@@ -3,9 +3,11 @@ import { Toaster } from '@/components/ui/toaster'
 import Layout from '@/components/Layout'
 import Dashboard from '@/pages/Dashboard'
 import Positions from '@/pages/Positions'
+import PositionCreate from '@/pages/PositionCreate'
 import PositionDetail from '@/pages/PositionDetail'
 import Strategies from '@/pages/Strategies'
 import StrategyDetail from '@/pages/StrategyDetail'
+import StrategyCreate from '@/pages/StrategyCreate'
 import Pools from '@/pages/Pools'
 import PoolDetail from '@/pages/PoolDetail'
 import Settings from '@/pages/Settings'
@@ -19,8 +21,10 @@ function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="positions" element={<Positions />} />
+            <Route path="positions/new" element={<PositionCreate />} />
             <Route path="positions/:address" element={<PositionDetail />} />
             <Route path="strategies" element={<Strategies />} />
+            <Route path="strategies/new" element={<StrategyCreate />} />
             <Route path="strategies/:id" element={<StrategyDetail />} />
             <Route path="pools" element={<Pools />} />
             <Route path="pools/:address" element={<PoolDetail />} />

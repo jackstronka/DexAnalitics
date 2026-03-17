@@ -1,6 +1,8 @@
 //! Command Line Interface for the CLMM Liquidity Provider.
 
+pub mod backtest_engine;
 pub mod commands;
+pub mod engine;
 pub mod output;
 
 use anyhow::Result;
@@ -14,6 +16,7 @@ use prettytable::{Table, row};
 use primitive_types::U256;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use std::collections::HashMap;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
@@ -50,6 +53,23 @@ enum StrategyArg {
     Threshold,
 }
 
+/// Objective for backtest-optimize: which metric to maximize.
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum BacktestObjectiveArg {
+    /// Maximize net PnL (final value - initial capital)
+    Pnl,
+    /// Maximize LP vs HODL (outperformance over hold)
+    #[default]
+    #[value(alias = "vs_hodl")]
+    VsHodl,
+    /// Composite: fees - alpha*|IL|*capital - rebalance_cost (use --alpha)
+    #[value(alias = "composite")]
+    Composite,
+    /// Risk-adjusted: PnL / (1 + max_drawdown)
+    #[value(alias = "risk_adj")]
+    RiskAdj,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Fetch recent market data
@@ -75,6 +95,14 @@ enum Commands {
         /// Token A Mint Address
         #[arg(long, default_value = "So11111111111111111111111111111111111111112")]
         mint_a: String,
+
+        /// Optional Token B Symbol (e.g., SOL for cross-pair whETH/SOL).
+        #[arg(long)]
+        symbol_b: Option<String>,
+
+        /// Optional Token B Mint Address (required if symbol_b is set).
+        #[arg(long)]
+        mint_b: Option<String>,
 
         /// Days of history to backtest
         #[arg(short, long, default_value_t = 30)]
@@ -107,6 +135,74 @@ enum Commands {
         /// Transaction cost per rebalance in USD
         #[arg(long, default_value_t = 1.0)]
         tx_cost: f64,
+
+        /// Optional Whirlpool pool address to use real Dune volume data
+        #[arg(long)]
+        whirlpool_address: Option<String>,
+
+        /// Optional fixed LP share of the pool (e.g. 0.001 = 0.1%)
+        #[arg(long)]
+        lp_share: Option<f64>,
+    },
+    /// Find best range and strategy on historical data (grid search over ranges + strategies)
+    BacktestOptimize {
+        /// Token A Symbol (e.g., whETH)
+        #[arg(short, long)]
+        symbol_a: String,
+        /// Token A Mint Address
+        #[arg(long)]
+        mint_a: String,
+        /// Token B Symbol (e.g., SOL)
+        #[arg(long)]
+        symbol_b: Option<String>,
+        /// Token B Mint Address (required if symbol_b is set)
+        #[arg(long)]
+        mint_b: Option<String>,
+        /// Days of history
+        #[arg(short, long, default_value_t = 30)]
+        days: u64,
+        /// Initial capital in USD
+        #[arg(long, default_value_t = 7000.0)]
+        capital: f64,
+        /// Transaction cost per rebalance in USD
+        #[arg(long, default_value_t = 0.1)]
+        tx_cost: f64,
+        /// Optional Whirlpool pool address for Dune TVL/volume
+        #[arg(long)]
+        whirlpool_address: Option<String>,
+        /// Optional fixed LP share (e.g. 0.0001 = 0.01%)
+        #[arg(long)]
+        lp_share: Option<f64>,
+        /// Objective to maximize: pnl or vs_hodl
+        #[arg(long, value_enum, default_value_t = BacktestObjectiveArg::VsHodl)]
+        objective: BacktestObjectiveArg,
+        /// Number of range widths to try (from min to max). E.g. 10 → 1%, 2%, ..., 10%
+        #[arg(long, default_value_t = 10)]
+        range_steps: usize,
+        /// Minimum range width in percent (e.g. 1 = 1%)
+        #[arg(long, default_value_t = 1.0)]
+        min_range_pct: f64,
+        /// Maximum range width in percent (e.g. 15 = 15%)
+        #[arg(long, default_value_t = 15.0)]
+        max_range_pct: f64,
+        /// Show top N results (0 = only best)
+        #[arg(long, default_value_t = 5)]
+        top_n: usize,
+        /// Min time-in-range %% to keep (0-100, e.g. 20)
+        #[arg(long)]
+        min_time_in_range: Option<f64>,
+        /// Max drawdown %% to keep (0-100, e.g. 10)
+        #[arg(long)]
+        max_drawdown: Option<f64>,
+        /// Alpha for composite objective: score = fees - alpha*|IL|*capital - cost
+        #[arg(long, default_value_t = 1.0)]
+        alpha: f64,
+        /// Only run static strategy (faster, range-only grid)
+        #[arg(long, default_value_t = false)]
+        static_only: bool,
+        /// Number of rolling windows; 1 = single period, >1 = average score over windows
+        #[arg(long, default_value_t = 1)]
+        windows: usize,
     },
     /// Optimize price range for LP position
     Optimize {
@@ -117,6 +213,14 @@ enum Commands {
         /// Token A Mint Address
         #[arg(long, default_value = "So11111111111111111111111111111111111111112")]
         mint_a: String,
+
+        /// Optional Token B Symbol (e.g., SOL for cross-pair whETH/SOL).
+        #[arg(long)]
+        symbol_b: Option<String>,
+
+        /// Optional Token B Mint Address (required if symbol_b is set).
+        #[arg(long)]
+        mint_b: Option<String>,
 
         /// Days of history to analyze for volatility
         #[arg(short, long, default_value_t = 30)]
@@ -149,9 +253,23 @@ enum Commands {
         #[arg(long, default_value = "So11111111111111111111111111111111111111112")]
         mint_a: String,
 
+        /// Optional Token B Symbol (e.g., SOL for cross-pair whETH/SOL).
+        #[arg(long)]
+        symbol_b: Option<String>,
+
+        /// Optional Token B Mint Address (required if symbol_b is set).
+        #[arg(long)]
+        mint_b: Option<String>,
+
         /// Days of history to analyze
         #[arg(short, long, default_value_t = 30)]
         days: u64,
+    },
+    /// Fetch pool metrics from Dune (TVL, volume, fees)
+    DunePoolMetrics {
+        /// Whirlpool pool address
+        #[arg(long)]
+        pool_address: String,
     },
 }
 
@@ -196,7 +314,13 @@ async fn main() -> Result<()> {
             let provider = BirdeyeProvider::new(api_key);
 
             // Define Tokens (Token B assumed USDC for this demo)
-            let token_a = Token::new(mint_a, symbol_a, 9, symbol_a);
+            let token_a_decimals: u8 = {
+                use crate::engine::token_meta::fetch_mint_decimals;
+                use clmm_lp_protocols::rpc::RpcProvider;
+                let rpc = RpcProvider::mainnet();
+                fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9)
+            };
+            let token_a = Token::new(mint_a, symbol_a, token_a_decimals, symbol_a);
             let token_b = Token::new(
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                 "USDC",
@@ -241,6 +365,8 @@ async fn main() -> Result<()> {
         Commands::Backtest {
             symbol_a,
             mint_a,
+            symbol_b,
+            mint_b,
             days,
             lower,
             upper,
@@ -249,6 +375,8 @@ async fn main() -> Result<()> {
             rebalance_interval,
             threshold_pct,
             tx_cost,
+            whirlpool_address,
+            lp_share,
         } => {
             let api_key = env::var("BIRDEYE_API_KEY")
                 .expect("BIRDEYE_API_KEY must be set in .env or environment");
@@ -257,30 +385,83 @@ async fn main() -> Result<()> {
             let provider = BirdeyeProvider::new(api_key);
 
             // Define Tokens
-            let token_a = Token::new(mint_a, symbol_a, 9, symbol_a);
-            let token_b = Token::new(
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "USDC",
-                6,
-                "USD Coin",
-            );
+            let (token_a_decimals, token_b_decimals): (u8, u8) = {
+                use crate::engine::token_meta::fetch_mint_decimals;
+                use clmm_lp_protocols::rpc::RpcProvider;
+                let rpc = RpcProvider::mainnet();
+                let da = fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9);
+                let db = if let Some(mb) = mint_b.as_ref() {
+                    fetch_mint_decimals(&rpc, mb).await.unwrap_or(9)
+                } else {
+                    6u8
+                };
+                (da, db)
+            };
+            let token_a = Token::new(mint_a, symbol_a, token_a_decimals, symbol_a);
+
+            let (token_b, use_cross_pair) = if let (Some(sb), Some(mb)) = (symbol_b.as_ref(), mint_b.as_ref()) {
+                // User supplied an explicit quote token (e.g., SOL for whETH/SOL)
+                let tb = Token::new(mb, sb, token_b_decimals, sb);
+                (tb, true)
+            } else {
+                // Default to USDC quote
+                let tb = Token::new(
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "USDC",
+                    6,
+                    "USD Coin",
+                );
+                (tb, false)
+            };
 
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let start_time = now - (days * 24 * 3600);
 
-            println!(
-                "🔍 Fetching historical data for {}/USDC ({} days)...",
-                symbol_a, days
-            );
+            if use_cross_pair {
+                println!(
+                    "🔍 Fetching historical data for {}/{} ({} days)...",
+                    symbol_a,
+                    symbol_b.as_deref().unwrap_or("UNKNOWN"),
+                    days
+                );
+            } else {
+                println!(
+                    "🔍 Fetching historical data for {}/USDC ({} days)...",
+                    symbol_a, days
+                );
+            }
 
-            let candles = provider
-                .get_price_history(&token_a, &token_b, start_time, now, 3600) // 1h resolution
-                .await?;
+            let candles = if use_cross_pair {
+                provider
+                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            } else {
+                provider
+                    .get_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            };
 
             if candles.is_empty() {
                 println!("❌ No data found for the specified period.");
                 return Ok(());
             }
+
+            // Optional: load real daily USD TVL & volume from Dune for a given Whirlpool pool.
+            let (dune_daily_tvl, dune_daily_volume): (Option<HashMap<String, Decimal>>, Option<HashMap<String, Decimal>>) =
+                if let Some(pool) = whirlpool_address {
+                    use clmm_lp_data::providers::DuneClient;
+                    println!("📡 Fetching daily TVL & volume from Dune for pool {pool}...");
+                    let dune = DuneClient::from_env()?;
+                    let (tvl_map, vol_map) = dune.fetch_tvl_volume_maps(pool).await?;
+                    if tvl_map.is_empty() || vol_map.is_empty() {
+                        println!("⚠️ Missing Dune TVL or volume data for this pool, falling back to synthetic model.");
+                        (None, None)
+                    } else {
+                        (Some(tvl_map), Some(vol_map))
+                    }
+                } else {
+                    (None, None)
+                };
 
             // Prepare Price Path
             let prices: Vec<Price> = candles.iter().map(|c| c.close).collect();
@@ -298,13 +479,14 @@ async fn main() -> Result<()> {
             let mut tracker =
                 PositionTracker::new(capital_dec, entry_price, initial_range, tx_cost_dec);
 
-            // Setup volume and liquidity models
+            // Setup synthetic fallback model (when no Dune data is available)
             let mut volume_model = ConstantVolume::from_amount(
                 Amount::new(U256::from(1_000_000_000_000u64), 6), // 1M USDC vol per step
             );
-            let liquidity_amount = (*capital as u128) * 10;
-            let global_liquidity = liquidity_amount * 100; // 1% share
             let fee_rate = Decimal::from_f64(0.003).unwrap();
+            let lp_share_override: Option<Decimal> = lp_share
+                .and_then(|s| Decimal::from_f64(s))
+                .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
 
             println!(
                 "🚀 Running backtest with {:?} strategy over {} steps...",
@@ -316,16 +498,58 @@ async fn main() -> Result<()> {
             let range_width_pct =
                 Decimal::from_f64((*upper - *lower) / ((*upper + *lower) / 2.0)).unwrap();
 
-            for price in &prices {
+            for (idx, price) in prices.iter().enumerate() {
+                // Per-step USD volume and LP share.
+                // If Dune data is available, we use daily TVL/volume for that date.
+                // Otherwise we fall back to a synthetic 1% share & constant volume.
+                let (step_volume_usd, lp_share_effective) = if let (Some(ref tvl_map), Some(ref vol_map)) =
+                    (dune_daily_tvl.as_ref(), dune_daily_volume.as_ref())
+                {
+                    // Group by date (YYYY-MM-DD)
+                    let candle = &candles[idx];
+                    let datetime =
+                        chrono::DateTime::from_timestamp(candle.start_timestamp as i64, 0)
+                            .unwrap_or_default();
+                    let date_key = datetime.format("%Y-%m-%d").to_string();
+
+                    let daily_tvl = tvl_map.get(&date_key).cloned().unwrap_or(Decimal::ZERO);
+                    let daily_vol = vol_map.get(&date_key).cloned().unwrap_or(Decimal::ZERO);
+
+                    // Avoid division by zero; if TVL is missing, drop back to synthetic model.
+                    if daily_tvl.is_zero() || daily_vol.is_zero() {
+                        let vol = volume_model.next_volume().to_decimal();
+                        let share = lp_share_override
+                            .unwrap_or_else(|| Decimal::from_f64(0.01).unwrap()); // default 1%
+                        (vol, share)
+                    } else {
+                        // Effective share: override from CLI if provided, otherwise capital / TVL.
+                        let share = if let Some(s) = lp_share_override {
+                            s
+                        } else {
+                            let capital_dec = Decimal::from_f64(*capital).unwrap();
+                            (capital_dec / daily_tvl)
+                                .min(Decimal::ONE)
+                                .max(Decimal::ZERO)
+                        };
+
+                        // Per-step volume: distribute daily volume evenly over the day for now.
+                        let steps_per_day = Decimal::from_f64(24.0).unwrap();
+                        let step_vol = daily_vol / steps_per_day;
+                        (step_vol, share)
+                    }
+                } else {
+                    let vol = volume_model.next_volume().to_decimal();
+                    let share = lp_share_override
+                        .unwrap_or_else(|| Decimal::from_f64(0.01).unwrap()); // default 1%
+                    (vol, share)
+                };
+
                 // Calculate fees for this step
                 let in_range = price.value >= tracker.current_range.lower_price.value
                     && price.value <= tracker.current_range.upper_price.value;
 
                 let step_fees = if in_range {
-                    let vol = volume_model.next_volume().to_decimal();
-                    let fee_share =
-                        Decimal::from(liquidity_amount) / Decimal::from(global_liquidity);
-                    vol * fee_share * fee_rate
+                    step_volume_usd * lp_share_effective * fee_rate
                 } else {
                     Decimal::ZERO
                 };
@@ -353,9 +577,16 @@ async fn main() -> Result<()> {
             // Get summary
             let summary = tracker.summary();
 
+            // Determine pair label for reporting (supports optional quote token)
+            let pair_label = if let Some(sb) = symbol_b {
+                format!("{}/{}", symbol_a, sb)
+            } else {
+                format!("{}/USDC", symbol_a)
+            };
+
             // Print rich report
             print_backtest_report(
-                symbol_a,
+                &pair_label,
                 *days,
                 *capital,
                 entry_price.value,
@@ -366,9 +597,392 @@ async fn main() -> Result<()> {
                 *strategy,
             );
         }
+        Commands::BacktestOptimize {
+            symbol_a,
+            mint_a,
+            symbol_b,
+            mint_b,
+            days,
+            capital,
+            tx_cost,
+            whirlpool_address,
+            lp_share,
+            objective,
+            range_steps,
+            min_range_pct,
+            max_range_pct,
+            top_n,
+            min_time_in_range,
+            max_drawdown,
+            alpha,
+            static_only,
+            windows,
+        } => {
+            let api_key = env::var("BIRDEYE_API_KEY")
+                .expect("BIRDEYE_API_KEY must be set in .env or environment");
+            let provider = BirdeyeProvider::new(api_key);
+            let (token_a_decimals_guess, token_b_decimals_guess): (u8, u8) = {
+                use crate::engine::token_meta::fetch_mint_decimals;
+                use clmm_lp_protocols::rpc::RpcProvider;
+                let rpc = RpcProvider::mainnet();
+                let da = fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9);
+                let db = if let Some(mb) = mint_b.as_ref() {
+                    fetch_mint_decimals(&rpc, mb).await.unwrap_or(9)
+                } else {
+                    6u8
+                };
+                (da, db)
+            };
+            let token_a = Token::new(mint_a, symbol_a, token_a_decimals_guess, symbol_a);
+            let (token_b, use_cross_pair) = if let (Some(sb), Some(mb)) = (symbol_b.as_ref(), mint_b.as_ref()) {
+                (Token::new(mb, sb, token_b_decimals_guess, sb), true)
+            } else {
+                (
+                    Token::new(
+                        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "USDC",
+                        6,
+                        "USD Coin",
+                    ),
+                    false,
+                )
+            };
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let fetch_days = *days * ((*windows).max(1) as u64);
+            let start_time = now - (fetch_days * 24 * 3600);
+            let pair_label = if use_cross_pair {
+                format!("{}/{}", symbol_a, symbol_b.as_deref().unwrap_or("?"))
+            } else {
+                format!("{}/USDC", symbol_a)
+            };
+            println!("🔍 Fetching historical data for {} ({} days, {} window(s))...", pair_label, fetch_days, windows);
+            let candles = if use_cross_pair {
+                provider
+                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            } else {
+                provider
+                    .get_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            };
+            if candles.is_empty() {
+                println!("❌ No data found for the specified period.");
+                return Ok(());
+            }
+
+            // For cross-pairs A/B, fetch B/USDC to convert USD capital to token B units (for liquidity math).
+            let quote_usd_map: Option<HashMap<u64, Decimal>> = if use_cross_pair {
+                let usdc = Token::new(
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "USDC",
+                    6,
+                    "USD Coin",
+                );
+                let quote_candles = provider
+                    .get_price_history(&token_b, &usdc, start_time, now, 3600)
+                    .await?;
+                if quote_candles.is_empty() {
+                    None
+                } else {
+                    Some(
+                        quote_candles
+                            .into_iter()
+                            .map(|c| (c.start_timestamp, c.close.value))
+                            .collect(),
+                    )
+                }
+            } else {
+                None
+            };
+            let (dune_daily_tvl, dune_daily_volume): (Option<HashMap<String, Decimal>>, Option<HashMap<String, Decimal>>) =
+                if let Some(pool) = whirlpool_address.as_ref() {
+                    use clmm_lp_data::providers::DuneClient;
+                    println!("📡 Fetching Dune TVL & volume for pool {}...", pool);
+                    let dune = DuneClient::from_env()?;
+                    let (tvl_map, vol_map) = dune.fetch_tvl_volume_maps(pool).await?;
+                    if tvl_map.is_empty() || vol_map.is_empty() {
+                        (None, None)
+                    } else {
+                        (Some(tvl_map), Some(vol_map))
+                    }
+                } else {
+                    (None, None)
+                };
+
+            // Fetch on-chain active liquidity and effective fee rate (Orca Whirlpool).
+            // Also fetch token decimals on-chain so base-unit conversions are correct.
+            let (pool_active_liquidity, effective_fee_rate, token_a_decimals, token_b_decimals): (Option<u128>, Option<Decimal>, u8, u8) =
+                if let Some(pool) = whirlpool_address.as_ref() {
+                    use clmm_lp_domain::math::fee_math::calculate_effective_fee_rate;
+                    use clmm_lp_protocols::orca::pool_reader::WhirlpoolReader;
+                    use clmm_lp_protocols::rpc::RpcProvider;
+                    use crate::engine::token_meta::fetch_mint_decimals;
+                    use std::sync::Arc;
+                    println!("⛓️  Fetching on-chain Whirlpool liquidity/fees for pool {}...", pool);
+                    let rpc = Arc::new(RpcProvider::mainnet());
+                    let reader = WhirlpoolReader::new(rpc.clone());
+                    let state = reader.get_pool_state(pool).await?;
+                    let base_fee = state.fee_rate();
+                    let protocol_fee_pct =
+                        Decimal::from(state.protocol_fee_rate_bps) / Decimal::from(10_000);
+                    let eff = calculate_effective_fee_rate(base_fee, protocol_fee_pct);
+                    let dec_a = fetch_mint_decimals(rpc.as_ref(), &state.token_mint_a.to_string()).await?;
+                    let dec_b = fetch_mint_decimals(rpc.as_ref(), &state.token_mint_b.to_string()).await?;
+                    (Some(state.liquidity), Some(eff), dec_a, dec_b)
+                } else {
+                    // fallback: assume 9/6 for A/USDC-like pairs
+                    (None, None, token_a_decimals_guess, if use_cross_pair { token_b_decimals_guess } else { 6u8 })
+                };
+
+            let fee_rate = effective_fee_rate.unwrap_or_else(|| Decimal::from_f64(0.003).unwrap());
+            let capital_dec = Decimal::from_f64(*capital).unwrap();
+            let lp_share_override: Option<Decimal> = lp_share
+                .and_then(|s| Decimal::from_f64(s))
+                .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
+            let steps_per_day = Decimal::from_f64(24.0).unwrap();
+            let _ = use_cross_pair;
+
+            use backtest_engine::{build_step_data, fee_realism, run_grid, StratConfig};
+
+            let steps_per_window = candles.len() / (*windows).max(1);
+            let window_ranges: Vec<std::ops::Range<usize>> = (0..*windows)
+                .map(|w| (w * steps_per_window)..((w + 1) * steps_per_window))
+                .collect();
+
+            let strategies: Vec<StratConfig> = if *static_only {
+                vec![StratConfig::Static]
+            } else {
+                vec![
+                    StratConfig::Static,
+                    StratConfig::Threshold(0.02),
+                    StratConfig::Threshold(0.03),
+                    StratConfig::Threshold(0.05),
+                    StratConfig::Threshold(0.07),
+                    StratConfig::Threshold(0.10),
+                    StratConfig::Threshold(0.15),
+                    StratConfig::Periodic(12),
+                    StratConfig::Periodic(24),
+                    StratConfig::Periodic(48),
+                    StratConfig::Periodic(72),
+                ]
+            };
+
+            let min_frac = (*min_range_pct / 100.0).clamp(0.001, 1.0);
+            let max_frac = (*max_range_pct / 100.0).clamp(min_frac + 0.001, 2.0);
+            let width_pcts: Vec<f64> = if *range_steps <= 1 {
+                vec![(min_frac + max_frac) / 2.0]
+            } else {
+                (0..*range_steps)
+                    .map(|i| min_frac + (max_frac - min_frac) * (i as f64) / ((*range_steps - 1) as f64))
+                    .collect()
+            };
+            let tx_cost_dec = Decimal::from_f64(*tx_cost).unwrap();
+
+            let score_fn = |s: &TrackerSummary| -> Decimal {
+                match objective {
+                    BacktestObjectiveArg::Pnl => s.final_pnl,
+                    BacktestObjectiveArg::VsHodl => s.vs_hodl,
+                    BacktestObjectiveArg::Composite => {
+                        let il_amt = (s.final_il_pct.abs() * capital_dec).min(capital_dec);
+                        s.total_fees - (Decimal::from_f64(*alpha).unwrap() * il_amt) - s.total_rebalance_cost
+                    }
+                    BacktestObjectiveArg::RiskAdj => {
+                        let denom = Decimal::ONE + s.max_drawdown;
+                        if denom.is_zero() {
+                            s.final_pnl
+                        } else {
+                            s.final_pnl / denom
+                        }
+                    }
+                }
+            };
+
+            let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<(f64, f64, String, TrackerSummary, Decimal)>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
+                let (step_data, entry_price, center) = build_step_data(
+                    &candles,
+                    dune_daily_tvl.as_ref(),
+                    dune_daily_volume.as_ref(),
+                    quote_usd_map.as_ref(),
+                    capital_dec,
+                    lp_share_override,
+                    steps_per_day,
+                );
+                let (fv, fe100) = fee_realism(&step_data, fee_rate);
+                let rows = run_grid(
+                    &step_data,
+                    entry_price,
+                    center,
+                    &width_pcts,
+                    &strategies,
+                    capital_dec,
+                    tx_cost_dec,
+                    fee_rate,
+                    pool_active_liquidity,
+                    token_a_decimals as u32,
+                    token_b_decimals as u32,
+                    None::<&[_]>,
+                );
+                let mut r: Vec<_> = rows
+                    .into_iter()
+                    .map(|(_, lower, upper, name, summary)| {
+                    let sc = score_fn(&summary);
+                    (lower, upper, name, summary, sc)
+                })
+                    .collect();
+                r.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+                (r, fv, fe100, Some(step_data))
+            } else {
+                type AggKey = (String, String);
+                let mut agg: HashMap<AggKey, (Decimal, u32, f64, f64, TrackerSummary)> = HashMap::new();
+                let mut fee_check_vol = Decimal::ZERO;
+                let mut fee_check_expected_100 = Decimal::ZERO;
+                let mut audit_step_data: Option<Vec<backtest_engine::StepData>> = None;
+                for range in &window_ranges {
+                    let slice = &candles[range.clone()];
+                    if slice.is_empty() {
+                        continue;
+                    }
+                    let (step_data, entry_price, center) = build_step_data(
+                        slice,
+                        dune_daily_tvl.as_ref(),
+                        dune_daily_volume.as_ref(),
+                        quote_usd_map.as_ref(),
+                        capital_dec,
+                        lp_share_override,
+                        steps_per_day,
+                    );
+                    if fee_check_vol.is_zero() {
+                        let (fv, fe100) = fee_realism(&step_data, fee_rate);
+                        fee_check_vol = fv;
+                        fee_check_expected_100 = fe100;
+                        audit_step_data = Some(step_data.clone());
+                    }
+                    let rows = run_grid(
+                        &step_data,
+                        entry_price,
+                        center,
+                        &width_pcts,
+                        &strategies,
+                        capital_dec,
+                        tx_cost_dec,
+                        fee_rate,
+                        pool_active_liquidity,
+                        token_a_decimals as u32,
+                        token_b_decimals as u32,
+                        None::<&[_]>,
+                    );
+                    for (wp_frac, lower, upper, strat_name, summary) in rows {
+                        let key = (format!("{:.6}", wp_frac), strat_name.clone());
+                        let sc = score_fn(&summary);
+                        agg.entry(key)
+                            .and_modify(|e| {
+                                e.0 += sc;
+                                e.1 += 1;
+                                e.2 = lower;
+                                e.3 = upper;
+                                e.4 = summary.clone();
+                            })
+                            .or_insert((sc, 1, lower, upper, summary));
+                    }
+                }
+                let mut r: Vec<_> = agg
+                    .into_iter()
+                    .map(|((_, strat_name), (sum_score, count, lower, upper, summary))| {
+                        let avg = if count > 0 {
+                            sum_score / Decimal::from(count)
+                        } else {
+                            sum_score
+                        };
+                        (lower, upper, strat_name, summary, avg)
+                    })
+                    .collect();
+                r.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+                (r, fee_check_vol, fee_check_expected_100, audit_step_data)
+            };
+
+            let _round2 = |d: Decimal| (d * Decimal::from(100)).round() / Decimal::from(100);
+
+            let min_tir = min_time_in_range.map(|x| Decimal::from_f64(x / 100.0).unwrap());
+            let max_dd = max_drawdown.map(|x| Decimal::from_f64(x / 100.0).unwrap());
+            results.retain(|(_, _, _, s, _)| {
+                min_tir.map_or(true, |m| s.time_in_range_pct >= m)
+                    && max_dd.map_or(true, |m| s.max_drawdown <= m)
+            });
+
+            let n = (*top_n).min(results.len());
+            let best = match results.first() {
+                Some(b) => b,
+                None => {
+                    println!("❌ No results after filters (min_time_in_range / max_drawdown). Relax or remove filters.");
+                    return Ok(());
+                }
+            };
+            use crate::output::optimize_report;
+            optimize_report::print_best_block(
+                &pair_label,
+                days,
+                capital,
+                windows,
+                &format!("{:?}", objective),
+                min_range_pct,
+                max_range_pct,
+                strategies.len(),
+                min_time_in_range,
+                max_drawdown,
+                best,
+                capital_dec,
+                fee_rate,
+                pool_active_liquidity,
+                audit_step_data.as_ref(),
+                token_a_decimals as u32,
+                token_b_decimals as u32,
+                symbol_a,
+                symbol_b.as_deref(),
+            );
+            if fee_check_expected_100 > Decimal::ZERO {
+                let ratio_pct = best.3.total_fees / fee_check_expected_100 * Decimal::from(100);
+                if *windows <= 1 {
+                    println!("   Fee check: period volume ${:.0}, expected (100% TIR) ${:.2}, simulated ${:.2} (ratio {:.1}%)",
+                        fee_check_vol, fee_check_expected_100, best.3.total_fees, ratio_pct);
+                } else {
+                    println!("   Fee check (first window only): period volume ${:.0}, expected (100% TIR) ${:.2}; BEST simulated ${:.2} is from last window (ratio {:.1}% vs first window)",
+                        fee_check_vol, fee_check_expected_100, best.3.total_fees, ratio_pct);
+                }
+            }
+            if n > 1 {
+                println!();
+                let quote_usd_for_table: Option<Decimal> = if use_cross_pair {
+                    audit_step_data
+                        .as_ref()
+                        .and_then(|v| v.first().map(|p| p.quote_usd))
+                        .filter(|q| *q > Decimal::ZERO)
+                } else {
+                    None
+                };
+                let table = optimize_report::build_results_table(
+                    &results,
+                    n,
+                    use_cross_pair,
+                    quote_usd_for_table,
+                    capital_dec,
+                );
+                table.printstd();
+            }
+            // Print diverse candidate sets to support manual/bot selection
+            optimize_report::print_candidate_sets(
+                &results,
+                n,
+                use_cross_pair,
+                audit_step_data.as_ref(),
+                capital_dec,
+            );
+            println!();
+        }
         Commands::Optimize {
             symbol_a,
             mint_a,
+            symbol_b,
+            mint_b,
             days,
             capital,
             objective,
@@ -381,25 +995,59 @@ async fn main() -> Result<()> {
             let provider = BirdeyeProvider::new(api_key);
 
             // Define Tokens
-            let token_a = Token::new(mint_a, symbol_a, 9, symbol_a);
-            let token_b = Token::new(
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "USDC",
-                6,
-                "USD Coin",
-            );
+            let (token_a_decimals, token_b_decimals): (u8, u8) = {
+                use crate::engine::token_meta::fetch_mint_decimals;
+                use clmm_lp_protocols::rpc::RpcProvider;
+                let rpc = RpcProvider::mainnet();
+                let da = fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9);
+                let db = if let Some(mb) = mint_b.as_ref() {
+                    fetch_mint_decimals(&rpc, mb).await.unwrap_or(9)
+                } else {
+                    6u8
+                };
+                (da, db)
+            };
+            let token_a = Token::new(mint_a, symbol_a, token_a_decimals, symbol_a);
+
+            let (token_b, use_cross_pair) = if let (Some(sb), Some(mb)) = (symbol_b.as_ref(), mint_b.as_ref()) {
+                let tb = Token::new(mb, sb, token_b_decimals, sb);
+                (tb, true)
+            } else {
+                let tb = Token::new(
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "USDC",
+                    6,
+                    "USD Coin",
+                );
+                (tb, false)
+            };
 
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let start_time = now - (days * 24 * 3600);
 
-            println!(
-                "🔍 Fetching historical data for {}/USDC ({} days) to estimate volatility...",
-                symbol_a, days
-            );
+            if use_cross_pair {
+                println!(
+                    "🔍 Fetching historical data for {}/{} ({} days) to estimate volatility...",
+                    symbol_a,
+                    symbol_b.as_deref().unwrap_or("UNKNOWN"),
+                    days
+                );
+            } else {
+                println!(
+                    "🔍 Fetching historical data for {}/USDC ({} days) to estimate volatility...",
+                    symbol_a, days
+                );
+            }
 
-            let candles = provider
-                .get_price_history(&token_a, &token_b, start_time, now, 3600)
-                .await?;
+            let candles = if use_cross_pair {
+                provider
+                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            } else {
+                provider
+                    .get_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            };
 
             if candles.is_empty() {
                 println!("❌ No data found for the specified period.");
@@ -562,30 +1210,69 @@ async fn main() -> Result<()> {
         Commands::Analyze {
             symbol_a,
             mint_a,
+            symbol_b,
+            mint_b,
             days,
         } => {
             let api_key = env::var("BIRDEYE_API_KEY")
                 .expect("BIRDEYE_API_KEY must be set in .env or environment");
 
-            println!("📊 Analyzing {}/USDC over {} days...", symbol_a, days);
+            let use_cross_pair = symbol_b.is_some() || mint_b.is_some();
+            if use_cross_pair && (symbol_b.is_none() || mint_b.is_none()) {
+                println!("❌ For cross-pairs, pass both --symbol-b and --mint-b.");
+                return Ok(());
+            }
+            let pair_label = if use_cross_pair {
+                format!("{}/{}", symbol_a, symbol_b.as_deref().unwrap_or("?"))
+            } else {
+                format!("{}/USDC", symbol_a)
+            };
+            println!("📊 Analyzing {} over {} days...", pair_label, days);
             println!();
 
             let provider = BirdeyeProvider::new(api_key);
 
-            let token_a = Token::new(mint_a, symbol_a, 9, symbol_a);
-            let token_b = Token::new(
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "USDC",
-                6,
-                "USD Coin",
-            );
+            let (token_a_decimals, token_b_decimals): (u8, u8) = {
+                use crate::engine::token_meta::fetch_mint_decimals;
+                use clmm_lp_protocols::rpc::RpcProvider;
+                let rpc = RpcProvider::mainnet();
+                let da = fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9);
+                let db = if let Some(mb) = mint_b.as_ref() {
+                    fetch_mint_decimals(&rpc, mb).await.unwrap_or(9)
+                } else {
+                    6u8
+                };
+                (da, db)
+            };
+            let token_a = Token::new(mint_a, symbol_a, token_a_decimals, symbol_a);
+            let token_b = if use_cross_pair {
+                Token::new(
+                    mint_b.as_ref().expect("validated above"),
+                    symbol_b.as_ref().expect("validated above"),
+                    token_b_decimals,
+                    symbol_b.as_ref().expect("validated above"),
+                )
+            } else {
+                Token::new(
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "USDC",
+                    6,
+                    "USD Coin",
+                )
+            };
 
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let start_time = now - (days * 24 * 3600);
 
-            let candles = provider
-                .get_price_history(&token_a, &token_b, start_time, now, 3600)
-                .await?;
+            let candles = if use_cross_pair {
+                provider
+                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            } else {
+                provider
+                    .get_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .await?
+            };
 
             if candles.is_empty() {
                 println!("❌ No data available for the specified period.");
@@ -621,7 +1308,7 @@ async fn main() -> Result<()> {
             let avg_hourly_volume = total_volume / candles.len() as f64;
 
             // Print analysis report
-            println!("🎯 ANALYSIS RESULTS: {}/USDC", symbol_a);
+            println!("🎯 ANALYSIS RESULTS: {}", pair_label);
             println!();
 
             // Price Statistics Table
@@ -714,6 +1401,29 @@ async fn main() -> Result<()> {
             );
             println!();
         }
+        Commands::DunePoolMetrics { pool_address } => {
+            use clmm_lp_data::providers::{DuneClient, TvlPoint, VolumePoint};
+
+            let dune = DuneClient::from_env()?;
+
+            println!("📡 Fetching TVL series from Dune for pool {pool_address}...");
+            let tvl_series: Vec<TvlPoint> = dune.fetch_tvl(pool_address).await?;
+            println!("   TVL points: {}", tvl_series.len());
+
+            println!("📡 Fetching volume/fees series from Dune for pool {pool_address}...");
+            let vol_series: Vec<VolumePoint> = dune.fetch_volume_fees(pool_address).await?;
+            println!("   Volume/fees points: {}", vol_series.len());
+
+            println!();
+            println!("date,tvl_usd,volume_usd,fees_usd");
+            for tvl in &tvl_series {
+                let vol = vol_series.iter().find(|v| v.date == tvl.date);
+                let volume_usd = vol.map(|v| v.volume_usd.to_string()).unwrap_or_else(|| "0".into());
+                let fees_usd = vol.map(|v| v.fees_usd.to_string()).unwrap_or_else(|| "0".into());
+
+                println!("{},{},{},{}", tvl.date, tvl.tvl_usd, volume_usd, fees_usd);
+            }
+        }
     }
 
     Ok(())
@@ -744,7 +1454,7 @@ fn calculate_volatility(prices: &[f64]) -> f64 {
 /// Prints a rich backtest report using prettytable.
 #[allow(clippy::too_many_arguments)]
 fn print_backtest_report(
-    symbol: &str,
+    pair: &str,
     days: u64,
     capital: f64,
     entry_price: Decimal,
@@ -765,7 +1475,7 @@ fn print_backtest_report(
     };
 
     println!();
-    println!("📊 BACKTEST RESULTS: {}/USDC", symbol);
+    println!("📊 BACKTEST RESULTS: {}", pair);
     println!("Period: {} days | Strategy: {:?}", days, strategy);
     println!();
 

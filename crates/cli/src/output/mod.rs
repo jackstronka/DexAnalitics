@@ -6,6 +6,7 @@
 pub mod chart;
 pub mod export;
 mod reports;
+pub mod optimize_report;
 pub mod table;
 
 pub use chart::*;

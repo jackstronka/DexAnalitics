@@ -27,12 +27,14 @@ export interface PnL {
   net_pnl_pct: string
 }
 
+export type StrategyType = 'static_range' | 'periodic' | 'threshold' | 'il_limit'
+
 export interface Strategy {
   id: string
   name: string
   description: string | null
-  strategy_type: 'static' | 'periodic' | 'threshold' | 'il_limit'
-  pool_address: string | null
+  strategy_type: StrategyType
+  pool_address: string
   running: boolean
   parameters: StrategyParameters
   created_at: string
@@ -44,6 +46,16 @@ export interface StrategyParameters {
   max_il_pct?: number
   min_rebalance_interval_hours?: number
   range_width_pct?: number
+}
+
+// Payload for creating/updating a strategy via API
+export interface CreateStrategyRequest {
+  name: string
+  pool_address: string
+  strategy_type: StrategyType
+  parameters: StrategyParameters
+  auto_execute?: boolean
+  dry_run?: boolean
 }
 
 export interface Pool {
@@ -161,9 +173,9 @@ export const rebalancePosition = (address: string, data: { new_tick_lower: numbe
 // Strategies
 export const getStrategies = () => fetchJson<{ strategies: Strategy[] }>('/strategies')
 export const getStrategy = (id: string) => fetchJson<Strategy>(`/strategies/${id}`)
-export const createStrategy = (data: Partial<Strategy>) =>
+export const createStrategy = (data: CreateStrategyRequest) =>
   fetchJson<Strategy>('/strategies', { method: 'POST', body: JSON.stringify(data) })
-export const updateStrategy = (id: string, data: Partial<Strategy>) =>
+export const updateStrategy = (id: string, data: CreateStrategyRequest) =>
   fetchJson<Strategy>(`/strategies/${id}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteStrategy = (id: string) =>
   fetchJson<{ message: string }>(`/strategies/${id}`, { method: 'DELETE' })

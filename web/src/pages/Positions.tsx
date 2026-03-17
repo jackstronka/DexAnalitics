@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -7,6 +7,7 @@ import { getPositions } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
 
 export default function Positions() {
+  const navigate = useNavigate()
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['positions'],
     queryFn: getPositions,
@@ -23,7 +24,7 @@ export default function Positions() {
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
-          <Button size="sm">
+          <Button size="sm" onClick={() => navigate('/positions/new')}>
             <Plus className="h-4 w-4 mr-2" />
             Open Position
           </Button>

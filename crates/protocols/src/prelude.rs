@@ -31,7 +31,7 @@ pub use crate::orca::pool_reader::{
 };
 pub use crate::orca::position_reader::{PositionReader, WhirlpoolPosition};
 pub use crate::orca::provider::OrcaPoolProvider;
-pub use crate::orca::whirlpool::{Whirlpool, WhirlpoolParser};
+pub use crate::orca::whirlpool::Whirlpool;
 
 // Solana client
 pub use crate::solana_client::SolanaRpcAdapter;

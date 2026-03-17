@@ -1,6 +1,9 @@
 use crate::token::TokenAmount;
+use primitive_types::U256;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+
+const Q64: u128 = 1u128 << 64;
 
 /// Calculates the amount of token0 (x) given liquidity and price range.
 /// delta_x = L * (1/sqrt(P_a) - 1/sqrt(P_b))
@@ -110,6 +113,161 @@ pub fn get_liquidity_for_amount1(
 
     let liquidity = amount1_dec / den;
     liquidity.to_u128().ok_or("Overflow")
+}
+
+/// Integer CLMM math using Whirlpool-style Q64.64 sqrt prices.
+///
+/// These helpers are designed so the resulting liquidity `L` is comparable to
+/// on-chain Whirlpool liquidity (u128), enabling realistic fee share:
+/// `fee_share = position_L / pool_active_L`.
+pub mod q64_64 {
+    use super::{Q64, U256};
+
+    /// Computes liquidity from amount0 (token A) for a full range [sqrt_lower, sqrt_upper].
+    ///
+    /// Formula (Uniswap v3):
+    /// \( amount0 = L * (sqrtU - sqrtL) / (sqrtU * sqrtL) \)
+    /// => \( L = amount0 * (sqrtU * sqrtL) / (sqrtU - sqrtL) \)
+    ///
+    /// `sqrt_*` are Q64.64, `amount0` is in base units.
+    pub fn liquidity_from_amount0(amount0: u64, sqrt_lower: u128, sqrt_upper: u128) -> u128 {
+        if amount0 == 0 || sqrt_lower == 0 || sqrt_upper == 0 {
+            return 0;
+        }
+        let (sl, su) = if sqrt_lower < sqrt_upper {
+            (sqrt_lower, sqrt_upper)
+        } else {
+            (sqrt_upper, sqrt_lower)
+        };
+        let delta = su.saturating_sub(sl);
+        if delta == 0 {
+            return 0;
+        }
+        let num = U256::from(amount0)
+            * U256::from(sl)
+            * U256::from(su);
+        let liq = num / U256::from(delta);
+        liq.min(U256::from(u128::MAX)).as_u128()
+    }
+
+    /// Computes liquidity from amount1 (token B) for a full range [sqrt_lower, sqrt_upper].
+    ///
+    /// Formula:
+    /// \( amount1 = L * (sqrtU - sqrtL) \)
+    /// In Q64.64: amount1 = L * (sqrtU - sqrtL) / Q64
+    /// => L = amount1 * Q64 / (sqrtU - sqrtL)
+    pub fn liquidity_from_amount1(amount1: u64, sqrt_lower: u128, sqrt_upper: u128) -> u128 {
+        if amount1 == 0 {
+            return 0;
+        }
+        let (sl, su) = if sqrt_lower < sqrt_upper {
+            (sqrt_lower, sqrt_upper)
+        } else {
+            (sqrt_upper, sqrt_lower)
+        };
+        let delta = su.saturating_sub(sl);
+        if delta == 0 {
+            return 0;
+        }
+        let num = U256::from(amount1) * U256::from(Q64);
+        let liq = num / U256::from(delta);
+        liq.min(U256::from(u128::MAX)).as_u128()
+    }
+
+    /// Computes liquidity from amount0 given current sqrt price inside the range.
+    ///
+    /// Formula:
+    /// amount0 = L * (sqrtU - sqrtP) / (sqrtU * sqrtP)
+    /// => L = amount0 * sqrtU * sqrtP / (sqrtU - sqrtP)
+    pub fn liquidity_from_amount0_in_range(amount0: u64, sqrt_p: u128, sqrt_upper: u128) -> u128 {
+        if amount0 == 0 || sqrt_p == 0 || sqrt_upper == 0 {
+            return 0;
+        }
+        let (sp, su) = if sqrt_p < sqrt_upper { (sqrt_p, sqrt_upper) } else { (sqrt_upper, sqrt_p) };
+        let delta = su.saturating_sub(sp);
+        if delta == 0 {
+            return 0;
+        }
+        let num = U256::from(amount0) * U256::from(sp) * U256::from(su);
+        let liq = num / U256::from(delta);
+        liq.min(U256::from(u128::MAX)).as_u128()
+    }
+
+    /// Computes liquidity from amount1 given current sqrt price inside the range.
+    ///
+    /// Formula:
+    /// amount1 = L * (sqrtP - sqrtL) / Q64
+    /// => L = amount1 * Q64 / (sqrtP - sqrtL)
+    pub fn liquidity_from_amount1_in_range(amount1: u64, sqrt_lower: u128, sqrt_p: u128) -> u128 {
+        if amount1 == 0 {
+            return 0;
+        }
+        let (sl, sp) = if sqrt_lower < sqrt_p { (sqrt_lower, sqrt_p) } else { (sqrt_p, sqrt_lower) };
+        let delta = sp.saturating_sub(sl);
+        if delta == 0 {
+            return 0;
+        }
+        let num = U256::from(amount1) * U256::from(Q64);
+        let liq = num / U256::from(delta);
+        liq.min(U256::from(u128::MAX)).as_u128()
+    }
+
+    /// Computes the maximum liquidity attainable for a given total value in token1 units
+    /// when the current price is inside the range.
+    ///
+    /// Inputs:
+    /// - `value_token1`: total capital denominated in token1 **base units** (e.g. SOL lamports).
+    /// - `price_x_in_y_q64`: current price as Q64.64 where `P = token1/token0`.
+    /// - `sqrt_lower/sqrt_p/sqrt_upper`: Q64.64 sqrt prices.
+    ///
+    /// Returns: (liquidity_L, amount0_used, amount1_used)
+    ///
+    /// We binary-search the token1 allocation `amount1` so that liquidity derived from
+    /// amount0 equals liquidity derived from amount1 (maximizing min(L0,L1)).
+    pub fn max_liquidity_for_value_in_range(
+        value_token1: u64,
+        price_x_in_y_q64: u128,
+        sqrt_lower: u128,
+        sqrt_p: u128,
+        sqrt_upper: u128,
+    ) -> (u128, u64, u64) {
+        if value_token1 == 0 || price_x_in_y_q64 == 0 {
+            return (0, 0, 0);
+        }
+
+        // Convert token1 value into token0 budget via x = (V - y) / P.
+        // P is Q64.64 => x = ((V - y) * Q64) / P_q64
+        let mut lo_y: u64 = 0;
+        let mut hi_y: u64 = value_token1;
+
+        let mut best = (0u128, 0u64, 0u64);
+        for _ in 0..64 {
+            let mid_y = lo_y + ((hi_y - lo_y) / 2);
+            let rem_y = value_token1 - mid_y;
+            let x = ((U256::from(rem_y) * U256::from(Q64)) / U256::from(price_x_in_y_q64))
+                .min(U256::from(u64::MAX))
+                .as_u64();
+
+            let l0 = liquidity_from_amount0_in_range(x, sqrt_p, sqrt_upper);
+            let l1 = liquidity_from_amount1_in_range(mid_y, sqrt_lower, sqrt_p);
+            let l = l0.min(l1);
+            if l > best.0 {
+                best = (l, x, mid_y);
+            }
+
+            // Move towards equality l0 ~= l1.
+            if l0 > l1 {
+                // Too much token0 (or too little token1) -> increase y
+                lo_y = mid_y.saturating_add(1);
+            } else {
+                hi_y = mid_y;
+            }
+            if lo_y >= hi_y {
+                break;
+            }
+        }
+        best
+    }
 }
 
 #[cfg(test)]

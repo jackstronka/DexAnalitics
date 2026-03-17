@@ -53,50 +53,98 @@ pub struct Whirlpool {
     // Or we can skip bytes if we know offsets.
 }
 
-/// Helper for parsing Whirlpool data.
-pub struct WhirlpoolParser;
+/// Minimal Whirlpool fields we need for analytics/backtests.
+#[derive(Debug, Clone)]
+pub struct WhirlpoolMinimal {
+    pub tick_spacing: u16,
+    pub fee_rate: u16,
+    pub protocol_fee_rate: u16,
+    pub liquidity: u128,
+    pub sqrt_price: u128,
+    pub tick_current_index: i32,
+    pub token_mint_a: Pubkey,
+    pub token_mint_b: Pubkey,
+}
 
-impl WhirlpoolParser {
-    /// Parses liquidity data from a given byte slice.
-    ///
-    /// # Parameters
-    /// - `_data`: A reference to a byte slice containing the binary representation of the data
-    ///   to be parsed. The data is expected to adhere to a specific structure and layout.
-    ///
-    /// # Returns
-    /// - `Option<u128>`: If parsing succeeds, returns `Some(u128)` containing the liquidity value.
-    ///   If parsing fails, returns `None`.
-    ///
-    /// # Remarks
-    /// - This function assumes a specific offset based on the underlying structure of the data:
-    ///   - Disc (8 bytes)
-    ///   - Config (32 bytes)
-    ///   - Bump (1 byte)
-    ///   - Timestamp (2 bytes)
-    ///   - Seed (2 bytes)
-    ///   - Fee (2 bytes)
-    ///   - Protocol Fee (2 bytes)
-    ///   - Total: 49 bytes before liquidity data.
-    /// - Liquidity data is expected to start at byte offset 49.
-    /// - The specific offsets and structure of the data should be validated using the associated
-    ///   Interface Definition Language (IDL) for accuracy.
-    /// - Currently, this implementation is incomplete and only serves as a placeholder. Proper
-    ///   parsing logic is yet to be implemented.
-    /// - If the assumed struct or offset is incorrect, updates to the structure or parsing logic
-    ///   will be necessary to correctly retrieve the liquidity value.
-    ///
-    /// # TODO
-    /// - Replace placeholder with actual parsing logic.
-    /// - Fetch and verify the exact offset for liquidity from the IDL.
-    /// - Handle potential issues with data alignment, endianess, or unsupported layouts.
-    ///
-    pub fn parse_liquidity(_data: &[u8]) -> Option<u128> {
-        // Offset based on layout.
-        // Disc(8) + Config(32) + Bump(1) + TS(2) + Seed(2) + Fee(2) + ProtoFee(2) = 49 bytes
-        // Liquidity starts at 49?
-        // Need exact offset from IDL.
-        // Let's assume we use full Borsh for now, assuming we got the struct right.
-        // If we fail, we fix struct.
-        None // Placeholder
-    }
+fn read_u16_le(data: &[u8], off: usize) -> Option<u16> {
+    data.get(off..off + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+}
+fn read_i32_le(data: &[u8], off: usize) -> Option<i32> {
+    data.get(off..off + 4)
+        .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+fn read_u64_le(data: &[u8], off: usize) -> Option<u64> {
+    data.get(off..off + 8).map(|b| u64::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
+}
+fn read_u128_le(data: &[u8], off: usize) -> Option<u128> {
+    data.get(off..off + 16).map(|b| u128::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+    ]))
+}
+fn read_pubkey(data: &[u8], off: usize) -> Option<Pubkey> {
+    let bytes = data.get(off..off + 32)?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    Some(Pubkey::new_from_array(arr))
+}
+
+/// Parses Whirlpool account bytes using fixed offsets for early fields.
+///
+/// This avoids relying on a fully accurate Anchor-generated struct, while remaining stable
+/// for the fields we need (fee rates, liquidity, sqrt price, tick, token mints).
+///
+/// Offsets are derived from the documented Whirlpool struct prefix:
+/// - discriminator: 8
+/// - whirlpools_config: 32
+/// - whirlpool_bump: 1
+/// - tick_spacing: 2
+/// - tick_spacing_seed: 2
+/// - fee_rate: 2
+/// - protocol_fee_rate: 2
+/// - liquidity: 16
+/// - sqrt_price: 16
+/// - tick_current_index: 4
+/// - protocol_fee_owed_a: 8
+/// - protocol_fee_owed_b: 8
+/// - token_mint_a: 32
+/// - token_vault_a: 32
+/// - fee_growth_global_a: 16
+/// - token_mint_b: 32
+pub fn parse_whirlpool_minimal(data: &[u8]) -> Option<WhirlpoolMinimal> {
+    // Prefix offsets
+    let off_tick_spacing = 8 + 32 + 1;
+    let tick_spacing = read_u16_le(data, off_tick_spacing)?;
+    let off_fee_rate = off_tick_spacing + 2 + 2;
+    let fee_rate = read_u16_le(data, off_fee_rate)?;
+    let protocol_fee_rate = read_u16_le(data, off_fee_rate + 2)?;
+    let off_liquidity = off_fee_rate + 2 + 2;
+    let liquidity = read_u128_le(data, off_liquidity)?;
+    let sqrt_price = read_u128_le(data, off_liquidity + 16)?;
+    let tick_current_index = read_i32_le(data, off_liquidity + 32)?;
+
+    let off_fee_owed_a = off_liquidity + 32 + 4;
+    let _fee_owed_a = read_u64_le(data, off_fee_owed_a)?;
+    let _fee_owed_b = read_u64_le(data, off_fee_owed_a + 8)?;
+
+    let off_token_mint_a = off_fee_owed_a + 8 + 8;
+    let token_mint_a = read_pubkey(data, off_token_mint_a)?;
+    let off_token_vault_a = off_token_mint_a + 32;
+    let _token_vault_a = read_pubkey(data, off_token_vault_a)?;
+    let off_fee_growth_a = off_token_vault_a + 32;
+    let _fee_growth_a = read_u128_le(data, off_fee_growth_a)?;
+    let off_token_mint_b = off_fee_growth_a + 16;
+    let token_mint_b = read_pubkey(data, off_token_mint_b)?;
+
+    Some(WhirlpoolMinimal {
+        tick_spacing,
+        fee_rate,
+        protocol_fee_rate,
+        liquidity,
+        sqrt_price,
+        tick_current_index,
+        token_mint_a,
+        token_mint_b,
+    })
 }

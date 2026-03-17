@@ -33,11 +33,16 @@ pub struct PositionSnapshot {
 }
 
 /// Tracks position state throughout a simulation.
+///
+/// Uses **segment-based** IL: after each rebalance, "entry" and capital for IL
+/// are reset to the price and position value at rebalance time. This makes IL
+/// and position value correct for a sequence of ranges (continuous rebalancing
+/// vs one wide range is comparable).
 #[derive(Debug)]
 pub struct PositionTracker {
-    /// Initial capital in USD.
+    /// Initial capital in USD (never changed; used for net PnL vs start).
     pub initial_capital: Decimal,
-    /// Entry price.
+    /// Entry price at very first step (used for strategy context and HODL).
     pub entry_price: Price,
     /// Current range.
     pub current_range: PriceRange,
@@ -55,6 +60,16 @@ pub struct PositionTracker {
     cumulative_fees: Decimal,
     /// Current step.
     current_step: u64,
+
+    // Segment state (reset on each rebalance for correct path-dependent IL)
+    /// Entry price for the current segment (price when this range was opened).
+    segment_entry_price: Price,
+    /// Capital at start of current segment (position value at last rebalance).
+    segment_capital: Decimal,
+    /// Cumulative fees at start of current segment.
+    segment_cumulative_fees: Decimal,
+    /// Total rebalance cost at start of current segment.
+    segment_rebalance_cost: Decimal,
 }
 
 impl PositionTracker {
@@ -84,6 +99,10 @@ impl PositionTracker {
             rebalance_cost,
             cumulative_fees: Decimal::ZERO,
             current_step: 0,
+            segment_entry_price: entry_price,
+            segment_capital: initial_capital,
+            segment_cumulative_fees: Decimal::ZERO,
+            segment_rebalance_cost: Decimal::ZERO,
         }
     }
 
@@ -108,19 +127,20 @@ impl PositionTracker {
         self.steps_since_rebalance += 1;
         self.cumulative_fees += step_fees;
 
-        // Calculate current IL
+        // IL for current segment (entry = segment start, so correct for sequence of ranges)
         let il_pct = calculate_il_concentrated(
-            self.entry_price.value,
+            self.segment_entry_price.value,
             price.value,
             self.current_range.lower_price.value,
             self.current_range.upper_price.value,
         )
         .unwrap_or(Decimal::ZERO);
 
-        // Calculate position value
-        let il_amount = self.initial_capital * il_pct;
-        let position_value =
-            self.initial_capital + il_amount + self.cumulative_fees - self.total_rebalance_cost;
+        // Position value: segment capital + IL in segment + fees since segment − costs since segment
+        let fees_since_segment = self.cumulative_fees - self.segment_cumulative_fees;
+        let costs_since_segment = self.total_rebalance_cost - self.segment_rebalance_cost;
+        let il_amount = self.segment_capital * il_pct;
+        let position_value = self.segment_capital + il_amount + fees_since_segment - costs_since_segment;
         let net_pnl = position_value - self.initial_capital;
 
         // Check if in range
@@ -141,11 +161,11 @@ impl PositionTracker {
             s.evaluate(&context)
         });
 
-        // Handle rebalance action
+        // Handle rebalance action (pass current price and position value for segment reset)
         let final_action = if let Some(ref act) = action {
             match act {
                 RebalanceAction::Rebalance { new_range, .. } => {
-                    self.execute_rebalance(new_range.clone());
+                    self.execute_rebalance(new_range.clone(), price, position_value);
                     action.clone()
                 }
                 RebalanceAction::Close { .. } => action.clone(),
@@ -172,8 +192,13 @@ impl PositionTracker {
         final_action
     }
 
-    /// Executes a rebalance to a new range.
-    fn execute_rebalance(&mut self, new_range: PriceRange) {
+    /// Executes a rebalance to a new range and starts a new segment for IL.
+    fn execute_rebalance(&mut self, new_range: PriceRange, rebalance_price: Price, position_value_before_cost: Decimal) {
+        let capital_after_cost = position_value_before_cost - self.rebalance_cost;
+        self.segment_entry_price = rebalance_price;
+        self.segment_capital = capital_after_cost;
+        self.segment_cumulative_fees = self.cumulative_fees;
+        self.segment_rebalance_cost = self.total_rebalance_cost;
         self.current_range = new_range;
         self.steps_since_rebalance = 0;
         self.rebalance_count += 1;
@@ -212,16 +237,13 @@ impl PositionTracker {
             }
         }
 
-        // Calculate HODL comparison
-        let hodl_value = if let Some(final_snap) = final_snapshot {
-            // Simple HODL: assume 50/50 split at entry, track price change
-            let price_ratio = final_snap.price.value / self.entry_price.value;
-            // HODL value = initial * (1 + price_change) / 2 + initial / 2
-            // Simplified: assume quote token is stable
-            self.initial_capital * (Decimal::ONE + price_ratio) / Decimal::from(2)
-        } else {
-            self.initial_capital
-        };
+        // HODL comparison:
+        // The tracker doesn't know quote/USD dynamics, so the only safe default here is the
+        // **USD cash benchmark**: holding the initial USD capital constant.
+        //
+        // Cross-pair commands (e.g. whETH/SOL) should override `hodl_value` with a correct
+        // 50/50 USD split across both legs (A and B) using their USD prices.
+        let hodl_value = self.initial_capital;
         let vs_hodl = final_value - hodl_value;
 
         TrackerSummary {

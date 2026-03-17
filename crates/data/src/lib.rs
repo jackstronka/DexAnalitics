@@ -9,6 +9,7 @@ pub mod cache;
 pub mod pool_state;
 /// Data providers.
 pub mod providers;
+pub mod swaps;
 /// Database repositories.
 pub mod repositories;
 /// In-memory data repository for simulation.

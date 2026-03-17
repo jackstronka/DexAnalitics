@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Plus, Play, Square, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -7,6 +7,7 @@ import { getStrategies, startStrategy, stopStrategy } from '@/lib/api'
 
 export default function Strategies() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
@@ -33,7 +34,7 @@ export default function Strategies() {
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
-          <Button size="sm">
+          <Button size="sm" onClick={() => navigate('/strategies/new')}>
             <Plus className="h-4 w-4 mr-2" />
             Create Strategy
           </Button>

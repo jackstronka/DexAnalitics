@@ -2,10 +2,9 @@
 //!
 //! Reads pool state from on-chain accounts.
 
-use super::whirlpool::Whirlpool;
+use super::whirlpool::{Whirlpool, parse_whirlpool_minimal};
 use crate::rpc::RpcProvider;
 use anyhow::{Context, Result};
-use borsh::BorshDeserialize;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use solana_sdk::pubkey::Pubkey;
@@ -41,8 +40,30 @@ impl WhirlpoolReader {
         info!(pool = pool_address, "Fetching Whirlpool state");
 
         let account = self.provider.get_account(&pubkey).await?;
-        let whirlpool = Whirlpool::try_from_slice(&account.data)
-            .context("Failed to deserialize Whirlpool account")?;
+        // Prefer manual parsing for stable offsets of required fields; fall back to Borsh if needed.
+        let minimal = parse_whirlpool_minimal(&account.data)
+            .context("Failed to parse Whirlpool account (minimal)")?;
+        let whirlpool = Whirlpool {
+            discriminator: [0u8; 8],
+            whirlpools_config: Pubkey::default(),
+            whirlpool_bump: [0u8; 1],
+            tick_spacing: minimal.tick_spacing,
+            tick_spacing_seed: [0u8; 2],
+            fee_rate: minimal.fee_rate,
+            protocol_fee_rate: minimal.protocol_fee_rate,
+            liquidity: minimal.liquidity,
+            sqrt_price: minimal.sqrt_price,
+            tick_current_index: minimal.tick_current_index,
+            protocol_fee_owed_a: 0,
+            protocol_fee_owed_b: 0,
+            token_mint_a: minimal.token_mint_a,
+            token_vault_a: Pubkey::default(),
+            fee_growth_global_a: 0,
+            token_mint_b: minimal.token_mint_b,
+            token_vault_b: Pubkey::default(),
+            fee_growth_global_b: 0,
+            reward_last_updated_timestamp: 0,
+        };
 
         debug!(
             tick = whirlpool.tick_current_index,
@@ -82,9 +103,29 @@ impl WhirlpoolReader {
 
         let mut states = Vec::new();
         for (i, account_opt) in accounts.into_iter().enumerate() {
-            if let Some(account) = account_opt
-                && let Ok(whirlpool) = Whirlpool::try_from_slice(&account.data)
-            {
+            let Some(account) = account_opt else { continue };
+            if let Some(minimal) = parse_whirlpool_minimal(&account.data) {
+                let whirlpool = Whirlpool {
+                    discriminator: [0u8; 8],
+                    whirlpools_config: Pubkey::default(),
+                    whirlpool_bump: [0u8; 1],
+                    tick_spacing: minimal.tick_spacing,
+                    tick_spacing_seed: [0u8; 2],
+                    fee_rate: minimal.fee_rate,
+                    protocol_fee_rate: minimal.protocol_fee_rate,
+                    liquidity: minimal.liquidity,
+                    sqrt_price: minimal.sqrt_price,
+                    tick_current_index: minimal.tick_current_index,
+                    protocol_fee_owed_a: 0,
+                    protocol_fee_owed_b: 0,
+                    token_mint_a: minimal.token_mint_a,
+                    token_vault_a: Pubkey::default(),
+                    fee_growth_global_a: 0,
+                    token_mint_b: minimal.token_mint_b,
+                    token_vault_b: Pubkey::default(),
+                    fee_growth_global_b: 0,
+                    reward_last_updated_timestamp: 0,
+                };
                 states.push(WhirlpoolState::from_whirlpool(&whirlpool, addresses[i]));
             }
         }
@@ -144,7 +185,10 @@ impl WhirlpoolState {
     /// Returns the fee rate as a decimal.
     #[must_use]
     pub fn fee_rate(&self) -> Decimal {
-        Decimal::from(self.fee_rate_bps) / Decimal::from(10_000)
+        // In Whirlpool accounts, `fee_rate` is stored as **hundredths of a basis point**
+        // (1e-6). Example: 0.05% = 5 bps = 500 hundredths-bp.
+        // So: decimal = fee_rate / 1_000_000.
+        Decimal::from(self.fee_rate_bps) / Decimal::from(1_000_000)
     }
 
     /// Checks if a tick is within the current range.

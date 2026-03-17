@@ -382,3 +382,113 @@ Once all services are running:
 4. Configure a **strategy** and start monitoring positions
 
 For more information, see the [README.md](./README.md).
+
+---
+
+## IL across rebalances (segment-based model)
+
+Backtest and simulation use **segment-based** impermanent loss:
+
+- **Single range**: IL is computed as usual (entry price, current price, range bounds).
+- **After each rebalance**: the tracker starts a new “segment”: entry price = price at rebalance, capital = position value at rebalance (after paying rebalance cost). IL for the new range is then computed from this segment entry and current price.
+
+So for a **sequence of ranges** (close → open new → repeat), each segment has its own entry and capital. That gives path-correct position value and makes the comparison **continuous rebalancing vs one wide range** meaningful: both are evaluated over the same price path, with correct per-segment IL and fees/costs.
+
+Implementation: `crates/simulation/src/position_tracker.rs` (fields `segment_entry_price`, `segment_capital`, reset in `execute_rebalance`).
+
+---
+
+## Backtest optimize (auto range + strategy)
+
+The **`backtest-optimize`** command finds a good range and strategy for a given pair and period by running many backtests on the same historical data:
+
+- Fetches **one** price path (Birdeye) and optional Dune TVL/volume.
+- Builds a **grid**: several range widths (e.g. 1%–15%) × strategies (static, threshold 2%/3%/5%/7%/10%/15%, periodic 12h/24h/48h/72h), or **only static** with `--static-only` for a faster range-only search.
+- Runs backtests in **parallel** (rayon); with `--windows N` (N>1), splits history into N rolling windows and ranks by **average score** across windows for robustness.
+- Applies optional **filters**: `--min-time-in-range` (%), `--max-drawdown` (%) so low TIR or high drawdown configs are dropped.
+- Ranks by **objective**: `pnl`, `vs_hodl`, `composite` (fees − α·|IL|·capital − cost, `--alpha`), or `risk_adj` (PnL / (1 + max_drawdown)).
+- Prints the **best** (range + strategy) and a **table** with Score, PnL, vs HODL, **TIR%**, **IL%** (rounded to 2 decimals).
+
+Example (whETH/SOL, 30 days, maximize vs HODL):
+
+```bash
+cargo run --bin clmm-lp-cli -- backtest-optimize \
+  --symbol-a whETH --mint-a 7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs \
+  --symbol-b SOL --mint-b So11111111111111111111111111111111111111112 \
+  --days 30 --capital 7000 --tx-cost 0.1 \
+  --whirlpool-address HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF \
+  --lp-share 0.0001 --objective vs_hodl --top-n 5
+```
+
+Options: `--objective pnl | vs_hodl | composite | risk_adj`, `--alpha` (for composite), `--range-steps`, `--min-range-pct` / `--max-range-pct`, `--top-n`, `--min-time-in-range` (%), `--max-drawdown` (%), `--static-only`, `--windows` (1 = single period, >1 = rolling windows, score averaged).
+
+**Fee realism:** The BEST block prints a **Fee check** line: period volume (USD), expected fees if 100% TIR (`volume × lp_share × fee_tier`), and simulated fees. With **one window** (`--windows 1`), the ratio (simulated / expected) should be ≤ 100% and close to your fee-weighted time-in-range. With **multiple windows** (`--windows 3` etc.), expected is from the first window and simulated is from the last window of the best config, so the ratio can exceed 100% and is for reference only; use `--windows 1` to compare like-with-like.
+
+**Tuning suggestions:**
+
+| Goal | `--min-range-pct` | `--max-range-pct` | `--min-time-in-range` | `--max-drawdown` | `--windows` |
+|------|-------------------|-------------------|------------------------|------------------|------------|
+| Default (broad search) | 1 | 15 | (none) | (none) | 1 |
+| Narrower ranges only | 3 | 10 | — | — | 1 |
+| Avoid low TIR / high DD | 1 | 15 | 20 | 10 | 1 |
+| More robust (avg over time) | 1 | 15 | — | — | 3 |
+| Conservative + robust | 5 | 12 | 30 | 8 | 3 |
+
+- **Range:** Wider (e.g. 15%) → more time in range, less rebalancing, often less IL; narrower (e.g. 3%) → more fees when in range but more rebalancing and risk of being out of range.
+- **min-time-in-range:** Drop configs that were in range &lt; X% of the time (e.g. 20 or 30).
+- **max-drawdown:** Drop configs with drawdown &gt; X% (e.g. 10).
+- **windows:** Use 3 (or 5) to split history into rolling windows and rank by **average** score; reduces overfitting to one period.
+
+**Refactor (shared logic):** `backtest` and `backtest-optimize` use:
+- **Data:** `DuneClient::fetch_tvl_volume_maps(pool)` in `crates/data/src/providers/dune.rs` for a single fetch of TVL + volume maps.
+- **CLI:** `crates/cli/src/backtest_engine.rs` – `build_step_data()`, `run_grid()`, `StratConfig`, `run_single()` for shared step data and parallel grid execution.
+
+**Volume (realistic intraday):** Step volume uses a **hybrid** model when Dune is provided: per-candle USD volume from Birdeye (`volume_token_a × close`) gives the **intraday distribution** (which hours had more volume); Dune daily volume gives the **scale** so the day total matches the pool. So `step_vol = dune_daily × (candle_vol_usd / birdeye_day_total)`. That way, hours with high volume (often when price moves a lot and may be out of range) get more volume assigned, and fees are only earned when price is in range—so results are closer to reality than spreading daily volume evenly.
+
+**IL:** Yes. Each backtest run uses the same segment-based IL as the single `backtest` command (see "IL across rebalances" above). The BEST and table show final IL % and it is included in PnL / position value.
+
+**Monte Carlo (symulowane ścieżki cen):** Użyj komendy `optimize`, nie `backtest-optimize`. Optymalizuje zakres na podstawie **wielu losowych ścieżek** (zmienność z historii), a nie jednej realnej ścieżki. Przykład:
+
+```bash
+cargo run --bin clmm-lp-cli -- optimize --symbol-a whETH --mint-a 7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs --symbol-b SOL --mint-b So11111111111111111111111111111111111111112 --days 30 --capital 7000 --objective pnl --iterations 100
+```
+
+---
+
+## Roadmap: Real Dune‑Powered LP Bot
+
+This project also serves as the foundation for a real Orca/Raydium LP bot that uses on‑chain prices and Dune pool metrics (TVL / volume / fees). The high‑level roadmap is:
+
+### Curated pools (seed list)
+
+Store a small curated list of pool addresses we care about, so we can:
+- run repeatable backtests/analytics
+- build multi‑protocol ranking (same universe of pools)
+- later let the bot choose where to deploy
+
+**Orca (Whirlpool)**
+- **SOL/USDC**: `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE`
+- **whETH/SOL**: `HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF`
+- **cbBTC/USDC**: `HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM`
+
+**Meteora**
+- **SOL/USDC (BIN Step1)**: `HTvjzsfX3yU6BUodCjZ5vZkUrAxMDTrBs3CJaq43ashR`
+- **SOL/USDC (BIN Step4)**: `5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6`
+- **SOL/USDC (BIN Step10)**: `BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y`
+
+**Raydium**
+- **SOL/USDT**: `3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF`
+
+1. **Define objective**: choose a clear function to maximize (e.g. `score = α · fees − β · |IL|`), reflecting the desired trade‑off between yield and risk.
+2. **Optimize ranges offline**: use historical Birdeye prices + Dune TVL/volume to backtest many candidate ranges and strategies, selecting those that maximize the objective.
+3. **Multi‑protocol pool analytics (discovery & ranking)**: implement analytics for a curated set of pools across projects (**Raydium**, **Meteora**, and others). Collect comparable metrics (e.g. daily/weekly **volume**, **TVL**, fee tier, volatility, historical time‑in‑range, stability of volume), then **rank pools** to answer: *“where should the bot deploy capital now?”* (e.g. pick pools with better volume/fees for the same risk).
+4. **Approach on‑chain reality (data + fees correctness)**: move fees from candle‑level heuristics toward swap/tick‑level accounting, **without paid APIs**:
+   - **B (swap history MVP)**: ingest **historical swaps** from a free dataset (start with **Dune** Solana DEX trades; optionally also **Solana BigQuery / Solarchive** backfills). Use swap timestamps + token amounts to drive **fee estimation at swap granularity** (fees come from swaps, not from candles). Candles (e.g. 1h) can still be used for **strategy logic / valuation / reporting**, but they should no longer be the source of “how much volume paid fees”.
+   - **C‑lite (if available in datasets)**: if swaps include decoded `tick` / `sqrt_price` / `liquidity`, upgrade fee share from a constant snapshot to per‑swap active‑liquidity share (much closer to CLMM reality).
+   - **C (full CLMM / “truth”)**: build/operate a lightweight indexer (e.g. **SQD/Subsquid** or **Yellowstone/Vixen**) to stream and store **swaps + tick array updates**. Reconstruct tick crossings and implement feeGrowth‑style accounting (fees owed = ΔfeeGrowthInside × L).
+   - **Data backup for Dune**: keep a compatible fallback path that can re‑generate the same `SwapEvent` JSONs from:
+     - **Solana BigQuery / Solarchive** (transactions + `pre/postTokenBalances`), using a small ETL script to reconstruct swaps for our curated pools and write them to `data/dune-swaps/*.json` in the same format as Dune, and
+     - (later) an optional **narrow custom indexer** (SQD/Triton) that streams swaps only for our curated pools and writes them to the same JSON format. Backtests and the bot always read from local JSON cache, never directly from Dune, so switching the upstream source is a matter of changing only the sync/ETL step.
+5. **Implement bot loop**: run a periodic agent that reads pool + position state, calls the optimizer, and decides when to enter/exit pools, harvest, close, or reopen positions on‑chain based on the pool ranking + range optimizer.
+6. **Hardening and risk controls**: add limits on gas/priority fees, max rebalance frequency, drawdown/IL guards, and monitoring/alerting for the production bot.
+7. **Research Hummingbot (code reuse)**: evaluate whether [Hummingbot](https://github.com/hummingbot/hummingbot) can be leveraged for parts of the bot (connectors, strategy scaffolding, event loop/monitoring, risk controls). Decide whether to reuse components or only borrow patterns.
