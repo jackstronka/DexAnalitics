@@ -1,7 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -50,7 +50,10 @@ impl DuneClient {
         })
     }
 
-    async fn fetch_rows<T: for<'de> Deserialize<'de>>(&self, query_id: &str) -> Result<Vec<T>> {
+    async fn fetch_rows<T: for<'de> Deserialize<'de> + Serialize>(
+        &self,
+        query_id: &str,
+    ) -> Result<Vec<T>> {
         /// Simple on-disk cache to avoid re-fetching identical Dune results.
         ///
         /// Cache layout:
@@ -66,12 +69,12 @@ impl DuneClient {
             path
         }
 
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct DuneRows<T> {
             rows: Vec<T>,
         }
 
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct DuneResult<T> {
             result: DuneRows<T>,
         }
@@ -83,12 +86,12 @@ impl DuneClient {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        if !disable_cache && path.exists() {
-            if let Ok(bytes) = fs::read(&path) {
-                if let Ok(wrapper) = serde_json::from_slice::<DuneResult<T>>(&bytes) {
-                    return Ok(wrapper.result.rows);
-                }
-            }
+        if !disable_cache
+            && path.exists()
+            && let Ok(bytes) = fs::read(&path)
+            && let Ok(wrapper) = serde_json::from_slice::<DuneResult<T>>(&bytes)
+        {
+            return Ok(wrapper.result.rows);
         }
 
         let url = format!("https://api.dune.com/api/v1/query/{}/results", query_id);
@@ -130,7 +133,7 @@ impl DuneClient {
 
     /// Fetch daily TVL for all pools, caller filters by `pool_address`.
     pub async fn fetch_tvl(&self, pool_address: &str) -> Result<Vec<TvlPoint>> {
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct Row {
             date: String,
             pool_address: String,
@@ -158,7 +161,7 @@ impl DuneClient {
 
     /// Fetch daily volume and fees for all pools, caller filters by `pool_address`.
     pub async fn fetch_volume_fees(&self, pool_address: &str) -> Result<Vec<VolumePoint>> {
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct Row {
             trade_date: String,
             whirlpool_address: String,

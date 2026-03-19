@@ -75,6 +75,7 @@ mod tests {
             None,
             9,
             9,
+            None,
         );
 
         assert_eq!(summary.total_fees, Decimal::ZERO);

@@ -181,12 +181,12 @@ pub fn estimate_position_liquidity(
 
 /// Index swap events by step index. Step duration assumed 3600s (1h). Swaps whose block_time
 /// falls in [step_start, step_start + 3600) are assigned to that step.
-fn index_swaps_by_step(
-    swaps: &[SwapEvent],
+fn index_swaps_by_step<'a>(
+    swaps: &'a [SwapEvent],
     step_data: &[StepData],
     step_seconds: i64,
-) -> BTreeMap<usize, Vec<&SwapEvent>> {
-    let mut map: BTreeMap<usize, Vec<&SwapEvent>> = BTreeMap::new();
+) -> BTreeMap<usize, Vec<&'a SwapEvent>> {
+    let mut map: BTreeMap<usize, Vec<&'a SwapEvent>> = BTreeMap::new();
     if step_data.is_empty() {
         return map;
     }
@@ -305,7 +305,7 @@ pub fn run_single(
 
         let pool_fees = if let Some(ref idx) = swap_index {
             idx.get(&i)
-                .map(|swaps_here| {
+                .map(|swaps_here: &Vec<&SwapEvent>| {
                     swaps_here.iter().fold(Decimal::ZERO, |acc, s| {
                         let f = if s.fee_usd != Decimal::ZERO {
                             s.fee_usd
@@ -492,7 +492,7 @@ pub fn run_grid(
                 pool_active_liquidity,
                 token_a_decimals,
                 token_b_decimals,
-                swaps_ref,
+                swaps_ref.map(|v| &**v),
             );
             (*wp, lower, upper, strat_name, summary)
         })
