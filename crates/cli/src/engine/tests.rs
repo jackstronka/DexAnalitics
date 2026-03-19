@@ -1,6 +1,7 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
-    use crate::backtest_engine::{run_single, StratConfig};
+    use crate::backtest_engine::{run_single, GridRunParams, StratConfig};
     use crate::engine::{hodl, liquidity};
     use crate::backtest_engine::StepDataPoint;
     use clmm_lp_domain::prelude::Price;
@@ -61,6 +62,16 @@ mod tests {
 
         let capital = dec!(1000);
         let tx_cost = dec!(2);
+        let params = GridRunParams {
+            capital_dec: capital,
+            tx_cost_dec: tx_cost,
+            fee_rate: dec!(0.0),
+            pool_active_liquidity: None,
+            token_a_decimals: 9,
+            token_b_decimals: 9,
+            step_seconds: 3600,
+            use_liquidity_share: false,
+        };
 
         // Periodic(1) => rebalance on every step.
         let (_lo, _hi, _name, summary) = run_single(
@@ -69,12 +80,8 @@ mod tests {
             2000.0,                 // center (USD) (only for fallback; bounds returned for reporting)
             0.20,                   // 20% width
             StratConfig::Periodic(1),
-            capital,
-            tx_cost,
-            dec!(0.0), // fee rate
-            None,
-            9,
-            9,
+            &params,
+            None::<&[_]>,
         );
 
         assert_eq!(summary.total_fees, Decimal::ZERO);

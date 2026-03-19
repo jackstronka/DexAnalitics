@@ -16,6 +16,8 @@ pub mod orca;
 pub mod parsers;
 /// Raydium protocol adapter.
 pub mod raydium;
+/// Meteora DLMM protocol adapter (bin-based).
+pub mod meteora;
 /// RPC provider with health checks and fallback.
 pub mod rpc;
 /// Solana client wrapper.

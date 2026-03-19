@@ -2,7 +2,7 @@
 //!
 //! Used by both `backtest` (single run) and `backtest-optimize` (grid + rolling windows).
 
-use clmm_lp_domain::prelude::{Amount, Price, PriceCandle, PriceRange};
+use clmm_lp_domain::prelude::{Amount, Price, PriceCandle};
 use clmm_lp_simulation::prelude::*;
 use clmm_lp_data::swaps::SwapEvent;
 use primitive_types::U256;
@@ -12,6 +12,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use crate::engine::{fees as fee_engine, hodl, liquidity};
+use crate::engine::pricing::price_ab_human_to_raw;
 
 /// Per-step data used by simulations.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +41,22 @@ pub enum StratConfig {
     Periodic(u64),
 }
 
+/// Shared parameters for a single backtest or grid run (capital, fees, pool, decimals).
+#[derive(Clone, Debug)]
+pub struct GridRunParams {
+    pub capital_dec: Decimal,
+    pub tx_cost_dec: Decimal,
+    pub fee_rate: Decimal,
+    pub pool_active_liquidity: Option<u128>,
+    pub token_a_decimals: u32,
+    pub token_b_decimals: u32,
+    /// Step duration in seconds (candle resolution), e.g. 3600 for 1H.
+    pub step_seconds: i64,
+    /// If true, use liquidity-based fee share when pool liquidity is known.
+    /// If false, always use `StepDataPoint.lp_share` (e.g. when `--lp-share` is provided).
+    pub use_liquidity_share: bool,
+}
+
 /// Build step data (price, volume, share) for each candle.
 ///
 /// **Volume:** When Dune TVL/volume is present we use **hybrid** volume:
@@ -47,6 +64,7 @@ pub enum StratConfig {
 ///   (high volume hours get more volume; often those are volatile hours when price may be out of range).
 /// - Dune daily volume for the pool gives the **scale** so the day total matches the pool.
 /// - So: `step_vol_usd = dune_daily_vol * (candle_vol_usd / birdeye_day_total)`.
+///
 /// When Birdeye has no volume for a day we fall back to uniform `daily_vol / 24`.
 /// Without Dune we use Birdeye candle volume as-is (realistic distribution, scale from lp_share).
 pub fn build_step_data(
@@ -83,7 +101,7 @@ pub fn build_step_data(
         })
         .collect();
     let mut birdeye_day_total: HashMap<String, Decimal> = HashMap::new();
-    for (candle, &ref vol) in candle_slice.iter().zip(candle_vol_usd.iter()) {
+    for (candle, vol) in candle_slice.iter().zip(candle_vol_usd.iter()) {
         let date_key = chrono::DateTime::from_timestamp(candle.start_timestamp as i64, 0)
             .unwrap_or_default()
             .format("%Y-%m-%d")
@@ -181,11 +199,11 @@ pub fn estimate_position_liquidity(
 
 /// Index swap events by step index. Step duration assumed 3600s (1h). Swaps whose block_time
 /// falls in [step_start, step_start + 3600) are assigned to that step.
-fn index_swaps_by_step(
-    swaps: &[SwapEvent],
+fn index_swaps_by_step<'a>(
+    swaps: &'a [SwapEvent],
     step_data: &[StepData],
     step_seconds: i64,
-) -> BTreeMap<usize, Vec<&SwapEvent>> {
+) -> BTreeMap<usize, Vec<&'a SwapEvent>> {
     let mut map: BTreeMap<usize, Vec<&SwapEvent>> = BTreeMap::new();
     if step_data.is_empty() {
         return map;
@@ -211,14 +229,15 @@ pub fn run_single(
     center: f64,
     width_pct: f64,
     strat: StratConfig,
-    capital_dec: Decimal,
-    tx_cost_dec: Decimal,
-    fee_rate: Decimal,
-    pool_active_liquidity: Option<u128>,
-    token_a_decimals: u32,
-    token_b_decimals: u32,
+    params: &GridRunParams,
     swaps: Option<&[SwapEvent]>,
 ) -> (f64, f64, String, TrackerSummary) {
+    let capital_dec = params.capital_dec;
+    let tx_cost_dec = params.tx_cost_dec;
+    let fee_rate = params.fee_rate;
+    let pool_active_liquidity = params.pool_active_liquidity;
+    let token_a_decimals = params.token_a_decimals;
+    let token_b_decimals = params.token_b_decimals;
     let _ = entry_price; // kept for API compatibility; amount-based sim derives entry from step_data[0]
     // Amount-based accounting:
     // - Range is defined in A/B (quote units) and checked against `price_ab`
@@ -284,16 +303,20 @@ pub fn run_single(
         StratConfig::Periodic(h) => format!("periodic_{}h", h),
     };
 
-    let mut fee_share_model = if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
-        fee_engine::FeeShareModel::LiquidityShare {
-            position_liquidity: liquidity_l,
-            pool_active_liquidity: pool_l,
-        }
+    let mut fee_share_model = if params.use_liquidity_share {
+        pool_active_liquidity
+            .filter(|v| *v > 0)
+            .map(|pool_l| fee_engine::FeeShareModel::LiquidityShare {
+                position_liquidity: liquidity_l,
+                pool_active_liquidity: pool_l,
+            })
+            .unwrap_or(fee_engine::FeeShareModel::LegacyLpShare)
     } else {
         fee_engine::FeeShareModel::LegacyLpShare
     };
 
-    let swap_index = swaps.map(|s| index_swaps_by_step(s, step_data, 3600));
+    let swap_index: Option<BTreeMap<usize, Vec<&SwapEvent>>> =
+        swaps.map(|s| index_swaps_by_step(s, step_data, params.step_seconds.max(1)));
 
     for (i, p) in step_data.iter().enumerate() {
         steps_since_rebalance += 1;
@@ -328,9 +351,13 @@ pub fn run_single(
         total_fees += step_fees;
 
         // Current position valuation (excluding fees)
-        let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(current_lower_ab);
-        let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(current_upper_ab);
-        let sqrt_p = crate::engine::pricing::price_to_sqrt_q64(price_ab);
+        let lower_ab_raw = price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
+        let upper_ab_raw = price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
+        let price_ab_raw = price_ab_human_to_raw(price_ab, token_a_decimals, token_b_decimals);
+
+        let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(lower_ab_raw);
+        let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(upper_ab_raw);
+        let sqrt_p = crate::engine::pricing::price_to_sqrt_q64(price_ab_raw);
         let (amt_a_base, amt_b_base) =
             liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
         let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
@@ -366,7 +393,10 @@ pub fn run_single(
                     }
                 }
             }
-            StratConfig::Periodic(interval) => steps_since_rebalance >= interval,
+            StratConfig::Periodic(interval_hours) => {
+                let elapsed = (steps_since_rebalance as i64) * params.step_seconds.max(1);
+                elapsed as u64 >= interval_hours.saturating_mul(3600)
+            }
         };
 
         if should_rebalance && liquidity_l > 0 {
@@ -394,11 +424,13 @@ pub fn run_single(
                 token_b_decimals,
             );
 
-            if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
-                fee_share_model = fee_engine::FeeShareModel::LiquidityShare {
-                    position_liquidity: liquidity_l,
-                    pool_active_liquidity: pool_l,
-                };
+            if params.use_liquidity_share {
+                if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
+                    fee_share_model = fee_engine::FeeShareModel::LiquidityShare {
+                        position_liquidity: liquidity_l,
+                        pool_active_liquidity: pool_l,
+                    };
+                }
             }
         }
     }
@@ -411,9 +443,13 @@ pub fn run_single(
     };
 
     let last = step_data.last().unwrap();
-    let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(current_lower_ab);
-    let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(current_upper_ab);
-    let sqrt_p = crate::engine::pricing::price_to_sqrt_q64(last.price_ab.value);
+    let lower_ab_raw = price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
+    let upper_ab_raw = price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
+    let last_ab_raw = price_ab_human_to_raw(last.price_ab.value, token_a_decimals, token_b_decimals);
+
+    let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(lower_ab_raw);
+    let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(upper_ab_raw);
+    let sqrt_p = crate::engine::pricing::price_to_sqrt_q64(last_ab_raw);
     let (amt_a_base, amt_b_base) =
         liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
     let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
@@ -463,12 +499,7 @@ pub fn run_grid(
     center: f64,
     width_pcts: &[f64],
     strategies: &[StratConfig],
-    capital_dec: Decimal,
-    tx_cost_dec: Decimal,
-    fee_rate: Decimal,
-    pool_active_liquidity: Option<u128>,
-    token_a_decimals: u32,
-    token_b_decimals: u32,
+    params: &GridRunParams,
     swaps: Option<&[SwapEvent]>,
 ) -> Vec<(f64, f64, f64, String, TrackerSummary)> {
     let step_data = Arc::new(step_data.to_vec());
@@ -479,19 +510,14 @@ pub fn run_grid(
         .collect();
     jobs.par_iter()
         .map(|(wp, strat)| {
-            let swaps_ref = swaps_arc.as_deref();
+            let swaps_ref: Option<&[SwapEvent]> = swaps_arc.as_deref().map(|v| v.as_slice());
             let (lower, upper, strat_name, summary) = run_single(
                 step_data.as_ref(),
                 entry_price,
                 center,
                 *wp,
                 *strat,
-                capital_dec,
-                tx_cost_dec,
-                fee_rate,
-                pool_active_liquidity,
-                token_a_decimals,
-                token_b_decimals,
+                params,
                 swaps_ref,
             );
             (*wp, lower, upper, strat_name, summary)

@@ -1,0 +1,6 @@
+# Main-thread stack: clmm-lp-cli uses a large clap::Parser tree; default 1MB can overflow on Windows.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:33554432"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:33554432"]

@@ -4,6 +4,7 @@ pub mod backtest_engine;
 pub mod commands;
 pub mod engine;
 pub mod output;
+mod snapshots;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -70,6 +71,36 @@ enum BacktestObjectiveArg {
     RiskAdj,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum FeeSourceArg {
+    /// Default behavior: swaps when provided, otherwise candles.
+    #[default]
+    Auto,
+    /// Candle-volume based fee model.
+    Candles,
+    /// Dune swap-level fee model.
+    Swaps,
+    /// Snapshot-derived fee proxy (orca/raydium).
+    Snapshots,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SnapshotProtocolArg {
+    Orca,
+    Raydium,
+    Meteora,
+}
+
+/// Where the backtest takes its **price path** from.
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum PricePathSourceArg {
+    /// Birdeye OHLCV (and cross-pair from USD legs).
+    #[default]
+    Birdeye,
+    /// One step per row in local Orca `snapshots.jsonl` inside the time window (no Birdeye).
+    Snapshots,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Fetch recent market data
@@ -107,6 +138,18 @@ enum Commands {
         /// Days of history to backtest
         #[arg(short, long, default_value_t = 30)]
         days: u64,
+        /// Hours of history to backtest (overrides --days when set)
+        #[arg(long)]
+        hours: Option<u64>,
+
+        /// Optional start date (UTC) in YYYY-MM-DD. Overrides --days.
+        #[arg(long)]
+        start_date: Option<String>,
+
+        /// Optional end date (UTC) in YYYY-MM-DD (exclusive). Overrides --days.
+        /// Example: start=2026-03-07 end=2026-03-15 covers 7 full days (7..14 inclusive).
+        #[arg(long)]
+        end_date: Option<String>,
 
         /// Lower price bound
         #[arg(long)]
@@ -143,6 +186,30 @@ enum Commands {
         /// Optional fixed LP share of the pool (e.g. 0.001 = 0.1%)
         #[arg(long)]
         lp_share: Option<f64>,
+
+        /// Optional Dune swaps query id/name to compute fees from swaps (e.g. "orca" or "6848259").
+        #[arg(long)]
+        dune_swaps: Option<String>,
+
+        /// Fee source model: auto (default), candles, swaps, or snapshots.
+        #[arg(long, value_enum, default_value_t = FeeSourceArg::Auto)]
+        fee_source: FeeSourceArg,
+
+        /// Protocol for reading pool snapshots (required for --fee-source snapshots).
+        #[arg(long, value_enum)]
+        snapshot_protocol: Option<SnapshotProtocolArg>,
+
+        /// Pool address to load snapshots from (required for --fee-source snapshots).
+        #[arg(long)]
+        snapshot_pool_address: Option<String>,
+
+        /// Candle resolution in seconds (e.g. 3600=1h, 1800=30m, 300=5m)
+        #[arg(long, default_value_t = 3600)]
+        resolution_seconds: u64,
+
+        /// Price path: Birdeye OHLCV (default) or local Orca snapshots only (requires `--snapshot-protocol orca`, `--snapshot-pool-address`, cross-pair mints; no `BIRDEYE_API_KEY`).
+        #[arg(long, value_enum, default_value_t = PricePathSourceArg::Birdeye)]
+        price_path_source: PricePathSourceArg,
     },
     /// Find best range and strategy on historical data (grid search over ranges + strategies)
     BacktestOptimize {
@@ -161,6 +228,9 @@ enum Commands {
         /// Days of history
         #[arg(short, long, default_value_t = 30)]
         days: u64,
+        /// Hours of history (overrides --days when set)
+        #[arg(long)]
+        hours: Option<u64>,
         /// Initial capital in USD
         #[arg(long, default_value_t = 7000.0)]
         capital: f64,
@@ -203,6 +273,20 @@ enum Commands {
         /// Number of rolling windows; 1 = single period, >1 = average score over windows
         #[arg(long, default_value_t = 1)]
         windows: usize,
+        /// Use Dune swap-level fees: orca, meteora, raydium, or a Dune query ID (e.g. 6848259). Requires DUNE_API_KEY.
+        #[arg(long)]
+        dune_swaps: Option<String>,
+        /// Candle resolution in seconds (e.g. 3600=1h, 900=15m, 300=5m, 60=1m).
+        #[arg(long, default_value_t = 3600)]
+        resolution_seconds: u64,
+
+        /// Optional: use snapshot vault balances to compute time-varying lp share (capital/TVL proxy).
+        #[arg(long, value_enum)]
+        snapshot_protocol: Option<SnapshotProtocolArg>,
+
+        /// Optional: pool address to load snapshots from (data/pool-snapshots/{protocol}/{pool}/snapshots.jsonl).
+        #[arg(long)]
+        snapshot_pool_address: Option<String>,
     },
     /// Optimize price range for LP position
     Optimize {
@@ -266,10 +350,128 @@ enum Commands {
         days: u64,
     },
     /// Fetch pool metrics from Dune (TVL, volume, fees)
+    /// Fetch Dune swap data from API and save to local cache (data/dune-cache/{query_id}.json).
+    /// Use before backtest-optimize --dune-swaps so the backtest uses cached data.
+    DuneSyncSwaps {
+        /// Protocol preset: orca, meteora, or raydium (uses known query IDs).
+        #[arg(long)]
+        protocol: Option<String>,
+        /// Dune query ID (e.g. 6848259). Overrides --protocol if set.
+        #[arg(long)]
+        query_id: Option<String>,
+    },
     DunePoolMetrics {
         /// Whirlpool pool address
         #[arg(long)]
         pool_address: String,
+    },
+    /// Print Orca Whirlpool fee tier (on-chain)
+    OrcaPoolFee {
+        /// Whirlpool pool address
+        #[arg(long)]
+        pool_address: String,
+    },
+    /// Find DefiLlama yield pools (discovery helper)
+    DefiLlamaFindPools {
+        /// Search string (matched against symbol + project)
+        #[arg(long)]
+        query: String,
+        /// Optional chain filter (default: Solana)
+        #[arg(long, default_value = "Solana")]
+        chain: String,
+        /// Max results to print
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Sync DefiLlama daily TVL to local cache
+    DefiLlamaSyncTvl {
+        /// DefiLlama yield pool id (UUID from /pools)
+        #[arg(long)]
+        pool_id: String,
+    },
+    /// Append an on-chain snapshot for an Orca Whirlpool pool (for local "cron" collection)
+    OrcaSnapshot {
+        /// Whirlpool pool address
+        #[arg(long)]
+        pool_address: String,
+    },
+    /// Snapshot all curated Orca Whirlpool pools from `STARTUP.md`
+    OrcaSnapshotCurated {
+        /// Optional: stop after N pools (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Append an on-chain raw account snapshot for Raydium pools from `STARTUP.md` (v1 minimal)
+    RaydiumSnapshotCurated {
+        /// Optional: stop after N pools (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Append an on-chain raw account snapshot for Meteora pools from `STARTUP.md` (v1 minimal)
+    MeteoraSnapshotCurated {
+        /// Optional: stop after N pools (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Snapshot curated pools for all supported protocols (Orca + Raydium + Meteora)
+    SnapshotRunCuratedAll {
+        /// Optional: stop after N pools per protocol (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show last snapshot-run-curated-all status from local JSONL log
+    SnapshotStatusLast,
+    /// Audit whether local snapshots are sufficient for each fee model tier
+    SnapshotReadiness {
+        /// Protocol of the snapshot file
+        #[arg(long, value_enum)]
+        protocol: SnapshotProtocolArg,
+        /// Pool address used in data/pool-snapshots/{protocol}/{pool}/snapshots.jsonl
+        #[arg(long)]
+        pool_address: String,
+    },
+
+    /// Dexscreener: search pairs by query (cached)
+    DexscreenerSearch {
+        /// Search query (symbol, token, etc.)
+        #[arg(long)]
+        query: String,
+        /// Max rows to print
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+    },
+
+    /// Dexscreener: list all pairs for a Solana token mint (cached)
+    DexscreenerTokenPairs {
+        /// Token mint address (Solana)
+        #[arg(long)]
+        token_mint: String,
+        /// Max rows to print
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+
+    /// Dexscreener: fetch details for a specific pair address (cached)
+    DexscreenerPair {
+        /// Pair address (e.g. pool address)
+        #[arg(long)]
+        pair_address: String,
+    },
+
+    /// Dexscreener: compare venues for a given token pair on Solana (cached)
+    DexscreenerComparePair {
+        /// Token mint A (Solana)
+        #[arg(long)]
+        mint_a: String,
+        /// Token mint B (Solana)
+        #[arg(long)]
+        mint_b: String,
+        /// Sort by: liquidity_usd, volume_h24, volume_h6, volume_h1, volume_m5
+        #[arg(long, default_value = "volume_h24")]
+        sort_by: String,
+        /// Max rows to print
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
     },
 }
 
@@ -368,6 +570,9 @@ async fn main() -> Result<()> {
             symbol_b,
             mint_b,
             days,
+            hours,
+            start_date,
+            end_date,
             lower,
             upper,
             capital,
@@ -377,12 +582,14 @@ async fn main() -> Result<()> {
             tx_cost,
             whirlpool_address,
             lp_share,
+            dune_swaps,
+            fee_source,
+            snapshot_protocol,
+            snapshot_pool_address,
+            resolution_seconds,
+            price_path_source,
         } => {
-            let api_key = env::var("BIRDEYE_API_KEY")
-                .expect("BIRDEYE_API_KEY must be set in .env or environment");
-
             println!("📡 Initializing Backtest Engine...");
-            let provider = BirdeyeProvider::new(api_key);
 
             // Define Tokens
             let (token_a_decimals, token_b_decimals): (u8, u8) = {
@@ -414,57 +621,653 @@ async fn main() -> Result<()> {
                 (tb, false)
             };
 
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let start_time = now - (days * 24 * 3600);
-
-            if use_cross_pair {
-                println!(
-                    "🔍 Fetching historical data for {}/{} ({} days)...",
-                    symbol_a,
-                    symbol_b.as_deref().unwrap_or("UNKNOWN"),
-                    days
-                );
+            let snapshots_only = matches!(price_path_source, PricePathSourceArg::Snapshots);
+            if snapshots_only {
+                if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                    anyhow::bail!(
+                        "--price-path-source snapshots requires --snapshot-protocol orca (other venues not implemented yet)"
+                    );
+                }
+                if snapshot_pool_address.is_none() {
+                    anyhow::bail!("--price-path-source snapshots requires --snapshot-pool-address");
+                }
+                if !use_cross_pair {
+                    anyhow::bail!(
+                        "--price-path-source snapshots requires a cross pair (--symbol-b and --mint-b)"
+                    );
+                }
             } else {
-                println!(
-                    "🔍 Fetching historical data for {}/USDC ({} days)...",
-                    symbol_a, days
-                );
+                let _ = env::var("BIRDEYE_API_KEY")
+                    .expect("BIRDEYE_API_KEY must be set in .env or environment (or use --price-path-source snapshots)");
             }
 
-            let candles = if use_cross_pair {
-                provider
-                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, 3600)
-                    .await?
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let (start_time, end_time, display_label) = if let (Some(sd), Some(ed)) =
+                (start_date.as_deref(), end_date.as_deref())
+            {
+                use chrono::{NaiveDate, TimeZone, Utc};
+                let s = NaiveDate::parse_from_str(sd, "%Y-%m-%d")?;
+                let e = NaiveDate::parse_from_str(ed, "%Y-%m-%d")?;
+                let s_ts = Utc.from_utc_datetime(&s.and_hms_opt(0, 0, 0).unwrap()).timestamp() as u64;
+                let e_ts = Utc.from_utc_datetime(&e.and_hms_opt(0, 0, 0).unwrap()).timestamp() as u64;
+                (s_ts, e_ts, format!("{}..{}", sd, ed))
+            } else if let Some(h) = hours {
+                let s_ts = now.saturating_sub(h.saturating_mul(3600));
+                (s_ts, now, format!("last {}h", h))
             } else {
-                provider
-                    .get_price_history(&token_a, &token_b, start_time, now, 3600)
-                    .await?
+                let s_ts = now - (days * 24 * 3600);
+                (s_ts, now, format!("last {}d", days))
+            };
+            let effective_days: u64 = (end_time.saturating_sub(start_time) / 86_400).max(1);
+
+            let mut prebuilt_snapshot_fee_index: Option<std::collections::BTreeMap<usize, Decimal>> = None;
+
+            let mut candles: Vec<clmm_lp_domain::entities::price_candle::PriceCandle> = Vec::new();
+            let mut quote_usd_map: Option<HashMap<u64, Decimal>> = None;
+
+            #[allow(clippy::type_complexity)]
+            let (dune_daily_tvl, dune_daily_volume): (
+                Option<HashMap<String, Decimal>>,
+                Option<HashMap<String, Decimal>>,
+            ) = if snapshots_only {
+                (None, None)
+            } else if let Some(pool) = whirlpool_address.as_ref() {
+                crate::commands::backtest_optimize::fetch_dune_tvl_volume(pool).await?
+            } else {
+                (None, None)
             };
 
-            if candles.is_empty() {
-                println!("❌ No data found for the specified period.");
-                return Ok(());
-            }
+            let capital_dec = Decimal::from_f64(*capital).unwrap();
+            let lp_share_override: Option<Decimal> = lp_share
+                .and_then(Decimal::from_f64)
+                .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
 
-            // Optional: load real daily USD TVL & volume from Dune for a given Whirlpool pool.
-            let (dune_daily_tvl, dune_daily_volume): (Option<HashMap<String, Decimal>>, Option<HashMap<String, Decimal>>) =
-                if let Some(pool) = whirlpool_address {
-                    use clmm_lp_data::providers::DuneClient;
-                    println!("📡 Fetching daily TVL & volume from Dune for pool {pool}...");
-                    let dune = DuneClient::from_env()?;
-                    let (tvl_map, vol_map) = dune.fetch_tvl_volume_maps(pool).await?;
-                    if tvl_map.is_empty() || vol_map.is_empty() {
-                        println!("⚠️ Missing Dune TVL or volume data for this pool, falling back to synthetic model.");
-                        (None, None)
+            let mut step_data: Vec<crate::backtest_engine::StepDataPoint> = if snapshots_only {
+                println!(
+                    "🔍 Price path from Orca snapshots only (window {}): {}/{} — no Birdeye",
+                    display_label, symbol_a, symbol_b.as_deref().unwrap_or("?")
+                );
+                let pool = snapshot_pool_address.as_ref().unwrap();
+                let prep = crate::commands::snapshot_price_path::build_from_orca_snapshots(
+                    pool,
+                    start_time as i64,
+                    end_time as i64,
+                    &token_a,
+                    &token_b,
+                    *capital,
+                    *lp_share,
+                )
+                .await?;
+                prebuilt_snapshot_fee_index = prep.per_step_fees_usd;
+                if prep.step_data.is_empty() {
+                    println!("❌ No snapshot rows in the requested time window.");
+                    return Ok(());
+                }
+                println!(
+                    "✅ Loaded {} snapshot steps from data/pool-snapshots/orca/{}/snapshots.jsonl",
+                    prep.step_data.len(),
+                    pool
+                );
+                prep.step_data
+            } else {
+                if use_cross_pair {
+                    if let Some(h) = hours {
+                        println!(
+                            "🔍 Fetching historical data for {}/{} ({} hours)...",
+                            symbol_a,
+                            symbol_b.as_deref().unwrap_or("UNKNOWN"),
+                            h
+                        );
                     } else {
-                        (Some(tvl_map), Some(vol_map))
+                        println!(
+                            "🔍 Fetching historical data for {}/{} ({} days)...",
+                            symbol_a,
+                            symbol_b.as_deref().unwrap_or("UNKNOWN"),
+                            days
+                        );
                     }
+                } else if let Some(h) = hours {
+                    println!(
+                        "🔍 Fetching historical data for {}/USDC ({} hours)...",
+                        symbol_a, h
+                    );
                 } else {
-                    (None, None)
+                    println!(
+                        "🔍 Fetching historical data for {}/USDC ({} days)...",
+                        symbol_a, days
+                    );
+                }
+
+                let api_key = env::var("BIRDEYE_API_KEY")
+                    .expect("BIRDEYE_API_KEY must be set in .env or environment");
+                let provider = BirdeyeProvider::new(api_key);
+
+                candles = if use_cross_pair {
+                    provider
+                        .get_cross_pair_price_history(
+                            &token_a,
+                            &token_b,
+                            start_time,
+                            end_time,
+                            *resolution_seconds,
+                        )
+                        .await?
+                } else {
+                    provider
+                        .get_price_history(
+                            &token_a,
+                            &token_b,
+                            start_time,
+                            end_time,
+                            *resolution_seconds,
+                        )
+                        .await?
                 };
 
-            // Prepare Price Path
-            let prices: Vec<Price> = candles.iter().map(|c| c.close).collect();
+                if candles.is_empty() {
+                    println!("❌ No data found for the specified period.");
+                    return Ok(());
+                }
+
+                quote_usd_map = if use_cross_pair {
+                    let usdc = Token::new(
+                        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "USDC",
+                        6,
+                        "USD Coin",
+                    );
+                    let quote_candles = provider
+                        .get_price_history(
+                            &token_b,
+                            &usdc,
+                            start_time,
+                            end_time,
+                            *resolution_seconds,
+                        )
+                        .await?;
+                    if quote_candles.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            quote_candles
+                                .into_iter()
+                                .map(|c| (c.start_timestamp, c.close.value))
+                                .collect(),
+                        )
+                    }
+                } else {
+                    None
+                };
+
+                let steps_per_day =
+                    Decimal::from_f64(86_400f64 / (*resolution_seconds).max(1) as f64).unwrap();
+                let (sd, _e, _c) = crate::backtest_engine::build_step_data(
+                    &candles,
+                    dune_daily_tvl.as_ref(),
+                    dune_daily_volume.as_ref(),
+                    quote_usd_map.as_ref(),
+                    capital_dec,
+                    lp_share_override,
+                    steps_per_day,
+                );
+                sd
+            };
+
+            // If snapshot pool data is provided and user didn't force a fixed lp share,
+            // update per-step `lp_share` using a TVL proxy from on-chain vault balances.
+            // This keeps candle/swaps fee logic intact, but makes `share(t)` more realistic.
+            if lp_share_override.is_none()
+                && snapshot_protocol.is_some()
+                && snapshot_pool_address.is_some()
+            {
+                let proto = snapshot_protocol.unwrap();
+                let pool_addr = snapshot_pool_address.clone().unwrap();
+                let base_dir = std::path::Path::new("data")
+                    .join("pool-snapshots")
+                    .join(match proto {
+                        SnapshotProtocolArg::Orca => "orca",
+                        SnapshotProtocolArg::Raydium => "raydium",
+                        SnapshotProtocolArg::Meteora => "meteora",
+                    });
+                let snap_path = base_dir.join(&pool_addr).join("snapshots.jsonl");
+                if snap_path.exists() {
+                    let txt = std::fs::read_to_string(&snap_path)?;
+                    let mut snaps: Vec<(i64, u64, u64, Option<String>, Option<String>)> = Vec::new();
+                    for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+                        let v: serde_json::Value = match serde_json::from_str(line) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let ts = v
+                            .get("ts_utc")
+                            .and_then(|x| x.as_str())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.timestamp());
+                        let a = v.get("vault_amount_a").and_then(|x| x.as_u64());
+                        let b = v.get("vault_amount_b").and_then(|x| x.as_u64());
+                        let ma = v.get("token_mint_a").and_then(|x| x.as_str()).map(|s| s.to_string());
+                        let mb = v.get("token_mint_b").and_then(|x| x.as_str()).map(|s| s.to_string());
+                        if let (Some(ts), Some(a), Some(b)) = (ts, a, b) {
+                            snaps.push((ts, a, b, ma, mb));
+                        }
+                    }
+                    snaps.sort_by_key(|(t, _, _, _, _)| *t);
+                    if snaps.len() >= 1 {
+                        let pow10 = |d: u32| -> Decimal {
+                            let mut v = Decimal::ONE;
+                            for _ in 0..d {
+                                v *= Decimal::from(10u32);
+                            }
+                            v
+                        };
+                        let mut j = 0usize;
+                        let mut last = snaps[0].clone();
+                        for p in step_data.iter_mut() {
+                            let t = p.start_timestamp as i64;
+                            while j + 1 < snaps.len() && snaps[j + 1].0 <= t {
+                                j += 1;
+                                last = snaps[j].clone();
+                            }
+                            let token_usd = |raw: u64, mint: Option<&str>| -> Option<Decimal> {
+                                let mint = mint?;
+                                if mint.eq_ignore_ascii_case(&token_a.mint_address) {
+                                    let amt = Decimal::from(raw) / pow10(token_a_decimals as u32);
+                                    Some(amt * p.price_usd.value)
+                                } else if mint.eq_ignore_ascii_case(&token_b.mint_address) {
+                                    let amt = Decimal::from(raw) / pow10(token_b_decimals as u32);
+                                    Some(amt * p.quote_usd)
+                                } else {
+                                    None
+                                }
+                            };
+                            let tvl_usd = token_usd(last.1, last.3.as_deref()).unwrap_or(Decimal::ZERO)
+                                + token_usd(last.2, last.4.as_deref()).unwrap_or(Decimal::ZERO);
+                            if tvl_usd > Decimal::ZERO {
+                                let mut share = capital_dec / tvl_usd;
+                                if share < Decimal::ZERO {
+                                    share = Decimal::ZERO;
+                                }
+                                if share > Decimal::ONE {
+                                    share = Decimal::ONE;
+                                }
+                                p.lp_share = share;
+                            }
+                        }
+                    } else {
+                        println!(
+                            "⚠️ No usable vault balances found in snapshots at {} (lp_share unchanged).",
+                            snap_path.display()
+                        );
+                    }
+                } else {
+                    println!(
+                        "⚠️ Snapshot file not found at {} (lp_share unchanged).",
+                        snap_path.display()
+                    );
+                }
+            }
+
+            // Optional: fetch and filter swaps for this pool (swap-fees mode).
+            let swaps: Option<Vec<clmm_lp_data::swaps::SwapEvent>> = if let Some(arg) = dune_swaps.as_ref() {
+                match crate::commands::backtest_optimize::fetch_swaps_for_optimize(arg).await {
+                    Ok(Some(s)) => {
+                        let (_pool_l, _eff, _da, _db, vault_a, vault_b) =
+                            if let Some(pool) = whirlpool_address.as_ref() {
+                                crate::commands::backtest_optimize::fetch_pool_state(
+                                    pool,
+                                    token_a_decimals,
+                                    token_b_decimals,
+                                    use_cross_pair,
+                                )
+                                .await?
+                            } else {
+                                (None, None, token_a_decimals, token_b_decimals, None, None)
+                            };
+                        Some(crate::commands::backtest_optimize::filter_swaps_for_pool(
+                            s,
+                            vault_a.as_deref(),
+                            vault_b.as_deref(),
+                            &token_a.mint_address,
+                            &token_b.mint_address,
+                        ))
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("402") || msg.contains("Payment Required") || msg.contains("credits") {
+                            println!("⚠️ Dune API credit limit reached. Falling back to candle-based fees.");
+                        } else {
+                            println!("⚠️ Could not fetch Dune swaps ({}). Falling back to candle-based fees.", e);
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Optional: build snapshot fee index by step (snapshot-fees mode).
+            use std::collections::BTreeMap;
+            let use_prebuilt_snap_fees = snapshots_only
+                && (matches!(fee_source, FeeSourceArg::Snapshots)
+                    || matches!(fee_source, FeeSourceArg::Auto));
+            let mut snapshot_fee_index: Option<BTreeMap<usize, Decimal>> = if use_prebuilt_snap_fees {
+                prebuilt_snapshot_fee_index.take()
+            } else {
+                None
+            };
+
+            if snapshot_fee_index.is_none() {
+                snapshot_fee_index = {
+                let want_snapshots = matches!(fee_source, FeeSourceArg::Snapshots)
+                    || (matches!(fee_source, FeeSourceArg::Auto) && snapshot_protocol.is_some() && snapshot_pool_address.is_some());
+                if !want_snapshots {
+                    None
+                } else {
+                    let proto = snapshot_protocol.ok_or_else(|| {
+                        anyhow::anyhow!("--snapshot-protocol is required when using --fee-source snapshots")
+                    })?;
+                    let pool_addr = snapshot_pool_address.clone().ok_or_else(|| {
+                        anyhow::anyhow!("--snapshot-pool-address is required when using --fee-source snapshots")
+                    })?;
+
+                    let base_dir = std::path::Path::new("data").join("pool-snapshots").join(match proto {
+                        SnapshotProtocolArg::Orca => "orca",
+                        SnapshotProtocolArg::Raydium => "raydium",
+                        SnapshotProtocolArg::Meteora => "meteora",
+                    });
+                    let snap_path = base_dir.join(&pool_addr).join("snapshots.jsonl");
+                    if !snap_path.exists() {
+                        println!(
+                            "⚠️ Snapshot file not found at {}. Falling back to candle/swap fees.",
+                            snap_path.display()
+                        );
+                        None
+                    } else {
+                        let txt = std::fs::read_to_string(&snap_path)?;
+
+                        #[derive(Clone)]
+                        struct SnapshotFeePoint {
+                            ts: i64,
+                            protocol_fee_a_raw: u128,
+                            protocol_fee_b_raw: u128,
+                            fee_growth_a_raw: Option<u128>,
+                            fee_growth_b_raw: Option<u128>,
+                            liquidity_active_raw: Option<u128>,
+                            mint_a: Option<String>,
+                            mint_b: Option<String>,
+                            dec_a: Option<u8>,
+                            dec_b: Option<u8>,
+                        }
+
+                        let val_to_u128 = |x: Option<&serde_json::Value>| -> Option<u128> {
+                            match x {
+                                Some(v) if v.is_u64() => v.as_u64().map(|n| n as u128),
+                                Some(v) if v.is_string() => {
+                                    v.as_str().and_then(|s| s.trim().parse::<u128>().ok())
+                                }
+                                _ => None,
+                            }
+                        };
+
+                        let mut pts: Vec<SnapshotFeePoint> = Vec::new();
+                        for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+                            let v: serde_json::Value = match serde_json::from_str(line) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                            let ts = v
+                                .get("ts_utc")
+                                .and_then(|x| x.as_str())
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|dt| dt.timestamp());
+                            let Some(ts) = ts else {
+                                continue;
+                            };
+
+                            let (protocol_fee_a_raw, protocol_fee_b_raw, fee_growth_a_raw, fee_growth_b_raw, liquidity_active_raw) = match proto {
+                                SnapshotProtocolArg::Orca => {
+                                    (
+                                        val_to_u128(v.get("protocol_fee_owed_a")).unwrap_or(0),
+                                        val_to_u128(v.get("protocol_fee_owed_b")).unwrap_or(0),
+                                        val_to_u128(v.get("fee_growth_global_a")),
+                                        val_to_u128(v.get("fee_growth_global_b")),
+                                        val_to_u128(v.get("liquidity_active")),
+                                    )
+                                }
+                                SnapshotProtocolArg::Raydium => {
+                                    (
+                                        val_to_u128(v.get("protocol_fees_token_a")).unwrap_or(0),
+                                        val_to_u128(v.get("protocol_fees_token_b")).unwrap_or(0),
+                                        val_to_u128(v.get("fee_growth_global_a_x64")),
+                                        val_to_u128(v.get("fee_growth_global_b_x64")),
+                                        val_to_u128(v.get("liquidity_active")),
+                                    )
+                                }
+                                SnapshotProtocolArg::Meteora => {
+                                    (
+                                        val_to_u128(v.get("protocol_fee_amount_a")).unwrap_or(0),
+                                        val_to_u128(v.get("protocol_fee_amount_b")).unwrap_or(0),
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                }
+                            };
+
+                            pts.push(SnapshotFeePoint {
+                                ts,
+                                protocol_fee_a_raw,
+                                protocol_fee_b_raw,
+                                fee_growth_a_raw,
+                                fee_growth_b_raw,
+                                liquidity_active_raw,
+                                mint_a: v
+                                    .get("token_mint_a")
+                                    .and_then(|x| x.as_str())
+                                    .map(|s| s.to_string()),
+                                mint_b: v
+                                    .get("token_mint_b")
+                                    .and_then(|x| x.as_str())
+                                    .map(|s| s.to_string()),
+                                dec_a: v
+                                    .get("mint_decimals_a")
+                                    .and_then(|x| x.as_u64())
+                                    .and_then(|n| u8::try_from(n).ok()),
+                                dec_b: v
+                                    .get("mint_decimals_b")
+                                    .and_then(|x| x.as_u64())
+                                    .and_then(|n| u8::try_from(n).ok()),
+                            });
+                        }
+
+                        if pts.len() < 2 {
+                            println!(
+                                "⚠️ Snapshot fee fields are missing or insufficient in {} for {:?}. Falling back to candle/swap fees.",
+                                snap_path.display(),
+                                proto
+                            );
+                            None
+                        } else {
+                            let mut decimals_by_mint: HashMap<String, u32> = HashMap::new();
+                            decimals_by_mint.insert(token_a.mint_address.clone(), token_a_decimals as u32);
+                            decimals_by_mint.insert(token_b.mint_address.clone(), token_b_decimals as u32);
+                            for p in &pts {
+                                if let (Some(m), Some(d)) = (&p.mint_a, p.dec_a) {
+                                    decimals_by_mint.entry(m.clone()).or_insert(d as u32);
+                                }
+                                if let (Some(m), Some(d)) = (&p.mint_b, p.dec_b) {
+                                    decimals_by_mint.entry(m.clone()).or_insert(d as u32);
+                                }
+                            }
+
+                            // Backfill missing decimals from RPC once (for protocols where snapshot doesn't include them).
+                            let mut unresolved: Vec<String> = Vec::new();
+                            for p in &pts {
+                                if let Some(m) = &p.mint_a {
+                                    if !decimals_by_mint.contains_key(m) {
+                                        unresolved.push(m.clone());
+                                    }
+                                }
+                                if let Some(m) = &p.mint_b {
+                                    if !decimals_by_mint.contains_key(m) {
+                                        unresolved.push(m.clone());
+                                    }
+                                }
+                            }
+                            unresolved.sort();
+                            unresolved.dedup();
+                            if !unresolved.is_empty() {
+                                use crate::engine::token_meta::fetch_mint_decimals;
+                                use clmm_lp_protocols::rpc::RpcProvider;
+                                let rpc_dec = RpcProvider::mainnet();
+                                for m in unresolved {
+                                    if let Ok(d) = fetch_mint_decimals(&rpc_dec, &m).await {
+                                        decimals_by_mint.insert(m, d as u32);
+                                    }
+                                }
+                            }
+
+                            let pow10 = |d: u32| -> Decimal {
+                                let mut v = Decimal::ONE;
+                                for _ in 0..d {
+                                    v *= Decimal::from(10u32);
+                                }
+                                v
+                            };
+                            let usd_for_mint = |mint: &str, p: &crate::backtest_engine::StepDataPoint| -> Option<Decimal> {
+                                if mint.eq_ignore_ascii_case(&token_a.mint_address) {
+                                    Some(p.price_usd.value)
+                                } else if mint.eq_ignore_ascii_case(&token_b.mint_address) {
+                                    Some(p.quote_usd)
+                                } else {
+                                    None
+                                }
+                            };
+
+                            pts.sort_by_key(|p| p.ts);
+                            let start_ts = step_data.first().map(|p| p.start_timestamp as i64).unwrap_or(0);
+                            let step_seconds = *resolution_seconds as i64;
+                            let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                            let q64: U256 = U256::from(1u128) << 64;
+                            let delta_from_growth = |g0: Option<u128>, g1: Option<u128>, liq: Option<u128>| -> Option<u128> {
+                                let (Some(g0), Some(g1), Some(liq)) = (g0, g1, liq) else {
+                                    return None;
+                                };
+                                if g1 <= g0 || liq == 0 {
+                                    return Some(0);
+                                }
+                                let dg = g1 - g0;
+                                let prod = U256::from(dg).saturating_mul(U256::from(liq));
+                                let raw = prod / q64;
+                                Some(raw.low_u128())
+                            };
+
+                            // Convert deltas of protocol fee accumulators into per-step USD fee proxy.
+                            for w in pts.windows(2) {
+                                let p0 = &w[0];
+                                let p1 = &w[1];
+                                if p1.ts <= p0.ts {
+                                    continue;
+                                }
+
+                                // Prefer fee-growth based deltas (Orca/Raydium) for smoother/realistic flow.
+                                // Fallback to protocol-fee counters (all protocols, incl. Meteora).
+                                let dv_a = delta_from_growth(
+                                    p0.fee_growth_a_raw,
+                                    p1.fee_growth_a_raw,
+                                    p1.liquidity_active_raw.or(p0.liquidity_active_raw),
+                                )
+                                .unwrap_or_else(|| p1.protocol_fee_a_raw.saturating_sub(p0.protocol_fee_a_raw));
+                                let dv_b = delta_from_growth(
+                                    p0.fee_growth_b_raw,
+                                    p1.fee_growth_b_raw,
+                                    p1.liquidity_active_raw.or(p0.liquidity_active_raw),
+                                )
+                                .unwrap_or_else(|| p1.protocol_fee_b_raw.saturating_sub(p0.protocol_fee_b_raw));
+                                if dv_a == 0 && dv_b == 0 {
+                                    continue;
+                                }
+
+                                let mid = (p0.ts + p1.ts) / 2;
+                                let delta = mid - start_ts;
+                                if delta < 0 {
+                                    continue;
+                                }
+                                let idx = (delta / step_seconds.max(1)) as usize;
+                                let Some(step) = step_data.get(idx) else {
+                                    continue;
+                                };
+
+                                let mut usd = Decimal::ZERO;
+                                if let Some(mint) = p1.mint_a.as_deref() {
+                                    if let (Some(dec), Some(px)) =
+                                        (decimals_by_mint.get(mint), usd_for_mint(mint, step))
+                                    {
+                                        let amt = Decimal::from_u128(dv_a).unwrap_or(Decimal::ZERO) / pow10(*dec);
+                                        usd += amt * px;
+                                    }
+                                }
+                                if let Some(mint) = p1.mint_b.as_deref() {
+                                    if let (Some(dec), Some(px)) =
+                                        (decimals_by_mint.get(mint), usd_for_mint(mint, step))
+                                    {
+                                        let amt = Decimal::from_u128(dv_b).unwrap_or(Decimal::ZERO) / pow10(*dec);
+                                        usd += amt * px;
+                                    }
+                                }
+
+                                if usd > Decimal::ZERO {
+                                    *map.entry(idx).or_insert(Decimal::ZERO) += usd;
+                                }
+                            }
+
+                            if map.is_empty() {
+                                println!(
+                                    "⚠️ Snapshot fee deltas found in {}, but could not convert to USD for this pair. Falling back to candle/swap fees.",
+                                    snap_path.display()
+                                );
+                                None
+                            } else {
+                                Some(map)
+                            }
+                        }
+                    }
+                }
+            };
+            }
+
+            // Index swap fees by step.
+            let swap_index: Option<BTreeMap<usize, Decimal>> = swaps.as_ref().map(|swaps| {
+                let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                if step_data.is_empty() {
+                    return map;
+                }
+                let step_seconds = *resolution_seconds as i64;
+                let start_ts = step_data[0].start_timestamp as i64;
+                for s in swaps {
+                    if let Some(dt) = s.block_time_utc() {
+                        let delta = dt.timestamp() - start_ts;
+                        if delta >= 0 {
+                            let idx = (delta / step_seconds.max(1)) as usize;
+                            let f = if s.fee_usd != Decimal::ZERO {
+                                s.fee_usd
+                            } else {
+                                s.amount_usd * s.fee_tier
+                            };
+                            *map.entry(idx).or_insert(Decimal::ZERO) += f;
+                        }
+                    }
+                }
+                map
+            });
+
+            // Prepare Price Path (A/B close prices)
+            let prices: Vec<Price> = if candles.is_empty() {
+                step_data.iter().map(|s| s.price_ab).collect()
+            } else {
+                candles.iter().map(|c| c.close).collect()
+            };
             let entry_price = prices.first().cloned().unwrap_or(Price::new(Decimal::ONE));
             let final_price = prices.last().cloned().unwrap_or(entry_price);
 
@@ -473,23 +1276,61 @@ async fn main() -> Result<()> {
                 Price::new(Decimal::from_f64(*lower).unwrap()),
                 Price::new(Decimal::from_f64(*upper).unwrap()),
             );
-            let capital_dec = Decimal::from_f64(*capital).unwrap();
             let tx_cost_dec = Decimal::from_f64(*tx_cost).unwrap();
 
             let mut tracker =
                 PositionTracker::new(capital_dec, entry_price, initial_range, tx_cost_dec);
 
-            // Setup synthetic fallback model (when no Dune data is available)
-            let mut volume_model = ConstantVolume::from_amount(
-                Amount::new(U256::from(1_000_000_000_000u64), 6), // 1M USDC vol per step
-            );
-            let fee_rate = Decimal::from_f64(0.003).unwrap();
-            let lp_share_override: Option<Decimal> = lp_share
-                .and_then(|s| Decimal::from_f64(s))
-                .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
+            // Fee rate: prefer on-chain effective fee rate when pool is provided.
+            // Fall back to 0.30% when we don't know the pool.
+            let fee_rate = if let Some(pool) = whirlpool_address
+                .as_ref()
+                .or(snapshot_pool_address.as_ref())
+            {
+                let (_pool_l, eff, _da, _db, _va, _vb) =
+                    crate::commands::backtest_optimize::fetch_pool_state(
+                        pool,
+                        token_a_decimals,
+                        token_b_decimals,
+                        use_cross_pair,
+                    )
+                    .await?;
+                eff.unwrap_or_else(|| Decimal::from_f64(0.003).unwrap())
+            } else {
+                Decimal::from_f64(0.003).unwrap()
+            };
+
+            // Guardrail: snapshot-fee model is experimental. If implied pool fees are
+            // unrealistically high vs candle-based pool fee baseline, disable it and fallback.
+            if !snapshots_only {
+                if let Some(idx_map) = snapshot_fee_index.as_ref() {
+                    let snapshot_pool_fees: Decimal = idx_map.values().cloned().sum();
+                    let candle_pool_fees: Decimal = step_data
+                        .iter()
+                        .map(|p| p.step_volume_usd * fee_rate)
+                        .sum();
+                    if candle_pool_fees > Decimal::ZERO {
+                        let ratio = snapshot_pool_fees / candle_pool_fees;
+                        let max_ratio = Decimal::from(10u32);
+                        if ratio > max_ratio {
+                            println!(
+                                "⚠️ Snapshot fee sanity check failed: snapshot pool fees {:.2} vs candle baseline {:.2} (ratio {:.2}x > {:.2}x). Falling back from snapshot fees.",
+                                snapshot_pool_fees,
+                                candle_pool_fees,
+                                ratio,
+                                max_ratio
+                            );
+                            snapshot_fee_index = None;
+                        }
+                    }
+                }
+            }
 
             println!(
-                "🚀 Running backtest with {:?} strategy over {} steps...",
+                "🚀 Running backtest ({}, res={}s, swaps={}) with {:?} strategy over {} steps...",
+                display_label,
+                *resolution_seconds,
+                dune_swaps.as_deref().unwrap_or("none"),
                 strategy,
                 prices.len()
             );
@@ -497,59 +1338,98 @@ async fn main() -> Result<()> {
             // Run simulation with strategy
             let range_width_pct =
                 Decimal::from_f64((*upper - *lower) / ((*upper + *lower) / 2.0)).unwrap();
+            let mut fee_steps_snapshots: usize = 0;
+            let mut fee_steps_swaps: usize = 0;
+            let mut fee_steps_candles: usize = 0;
+            let mut fee_steps_zero: usize = 0;
 
             for (idx, price) in prices.iter().enumerate() {
-                // Per-step USD volume and LP share.
-                // If Dune data is available, we use daily TVL/volume for that date.
-                // Otherwise we fall back to a synthetic 1% share & constant volume.
-                let (step_volume_usd, lp_share_effective) = if let (Some(ref tvl_map), Some(ref vol_map)) =
-                    (dune_daily_tvl.as_ref(), dune_daily_volume.as_ref())
-                {
-                    // Group by date (YYYY-MM-DD)
-                    let candle = &candles[idx];
-                    let datetime =
-                        chrono::DateTime::from_timestamp(candle.start_timestamp as i64, 0)
-                            .unwrap_or_default();
-                    let date_key = datetime.format("%Y-%m-%d").to_string();
-
-                    let daily_tvl = tvl_map.get(&date_key).cloned().unwrap_or(Decimal::ZERO);
-                    let daily_vol = vol_map.get(&date_key).cloned().unwrap_or(Decimal::ZERO);
-
-                    // Avoid division by zero; if TVL is missing, drop back to synthetic model.
-                    if daily_tvl.is_zero() || daily_vol.is_zero() {
-                        let vol = volume_model.next_volume().to_decimal();
-                        let share = lp_share_override
-                            .unwrap_or_else(|| Decimal::from_f64(0.01).unwrap()); // default 1%
-                        (vol, share)
-                    } else {
-                        // Effective share: override from CLI if provided, otherwise capital / TVL.
-                        let share = if let Some(s) = lp_share_override {
-                            s
-                        } else {
-                            let capital_dec = Decimal::from_f64(*capital).unwrap();
-                            (capital_dec / daily_tvl)
-                                .min(Decimal::ONE)
-                                .max(Decimal::ZERO)
-                        };
-
-                        // Per-step volume: distribute daily volume evenly over the day for now.
-                        let steps_per_day = Decimal::from_f64(24.0).unwrap();
-                        let step_vol = daily_vol / steps_per_day;
-                        (step_vol, share)
-                    }
-                } else {
-                    let vol = volume_model.next_volume().to_decimal();
-                    let share = lp_share_override
-                        .unwrap_or_else(|| Decimal::from_f64(0.01).unwrap()); // default 1%
-                    (vol, share)
-                };
+                let p = step_data.get(idx).copied().unwrap_or(crate::backtest_engine::StepDataPoint {
+                    price_usd: *price,
+                    price_ab: *price,
+                    step_volume_usd: Decimal::ZERO,
+                    quote_usd: Decimal::ONE,
+                    lp_share: lp_share_override.unwrap_or_else(|| Decimal::from_f64(0.01).unwrap()),
+                    start_timestamp: step_data
+                        .get(idx)
+                        .map(|p| p.start_timestamp)
+                        .or_else(|| candles.get(idx).map(|c| c.start_timestamp))
+                        .unwrap_or(0),
+                });
 
                 // Calculate fees for this step
                 let in_range = price.value >= tracker.current_range.lower_price.value
                     && price.value <= tracker.current_range.upper_price.value;
 
                 let step_fees = if in_range {
-                    step_volume_usd * lp_share_effective * fee_rate
+                    match fee_source {
+                        FeeSourceArg::Candles => {
+                            fee_steps_candles += 1;
+                            p.step_volume_usd * fee_rate * p.lp_share
+                        }
+                        FeeSourceArg::Swaps => {
+                            if let Some(v) = swap_index
+                                .as_ref()
+                                .and_then(|idx_map| idx_map.get(&idx).cloned())
+                            {
+                                fee_steps_swaps += 1;
+                                v * p.lp_share
+                            } else {
+                                fee_steps_zero += 1;
+                                Decimal::ZERO
+                            }
+                        }
+                        FeeSourceArg::Snapshots => {
+                            if let Some(v) = snapshot_fee_index
+                                .as_ref()
+                                .and_then(|idx_map| idx_map.get(&idx).cloned())
+                            {
+                                fee_steps_snapshots += 1;
+                                v * p.lp_share
+                            } else if let Some(ref idx_map) = swap_index {
+                                if let Some(v) = idx_map.get(&idx).cloned() {
+                                    fee_steps_swaps += 1;
+                                    v * p.lp_share
+                                } else {
+                                    fee_steps_candles += 1;
+                                    p.step_volume_usd * fee_rate * p.lp_share
+                                }
+                            } else {
+                                fee_steps_candles += 1;
+                                p.step_volume_usd * fee_rate * p.lp_share
+                            }
+                        }
+                        FeeSourceArg::Auto => {
+                            if let Some(ref idx_map) = swap_index {
+                                if let Some(v) = idx_map.get(&idx).cloned() {
+                                    fee_steps_swaps += 1;
+                                    v * p.lp_share
+                                } else if let Some(ref sidx) = snapshot_fee_index {
+                                    if let Some(vs) = sidx.get(&idx).cloned() {
+                                        fee_steps_snapshots += 1;
+                                        vs * p.lp_share
+                                    } else {
+                                        fee_steps_candles += 1;
+                                        p.step_volume_usd * fee_rate * p.lp_share
+                                    }
+                                } else {
+                                    fee_steps_candles += 1;
+                                    p.step_volume_usd * fee_rate * p.lp_share
+                                }
+                            } else if let Some(ref idx_map) = snapshot_fee_index {
+                                if let Some(v) = idx_map.get(&idx).cloned() {
+                                    fee_steps_snapshots += 1;
+                                    v * p.lp_share
+                                } else {
+                                    fee_steps_candles += 1;
+                                    p.step_volume_usd * fee_rate * p.lp_share
+                                }
+                            } else {
+                                fee_steps_candles += 1;
+                                p.step_volume_usd * fee_rate * p.lp_share
+                            }
+                        }
+                    }
                 } else {
                     Decimal::ZERO
                 };
@@ -576,6 +1456,11 @@ async fn main() -> Result<()> {
 
             // Get summary
             let summary = tracker.summary();
+            let total_steps = prices.len();
+            println!(
+                "🧾 Fee source breakdown (in-range steps): snapshots={} swaps={} candles={} zero={} | total steps={}",
+                fee_steps_snapshots, fee_steps_swaps, fee_steps_candles, fee_steps_zero, total_steps
+            );
 
             // Determine pair label for reporting (supports optional quote token)
             let pair_label = if let Some(sb) = symbol_b {
@@ -587,7 +1472,7 @@ async fn main() -> Result<()> {
             // Print rich report
             print_backtest_report(
                 &pair_label,
-                *days,
+                effective_days,
                 *capital,
                 entry_price.value,
                 final_price.value,
@@ -603,6 +1488,7 @@ async fn main() -> Result<()> {
             symbol_b,
             mint_b,
             days,
+            hours,
             capital,
             tx_cost,
             whirlpool_address,
@@ -617,6 +1503,10 @@ async fn main() -> Result<()> {
             alpha,
             static_only,
             windows,
+            dune_swaps,
+            resolution_seconds,
+            snapshot_protocol,
+            snapshot_pool_address,
         } => {
             let api_key = env::var("BIRDEYE_API_KEY")
                 .expect("BIRDEYE_API_KEY must be set in .env or environment");
@@ -648,21 +1538,37 @@ async fn main() -> Result<()> {
                 )
             };
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let fetch_days = *days * ((*windows).max(1) as u64);
-            let start_time = now - (fetch_days * 24 * 3600);
+            let windows_u64 = (*windows).max(1) as u64;
+            let fetch_span_secs = if let Some(h) = hours {
+                h.saturating_mul(3600).saturating_mul(windows_u64)
+            } else {
+                days.saturating_mul(24 * 3600).saturating_mul(windows_u64)
+            };
+            let start_time = now.saturating_sub(fetch_span_secs);
             let pair_label = if use_cross_pair {
                 format!("{}/{}", symbol_a, symbol_b.as_deref().unwrap_or("?"))
             } else {
                 format!("{}/USDC", symbol_a)
             };
-            println!("🔍 Fetching historical data for {} ({} days, {} window(s))...", pair_label, fetch_days, windows);
+            if let Some(h) = hours {
+                println!(
+                    "🔍 Fetching historical data for {} ({} hour(s), {} window(s))...",
+                    pair_label, h, windows
+                );
+            } else {
+                println!(
+                    "🔍 Fetching historical data for {} ({} day(s), {} window(s))...",
+                    pair_label, days, windows
+                );
+            }
+            let res = *resolution_seconds;
             let candles = if use_cross_pair {
                 provider
-                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .get_cross_pair_price_history(&token_a, &token_b, start_time, now, res)
                     .await?
             } else {
                 provider
-                    .get_price_history(&token_a, &token_b, start_time, now, 3600)
+                    .get_price_history(&token_a, &token_b, start_time, now, res)
                     .await?
             };
             if candles.is_empty() {
@@ -679,7 +1585,7 @@ async fn main() -> Result<()> {
                     "USD Coin",
                 );
                 let quote_candles = provider
-                    .get_price_history(&token_b, &usdc, start_time, now, 3600)
+                    .get_price_history(&token_b, &usdc, start_time, now, res)
                     .await?;
                 if quote_candles.is_empty() {
                     None
@@ -694,78 +1600,80 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+            #[allow(clippy::type_complexity)]
             let (dune_daily_tvl, dune_daily_volume): (Option<HashMap<String, Decimal>>, Option<HashMap<String, Decimal>>) =
                 if let Some(pool) = whirlpool_address.as_ref() {
-                    use clmm_lp_data::providers::DuneClient;
-                    println!("📡 Fetching Dune TVL & volume for pool {}...", pool);
-                    let dune = DuneClient::from_env()?;
-                    let (tvl_map, vol_map) = dune.fetch_tvl_volume_maps(pool).await?;
-                    if tvl_map.is_empty() || vol_map.is_empty() {
-                        (None, None)
-                    } else {
-                        (Some(tvl_map), Some(vol_map))
-                    }
+                    crate::commands::backtest_optimize::fetch_dune_tvl_volume(pool).await?
                 } else {
                     (None, None)
                 };
 
-            // Fetch on-chain active liquidity and effective fee rate (Orca Whirlpool).
-            // Also fetch token decimals on-chain so base-unit conversions are correct.
-            let (pool_active_liquidity, effective_fee_rate, token_a_decimals, token_b_decimals): (Option<u128>, Option<Decimal>, u8, u8) =
+            let (pool_active_liquidity, effective_fee_rate, token_a_decimals, token_b_decimals, pool_vault_a, pool_vault_b): (Option<u128>, Option<Decimal>, u8, u8, Option<String>, Option<String>) =
                 if let Some(pool) = whirlpool_address.as_ref() {
-                    use clmm_lp_domain::math::fee_math::calculate_effective_fee_rate;
-                    use clmm_lp_protocols::orca::pool_reader::WhirlpoolReader;
-                    use clmm_lp_protocols::rpc::RpcProvider;
-                    use crate::engine::token_meta::fetch_mint_decimals;
-                    use std::sync::Arc;
-                    println!("⛓️  Fetching on-chain Whirlpool liquidity/fees for pool {}...", pool);
-                    let rpc = Arc::new(RpcProvider::mainnet());
-                    let reader = WhirlpoolReader::new(rpc.clone());
-                    let state = reader.get_pool_state(pool).await?;
-                    let base_fee = state.fee_rate();
-                    let protocol_fee_pct =
-                        Decimal::from(state.protocol_fee_rate_bps) / Decimal::from(10_000);
-                    let eff = calculate_effective_fee_rate(base_fee, protocol_fee_pct);
-                    let dec_a = fetch_mint_decimals(rpc.as_ref(), &state.token_mint_a.to_string()).await?;
-                    let dec_b = fetch_mint_decimals(rpc.as_ref(), &state.token_mint_b.to_string()).await?;
-                    (Some(state.liquidity), Some(eff), dec_a, dec_b)
+                    crate::commands::backtest_optimize::fetch_pool_state(
+                        pool,
+                        token_a_decimals_guess,
+                        token_b_decimals_guess,
+                        use_cross_pair,
+                    )
+                    .await?
                 } else {
-                    // fallback: assume 9/6 for A/USDC-like pairs
-                    (None, None, token_a_decimals_guess, if use_cross_pair { token_b_decimals_guess } else { 6u8 })
+                    (
+                        None,
+                        None,
+                        token_a_decimals_guess,
+                        if use_cross_pair { token_b_decimals_guess } else { 6u8 },
+                        None,
+                        None,
+                    )
                 };
 
             let fee_rate = effective_fee_rate.unwrap_or_else(|| Decimal::from_f64(0.003).unwrap());
             let capital_dec = Decimal::from_f64(*capital).unwrap();
             let lp_share_override: Option<Decimal> = lp_share
-                .and_then(|s| Decimal::from_f64(s))
+                .and_then(Decimal::from_f64)
                 .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
-            let steps_per_day = Decimal::from_f64(24.0).unwrap();
+            let steps_per_day = Decimal::from_f64(86_400f64 / res.max(1) as f64).unwrap();
             let _ = use_cross_pair;
 
-            use backtest_engine::{build_step_data, fee_realism, run_grid, StratConfig};
+            let swaps: Option<Vec<clmm_lp_data::swaps::SwapEvent>> =
+                if let Some(arg) = dune_swaps.as_ref() {
+                    match crate::commands::backtest_optimize::fetch_swaps_for_optimize(arg).await {
+                        Ok(Some(s)) => Some(s),
+                        Ok(None) => None,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if msg.contains("402") || msg.contains("Payment Required") || msg.contains("credits") {
+                                println!("⚠️ Dune API credit limit reached. Using volume-based fees instead of swap-level fees.");
+                            } else {
+                                println!("⚠️ Could not fetch Dune swaps ({}). Using volume-based fees.", e);
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+            let swaps = swaps.map(|s| {
+                crate::commands::backtest_optimize::filter_swaps_for_pool(
+                    s,
+                    pool_vault_a.as_deref(),
+                    pool_vault_b.as_deref(),
+                    &token_a.mint_address,
+                    &token_b.mint_address,
+                )
+            });
+            let swaps_ref: Option<&[clmm_lp_data::swaps::SwapEvent]> = swaps.as_deref();
+
+            use backtest_engine::{build_step_data, fee_realism, run_grid, GridRunParams, StratConfig};
 
             let steps_per_window = candles.len() / (*windows).max(1);
             let window_ranges: Vec<std::ops::Range<usize>> = (0..*windows)
                 .map(|w| (w * steps_per_window)..((w + 1) * steps_per_window))
                 .collect();
 
-            let strategies: Vec<StratConfig> = if *static_only {
-                vec![StratConfig::Static]
-            } else {
-                vec![
-                    StratConfig::Static,
-                    StratConfig::Threshold(0.02),
-                    StratConfig::Threshold(0.03),
-                    StratConfig::Threshold(0.05),
-                    StratConfig::Threshold(0.07),
-                    StratConfig::Threshold(0.10),
-                    StratConfig::Threshold(0.15),
-                    StratConfig::Periodic(12),
-                    StratConfig::Periodic(24),
-                    StratConfig::Periodic(48),
-                    StratConfig::Periodic(72),
-                ]
-            };
+            let strategies: Vec<StratConfig> =
+                crate::commands::backtest_optimize::default_strategies(*static_only);
 
             let min_frac = (*min_range_pct / 100.0).clamp(0.001, 1.0);
             let max_frac = (*max_range_pct / 100.0).clamp(min_frac + 0.001, 2.0);
@@ -777,6 +1685,16 @@ async fn main() -> Result<()> {
                     .collect()
             };
             let tx_cost_dec = Decimal::from_f64(*tx_cost).unwrap();
+            let grid_params = GridRunParams {
+                capital_dec,
+                tx_cost_dec,
+                fee_rate,
+                pool_active_liquidity,
+                token_a_decimals: token_a_decimals as u32,
+                token_b_decimals: token_b_decimals as u32,
+                step_seconds: res as i64,
+                use_liquidity_share: lp_share_override.is_none(),
+            };
 
             let score_fn = |s: &TrackerSummary| -> Decimal {
                 match objective {
@@ -797,6 +1715,7 @@ async fn main() -> Result<()> {
                 }
             };
 
+            #[allow(clippy::type_complexity)]
             let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<(f64, f64, String, TrackerSummary, Decimal)>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
                 let (step_data, entry_price, center) = build_step_data(
                     &candles,
@@ -807,6 +1726,87 @@ async fn main() -> Result<()> {
                     lp_share_override,
                     steps_per_day,
                 );
+                let mut step_data = step_data;
+                if lp_share_override.is_none()
+                    && snapshot_protocol.is_some()
+                    && snapshot_pool_address.is_some()
+                {
+                    let proto = snapshot_protocol.unwrap();
+                    let pool_addr = snapshot_pool_address.clone().unwrap();
+                    let base_dir = std::path::Path::new("data")
+                        .join("pool-snapshots")
+                        .join(match proto {
+                            SnapshotProtocolArg::Orca => "orca",
+                            SnapshotProtocolArg::Raydium => "raydium",
+                            SnapshotProtocolArg::Meteora => "meteora",
+                        });
+                    let snap_path = base_dir.join(&pool_addr).join("snapshots.jsonl");
+                    if snap_path.exists() {
+                        let txt = std::fs::read_to_string(&snap_path)?;
+                        let mut snaps: Vec<(i64, u64, u64, Option<String>, Option<String>)> = Vec::new();
+                        for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+                            let v: serde_json::Value = match serde_json::from_str(line) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                            let ts = v
+                                .get("ts_utc")
+                                .and_then(|x| x.as_str())
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|dt| dt.timestamp());
+                            let a = v.get("vault_amount_a").and_then(|x| x.as_u64());
+                            let b = v.get("vault_amount_b").and_then(|x| x.as_u64());
+                            let ma = v.get("token_mint_a").and_then(|x| x.as_str()).map(|s| s.to_string());
+                            let mb = v.get("token_mint_b").and_then(|x| x.as_str()).map(|s| s.to_string());
+                            if let (Some(ts), Some(a), Some(b)) = (ts, a, b) {
+                                snaps.push((ts, a, b, ma, mb));
+                            }
+                        }
+                        snaps.sort_by_key(|(t, _, _, _, _)| *t);
+                        if !snaps.is_empty() {
+                            let pow10 = |d: u32| -> Decimal {
+                                let mut v = Decimal::ONE;
+                                for _ in 0..d {
+                                    v *= Decimal::from(10u32);
+                                }
+                                v
+                            };
+                            let mut j = 0usize;
+                            let mut last = snaps[0].clone();
+                            for p in step_data.iter_mut() {
+                                let t = p.start_timestamp as i64;
+                                while j + 1 < snaps.len() && snaps[j + 1].0 <= t {
+                                    j += 1;
+                                    last = snaps[j].clone();
+                                }
+                                let token_usd = |raw: u64, mint: Option<&str>| -> Option<Decimal> {
+                                    let mint = mint?;
+                                    if mint.eq_ignore_ascii_case(&token_a.mint_address) {
+                                        let amt = Decimal::from(raw) / pow10(token_a_decimals as u32);
+                                        Some(amt * p.price_usd.value)
+                                    } else if mint.eq_ignore_ascii_case(&token_b.mint_address) {
+                                        let amt = Decimal::from(raw) / pow10(token_b_decimals as u32);
+                                        Some(amt * p.quote_usd)
+                                    } else {
+                                        None
+                                    }
+                                };
+                                let tvl_usd = token_usd(last.1, last.3.as_deref()).unwrap_or(Decimal::ZERO)
+                                    + token_usd(last.2, last.4.as_deref()).unwrap_or(Decimal::ZERO);
+                                if tvl_usd > Decimal::ZERO {
+                                    let mut share = capital_dec / tvl_usd;
+                                    if share < Decimal::ZERO {
+                                        share = Decimal::ZERO;
+                                    }
+                                    if share > Decimal::ONE {
+                                        share = Decimal::ONE;
+                                    }
+                                    p.lp_share = share;
+                                }
+                            }
+                        }
+                    }
+                }
                 let (fv, fe100) = fee_realism(&step_data, fee_rate);
                 let rows = run_grid(
                     &step_data,
@@ -814,13 +1814,8 @@ async fn main() -> Result<()> {
                     center,
                     &width_pcts,
                     &strategies,
-                    capital_dec,
-                    tx_cost_dec,
-                    fee_rate,
-                    pool_active_liquidity,
-                    token_a_decimals as u32,
-                    token_b_decimals as u32,
-                    None::<&[_]>,
+                    &grid_params,
+                    swaps_ref,
                 );
                 let mut r: Vec<_> = rows
                     .into_iter()
@@ -851,6 +1846,87 @@ async fn main() -> Result<()> {
                         lp_share_override,
                         steps_per_day,
                     );
+                    let mut step_data = step_data;
+                    if lp_share_override.is_none()
+                        && snapshot_protocol.is_some()
+                        && snapshot_pool_address.is_some()
+                    {
+                        let proto = snapshot_protocol.unwrap();
+                        let pool_addr = snapshot_pool_address.clone().unwrap();
+                        let base_dir = std::path::Path::new("data")
+                            .join("pool-snapshots")
+                            .join(match proto {
+                                SnapshotProtocolArg::Orca => "orca",
+                                SnapshotProtocolArg::Raydium => "raydium",
+                                SnapshotProtocolArg::Meteora => "meteora",
+                            });
+                        let snap_path = base_dir.join(&pool_addr).join("snapshots.jsonl");
+                        if snap_path.exists() {
+                            let txt = std::fs::read_to_string(&snap_path)?;
+                            let mut snaps: Vec<(i64, u64, u64, Option<String>, Option<String>)> = Vec::new();
+                            for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+                                let v: serde_json::Value = match serde_json::from_str(line) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                let ts = v
+                                    .get("ts_utc")
+                                    .and_then(|x| x.as_str())
+                                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                    .map(|dt| dt.timestamp());
+                                let a = v.get("vault_amount_a").and_then(|x| x.as_u64());
+                                let b = v.get("vault_amount_b").and_then(|x| x.as_u64());
+                                let ma = v.get("token_mint_a").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                let mb = v.get("token_mint_b").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                if let (Some(ts), Some(a), Some(b)) = (ts, a, b) {
+                                    snaps.push((ts, a, b, ma, mb));
+                                }
+                            }
+                            snaps.sort_by_key(|(t, _, _, _, _)| *t);
+                            if !snaps.is_empty() {
+                                let pow10 = |d: u32| -> Decimal {
+                                    let mut v = Decimal::ONE;
+                                    for _ in 0..d {
+                                        v *= Decimal::from(10u32);
+                                    }
+                                    v
+                                };
+                                let mut j = 0usize;
+                                let mut last = snaps[0].clone();
+                                for p in step_data.iter_mut() {
+                                    let t = p.start_timestamp as i64;
+                                    while j + 1 < snaps.len() && snaps[j + 1].0 <= t {
+                                        j += 1;
+                                        last = snaps[j].clone();
+                                    }
+                                    let token_usd = |raw: u64, mint: Option<&str>| -> Option<Decimal> {
+                                        let mint = mint?;
+                                        if mint.eq_ignore_ascii_case(&token_a.mint_address) {
+                                            let amt = Decimal::from(raw) / pow10(token_a_decimals as u32);
+                                            Some(amt * p.price_usd.value)
+                                        } else if mint.eq_ignore_ascii_case(&token_b.mint_address) {
+                                            let amt = Decimal::from(raw) / pow10(token_b_decimals as u32);
+                                            Some(amt * p.quote_usd)
+                                        } else {
+                                            None
+                                        }
+                                    };
+                                    let tvl_usd = token_usd(last.1, last.3.as_deref()).unwrap_or(Decimal::ZERO)
+                                        + token_usd(last.2, last.4.as_deref()).unwrap_or(Decimal::ZERO);
+                                    if tvl_usd > Decimal::ZERO {
+                                        let mut share = capital_dec / tvl_usd;
+                                        if share < Decimal::ZERO {
+                                            share = Decimal::ZERO;
+                                        }
+                                        if share > Decimal::ONE {
+                                            share = Decimal::ONE;
+                                        }
+                                        p.lp_share = share;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if fee_check_vol.is_zero() {
                         let (fv, fe100) = fee_realism(&step_data, fee_rate);
                         fee_check_vol = fv;
@@ -863,13 +1939,8 @@ async fn main() -> Result<()> {
                         center,
                         &width_pcts,
                         &strategies,
-                        capital_dec,
-                        tx_cost_dec,
-                        fee_rate,
-                        pool_active_liquidity,
-                        token_a_decimals as u32,
-                        token_b_decimals as u32,
-                        None::<&[_]>,
+                        &grid_params,
+                        swaps_ref,
                     );
                     for (wp_frac, lower, upper, strat_name, summary) in rows {
                         let key = (format!("{:.6}", wp_frac), strat_name.clone());
@@ -905,8 +1976,8 @@ async fn main() -> Result<()> {
             let min_tir = min_time_in_range.map(|x| Decimal::from_f64(x / 100.0).unwrap());
             let max_dd = max_drawdown.map(|x| Decimal::from_f64(x / 100.0).unwrap());
             results.retain(|(_, _, _, s, _)| {
-                min_tir.map_or(true, |m| s.time_in_range_pct >= m)
-                    && max_dd.map_or(true, |m| s.max_drawdown <= m)
+                min_tir.is_none_or(|m| s.time_in_range_pct >= m)
+                    && max_dd.is_none_or(|m| s.max_drawdown <= m)
             });
 
             let n = (*top_n).min(results.len());
@@ -1401,6 +2472,17 @@ async fn main() -> Result<()> {
             );
             println!();
         }
+        Commands::DuneSyncSwaps { protocol, query_id } => {
+            let query_id = query_id
+                .clone()
+                .or_else(|| protocol.as_ref().map(|p| crate::commands::backtest_optimize::dune_swaps_query_id(p).to_string()))
+                .ok_or_else(|| anyhow::anyhow!("Provide --protocol (orca|meteora|raydium) or --query-id <id>"))?;
+            let dune = clmm_lp_data::providers::DuneClient::from_env_swaps_only()?;
+            println!("📡 Fetching Dune swaps (query {}) and saving to cache...", query_id);
+            let swaps = dune.fetch_swaps_force(&query_id).await?;
+            let path = std::path::Path::new("data").join("dune-cache").join(format!("{}.json", query_id));
+            println!("✅ Cached {} swap events to {}", swaps.len(), path.display());
+        }
         Commands::DunePoolMetrics { pool_address } => {
             use clmm_lp_data::providers::{DuneClient, TvlPoint, VolumePoint};
 
@@ -1423,6 +2505,1747 @@ async fn main() -> Result<()> {
 
                 println!("{},{},{},{}", tvl.date, tvl.tvl_usd, volume_usd, fees_usd);
             }
+        }
+        Commands::OrcaPoolFee { pool_address } => {
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            let reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc);
+            let state = reader.get_pool_state(&pool_address).await?;
+
+            let base_fee = state.fee_rate();
+            let proto = Decimal::from(state.protocol_fee_rate_bps) / Decimal::from(10_000);
+            let eff = clmm_lp_domain::prelude::calculate_effective_fee_rate(base_fee, proto);
+            let base_pct = base_fee.to_f64().unwrap_or(0.0) * 100.0;
+            let proto_pct = proto.to_f64().unwrap_or(0.0) * 100.0;
+            let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
+
+            println!("Orca Whirlpool: {}", pool_address);
+            println!(
+                "  fee_rate_raw: {} (hundredths-of-bp)  -> {:.4}%",
+                state.fee_rate_bps, base_pct
+            );
+            println!(
+                "  protocol_fee_rate_bps: {} ({:.2}% of fees)",
+                state.protocol_fee_rate_bps, proto_pct
+            );
+            println!("  effective_fee_rate: {:.4}% (LP share after protocol cut)", eff_pct);
+        }
+        Commands::DefiLlamaFindPools { query, chain, limit } => {
+            use clmm_lp_data::providers::DefiLlamaClient;
+            let client = DefiLlamaClient::new();
+            let pools = client.list_pools().await?;
+            let q = query.to_lowercase();
+            let chain_lc = chain.to_lowercase();
+
+            let mut matches: Vec<_> = pools
+                .into_iter()
+                .filter(|p| p.chain.to_lowercase() == chain_lc)
+                .filter(|p| {
+                    let hay = format!("{} {}", p.symbol, p.project).to_lowercase();
+                    hay.contains(&q)
+                })
+                .collect();
+
+            // Sort by TVL desc (rough relevance).
+            matches.sort_by(|a, b| b.tvl_usd.partial_cmp(&a.tvl_usd).unwrap_or(std::cmp::Ordering::Equal));
+
+            println!("pool_id,chain,project,symbol,tvl_usd");
+            for p in matches.into_iter().take(*limit) {
+                println!("{},{},{},{},{:.2}", p.pool, p.chain, p.project, p.symbol, p.tvl_usd);
+            }
+        }
+        Commands::DefiLlamaSyncTvl { pool_id } => {
+            use clmm_lp_data::providers::DefiLlamaClient;
+            let client = DefiLlamaClient::new();
+            let daily = client.fetch_daily_tvl(pool_id).await?;
+            let path = std::path::Path::new("data")
+                .join("defillama-cache")
+                .join(format!("daily_tvl_{}.json", pool_id));
+            println!("✅ Cached {} daily TVL points to {}", daily.len(), path.display());
+        }
+        Commands::OrcaSnapshot { pool_address } => {
+            return snapshots::collector::orca_snapshot(pool_address).await;
+            use chrono::Utc;
+            use rust_decimal::prelude::ToPrimitive;
+            use serde::Serialize;
+            use solana_sdk::pubkey::Pubkey;
+            use spl_token::solana_program::program_pack::Pack;
+            use spl_token::state::Account as SplTokenAccount;
+            use std::fs;
+            use std::io::Write;
+            use std::path::PathBuf;
+            use std::str::FromStr;
+
+            #[derive(Debug, Serialize)]
+            struct OrcaWhirlpoolSnapshot {
+                ts_utc: String,
+                slot: u64,
+                pool_address: String,
+                token_mint_a: String,
+                token_mint_b: String,
+                token_vault_a: String,
+                token_vault_b: String,
+                vault_amount_a: u64,
+                vault_amount_b: u64,
+                liquidity_active: String,
+                tick_current: i32,
+                fee_rate_raw: u16,
+                protocol_fee_rate_bps: u16,
+                fee_growth_global_a: String,
+                fee_growth_global_b: String,
+                protocol_fee_owed_a: u64,
+                protocol_fee_owed_b: u64,
+                effective_fee_rate_pct: f64,
+            }
+
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            let slot = rpc.get_slot().await.unwrap_or(0);
+            let reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc.clone());
+            let state = reader.get_pool_state(pool_address).await?;
+
+            // Fetch vault SPL token accounts and decode balances.
+            let va = Pubkey::from_str(&state.token_vault_a.to_string())?;
+            let vb = Pubkey::from_str(&state.token_vault_b.to_string())?;
+            let accounts = rpc.get_multiple_accounts(&[va, vb]).await?;
+            let vault_amount_a = accounts
+                .get(0)
+                .and_then(|a| a.as_ref())
+                .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                .map(|a| a.amount)
+                .unwrap_or(0);
+            let vault_amount_b = accounts
+                .get(1)
+                .and_then(|a| a.as_ref())
+                .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                .map(|a| a.amount)
+                .unwrap_or(0);
+
+            let base_fee = state.fee_rate();
+            let proto = Decimal::from(state.protocol_fee_rate_bps) / Decimal::from(10_000);
+            let eff = clmm_lp_domain::prelude::calculate_effective_fee_rate(base_fee, proto);
+            let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
+
+            let snap = OrcaWhirlpoolSnapshot {
+                ts_utc: Utc::now().to_rfc3339(),
+                slot,
+                pool_address: pool_address.to_string(),
+                token_mint_a: state.token_mint_a.to_string(),
+                token_mint_b: state.token_mint_b.to_string(),
+                token_vault_a: state.token_vault_a.to_string(),
+                token_vault_b: state.token_vault_b.to_string(),
+                vault_amount_a,
+                vault_amount_b,
+                liquidity_active: state.liquidity.to_string(),
+                tick_current: state.tick_current,
+                fee_rate_raw: state.fee_rate_bps,
+                protocol_fee_rate_bps: state.protocol_fee_rate_bps,
+                fee_growth_global_a: state.fee_growth_global_a.to_string(),
+                fee_growth_global_b: state.fee_growth_global_b.to_string(),
+                protocol_fee_owed_a: state.protocol_fee_owed_a,
+                protocol_fee_owed_b: state.protocol_fee_owed_b,
+                effective_fee_rate_pct: eff_pct,
+            };
+
+            let mut dir = PathBuf::from("data");
+            dir.push("pool-snapshots");
+            dir.push("orca");
+            dir.push(pool_address);
+            fs::create_dir_all(&dir)?;
+            let mut path = dir;
+            path.push("snapshots.jsonl");
+
+            let line = serde_json::to_string(&snap)? + "\n";
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            f.write_all(line.as_bytes())?;
+
+            println!("✅ Snapshot appended: {}", path.display());
+        }
+        Commands::OrcaSnapshotCurated { limit } => {
+            return snapshots::collector::orca_snapshot_curated(*limit).await;
+            let startup_path = std::path::Path::new("STARTUP.md");
+            let content = std::fs::read_to_string(startup_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read STARTUP.md at {}: {}", startup_path.display(), e)
+            })?;
+
+            // Very small parser: read "Orca (Whirlpool)" section until next "**Meteora**" or "**Raydium**",
+            // then extract addresses inside backticks.
+            let mut in_orca_section = false;
+            let mut done = false;
+            let mut pool_addrs: Vec<String> = Vec::new();
+
+            for line in content.lines() {
+                if line.contains("**Orca (Whirlpool)**") || line.trim_start().starts_with("**Orca (Whirlpool)**") {
+                    in_orca_section = true;
+                    continue;
+                }
+                if in_orca_section
+                    && (line.contains("**Meteora**") || line.contains("**Raydium**"))
+                {
+                    done = true;
+                }
+                if done {
+                    break;
+                }
+                if in_orca_section {
+                    // extract text between first pair of backticks in the line
+                    let chars = line.chars().collect::<Vec<_>>();
+                    let is_solana_pubkey = |s: &str| {
+                        // Solana addresses are base58. We just filter out obvious UUID junk (hyphens).
+                        if s.len() < 32 || s.len() > 44 {
+                            return false;
+                        }
+                        if s.contains('-') {
+                            return false;
+                        }
+                        // Allow typical base58 charset (no 0,O,l,I and no punctuation).
+                        s.chars().all(|c| {
+                            matches!(
+                                c,
+                                '1'..='9'
+                                    | 'A'..='Z'
+                                    | 'a'..='z'
+                                    // base58 includes 0? no; and includes lowercase 'l'? no; so we keep alphabetic but decode will validate.
+                            )
+                        })
+                    };
+                    let mut i = 0usize;
+                    while i < chars.len() {
+                        if chars[i] == '`' {
+                            // find next backtick
+                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
+                                let addr: String = chars[i + 1..j].iter().collect();
+                                // sanity: Solana pubkey length ~32-44 base58 chars
+                                if is_solana_pubkey(&addr) {
+                                    if !pool_addrs.contains(&addr) {
+                                        pool_addrs.push(addr);
+                                        if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
+                                            done = true;
+                                        }
+                                    }
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            if pool_addrs.is_empty() {
+                return Err(anyhow::anyhow!("No Orca pools found in STARTUP.md Orca section"));
+            }
+
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            for pool_address in pool_addrs.into_iter() {
+                // Reuse the single-pool logic by calling the same internal code path:
+                // (duplicated here to avoid restructuring the command handler)
+                use chrono::Utc;
+                use clmm_lp_domain::prelude::calculate_effective_fee_rate;
+                use rust_decimal::prelude::ToPrimitive;
+                use serde::Serialize;
+                use spl_token::solana_program::program_pack::Pack;
+                use spl_token::state::Account as SplTokenAccount;
+
+                #[derive(Debug, Serialize)]
+                struct OrcaWhirlpoolSnapshot {
+                    ts_utc: String,
+                    slot: u64,
+                    pool_address: String,
+                    token_mint_a: String,
+                    token_mint_b: String,
+                    token_vault_a: String,
+                    token_vault_b: String,
+                    vault_amount_a: u64,
+                    vault_amount_b: u64,
+                    liquidity_active: String,
+                    tick_current: i32,
+                    fee_rate_raw: u16,
+                    protocol_fee_rate_bps: u16,
+                    fee_growth_global_a: String,
+                    fee_growth_global_b: String,
+                    protocol_fee_owed_a: u64,
+                    protocol_fee_owed_b: u64,
+                    effective_fee_rate_pct: f64,
+                }
+
+                let slot_now = rpc.get_slot().await.unwrap_or(0);
+                let reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc.clone());
+                let state = reader.get_pool_state(&pool_address).await?;
+
+                // `WhirlpoolState` already provides vault addresses as Pubkey.
+                let va = state.token_vault_a;
+                let vb = state.token_vault_b;
+                let accounts = rpc.get_multiple_accounts(&[va, vb]).await?;
+                let vault_amount_a = accounts
+                    .get(0)
+                    .and_then(|a| a.as_ref())
+                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                    .map(|a| a.amount)
+                    .unwrap_or(0);
+                let vault_amount_b = accounts
+                    .get(1)
+                    .and_then(|a| a.as_ref())
+                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                    .map(|a| a.amount)
+                    .unwrap_or(0);
+
+                let base_fee = state.fee_rate();
+                let proto = rust_decimal::Decimal::from(state.protocol_fee_rate_bps)
+                    / rust_decimal::Decimal::from(10_000);
+                let eff = calculate_effective_fee_rate(base_fee, proto);
+                let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
+
+                let snap = OrcaWhirlpoolSnapshot {
+                    ts_utc: Utc::now().to_rfc3339(),
+                    slot: slot_now,
+                    pool_address: pool_address.to_string(),
+                    token_mint_a: state.token_mint_a.to_string(),
+                    token_mint_b: state.token_mint_b.to_string(),
+                    token_vault_a: state.token_vault_a.to_string(),
+                    token_vault_b: state.token_vault_b.to_string(),
+                    vault_amount_a,
+                    vault_amount_b,
+                    liquidity_active: state.liquidity.to_string(),
+                    tick_current: state.tick_current,
+                    fee_rate_raw: state.fee_rate_bps,
+                    protocol_fee_rate_bps: state.protocol_fee_rate_bps,
+                    fee_growth_global_a: state.fee_growth_global_a.to_string(),
+                    fee_growth_global_b: state.fee_growth_global_b.to_string(),
+                    protocol_fee_owed_a: state.protocol_fee_owed_a,
+                    protocol_fee_owed_b: state.protocol_fee_owed_b,
+                    effective_fee_rate_pct: eff_pct,
+                };
+
+                let mut dir = std::path::PathBuf::from("data");
+                dir.push("pool-snapshots");
+                dir.push("orca");
+                dir.push(&pool_address);
+                std::fs::create_dir_all(&dir)?;
+                let mut path = dir;
+                path.push("snapshots.jsonl");
+
+                let line = serde_json::to_string(&snap)?;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)?;
+                use std::io::Write;
+                f.write_all(line.as_bytes())?;
+                f.write_all(b"\n")?;
+
+                println!("✅ Snapshot appended: {}", path.display());
+            }
+        }
+        Commands::RaydiumSnapshotCurated { limit } => {
+            return snapshots::collector::raydium_snapshot_curated(*limit).await;
+            let startup_path = std::path::Path::new("STARTUP.md");
+            let content = std::fs::read_to_string(startup_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read STARTUP.md at {}: {}", startup_path.display(), e)
+            })?;
+
+            let mut in_section = false;
+            let mut done = false;
+            let mut pool_addrs: Vec<String> = Vec::new();
+
+            let is_solana_pubkey = |s: &str| {
+                if s.len() < 32 || s.len() > 44 {
+                    return false;
+                }
+                if s.contains('-') {
+                    return false;
+                }
+                s.chars().all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
+            };
+
+            for line in content.lines() {
+                if line.trim_start().starts_with("**Raydium**") {
+                    in_section = true;
+                    continue;
+                }
+                if in_section && line.contains("**Meteora**") {
+                    // Not expected in this order, but keep safe.
+                }
+                // Raydium section ends before the numbered steps.
+                if in_section && line.trim_start().starts_with("1.") {
+                    done = true;
+                }
+                if done {
+                    break;
+                }
+                if in_section {
+                    let chars = line.chars().collect::<Vec<_>>();
+                    let mut i = 0usize;
+                    while i < chars.len() {
+                        if chars[i] == '`' {
+                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
+                                let addr: String = chars[i + 1..j].iter().collect();
+                                if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
+                                    pool_addrs.push(addr.clone());
+                                    if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
+                                        done = true;
+                                    }
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            if pool_addrs.is_empty() {
+                return Err(anyhow::anyhow!("No Raydium pools found in STARTUP.md Raydium section"));
+            }
+
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            let slot_now = rpc.get_slot().await.unwrap_or(0);
+
+            use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+
+            #[derive(Debug, serde::Serialize)]
+            struct RaydiumClmmSnapshot {
+                ts_utc: String,
+                slot: u64,
+                protocol: String,
+                pool_address: String,
+                owner: String,
+                lamports: u64,
+
+                // Keep the raw payload for debugging / future decoding improvements.
+                data_len: usize,
+                data_b64: String,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_b: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_b: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_b: Option<u64>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                mint_decimals_a: Option<u8>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                mint_decimals_b: Option<u8>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                liquidity_active: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                tick_current: Option<i32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                sqrt_price_x64: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                fee_growth_global_a_x64: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                fee_growth_global_b_x64: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fees_token_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fees_token_b: Option<u64>,
+            }
+
+            for pool_address in pool_addrs.into_iter() {
+                let acct = rpc.get_account_by_address(&pool_address).await?;
+                let parsed = clmm_lp_protocols::raydium::pool_reader::parse_pool_state(&acct.data).ok();
+                let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
+                    use spl_token::solana_program::program_pack::Pack;
+                    use spl_token::state::Account as SplTokenAccount;
+                    use std::str::FromStr;
+                    let va = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault0).ok();
+                    let vb = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault1).ok();
+                    if let (Some(va), Some(vb)) = (va, vb) {
+                        match rpc.get_multiple_accounts(&[va, vb]).await {
+                            Ok(accounts) => {
+                                let a = accounts
+                                    .get(0)
+                                    .and_then(|a| a.as_ref())
+                                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                                    .map(|a| a.amount);
+                                let b = accounts
+                                    .get(1)
+                                    .and_then(|a| a.as_ref())
+                                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                                    .map(|a| a.amount);
+                                (a, b)
+                            }
+                            Err(_) => (None, None),
+                        }
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+                let snap = RaydiumClmmSnapshot {
+                    ts_utc: chrono::Utc::now().to_rfc3339(),
+                    slot: slot_now,
+                    protocol: "raydium".to_string(),
+                    pool_address: pool_address.clone(),
+                    owner: acct.owner.to_string(),
+                    lamports: acct.lamports,
+                    data_len: acct.data.len(),
+                    data_b64: BASE64_STANDARD.encode(&acct.data),
+                    token_mint_a: parsed.as_ref().map(|p| p.token_mint0.to_string()),
+                    token_mint_b: parsed.as_ref().map(|p| p.token_mint1.to_string()),
+                    token_vault_a: parsed.as_ref().map(|p| p.token_vault0.to_string()),
+                    token_vault_b: parsed.as_ref().map(|p| p.token_vault1.to_string()),
+                    vault_amount_a,
+                    vault_amount_b,
+                    mint_decimals_a: parsed.as_ref().map(|p| p.mint_decimals0),
+                    mint_decimals_b: parsed.as_ref().map(|p| p.mint_decimals1),
+                    liquidity_active: parsed.as_ref().map(|p| p.liquidity_active.to_string()),
+                    tick_current: parsed.as_ref().map(|p| p.tick_current),
+                    sqrt_price_x64: parsed.as_ref().map(|p| p.sqrt_price_x64.to_string()),
+                    fee_growth_global_a_x64: parsed.as_ref().map(|p| p.fee_growth_global0_x64.to_string()),
+                    fee_growth_global_b_x64: parsed.as_ref().map(|p| p.fee_growth_global1_x64.to_string()),
+                    protocol_fees_token_a: parsed.as_ref().map(|p| p.protocol_fees_token0),
+                    protocol_fees_token_b: parsed.as_ref().map(|p| p.protocol_fees_token1),
+                };
+
+                let mut dir = std::path::PathBuf::from("data");
+                dir.push("pool-snapshots");
+                dir.push("raydium");
+                dir.push(&pool_address);
+                std::fs::create_dir_all(&dir)?;
+                let mut path = dir;
+                path.push("snapshots.jsonl");
+
+                let line = serde_json::to_string(&snap)?;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)?;
+                use std::io::Write;
+                f.write_all(line.as_bytes())?;
+                f.write_all(b"\n")?;
+
+                println!("✅ Snapshot appended: {}", path.display());
+            }
+        }
+        Commands::MeteoraSnapshotCurated { limit } => {
+            return snapshots::collector::meteora_snapshot_curated(*limit).await;
+            let startup_path = std::path::Path::new("STARTUP.md");
+            let content = std::fs::read_to_string(startup_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read STARTUP.md at {}: {}", startup_path.display(), e)
+            })?;
+
+            let mut in_section = false;
+            let mut done = false;
+            let mut pool_addrs: Vec<String> = Vec::new();
+
+            let is_solana_pubkey = |s: &str| {
+                if s.len() < 32 || s.len() > 44 {
+                    return false;
+                }
+                if s.contains('-') {
+                    return false;
+                }
+                s.chars().all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
+            };
+
+            for line in content.lines() {
+                if line.trim_start().starts_with("**Meteora**") {
+                    in_section = true;
+                    continue;
+                }
+                // Meteora section ends before the Raydium section.
+                if in_section && line.contains("**Raydium**") {
+                    done = true;
+                }
+                if done {
+                    break;
+                }
+                if in_section {
+                    let chars = line.chars().collect::<Vec<_>>();
+                    let mut i = 0usize;
+                    while i < chars.len() {
+                        if chars[i] == '`' {
+                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
+                                let addr: String = chars[i + 1..j].iter().collect();
+                                if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
+                                    pool_addrs.push(addr.clone());
+                                    if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
+                                        done = true;
+                                    }
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            if pool_addrs.is_empty() {
+                return Err(anyhow::anyhow!("No Meteora pools found in STARTUP.md Meteora section"));
+            }
+
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            let slot_now = rpc.get_slot().await.unwrap_or(0);
+
+            use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+
+            #[derive(Debug, serde::Serialize)]
+            struct MeteoraLbPairSnapshot {
+                ts_utc: String,
+                slot: u64,
+                protocol: String,
+                pool_address: String,
+                owner: String,
+                lamports: u64,
+
+                // Keep raw payload for later deeper decoding (bin arrays, fee growth, etc.).
+                data_len: usize,
+                data_b64: String,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                active_id: Option<i32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                bin_step: Option<u16>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_b: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_b: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_b: Option<u64>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fee_amount_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fee_amount_b: Option<u64>,
+            }
+
+            for pool_address in pool_addrs.into_iter() {
+                let acct = rpc.get_account_by_address(&pool_address).await?;
+                let parsed = clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data).ok();
+                let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
+                    use spl_token::solana_program::program_pack::Pack;
+                    use spl_token::state::Account as SplTokenAccount;
+                    let accounts = rpc
+                        .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
+                        .await
+                        .ok();
+                    if let Some(accounts) = accounts {
+                        let a = accounts
+                            .get(0)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                            .map(|a| a.amount);
+                        let b = accounts
+                            .get(1)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                            .map(|a| a.amount);
+                        (a, b)
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+                let snap = MeteoraLbPairSnapshot {
+                    ts_utc: chrono::Utc::now().to_rfc3339(),
+                    slot: slot_now,
+                    protocol: "meteora".to_string(),
+                    pool_address: pool_address.clone(),
+                    owner: acct.owner.to_string(),
+                    lamports: acct.lamports,
+                    data_len: acct.data.len(),
+                    data_b64: BASE64_STANDARD.encode(&acct.data),
+                    active_id: parsed.as_ref().map(|p| p.active_id),
+                    bin_step: parsed.as_ref().map(|p| p.bin_step),
+                    token_mint_a: parsed.as_ref().map(|p| p.token_mint_x.to_string()),
+                    token_mint_b: parsed.as_ref().map(|p| p.token_mint_y.to_string()),
+                    token_vault_a: parsed.as_ref().map(|p| p.reserve_x.to_string()),
+                    token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
+                    vault_amount_a,
+                    vault_amount_b,
+                    protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),
+                    protocol_fee_amount_b: parsed.as_ref().map(|p| p.protocol_fee_amount_y),
+                };
+
+                let mut dir = std::path::PathBuf::from("data");
+                dir.push("pool-snapshots");
+                dir.push("meteora");
+                dir.push(&pool_address);
+                std::fs::create_dir_all(&dir)?;
+                let mut path = dir;
+                path.push("snapshots.jsonl");
+
+                let line = serde_json::to_string(&snap)?;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)?;
+                use std::io::Write;
+                f.write_all(line.as_bytes())?;
+                f.write_all(b"\n")?;
+
+                println!("✅ Snapshot appended: {}", path.display());
+            }
+        }
+        Commands::SnapshotRunCuratedAll { limit } => {
+            use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+            use clmm_lp_domain::prelude::calculate_effective_fee_rate;
+            use rust_decimal::prelude::ToPrimitive;
+            use serde::Serialize;
+            use spl_token::solana_program::program_pack::Pack;
+            use spl_token::state::Account as SplTokenAccount;
+            use std::time::Instant;
+
+            #[derive(Debug, Serialize)]
+            struct ProtocolRunStats {
+                target: usize,
+                success: usize,
+                failed: usize,
+            }
+
+            #[derive(Debug, Serialize)]
+            struct RunErrorEntry {
+                protocol: String,
+                pool_address: String,
+                error: String,
+            }
+
+            #[derive(Debug, Serialize)]
+            struct SnapshotRunStatus {
+                ts_utc: String,
+                elapsed_ms: u128,
+                rpc_slot: u64,
+                ok: bool,
+                orca: ProtocolRunStats,
+                raydium: ProtocolRunStats,
+                meteora: ProtocolRunStats,
+                errors: Vec<RunErrorEntry>,
+            }
+
+            let startup_path = std::path::Path::new("STARTUP.md");
+            let content = std::fs::read_to_string(startup_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read STARTUP.md at {}: {}", startup_path.display(), e)
+            })?;
+
+            let is_solana_pubkey = |s: &str| {
+                if s.len() < 32 || s.len() > 44 {
+                    return false;
+                }
+                if s.contains('-') {
+                    return false;
+                }
+                s.chars().all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
+            };
+
+            // --- Extract Orca pools ---
+            let mut in_section = false;
+            let mut done = false;
+            let mut orca_pool_addrs: Vec<String> = Vec::new();
+            for line in content.lines() {
+                if line.contains("**Orca (Whirlpool)**") || line.trim_start().starts_with("**Orca (Whirlpool)**") {
+                    in_section = true;
+                    continue;
+                }
+                if in_section && (line.contains("**Meteora**") || line.contains("**Raydium**")) {
+                    done = true;
+                }
+                if done {
+                    break;
+                }
+                if in_section {
+                    let chars = line.chars().collect::<Vec<_>>();
+                    let mut i = 0usize;
+                    while i < chars.len() {
+                        if chars[i] == '`' {
+                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
+                                let addr: String = chars[i + 1..j].iter().collect();
+                                if is_solana_pubkey(&addr) && !orca_pool_addrs.contains(&addr) {
+                                    orca_pool_addrs.push(addr.clone());
+                                    if limit.map(|l| orca_pool_addrs.len() >= l).unwrap_or(false) {
+                                        done = true;
+                                    }
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            // --- Extract Meteora pools ---
+            in_section = false;
+            done = false;
+            let mut meteora_pool_addrs: Vec<String> = Vec::new();
+            for line in content.lines() {
+                if line.trim_start().starts_with("**Meteora**") {
+                    in_section = true;
+                    continue;
+                }
+                if in_section && line.contains("**Raydium**") {
+                    done = true;
+                }
+                if done {
+                    break;
+                }
+                if in_section {
+                    let chars = line.chars().collect::<Vec<_>>();
+                    let mut i = 0usize;
+                    while i < chars.len() {
+                        if chars[i] == '`' {
+                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
+                                let addr: String = chars[i + 1..j].iter().collect();
+                                if is_solana_pubkey(&addr) && !meteora_pool_addrs.contains(&addr) {
+                                    meteora_pool_addrs.push(addr.clone());
+                                    if limit.map(|l| meteora_pool_addrs.len() >= l).unwrap_or(false) {
+                                        done = true;
+                                    }
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            // --- Extract Raydium pools ---
+            in_section = false;
+            done = false;
+            let mut raydium_pool_addrs: Vec<String> = Vec::new();
+            for line in content.lines() {
+                if line.trim_start().starts_with("**Raydium**") {
+                    in_section = true;
+                    continue;
+                }
+                if in_section && line.trim_start().starts_with("1.") {
+                    done = true;
+                }
+                if done {
+                    break;
+                }
+                if in_section {
+                    let chars = line.chars().collect::<Vec<_>>();
+                    let mut i = 0usize;
+                    while i < chars.len() {
+                        if chars[i] == '`' {
+                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
+                                let addr: String = chars[i + 1..j].iter().collect();
+                                if is_solana_pubkey(&addr) && !raydium_pool_addrs.contains(&addr) {
+                                    raydium_pool_addrs.push(addr.clone());
+                                    if limit.map(|l| raydium_pool_addrs.len() >= l).unwrap_or(false) {
+                                        done = true;
+                                    }
+                                }
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            if orca_pool_addrs.is_empty() {
+                return Err(anyhow::anyhow!("No Orca pools found in STARTUP.md"));
+            }
+
+            let run_started_at = chrono::Utc::now();
+            let run_started_instant = Instant::now();
+            let mut run_errors: Vec<RunErrorEntry> = Vec::new();
+            let mut orca_success = 0usize;
+            let mut raydium_success = 0usize;
+            let mut meteora_success = 0usize;
+
+            let orca_target = orca_pool_addrs.len();
+            let raydium_target = raydium_pool_addrs.len();
+            let meteora_target = meteora_pool_addrs.len();
+
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            let slot_now = rpc.get_slot().await.unwrap_or(0);
+
+            // ---- Orca snapshots (proper fields) ----
+            #[derive(Debug, Serialize)]
+            struct OrcaWhirlpoolSnapshot {
+                ts_utc: String,
+                slot: u64,
+                pool_address: String,
+                token_mint_a: String,
+                token_mint_b: String,
+                token_vault_a: String,
+                token_vault_b: String,
+                vault_amount_a: u64,
+                vault_amount_b: u64,
+                liquidity_active: String,
+                tick_current: i32,
+                fee_rate_raw: u16,
+                protocol_fee_rate_bps: u16,
+                fee_growth_global_a: String,
+                fee_growth_global_b: String,
+                protocol_fee_owed_a: u64,
+                protocol_fee_owed_b: u64,
+                effective_fee_rate_pct: f64,
+            }
+
+            let orca_reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc.clone());
+            for pool_address in orca_pool_addrs.into_iter() {
+                let result: anyhow::Result<()> = async {
+                    let state = orca_reader.get_pool_state(&pool_address).await?;
+                    let accounts = rpc
+                        .get_multiple_accounts(&[state.token_vault_a, state.token_vault_b])
+                        .await?;
+
+                    let vault_amount_a = accounts
+                        .get(0)
+                        .and_then(|a| a.as_ref())
+                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                        .map(|a| a.amount)
+                        .unwrap_or(0);
+                    let vault_amount_b = accounts
+                        .get(1)
+                        .and_then(|a| a.as_ref())
+                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                        .map(|a| a.amount)
+                        .unwrap_or(0);
+
+                    let base_fee = state.fee_rate();
+                    let proto = rust_decimal::Decimal::from(state.protocol_fee_rate_bps)
+                        / rust_decimal::Decimal::from(10_000);
+                    let eff = calculate_effective_fee_rate(base_fee, proto);
+                    let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
+
+                    let snap = OrcaWhirlpoolSnapshot {
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                        slot: slot_now,
+                        pool_address: pool_address.to_string(),
+                        token_mint_a: state.token_mint_a.to_string(),
+                        token_mint_b: state.token_mint_b.to_string(),
+                        token_vault_a: state.token_vault_a.to_string(),
+                        token_vault_b: state.token_vault_b.to_string(),
+                        vault_amount_a,
+                        vault_amount_b,
+                        liquidity_active: state.liquidity.to_string(),
+                        tick_current: state.tick_current,
+                        fee_rate_raw: state.fee_rate_bps,
+                        protocol_fee_rate_bps: state.protocol_fee_rate_bps,
+                        fee_growth_global_a: state.fee_growth_global_a.to_string(),
+                        fee_growth_global_b: state.fee_growth_global_b.to_string(),
+                        protocol_fee_owed_a: state.protocol_fee_owed_a,
+                        protocol_fee_owed_b: state.protocol_fee_owed_b,
+                        effective_fee_rate_pct: eff_pct,
+                    };
+
+                    let mut dir = std::path::PathBuf::from("data");
+                    dir.push("pool-snapshots");
+                    dir.push("orca");
+                    dir.push(&pool_address);
+                    std::fs::create_dir_all(&dir)?;
+                    let mut path = dir;
+                    path.push("snapshots.jsonl");
+
+                    let line = serde_json::to_string(&snap)?;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)?;
+                    use std::io::Write;
+                    f.write_all(line.as_bytes())?;
+                    f.write_all(b"\n")?;
+
+                    println!("✅ Snapshot appended: {}", path.display());
+                    Ok(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => orca_success += 1,
+                    Err(e) => {
+                        eprintln!("❌ Orca snapshot failed for {}: {}", pool_address, e);
+                        run_errors.push(RunErrorEntry {
+                            protocol: "orca".to_string(),
+                            pool_address: pool_address.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // ---- Raydium raw snapshots ----
+            #[derive(Debug, Serialize)]
+            struct RaydiumClmmSnapshot {
+                ts_utc: String,
+                slot: u64,
+                protocol: String,
+                pool_address: String,
+                owner: String,
+                lamports: u64,
+
+                data_len: usize,
+                data_b64: String,
+
+                /// Whether the Raydium pool account bytes were decoded successfully.
+                parse_ok: bool,
+                /// Detailed decode error (only set when `parse_ok=false`).
+                #[serde(skip_serializing_if = "Option::is_none")]
+                parse_error: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_b: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_b: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_b: Option<u64>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                mint_decimals_a: Option<u8>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                mint_decimals_b: Option<u8>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                liquidity_active: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                tick_current: Option<i32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                sqrt_price_x64: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                fee_growth_global_a_x64: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                fee_growth_global_b_x64: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fees_token_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fees_token_b: Option<u64>,
+            }
+            for pool_address in raydium_pool_addrs.into_iter() {
+                let result: anyhow::Result<()> = async {
+                    let acct = rpc.get_account_by_address(&pool_address).await?;
+                let (parsed, parse_ok, parse_error) = match clmm_lp_protocols::raydium::pool_reader::parse_pool_state(&acct.data) {
+                    Ok(p) => (Some(p), true, None),
+                    Err(e) => (None, false, Some(e.to_string())),
+                };
+                let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
+                    use spl_token::solana_program::program_pack::Pack;
+                    use spl_token::state::Account as SplTokenAccount;
+                    use std::str::FromStr;
+                    let va = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault0).ok();
+                    let vb = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault1).ok();
+                    if let (Some(va), Some(vb)) = (va, vb) {
+                        match rpc.get_multiple_accounts(&[va, vb]).await {
+                            Ok(accounts) => {
+                                let a = accounts
+                                    .get(0)
+                                    .and_then(|a| a.as_ref())
+                                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                                    .map(|a| a.amount);
+                                let b = accounts
+                                    .get(1)
+                                    .and_then(|a| a.as_ref())
+                                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                                    .map(|a| a.amount);
+                                (a, b)
+                            }
+                            Err(_) => (None, None),
+                        }
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+                    let snap = RaydiumClmmSnapshot {
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                        slot: slot_now,
+                        protocol: "raydium".to_string(),
+                        pool_address: pool_address.clone(),
+                        owner: acct.owner.to_string(),
+                        lamports: acct.lamports,
+                        data_len: acct.data.len(),
+                        data_b64: BASE64_STANDARD.encode(&acct.data),
+                        parse_ok,
+                        parse_error,
+                        token_mint_a: parsed.as_ref().map(|p| p.token_mint0.to_string()),
+                        token_mint_b: parsed.as_ref().map(|p| p.token_mint1.to_string()),
+                        token_vault_a: parsed.as_ref().map(|p| p.token_vault0.to_string()),
+                        token_vault_b: parsed.as_ref().map(|p| p.token_vault1.to_string()),
+                    vault_amount_a,
+                    vault_amount_b,
+                        mint_decimals_a: parsed.as_ref().map(|p| p.mint_decimals0),
+                        mint_decimals_b: parsed.as_ref().map(|p| p.mint_decimals1),
+                        liquidity_active: parsed.as_ref().map(|p| p.liquidity_active.to_string()),
+                        tick_current: parsed.as_ref().map(|p| p.tick_current),
+                        sqrt_price_x64: parsed.as_ref().map(|p| p.sqrt_price_x64.to_string()),
+                        fee_growth_global_a_x64: parsed
+                            .as_ref()
+                            .map(|p| p.fee_growth_global0_x64.to_string()),
+                        fee_growth_global_b_x64: parsed
+                            .as_ref()
+                            .map(|p| p.fee_growth_global1_x64.to_string()),
+                        protocol_fees_token_a: parsed.as_ref().map(|p| p.protocol_fees_token0),
+                        protocol_fees_token_b: parsed.as_ref().map(|p| p.protocol_fees_token1),
+                    };
+
+                    let mut dir = std::path::PathBuf::from("data");
+                    dir.push("pool-snapshots");
+                    dir.push("raydium");
+                    dir.push(&pool_address);
+                    std::fs::create_dir_all(&dir)?;
+                    let mut path = dir;
+                    path.push("snapshots.jsonl");
+
+                    let line = serde_json::to_string(&snap)?;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)?;
+                    use std::io::Write;
+                    f.write_all(line.as_bytes())?;
+                    f.write_all(b"\n")?;
+
+                    println!("✅ Snapshot appended: {}", path.display());
+                    Ok(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => raydium_success += 1,
+                    Err(e) => {
+                        eprintln!("❌ Raydium snapshot failed for {}: {}", pool_address, e);
+                        run_errors.push(RunErrorEntry {
+                            protocol: "raydium".to_string(),
+                            pool_address: pool_address.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // ---- Meteora raw snapshots ----
+            #[derive(Debug, Serialize)]
+            struct MeteoraLbPairSnapshot {
+                ts_utc: String,
+                slot: u64,
+                protocol: String,
+                pool_address: String,
+                owner: String,
+                lamports: u64,
+
+                data_len: usize,
+                data_b64: String,
+
+                /// Whether the Meteora lb_pair account bytes were decoded successfully.
+                parse_ok: bool,
+                /// Detailed decode error (only set when `parse_ok=false`).
+                #[serde(skip_serializing_if = "Option::is_none")]
+                parse_error: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                active_id: Option<i32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                bin_step: Option<u16>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_mint_b: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_a: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                token_vault_b: Option<String>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                vault_amount_b: Option<u64>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fee_amount_a: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                protocol_fee_amount_b: Option<u64>,
+            }
+            for pool_address in meteora_pool_addrs.into_iter() {
+                let result: anyhow::Result<()> = async {
+                    let acct = rpc.get_account_by_address(&pool_address).await?;
+                let (parsed, parse_ok, parse_error) = match clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data) {
+                    Ok(p) => (Some(p), true, None),
+                    Err(e) => (None, false, Some(e.to_string())),
+                };
+                let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
+                    use spl_token::solana_program::program_pack::Pack;
+                    use spl_token::state::Account as SplTokenAccount;
+                    let accounts = rpc
+                        .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
+                        .await
+                        .ok();
+                    if let Some(accounts) = accounts {
+                        let a = accounts
+                            .get(0)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                            .map(|a| a.amount);
+                        let b = accounts
+                            .get(1)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                            .map(|a| a.amount);
+                        (a, b)
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+                    let snap = MeteoraLbPairSnapshot {
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                        slot: slot_now,
+                        protocol: "meteora".to_string(),
+                        pool_address: pool_address.clone(),
+                        owner: acct.owner.to_string(),
+                        lamports: acct.lamports,
+                        data_len: acct.data.len(),
+                        data_b64: BASE64_STANDARD.encode(&acct.data),
+                        parse_ok,
+                        parse_error,
+                        active_id: parsed.as_ref().map(|p| p.active_id),
+                        bin_step: parsed.as_ref().map(|p| p.bin_step),
+                        token_mint_a: parsed.as_ref().map(|p| p.token_mint_x.to_string()),
+                        token_mint_b: parsed.as_ref().map(|p| p.token_mint_y.to_string()),
+                        token_vault_a: parsed.as_ref().map(|p| p.reserve_x.to_string()),
+                        token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
+                    vault_amount_a,
+                    vault_amount_b,
+                        protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),
+                        protocol_fee_amount_b: parsed.as_ref().map(|p| p.protocol_fee_amount_y),
+                    };
+
+                    let mut dir = std::path::PathBuf::from("data");
+                    dir.push("pool-snapshots");
+                    dir.push("meteora");
+                    dir.push(&pool_address);
+                    std::fs::create_dir_all(&dir)?;
+                    let mut path = dir;
+                    path.push("snapshots.jsonl");
+
+                    let line = serde_json::to_string(&snap)?;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)?;
+                    use std::io::Write;
+                    f.write_all(line.as_bytes())?;
+                    f.write_all(b"\n")?;
+
+                    println!("✅ Snapshot appended: {}", path.display());
+                    Ok(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => meteora_success += 1,
+                    Err(e) => {
+                        eprintln!("❌ Meteora snapshot failed for {}: {}", pool_address, e);
+                        run_errors.push(RunErrorEntry {
+                            protocol: "meteora".to_string(),
+                            pool_address: pool_address.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            let status = SnapshotRunStatus {
+                ts_utc: run_started_at.to_rfc3339(),
+                elapsed_ms: run_started_instant.elapsed().as_millis(),
+                rpc_slot: slot_now,
+                ok: run_errors.is_empty(),
+                orca: ProtocolRunStats {
+                    target: orca_target,
+                    success: orca_success,
+                    failed: orca_target.saturating_sub(orca_success),
+                },
+                raydium: ProtocolRunStats {
+                    target: raydium_target,
+                    success: raydium_success,
+                    failed: raydium_target.saturating_sub(raydium_success),
+                },
+                meteora: ProtocolRunStats {
+                    target: meteora_target,
+                    success: meteora_success,
+                    failed: meteora_target.saturating_sub(meteora_success),
+                },
+                errors: run_errors,
+            };
+
+            let mut status_dir = std::path::PathBuf::from("data");
+            status_dir.push("snapshot_logs");
+            std::fs::create_dir_all(&status_dir)?;
+            let mut status_path = status_dir;
+            status_path.push("snapshot-run-curated-all.jsonl");
+            let status_line = serde_json::to_string(&status)?;
+            let mut sf = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&status_path)?;
+            use std::io::Write;
+            sf.write_all(status_line.as_bytes())?;
+            sf.write_all(b"\n")?;
+
+            println!(
+                "📌 Snapshot run summary: Orca {}/{} | Raydium {}/{} | Meteora {}/{} | errors: {}",
+                status.orca.success,
+                status.orca.target,
+                status.raydium.success,
+                status.raydium.target,
+                status.meteora.success,
+                status.meteora.target,
+                status.errors.len()
+            );
+            println!("📝 Run status appended: {}", status_path.display());
+        }
+        Commands::SnapshotStatusLast => {
+            use serde_json::Value;
+
+            let path = std::path::Path::new("data")
+                .join("snapshot_logs")
+                .join("snapshot-run-curated-all.jsonl");
+            if !path.exists() {
+                println!("No snapshot status log found at {}", path.display());
+                println!("Run `snapshot-run-curated-all` first.");
+                return Ok(());
+            }
+
+            let content = std::fs::read_to_string(&path)?;
+            let Some(last_line) = content
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+            else {
+                println!("Status log exists but is empty: {}", path.display());
+                return Ok(());
+            };
+
+            let v: Value = serde_json::from_str(last_line)?;
+
+            let ts = v.get("ts_utc").and_then(|x| x.as_str()).unwrap_or("n/a");
+            let elapsed = v.get("elapsed_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+            let slot = v.get("rpc_slot").and_then(|x| x.as_u64()).unwrap_or(0);
+            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+
+            let stat = |name: &str| -> (u64, u64, u64) {
+                let obj = v.get(name).and_then(|x| x.as_object());
+                let target = obj
+                    .and_then(|o| o.get("target"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let success = obj
+                    .and_then(|o| o.get("success"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let failed = obj
+                    .and_then(|o| o.get("failed"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                (target, success, failed)
+            };
+
+            let (orca_t, orca_s, orca_f) = stat("orca");
+            let (ray_t, ray_s, ray_f) = stat("raydium");
+            let (met_t, met_s, met_f) = stat("meteora");
+
+            let errors = v
+                .get("errors")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            println!("Snapshot run status (last):");
+            println!("  ts_utc: {}", ts);
+            println!("  ok: {}   elapsed_ms: {}   rpc_slot: {}", ok, elapsed, slot);
+            println!(
+                "  orca:    success {}/{}  failed {}",
+                orca_s, orca_t, orca_f
+            );
+            println!(
+                "  raydium: success {}/{}  failed {}",
+                ray_s, ray_t, ray_f
+            );
+            println!(
+                "  meteora: success {}/{}  failed {}",
+                met_s, met_t, met_f
+            );
+            println!("  errors: {}", errors.len());
+
+            for e in errors.iter().take(5) {
+                let protocol = e.get("protocol").and_then(|x| x.as_str()).unwrap_or("?");
+                let pool = e.get("pool_address").and_then(|x| x.as_str()).unwrap_or("?");
+                let err = e.get("error").and_then(|x| x.as_str()).unwrap_or("?");
+                println!("    - [{}] {} -> {}", protocol, pool, err);
+            }
+            if errors.len() > 5 {
+                println!("    ... and {} more errors", errors.len() - 5);
+            }
+        }
+        Commands::SnapshotReadiness {
+            protocol,
+            pool_address,
+        } => {
+            let proto_dir = match protocol {
+                SnapshotProtocolArg::Orca => "orca",
+                SnapshotProtocolArg::Raydium => "raydium",
+                SnapshotProtocolArg::Meteora => "meteora",
+            };
+            let path = std::path::Path::new("data")
+                .join("pool-snapshots")
+                .join(proto_dir)
+                .join(pool_address)
+                .join("snapshots.jsonl");
+            if !path.exists() {
+                println!("No snapshot file found: {}", path.display());
+                return Ok(());
+            }
+
+            let txt = std::fs::read_to_string(&path)?;
+            let lines: Vec<&str> = txt.lines().filter(|l| !l.trim().is_empty()).collect();
+            if lines.is_empty() {
+                println!("Snapshot file is empty: {}", path.display());
+                return Ok(());
+            }
+
+            let mut with_ts = 0usize;
+            let mut with_vaults = 0usize;
+            let mut with_mints = 0usize;
+            let mut with_liquidity = 0usize;
+            let mut with_fee_growth = 0usize;
+            let mut with_protocol_fee_counter = 0usize;
+            let mut with_decimals = 0usize;
+            let mut with_parse_ok = 0usize;
+            let mut with_parse_error = 0usize;
+
+            for line in &lines {
+                let v: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("ts_utc").and_then(|x| x.as_str()).is_some() {
+                    with_ts += 1;
+                }
+                if v.get("vault_amount_a").and_then(|x| x.as_u64()).is_some()
+                    && v.get("vault_amount_b").and_then(|x| x.as_u64()).is_some()
+                {
+                    with_vaults += 1;
+                }
+                if v.get("token_mint_a").and_then(|x| x.as_str()).is_some()
+                    && v.get("token_mint_b").and_then(|x| x.as_str()).is_some()
+                {
+                    with_mints += 1;
+                }
+                if v.get("liquidity_active").is_some() {
+                    with_liquidity += 1;
+                }
+
+                if v.get("parse_ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    with_parse_ok += 1;
+                }
+                if v.get("parse_error").is_some() {
+                    with_parse_error += 1;
+                }
+                let has_fee_growth = match protocol {
+                    SnapshotProtocolArg::Orca => {
+                        v.get("fee_growth_global_a").is_some() && v.get("fee_growth_global_b").is_some()
+                    }
+                    SnapshotProtocolArg::Raydium => {
+                        v.get("fee_growth_global_a_x64").is_some()
+                            && v.get("fee_growth_global_b_x64").is_some()
+                    }
+                    SnapshotProtocolArg::Meteora => false,
+                };
+                if has_fee_growth {
+                    with_fee_growth += 1;
+                }
+                let has_protocol_fee_counter = match protocol {
+                    SnapshotProtocolArg::Orca => {
+                        v.get("protocol_fee_owed_a").is_some() && v.get("protocol_fee_owed_b").is_some()
+                    }
+                    SnapshotProtocolArg::Raydium => {
+                        v.get("protocol_fees_token_a").is_some()
+                            && v.get("protocol_fees_token_b").is_some()
+                    }
+                    SnapshotProtocolArg::Meteora => {
+                        v.get("protocol_fee_amount_a").is_some()
+                            && v.get("protocol_fee_amount_b").is_some()
+                    }
+                };
+                if has_protocol_fee_counter {
+                    with_protocol_fee_counter += 1;
+                }
+                if v.get("mint_decimals_a").is_some() && v.get("mint_decimals_b").is_some() {
+                    with_decimals += 1;
+                }
+            }
+
+            let total = lines.len();
+            let pct = |n: usize| -> f64 { (n as f64) * 100.0 / (total as f64) };
+
+            let lp_share_ready = with_ts >= 2 && with_vaults >= 2 && with_mints >= 2;
+            let snapshot_fee_heuristic_ready =
+                with_ts >= 2 && with_mints >= 2 && (with_fee_growth >= 2 || with_protocol_fee_counter >= 2);
+            let position_truth_ready = false; // requires position-level state (inside-growth checkpoints + position liquidity/range history)
+
+            println!("Snapshot readiness audit:");
+            println!("  protocol: {:?}", protocol);
+            println!("  pool: {}", pool_address);
+            println!("  file: {}", path.display());
+            println!("  rows: {}", total);
+            println!(
+                "  coverage: ts={} ({:.1}%), vaults={} ({:.1}%), mints={} ({:.1}%), liquidity={} ({:.1}%), fee_growth={} ({:.1}%), protocol_fee_counter={} ({:.1}%), decimals={} ({:.1}%)",
+                with_ts, pct(with_ts),
+                with_vaults, pct(with_vaults),
+                with_mints, pct(with_mints),
+                with_liquidity, pct(with_liquidity),
+                with_fee_growth, pct(with_fee_growth),
+                with_protocol_fee_counter, pct(with_protocol_fee_counter),
+                with_decimals, pct(with_decimals)
+            );
+            println!(
+                "  parse: parse_ok={} ({:.1}%), parse_error={} ({:.1}%)",
+                with_parse_ok,
+                pct(with_parse_ok),
+                with_parse_error,
+                pct(with_parse_error)
+            );
+            println!();
+            println!("Readiness tiers:");
+            println!(
+                "  1) LP-share (capital/TVL proxy): {}",
+                if lp_share_ready { "READY" } else { "NOT READY" }
+            );
+            println!(
+                "  2) Snapshot fee heuristic (experimental): {}",
+                if snapshot_fee_heuristic_ready { "READY" } else { "NOT READY" }
+            );
+            println!(
+                "  3) Position-truth fee model (fee_growth_inside + position history): {}",
+                if position_truth_ready { "READY" } else { "NOT READY" }
+            );
+            if !position_truth_ready {
+                println!("     Missing: position range+liquidity timeline and inside-growth accounting checkpoints.");
+            }
+        }
+        Commands::DexscreenerSearch { query, limit } => {
+            use clmm_lp_data::providers::{DexChain, DexscreenerClient};
+
+            let client = DexscreenerClient::new();
+            let mut pairs = client.search(query).await?;
+            pairs.retain(|p| p.chain_id.eq_ignore_ascii_case(DexChain::Solana.as_str()));
+
+            // Sort by 24h volume, then liquidity
+            pairs.sort_by(|a, b| {
+                b.volume
+                    .h24
+                    .partial_cmp(&a.volume.h24)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        b.liquidity
+                            .usd
+                            .partial_cmp(&a.liquidity.usd)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+
+            let mut t = Table::new();
+            t.add_row(row![
+                "chain",
+                "dex",
+                "pair_address",
+                "base",
+                "quote",
+                "liq_usd",
+                "vol_24h",
+                "tx_24h"
+            ]);
+            for p in pairs.into_iter().take(*limit) {
+                let tx24 = p.txns.h24.buys + p.txns.h24.sells;
+                t.add_row(row![
+                    p.chain_id,
+                    p.dex_id,
+                    p.pair_address,
+                    format!("{} ({})", p.base_token.symbol, p.base_token.address),
+                    format!("{} ({})", p.quote_token.symbol, p.quote_token.address),
+                    format!("{:.0}", p.liquidity.usd),
+                    format!("{:.0}", p.volume.h24),
+                    tx24
+                ]);
+            }
+            t.printstd();
+        }
+        Commands::DexscreenerTokenPairs { token_mint, limit } => {
+            use clmm_lp_data::providers::{DexChain, DexscreenerClient};
+
+            let client = DexscreenerClient::new();
+            let mut pairs = client.token_pairs(DexChain::Solana, token_mint).await?;
+            pairs.sort_by(|a, b| {
+                b.volume
+                    .h24
+                    .partial_cmp(&a.volume.h24)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        b.liquidity
+                            .usd
+                            .partial_cmp(&a.liquidity.usd)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+
+            let mut t = Table::new();
+            t.add_row(row![
+                "dex",
+                "pair_address",
+                "base",
+                "quote",
+                "liq_usd",
+                "vol_24h",
+                "tx_24h"
+            ]);
+            for p in pairs.into_iter().take(*limit) {
+                let tx24 = p.txns.h24.buys + p.txns.h24.sells;
+                t.add_row(row![
+                    p.dex_id,
+                    p.pair_address,
+                    format!("{} ({})", p.base_token.symbol, p.base_token.address),
+                    format!("{} ({})", p.quote_token.symbol, p.quote_token.address),
+                    format!("{:.0}", p.liquidity.usd),
+                    format!("{:.0}", p.volume.h24),
+                    tx24
+                ]);
+            }
+            t.printstd();
+        }
+        Commands::DexscreenerPair { pair_address } => {
+            use clmm_lp_data::providers::{DexChain, DexscreenerClient};
+
+            let client = DexscreenerClient::new();
+            let pairs = client.pair(DexChain::Solana, pair_address).await?;
+            let mut t = Table::new();
+            t.add_row(row![
+                "dex",
+                "pair_address",
+                "base",
+                "quote",
+                "liq_usd",
+                "vol_24h",
+                "vol_6h",
+                "vol_1h",
+                "vol_5m",
+                "tx_24h"
+            ]);
+            for p in pairs {
+                let tx24 = p.txns.h24.buys + p.txns.h24.sells;
+                t.add_row(row![
+                    p.dex_id,
+                    p.pair_address,
+                    format!("{} ({})", p.base_token.symbol, p.base_token.address),
+                    format!("{} ({})", p.quote_token.symbol, p.quote_token.address),
+                    format!("{:.0}", p.liquidity.usd),
+                    format!("{:.0}", p.volume.h24),
+                    format!("{:.0}", p.volume.h6),
+                    format!("{:.0}", p.volume.h1),
+                    format!("{:.0}", p.volume.m5),
+                    tx24
+                ]);
+            }
+            t.printstd();
+        }
+        Commands::DexscreenerComparePair {
+            mint_a,
+            mint_b,
+            sort_by,
+            limit,
+        } => {
+            use clmm_lp_data::providers::{DexChain, DexPair, DexscreenerClient};
+
+            fn matches_pair(p: &DexPair, a: &str, b: &str) -> bool {
+                let ba = p.base_token.address.eq_ignore_ascii_case(a)
+                    && p.quote_token.address.eq_ignore_ascii_case(b);
+                let ab = p.base_token.address.eq_ignore_ascii_case(b)
+                    && p.quote_token.address.eq_ignore_ascii_case(a);
+                ba || ab
+            }
+
+            let client = DexscreenerClient::new();
+            let mut pairs = client.token_pairs(DexChain::Solana, mint_a).await?;
+            pairs.retain(|p| matches_pair(p, mint_a, mint_b));
+
+            let key = sort_by.trim().to_lowercase();
+            pairs.sort_by(|a, b| {
+                let f = |p: &DexPair| -> f64 {
+                    match key.as_str() {
+                        "liquidity_usd" => p.liquidity.usd,
+                        "volume_h6" => p.volume.h6,
+                        "volume_h1" => p.volume.h1,
+                        "volume_m5" => p.volume.m5,
+                        _ => p.volume.h24, // default volume_h24
+                    }
+                };
+                f(b).partial_cmp(&f(a)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let mut t = Table::new();
+            t.add_row(row![
+                "dex",
+                "pair_address",
+                "base",
+                "quote",
+                "liq_usd",
+                "vol_24h",
+                "vol_6h",
+                "vol_1h",
+                "vol_5m",
+                "tx_24h"
+            ]);
+            for p in pairs.into_iter().take(*limit) {
+                let tx24 = p.txns.h24.buys + p.txns.h24.sells;
+                t.add_row(row![
+                    p.dex_id,
+                    p.pair_address,
+                    format!("{} ({})", p.base_token.symbol, p.base_token.address),
+                    format!("{} ({})", p.quote_token.symbol, p.quote_token.address),
+                    format!("{:.0}", p.liquidity.usd),
+                    format!("{:.0}", p.volume.h24),
+                    format!("{:.0}", p.volume.h6),
+                    format!("{:.0}", p.volume.h1),
+                    format!("{:.0}", p.volume.m5),
+                    tx24
+                ]);
+            }
+            t.printstd();
         }
     }
 

@@ -19,7 +19,7 @@ fn quote_usd(step_data: Option<&Vec<StepData>>) -> Option<Decimal> {
         .filter(|q| *q > Decimal::ZERO)
 }
 
-fn price_low_high_ab(step_data: &Vec<StepData>) -> Option<(Decimal, Decimal)> {
+fn price_low_high_ab(step_data: &[StepData]) -> Option<(Decimal, Decimal)> {
     let mut low: Option<Decimal> = None;
     let mut high: Option<Decimal> = None;
     for p in step_data.iter() {
@@ -42,6 +42,7 @@ fn bounds_in_quote_units(lower_usd: f64, upper_usd: f64, quote_usd: Decimal) -> 
     (lo, up)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn print_best_block(
     pair_label: &str,
     days: &u64,
@@ -267,7 +268,7 @@ pub fn print_candidate_sets(
     }
 
     let q = quote_usd(audit_step_data);
-    let low_high = audit_step_data.and_then(price_low_high_ab);
+    let low_high = audit_step_data.and_then(|v| price_low_high_ab(v));
 
     // Helper: pick top-K by a key
     let mut by_fees = results.to_vec();

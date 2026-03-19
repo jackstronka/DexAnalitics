@@ -5,6 +5,8 @@
 //! utilities for working with on-chain pool metadata.
 
 mod birdeye;
+mod dexscreener;
+mod defillama;
 /// CSV provider module for file-based data loading.
 pub mod csv_provider;
 /// Jupiter Price API provider.
@@ -14,6 +16,8 @@ pub mod pool_info;
 pub mod dune;
 
 pub use birdeye::BirdeyeProvider;
+pub use dexscreener::{DexChain, DexPair, DexscreenerClient};
+pub use defillama::{DefiLlamaChartPoint, DefiLlamaClient, DefiLlamaYieldPool, DailyTvlPoint};
 pub use csv_provider::CsvProvider;
 pub use jupiter::JupiterProvider;
 pub use mock::MockMarketDataProvider;

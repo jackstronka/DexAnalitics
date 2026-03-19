@@ -5,8 +5,10 @@
 
 pub mod analyze;
 pub mod backtest;
+pub mod backtest_optimize;
 pub mod data;
 pub mod optimize;
+pub mod snapshot_price_path;
 
 pub use analyze::run_analyze;
 pub use backtest::run_backtest;

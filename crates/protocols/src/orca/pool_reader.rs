@@ -2,7 +2,7 @@
 //!
 //! Reads pool state from on-chain accounts.
 
-use super::whirlpool::{Whirlpool, parse_whirlpool_minimal};
+use super::whirlpool::{Whirlpool, parse_whirlpool_account_borsh, parse_whirlpool_minimal};
 use crate::rpc::RpcProvider;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -54,14 +54,14 @@ impl WhirlpoolReader {
             liquidity: minimal.liquidity,
             sqrt_price: minimal.sqrt_price,
             tick_current_index: minimal.tick_current_index,
-            protocol_fee_owed_a: 0,
-            protocol_fee_owed_b: 0,
+            protocol_fee_owed_a: minimal.protocol_fee_owed_a,
+            protocol_fee_owed_b: minimal.protocol_fee_owed_b,
             token_mint_a: minimal.token_mint_a,
-            token_vault_a: Pubkey::default(),
-            fee_growth_global_a: 0,
+            token_vault_a: minimal.token_vault_a,
+            fee_growth_global_a: minimal.fee_growth_global_a,
             token_mint_b: minimal.token_mint_b,
-            token_vault_b: Pubkey::default(),
-            fee_growth_global_b: 0,
+            token_vault_b: minimal.token_vault_b,
+            fee_growth_global_b: minimal.fee_growth_global_b,
             reward_last_updated_timestamp: 0,
         };
 
@@ -104,7 +104,9 @@ impl WhirlpoolReader {
         let mut states = Vec::new();
         for (i, account_opt) in accounts.into_iter().enumerate() {
             let Some(account) = account_opt else { continue };
-            if let Some(minimal) = parse_whirlpool_minimal(&account.data) {
+            if let Some(minimal) = parse_whirlpool_account_borsh(&account.data)
+                .or_else(|| parse_whirlpool_minimal(&account.data))
+            {
                 let whirlpool = Whirlpool {
                     discriminator: [0u8; 8],
                     whirlpools_config: Pubkey::default(),
@@ -116,14 +118,14 @@ impl WhirlpoolReader {
                     liquidity: minimal.liquidity,
                     sqrt_price: minimal.sqrt_price,
                     tick_current_index: minimal.tick_current_index,
-                    protocol_fee_owed_a: 0,
-                    protocol_fee_owed_b: 0,
+                    protocol_fee_owed_a: minimal.protocol_fee_owed_a,
+                    protocol_fee_owed_b: minimal.protocol_fee_owed_b,
                     token_mint_a: minimal.token_mint_a,
-                    token_vault_a: Pubkey::default(),
-                    fee_growth_global_a: 0,
+                    token_vault_a: minimal.token_vault_a,
+                    fee_growth_global_a: minimal.fee_growth_global_a,
                     token_mint_b: minimal.token_mint_b,
-                    token_vault_b: Pubkey::default(),
-                    fee_growth_global_b: 0,
+                    token_vault_b: minimal.token_vault_b,
+                    fee_growth_global_b: minimal.fee_growth_global_b,
                     reward_last_updated_timestamp: 0,
                 };
                 states.push(WhirlpoolState::from_whirlpool(&whirlpool, addresses[i]));
@@ -143,6 +145,10 @@ pub struct WhirlpoolState {
     pub token_mint_a: Pubkey,
     /// Token B mint.
     pub token_mint_b: Pubkey,
+    /// Vault for token A.
+    pub token_vault_a: Pubkey,
+    /// Vault for token B.
+    pub token_vault_b: Pubkey,
     /// Current tick index.
     pub tick_current: i32,
     /// Tick spacing.
@@ -157,6 +163,10 @@ pub struct WhirlpoolState {
     pub fee_rate_bps: u16,
     /// Protocol fee rate in basis points.
     pub protocol_fee_rate_bps: u16,
+    /// Protocol fee owed in token A raw units.
+    pub protocol_fee_owed_a: u64,
+    /// Protocol fee owed in token B raw units.
+    pub protocol_fee_owed_b: u64,
     /// Fee growth global for token A.
     pub fee_growth_global_a: u128,
     /// Fee growth global for token B.
@@ -170,6 +180,8 @@ impl WhirlpoolState {
             address: address.to_string(),
             token_mint_a: wp.token_mint_a,
             token_mint_b: wp.token_mint_b,
+            token_vault_a: wp.token_vault_a,
+            token_vault_b: wp.token_vault_b,
             tick_current: wp.tick_current_index,
             tick_spacing: wp.tick_spacing,
             sqrt_price: wp.sqrt_price,
@@ -177,6 +189,8 @@ impl WhirlpoolState {
             liquidity: wp.liquidity,
             fee_rate_bps: wp.fee_rate,
             protocol_fee_rate_bps: wp.protocol_fee_rate,
+            protocol_fee_owed_a: wp.protocol_fee_owed_a,
+            protocol_fee_owed_b: wp.protocol_fee_owed_b,
             fee_growth_global_a: wp.fee_growth_global_a,
             fee_growth_global_b: wp.fee_growth_global_b,
         }

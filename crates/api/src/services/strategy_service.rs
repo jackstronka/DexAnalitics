@@ -108,32 +108,32 @@ impl StrategyService {
             executor_config,
         );
 
-        // Configure decision engine if parameters provided
+        // Configure decision engine if parameters provided (config built for future use when executor supports it).
         if let Some(params) = strategy.config.get("parameters") {
-            let mut decision_config = DecisionConfig::default();
+            let mut _decision_config = DecisionConfig::default();
 
             if let Some(threshold) = params.get("rebalance_threshold_pct")
                 && let Some(val) = threshold.as_f64()
             {
-                decision_config.il_rebalance_threshold =
+                _decision_config.il_rebalance_threshold =
                     Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(5, 2));
             }
 
             if let Some(max_il) = params.get("max_il_pct")
                 && let Some(val) = max_il.as_f64()
             {
-                decision_config.il_close_threshold =
+                _decision_config.il_close_threshold =
                     Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
             }
 
             if let Some(min_hours) = params.get("min_rebalance_interval_hours")
                 && let Some(val) = min_hours.as_u64()
             {
-                decision_config.min_rebalance_interval_hours = val;
+                _decision_config.min_rebalance_interval_hours = val;
             }
 
             // Note: Would need mutable access to set config
-            // executor.set_decision_config(decision_config);
+            // executor.set_decision_config(_decision_config);
         }
 
         let executor = Arc::new(RwLock::new(executor));

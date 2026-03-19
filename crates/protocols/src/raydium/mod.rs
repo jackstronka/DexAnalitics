@@ -1,2 +1,5 @@
-// Raydium adapter module
-// TODO: Implement Raydium V4 (CLMM) and CLMM parsing logic
+//! Raydium adapter module.
+//!
+//! For now we only implement minimal pool-state parsing needed for analytics/snapshotting.
+
+pub mod pool_reader;

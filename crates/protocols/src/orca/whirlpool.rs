@@ -1,6 +1,68 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_sdk::pubkey::Pubkey;
 
+/// Reward slot in Whirlpool account (128 bytes each × 3 = 384).
+#[derive(BorshDeserialize, BorshSerialize, Debug, Clone, Copy)]
+pub struct WhirlpoolRewardInfoLayout {
+    pub mint: Pubkey,
+    pub vault: Pubkey,
+    pub extension: [u8; 32],
+    pub emissions_per_second_x64: u128,
+    pub growth_global_x64: u128,
+}
+
+/// Full Whirlpool account body after the 8-byte Anchor discriminator (645 bytes).
+/// Matches on-chain layout in `orca-so/whirlpools` (Whirlpool::LEN = 653 including disc).
+#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
+pub struct WhirlpoolAccountBody {
+    pub whirlpools_config: Pubkey,
+    pub whirlpool_bump: [u8; 1],
+    pub tick_spacing: u16,
+    pub fee_tier_index_seed: [u8; 2],
+    pub fee_rate: u16,
+    pub protocol_fee_rate: u16,
+    pub liquidity: u128,
+    pub sqrt_price: u128,
+    pub tick_current_index: i32,
+    pub protocol_fee_owed_a: u64,
+    pub protocol_fee_owed_b: u64,
+    pub token_mint_a: Pubkey,
+    pub token_vault_a: Pubkey,
+    pub fee_growth_global_a: u128,
+    pub token_mint_b: Pubkey,
+    pub token_vault_b: Pubkey,
+    pub fee_growth_global_b: u128,
+    pub reward_last_updated_timestamp: u64,
+    pub reward_infos: [WhirlpoolRewardInfoLayout; 3],
+}
+
+/// Parse a Whirlpool account using Borsh (preferred). `data` must include the 8-byte discriminator.
+#[must_use]
+pub fn parse_whirlpool_account_borsh(data: &[u8]) -> Option<WhirlpoolMinimal> {
+    const WHIRLPOOL_TOTAL: usize = 653;
+    if data.len() < WHIRLPOOL_TOTAL {
+        return None;
+    }
+    let body = data.get(8..WHIRLPOOL_TOTAL)?;
+    let parsed = WhirlpoolAccountBody::try_from_slice(body).ok()?;
+    Some(WhirlpoolMinimal {
+        tick_spacing: parsed.tick_spacing,
+        fee_rate: parsed.fee_rate,
+        protocol_fee_rate: parsed.protocol_fee_rate,
+        liquidity: parsed.liquidity,
+        sqrt_price: parsed.sqrt_price,
+        tick_current_index: parsed.tick_current_index,
+        protocol_fee_owed_a: parsed.protocol_fee_owed_a,
+        protocol_fee_owed_b: parsed.protocol_fee_owed_b,
+        token_mint_a: parsed.token_mint_a,
+        token_vault_a: parsed.token_vault_a,
+        fee_growth_global_a: parsed.fee_growth_global_a,
+        token_mint_b: parsed.token_mint_b,
+        token_vault_b: parsed.token_vault_b,
+        fee_growth_global_b: parsed.fee_growth_global_b,
+    })
+}
+
 // Simplification of Whirlpool Account Layout
 // In reality, we would use the anchor-generated structs or a complete copy of the layout.
 // For MVP, we define enough to read ticks and liquidity.
@@ -62,8 +124,14 @@ pub struct WhirlpoolMinimal {
     pub liquidity: u128,
     pub sqrt_price: u128,
     pub tick_current_index: i32,
+    pub protocol_fee_owed_a: u64,
+    pub protocol_fee_owed_b: u64,
     pub token_mint_a: Pubkey,
+    pub token_vault_a: Pubkey,
+    pub fee_growth_global_a: u128,
     pub token_mint_b: Pubkey,
+    pub token_vault_b: Pubkey,
+    pub fee_growth_global_b: u128,
 }
 
 fn read_u16_le(data: &[u8], off: usize) -> Option<u16> {
@@ -125,17 +193,21 @@ pub fn parse_whirlpool_minimal(data: &[u8]) -> Option<WhirlpoolMinimal> {
     let tick_current_index = read_i32_le(data, off_liquidity + 32)?;
 
     let off_fee_owed_a = off_liquidity + 32 + 4;
-    let _fee_owed_a = read_u64_le(data, off_fee_owed_a)?;
-    let _fee_owed_b = read_u64_le(data, off_fee_owed_a + 8)?;
+    let fee_owed_a = read_u64_le(data, off_fee_owed_a)?;
+    let fee_owed_b = read_u64_le(data, off_fee_owed_a + 8)?;
 
     let off_token_mint_a = off_fee_owed_a + 8 + 8;
     let token_mint_a = read_pubkey(data, off_token_mint_a)?;
     let off_token_vault_a = off_token_mint_a + 32;
-    let _token_vault_a = read_pubkey(data, off_token_vault_a)?;
+    let token_vault_a = read_pubkey(data, off_token_vault_a)?;
     let off_fee_growth_a = off_token_vault_a + 32;
-    let _fee_growth_a = read_u128_le(data, off_fee_growth_a)?;
+    let fee_growth_a = read_u128_le(data, off_fee_growth_a)?;
     let off_token_mint_b = off_fee_growth_a + 16;
     let token_mint_b = read_pubkey(data, off_token_mint_b)?;
+    let off_token_vault_b = off_token_mint_b + 32;
+    let token_vault_b = read_pubkey(data, off_token_vault_b)?;
+    let off_fee_growth_b = off_token_vault_b + 32;
+    let fee_growth_b = read_u128_le(data, off_fee_growth_b)?;
 
     Some(WhirlpoolMinimal {
         tick_spacing,
@@ -144,7 +216,13 @@ pub fn parse_whirlpool_minimal(data: &[u8]) -> Option<WhirlpoolMinimal> {
         liquidity,
         sqrt_price,
         tick_current_index,
+        protocol_fee_owed_a: fee_owed_a,
+        protocol_fee_owed_b: fee_owed_b,
         token_mint_a,
+        token_vault_a,
+        fee_growth_global_a: fee_growth_a,
         token_mint_b,
+        token_vault_b,
+        fee_growth_global_b: fee_growth_b,
     })
 }

@@ -223,6 +223,35 @@ cargo run --bin clmm-lp-cli -- optimize \
   --objective sharpe
 ```
 
+### Backtest: price path from local Orca snapshots only (no Birdeye)
+
+Use **`--price-path-source snapshots`** when you want **one simulation step per row** in
+`data/pool-snapshots/orca/<POOL>/snapshots.jsonl` inside the selected time window. This **does not** require `BIRDEYE_API_KEY`.
+
+Requirements:
+
+- `--snapshot-protocol orca` and `--snapshot-pool-address <POOL>` (same path as tier‑2 snapshots).
+- Cross pair: pass **`--symbol-b` / `--mint-b`** (e.g. whETH/SOL).
+- Optional: new snapshot lines include **`sqrt_price_x64`** for more stable spot price; older files fall back to `tick_current`.
+- **Quote token USD** (for fee notionals and TVL) is taken from **Dexscreener** (free HTTP + local cache under `data/dexscreener-cache/`). For production-grade USD you may still layer Coingecko/Jupiter/oracle later.
+
+Example (whETH/SOL, static, snapshot fees, 12h window by wall clock — only snapshot rows whose `ts_utc` falls in the window are used):
+
+```bash
+cargo run --bin clmm-lp-cli -- backtest \
+  --symbol-a whETH --mint-a 7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs \
+  --symbol-b SOL --mint-b So11111111111111111111111111111111111111112 \
+  --hours 12 --lower 22.891 --upper 24.679 --strategy static \
+  --price-path-source snapshots \
+  --snapshot-protocol orca \
+  --snapshot-pool-address HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF \
+  --fee-source snapshots
+```
+
+**Why `fee_growth_global_*` was `"0"` in some JSONL files:** older collectors / manual layouts could mis-read the account; the reader now tries **full Borsh layout** (653-byte Whirlpool) before the offset parser. **Re-run** `orca_snapshot` / `snapshot_curated` so new lines carry real `fee_growth_global_*` and `protocol_fee_owed_*`.
+
+**Free / low-cost price alternatives to Birdeye** (for other modes): Dexscreener, Jupiter price API, CoinGecko public endpoints, or **your own Solana RPC** + pool account decode (what snapshots already do for Orca).
+
 ---
 
 ## Docker Compose (Full Stack)
@@ -467,21 +496,25 @@ Store a small curated list of pool addresses we care about, so we can:
 - later let the bot choose where to deploy
 
 **Orca (Whirlpool)**
-- **SOL/USDC**: `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE`
-- **whETH/SOL**: `HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF`
-- **cbBTC/USDC**: `HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM`
+- **SOL/USDC** (**0.04%**) : `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE` (DefiLlama TVL: `a5c85bc8-eb41-45c0-a520-d18d7529c0d8`)
+- **whETH/SOL** (**0.05%**) : `HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF` (DefiLlama TVL: `69c64232-ef1a-45f2-b49b-daeb2a906873`)
+- **cbBTC/USDC** (**0.04%**) : `HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM` (DefiLlama TVL: `2651188f-6b05-473e-9cfb-977a4ad094ba`)
+- **syrupUSDC/USDC** (**0.01%**) : (pool address TBD)
+- **USDG/USDC** (**0.01%**) : (pool address TBD)
 
 **Meteora**
-- **SOL/USDC (BIN Step1)**: `HTvjzsfX3yU6BUodCjZ5vZkUrAxMDTrBs3CJaq43ashR`
-- **SOL/USDC (BIN Step4)**: `5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6`
-- **SOL/USDC (BIN Step10)**: `BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y`
+- **SOL/USDC (BIN Step1)** (**0.01%**) : `HTvjzsfX3yU6BUodCjZ5vZkUrAxMDTrBs3CJaq43ashR`
+- **SOL/USDC (BIN Step4)** (**0.04%**) : `5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6`
+- **SOL/USDC (BIN Step10)** (**0.10%**) : `BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y`
 
 **Raydium**
-- **SOL/USDT**: `3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF`
+- **SOL/USDT** (**0.01%**) : `3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF` (DefiLlama TVL: `36439c60-452b-434f-8c62-651060e7dd55`)
 
 1. **Define objective**: choose a clear function to maximize (e.g. `score = α · fees − β · |IL|`), reflecting the desired trade‑off between yield and risk.
-2. **Optimize ranges offline**: use historical Birdeye prices + Dune TVL/volume to backtest many candidate ranges and strategies, selecting those that maximize the objective.
-3. **Multi‑protocol pool analytics (discovery & ranking)**: implement analytics for a curated set of pools across projects (**Raydium**, **Meteora**, and others). Collect comparable metrics (e.g. daily/weekly **volume**, **TVL**, fee tier, volatility, historical time‑in‑range, stability of volume), then **rank pools** to answer: *“where should the bot deploy capital now?”* (e.g. pick pools with better volume/fees for the same risk).
+2. **Optimize ranges offline (window-based)**: use historical prices + TVL/volume inputs to backtest many candidate ranges inside arbitrary time windows (e.g. 1d/7d/30d). For `static` positions: scan `lower/upper` candidates and pick the range with the highest **net score** (fees earned within TIR, minus IL penalty and estimated costs). For strategies with rebalances: include rebalancing logic so the optimizer can choose ranges that remain robust over time.
+   - Output should be usable for *future* windows: once we have cached daily/hourly data, we can re-run the “find best range” process for any period without changing the core pipeline.
+3. **Multi‑protocol pool analytics (same assumptions)**: implement analytics for a curated set of pools across projects (**Raydium**, **Meteora**, and others). For each time window and for the same capital + entry/exit policy, compute the best configuration per protocol (best range / best strategy) and **rank protocols** by **best net result** (not just fees). Collect comparable metrics (e.g. daily/weekly **volume**, **TVL**, fee tier, volatility, historical time‑in‑range, stability of volume).
+   - **Venue rotation (next phase):** when volume growth differs across venues, detect which DEX shows stronger relative volume during the window (e.g. via Dexscreener volume trend). Then bias deployment toward the protocol(s) with the best “forecasted fees per unit risk” for that period.
 4. **Approach on‑chain reality (data + fees correctness)**: move fees from candle‑level heuristics toward swap/tick‑level accounting, **without paid APIs**:
    - **B (swap history MVP)**: ingest **historical swaps** from a free dataset (start with **Dune** Solana DEX trades; optionally also **Solana BigQuery / Solarchive** backfills). Use swap timestamps + token amounts to drive **fee estimation at swap granularity** (fees come from swaps, not from candles). Candles (e.g. 1h) can still be used for **strategy logic / valuation / reporting**, but they should no longer be the source of “how much volume paid fees”.
    - **C‑lite (if available in datasets)**: if swaps include decoded `tick` / `sqrt_price` / `liquidity`, upgrade fee share from a constant snapshot to per‑swap active‑liquidity share (much closer to CLMM reality).

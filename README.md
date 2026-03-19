@@ -171,6 +171,86 @@ The project is being built in incremental phases. **Current version: 0.1.1-alpha
 
 ---
 
+### Roadmap Idea: On-chain Snapshot Cron (free, local cache)
+
+To reduce reliance on paid analytics (Dune/others) and to improve fee/TVL realism, add a lightweight scheduled “snapshot collector” that runs **every 4h (configurable)** and stores data locally for Orca/Raydium/Meteora pools.
+
+- **What to collect (per pool)**
+  - **Vault balances / TVL proxy**: SPL token balances of `token_vault_a` + `token_vault_b` (convert to USD using cached prices)
+  - **Pool state**: `liquidity`, `sqrt_price`, `tick_current`, `fee_rate`, `protocol_fee_rate`
+  - **Fee accumulators (for fee accrual without swap backfills)**: `fee_growth_global_a/b`, `protocol_fee_owed_a/b` (and equivalents per protocol)
+  - **Local liquidity shape**: tick-array/bin snapshots around current price and around the strategy range (enables active-liquidity share \(L_pos/L_active\))
+  - **Metadata**: slot + blockTime, mint decimals (cached), pool/vault addresses
+  - **Optional (heavier)**: per-pool swap events by parsing on-chain transactions to reconstruct volume/fees without external providers
+
+- **How it’s used**
+  - Backtests can compute **time-varying pool share** from snapshots (TVL-share or preferably active-liquidity share) instead of `capital / daily_TVL` heuristics.
+  - Enables “grounded” fee accrual using on-chain fee-growth deltas when swap-level fees are unavailable.
+  - Enables **cross-protocol comparisons** (same pair, same capital, same time window) by running the same strategy simulation on Orca vs Raydium vs Meteora snapshots.
+  - Supports a later “rotation” workflow: detect periods where volume/fees increase on one venue for the same pair, then compare expected net return and switch venue (future bot).
+
+- **Storage & caching**
+  - Append-only local files (e.g. `data/pool-snapshots/{protocol}/{pool}/snapshots_4h.jsonl`)
+  - Keep retention configurable (e.g. 180–365 days) and never prune below the currently requested backtest range.
+
+- **Scheduling**
+  - Local: Windows Task Scheduler / Linux cron
+  - Free-tier hosted alternative: small VM free-tier (optional later)
+
+#### Snapshot Spec v1 (concrete)
+
+**Goal:** collect a minimal, comparable dataset across **Orca / Raydium / Meteora** every hour (or 4h) that can later drive backtests and “share” heuristics without paid analytics.
+
+- **Storage format**
+  - Append-only JSONL: `data/pool-snapshots/{protocol}/{pool_address}/snapshots.jsonl`
+  - One JSON object per run.
+
+- **Common fields (all protocols)**
+  - `ts_utc`, `slot`, `protocol`, `pool_address`
+  - `token_mint_a`, `token_mint_b`
+  - `token_vault_a`, `token_vault_b`
+  - `vault_amount_a`, `vault_amount_b` (raw SPL base units)
+  - `fee_tier_pct` (base), `protocol_fee_pct` (cut), `effective_fee_pct`
+
+- **Protocol-specific fields (v1 minimal)**
+  - **Orca Whirlpool**
+    - `liquidity_active`, `sqrt_price`, `tick_current`
+    - `fee_growth_global_a`, `fee_growth_global_b`
+  - **Raydium**
+    - v1 stores `pool_account_b64` (raw account data) until a proper parser is implemented
+    - optional: `liquidity_active`/ticks once parser is added
+  - **Meteora DLMM**
+    - v1 stores `pool_account_b64` (raw account data) until a proper parser is implemented
+    - later: bin state around price / active liquidity per bin
+
+- **Collection source**
+  - Solana RPC only (on-chain), no paid APIs.
+  - Vault balances from SPL Token accounts (decode `spl_token::state::Account`).
+
+- **Next upgrades**
+  - Add true Raydium/Meteora parsers to auto-derive vaults, fee params, and active liquidity.
+  - Add optional “tick/bin neighborhood” snapshots for accurate \(L_{active}(t)\).
+  - Add backtest integration modes:
+    - `lp_share(t)` from snapshot TVL proxy (`capital / TVL(t)`)
+    - (later) `lp_share(t)` from active-liquidity share (`L_pos / L_active(t)`)
+    - (later) fee accrual from on-chain accumulators when available (reduce reliance on paid swap backfills)
+  - Add a “compare venues” command: run the same strategy across Orca/Raydium/Meteora over the same period and rank by net PnL (fees - IL - tx costs).
+
+### Deferred (needs design): Hosted scheduler + object storage (R2/S3/B2)
+
+This is a **deep topic** and should be designed deliberately before implementation.
+
+- **Key questions to decide**
+  - **Where the job runs**: GitHub Actions schedule vs self-hosted runner vs Always-Free VM vs Jenkins
+  - **Where snapshots live**: local disk vs object storage (Cloudflare R2 / AWS S3 / Backblaze B2 / etc.)
+  - **Cost drivers**: storage (GB-month), request counts (PUT/LIST/GET), and egress (important for S3; R2 egress is typically free)
+  - **Data layout**: append-only JSONL “monthly” files vs many small files (request/list amplification)
+  - **Retention & pruning**: configurable retention, and never pruning below the currently requested backtest range
+  - **Secrets & access**: RPC endpoints, optional pricing APIs, and secure credential storage
+
+- **Goal**
+  - Achieve a **free/low-cost** setup that reliably collects snapshots and keeps historical data without vendor lock-in.
+
 ## ✨ Features
 
 ### Core Capabilities

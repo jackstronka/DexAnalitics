@@ -203,6 +203,8 @@ impl StrategyExecutor {
                 address: position.pool.to_string(),
                 token_mint_a: solana_sdk::pubkey::Pubkey::default(),
                 token_mint_b: solana_sdk::pubkey::Pubkey::default(),
+                token_vault_a: solana_sdk::pubkey::Pubkey::default(),
+                token_vault_b: solana_sdk::pubkey::Pubkey::default(),
                 tick_current: 0,
                 tick_spacing: 64,
                 sqrt_price: 1 << 64,
@@ -210,6 +212,8 @@ impl StrategyExecutor {
                 liquidity: 0,
                 fee_rate_bps: 30,
                 protocol_fee_rate_bps: 0,
+                protocol_fee_owed_a: 0,
+                protocol_fee_owed_b: 0,
                 fee_growth_global_a: 0,
                 fee_growth_global_b: 0,
             });

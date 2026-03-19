@@ -33,6 +33,7 @@ dirs = "5.0"
 rayon = "1.10"
 spl-token = { workspace = true }
 solana-sdk = { workspace = true }
+base64 = "0.22.1"
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
