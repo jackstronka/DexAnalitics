@@ -34,13 +34,20 @@ The “snapshot-fees” pipeline is intended to reduce reliance on paid analytic
 ```mermaid
 graph TD
   Cron[CRON / local scheduler] --> Collector[Snapshot collector CLI]
+  Cron --> SwapSync[Swaps sync CLI]
   Collector --> OrcaSnaps[orca snapshots.jsonl]
   Collector --> RaydiumSnaps[raydium snapshots.jsonl]
   Collector --> MeteoraSnaps[meteora snapshots.jsonl]
+  SwapSync --> OrcaSwaps[orca swaps.jsonl]
+  SwapSync --> RaydiumSwaps[raydium swaps.jsonl]
+  SwapSync --> MeteoraSwaps[meteora swaps.jsonl]
 
   OrcaSnaps --> Optimizer[backtest / backtest-optimize]
   RaydiumSnaps --> Optimizer
   MeteoraSnaps --> Optimizer
+  OrcaSwaps --> Optimizer
+  RaydiumSwaps --> Optimizer
+  MeteoraSwaps --> Optimizer
   Optimizer --> BestRange[best range per strategy (fees - IL - costs)]
 ```
 
@@ -54,9 +61,14 @@ Key commands live in `crates/cli/src/main.rs`:
   - `MeteoraSnapshotCurated`
   - `SnapshotRunCuratedAll`
   - `SnapshotReadiness` (audits if snapshot data covers fee tiers)
+- Swap stream collection (P1):
+  - `SwapsSyncCuratedAll` (raw signatures)
+  - `SwapsEnrichCuratedAll` → `decoded_swaps.jsonl` (vault deltas + direction)
+  - `SwapsDecodeAudit` (quality report)
+  - `DataHealthCheck` (staleness + decode OK%)
 - Backtesting/optimization:
   - `Backtest`
-  - `BacktestOptimize` (grid search over ranges + 3 strategy types)
+  - `BacktestOptimize` (grid search over ranges + 3 strategy types; opcjonalnie lokalne `data/swaps` gdy brak Dune)
 
 The curated pool addresses are defined in `STARTUP.md`.
 
@@ -67,7 +79,11 @@ Local snapshot files (append-only JSONL):
 - `data/pool-snapshots/raydium/<pool_address>/snapshots.jsonl`
 - `data/pool-snapshots/meteora/<pool_address>/snapshots.jsonl`
 
-Swap-level cache (when used):
+Swap-level cache:
+- `data/swaps/orca/<pool_address>/swaps.jsonl` (raw chain stream, P1)
+- `data/swaps/orca/<pool_address>/decoded_swaps.jsonl` (P1.1 decode)
+- `data/swaps/raydium/<pool_address>/swaps.jsonl` + `decoded_swaps.jsonl`
+- `data/swaps/meteora/<pool_address>/swaps.jsonl` + `decoded_swaps.jsonl`
 - `data/dune-cache/*`
 - `data/dune-swaps/*` (if/when ETL output is used)
 

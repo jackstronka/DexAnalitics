@@ -4,7 +4,9 @@ pub mod backtest_engine;
 pub mod commands;
 pub mod engine;
 pub mod output;
+mod local_swap_fees;
 mod snapshots;
+mod swap_sync;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -99,6 +101,16 @@ enum PricePathSourceArg {
     Birdeye,
     /// One step per row in local Orca `snapshots.jsonl` inside the time window (no Birdeye).
     Snapshots,
+}
+
+/// How strict to be when reading local `decoded_swaps.jsonl` for fee indexing.
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum FeeSwapDecodeStatusArg {
+    /// Only rows with `decode_status == "ok"` or `"ok_traded_event"` (Orca Anchor `Traded` event).
+    #[default]
+    Ok,
+    /// Any successful tx with `amount_in_raw` (older / looser; may mix non-swap txs).
+    Loose,
 }
 
 #[derive(Subcommand)]
@@ -210,6 +222,10 @@ enum Commands {
         /// Price path: Birdeye OHLCV (default) or local Orca snapshots only (requires `--snapshot-protocol orca`, `--snapshot-pool-address`, cross-pair mints; no `BIRDEYE_API_KEY`).
         #[arg(long, value_enum, default_value_t = PricePathSourceArg::Birdeye)]
         price_path_source: PricePathSourceArg,
+
+        /// For local `decoded_swaps.jsonl` fee index: `ok` = strict swap rows only; `loose` = legacy filter (success + amount_in_raw).
+        #[arg(long, value_enum, default_value_t = FeeSwapDecodeStatusArg::Ok)]
+        fee_swap_decode_status: FeeSwapDecodeStatusArg,
     },
     /// Find best range and strategy on historical data (grid search over ranges + strategies)
     BacktestOptimize {
@@ -287,6 +303,10 @@ enum Commands {
         /// Optional: pool address to load snapshots from (data/pool-snapshots/{protocol}/{pool}/snapshots.jsonl).
         #[arg(long)]
         snapshot_pool_address: Option<String>,
+
+        /// For local `decoded_swaps.jsonl` when Dune swaps are missing/empty (same as `backtest`).
+        #[arg(long, value_enum, default_value_t = FeeSwapDecodeStatusArg::Ok)]
+        fee_swap_decode_status: FeeSwapDecodeStatusArg,
     },
     /// Optimize price range for LP position
     Optimize {
@@ -418,6 +438,54 @@ enum Commands {
         /// Optional: stop after N pools per protocol (useful for testing)
         #[arg(long)]
         limit: Option<usize>,
+    },
+    /// Sync raw on-chain transaction stream for curated pools (P1 swaps MVP).
+    SwapsSyncCuratedAll {
+        /// Optional: stop after N pools per protocol (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Max signatures fetched per pool per run.
+        #[arg(long, default_value_t = 300)]
+        max_signatures: usize,
+    },
+    /// Decode raw swap stream into vault-delta swap rows (P1.1).
+    SwapsEnrichCuratedAll {
+        /// Optional: stop after N pools per protocol (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Max raw signatures decoded per pool per run.
+        #[arg(long, default_value_t = 120)]
+        max_decode: usize,
+        /// Timeout per decode attempt (seconds).
+        #[arg(long, default_value_t = 20)]
+        decode_timeout_secs: u64,
+        /// Number of retries after first failed/timeout decode attempt.
+        #[arg(long, default_value_t = 2)]
+        decode_retries: usize,
+        /// Delete existing `decoded_swaps.jsonl` per pool and re-decode from raw (after decoder fixes).
+        #[arg(long, default_value_t = false)]
+        refresh_decoded: bool,
+    },
+    /// Audit decode quality for P1.1 (coverage + decode_status histogram).
+    SwapsDecodeAudit {
+        /// Optional: stop after N pools per protocol (useful for testing)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Save JSON report in data/reports/.
+        #[arg(long, default_value_t = true)]
+        save_report: bool,
+    },
+    /// Health check for snapshots/swaps pipelines with staleness + decode quality alerts.
+    DataHealthCheck {
+        /// Alert if file age is above this threshold.
+        #[arg(long, default_value_t = 30)]
+        max_age_minutes: i64,
+        /// Alert if decoded ok percentage drops below this threshold.
+        #[arg(long, default_value_t = 65.0)]
+        min_decode_ok_pct: f64,
+        /// Exit with error when alerts exist (for scheduler/monitor integration).
+        #[arg(long, default_value_t = false)]
+        fail_on_alert: bool,
     },
     /// Show last snapshot-run-curated-all status from local JSONL log
     SnapshotStatusLast,
@@ -588,6 +656,7 @@ async fn main() -> Result<()> {
             snapshot_pool_address,
             resolution_seconds,
             price_path_source,
+            fee_swap_decode_status,
         } => {
             println!("📡 Initializing Backtest Engine...");
 
@@ -945,6 +1014,74 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+            if dune_swaps.is_none() && matches!(fee_source, FeeSourceArg::Swaps | FeeSourceArg::Auto)
+            {
+                println!("ℹ️ --dune-swaps not set: using local swaps cache when available.");
+            }
+
+            // Optional: read local raw swap stream (P1 MVP) to build tx-count timing per step.
+            let raw_swap_counts_by_step: Option<std::collections::BTreeMap<usize, u64>> = {
+                let proto = snapshot_protocol.as_ref();
+                let pool = snapshot_pool_address.as_ref().or(whirlpool_address.as_ref());
+                if proto.is_none() || pool.is_none() || step_data.is_empty() {
+                    None
+                } else {
+                    let pdir = match proto.unwrap() {
+                        SnapshotProtocolArg::Orca => "orca",
+                        SnapshotProtocolArg::Raydium => "raydium",
+                        SnapshotProtocolArg::Meteora => "meteora",
+                    };
+                    let path = std::path::Path::new("data")
+                        .join("swaps")
+                        .join(pdir)
+                        .join(pool.unwrap())
+                        .join("swaps.jsonl");
+                    if !path.exists() {
+                        None
+                    } else {
+                        let txt = match std::fs::read_to_string(&path) {
+                            Ok(t) => t,
+                            Err(_) => String::new(),
+                        };
+                        if txt.is_empty() {
+                            None
+                        } else {
+                            let step_seconds = (*resolution_seconds).max(1) as i64;
+                            let start_ts = step_data[0].start_timestamp as i64;
+                            let mut counts: std::collections::BTreeMap<usize, u64> =
+                                std::collections::BTreeMap::new();
+                            for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+                                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                                    continue;
+                                };
+                                // Skip failed txs
+                                if v.get("err")
+                                    .and_then(|x| x.as_str())
+                                    .map(|s| !s.trim().is_empty() && s != "None")
+                                    .unwrap_or(false)
+                                {
+                                    continue;
+                                }
+                                let ts = v.get("block_time").and_then(|x| x.as_i64());
+                                let Some(ts) = ts else {
+                                    continue;
+                                };
+                                let delta = ts - start_ts;
+                                if delta < 0 {
+                                    continue;
+                                }
+                                let idx = (delta / step_seconds) as usize;
+                                *counts.entry(idx).or_insert(0) += 1;
+                            }
+                            if counts.is_empty() {
+                                None
+                            } else {
+                                Some(counts)
+                            }
+                        }
+                    }
+                }
+            };
 
             // Optional: build snapshot fee index by step (snapshot-fees mode).
             use std::collections::BTreeMap;
@@ -1237,8 +1374,8 @@ async fn main() -> Result<()> {
             };
             }
 
-            // Index swap fees by step.
-            let swap_index: Option<BTreeMap<usize, Decimal>> = swaps.as_ref().map(|swaps| {
+            // Index swap fees by step from Dune data (when provided).
+            let mut swap_index: Option<BTreeMap<usize, Decimal>> = swaps.as_ref().map(|swaps| {
                 let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
                 if step_data.is_empty() {
                     return map;
@@ -1261,6 +1398,7 @@ async fn main() -> Result<()> {
                 }
                 map
             });
+            let mut local_decoded_swap_index: Option<BTreeMap<usize, Decimal>> = None;
 
             // Prepare Price Path (A/B close prices)
             let prices: Vec<Price> = if candles.is_empty() {
@@ -1299,6 +1437,182 @@ async fn main() -> Result<()> {
             } else {
                 Decimal::from_f64(0.003).unwrap()
             };
+
+            // Local decoded swaps (P1.1): prefer this when Dune swaps are not provided.
+            {
+                let proto = snapshot_protocol.as_ref();
+                let pool = snapshot_pool_address.as_ref().or(whirlpool_address.as_ref());
+                if proto.is_some() && pool.is_some() && !step_data.is_empty() {
+                    let pdir = match proto.unwrap() {
+                        SnapshotProtocolArg::Orca => "orca",
+                        SnapshotProtocolArg::Raydium => "raydium",
+                        SnapshotProtocolArg::Meteora => "meteora",
+                    };
+                    let path = std::path::Path::new("data")
+                        .join("swaps")
+                        .join(pdir)
+                        .join(pool.unwrap())
+                        .join("decoded_swaps.jsonl");
+                    if path.exists() {
+                        let txt = std::fs::read_to_string(&path).unwrap_or_default();
+                        if !txt.trim().is_empty() {
+                            let step_seconds = (*resolution_seconds).max(1) as i64;
+                            let start_ts = step_data[0].start_timestamp as i64;
+                            let pow10 = |d: u32| -> Decimal {
+                                let mut v = Decimal::ONE;
+                                for _ in 0..d {
+                                    v *= Decimal::from(10u32);
+                                }
+                                v
+                            };
+                            let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                            for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+                                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                                    continue;
+                                };
+                                if matches!(*fee_swap_decode_status, FeeSwapDecodeStatusArg::Ok) {
+                                    let st = v.get("decode_status").and_then(|x| x.as_str());
+                                    if !matches!(st, Some("ok") | Some("ok_traded_event")) {
+                                        continue;
+                                    }
+                                }
+                                if !v.get("success").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                    continue;
+                                }
+                                let Some(ts) = v.get("block_time").and_then(|x| x.as_i64()) else {
+                                    continue;
+                                };
+                                let delta = ts - start_ts;
+                                if delta < 0 {
+                                    continue;
+                                }
+                                let idx = (delta / step_seconds) as usize;
+                                let Some(step) = step_data.get(idx) else {
+                                    continue;
+                                };
+                                let amount_in_raw = v
+                                    .get("amount_in_raw")
+                                    .and_then(|x| x.as_u64())
+                                    .map(Decimal::from)
+                                    .or_else(|| {
+                                        v.get("amount_in_raw")
+                                            .and_then(|x| x.as_str())
+                                            .and_then(|s| s.parse::<u128>().ok())
+                                            .and_then(Decimal::from_u128)
+                                    });
+                                let Some(amount_in_raw) = amount_in_raw else {
+                                    continue;
+                                };
+                                let direction =
+                                    v.get("direction").and_then(|x| x.as_str()).unwrap_or("");
+                                let input_is_a = direction == "a_to_b";
+                                let (decimals_in, price_in_usd) = if input_is_a {
+                                    (token_a_decimals as u32, step.price_usd.value)
+                                } else {
+                                    (token_b_decimals as u32, step.quote_usd)
+                                };
+                                let amount_in_h = amount_in_raw / pow10(decimals_in);
+                                let fee_usd = amount_in_h * price_in_usd * fee_rate;
+                                if fee_usd > Decimal::ZERO {
+                                    *map.entry(idx).or_insert(Decimal::ZERO) += fee_usd;
+                                }
+                            }
+                            if !map.is_empty() {
+                                local_decoded_swap_index = Some(map);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // P1.2: if no decoded Dune swaps are available, use local raw swap tx timing
+            // to distribute total pool fees across steps (swaps-timing proxy).
+            if swap_index.as_ref().map(|m| m.is_empty()).unwrap_or(true) {
+                if let Some(local_map) = local_decoded_swap_index.as_ref() {
+                    // If decoded swaps only cover a few step buckets, hybridize:
+                    // - use decoded swaps on buckets where we have them,
+                    // - fill missing buckets with raw tx-count timing proxy.
+                    if let Some(counts) = raw_swap_counts_by_step.as_ref() {
+                        let total_count: u64 = counts.values().copied().sum();
+                        if total_count > 0 {
+                            let total_pool_fees: Decimal = step_data
+                                .iter()
+                                .map(|p| p.step_volume_usd * fee_rate)
+                                .sum();
+                            if total_pool_fees > Decimal::ZERO {
+                                let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                                let denom = Decimal::from(total_count);
+                                for (idx, c) in counts {
+                                    if *c == 0 {
+                                        continue;
+                                    }
+                                    let w = Decimal::from(*c) / denom;
+                                    let v = total_pool_fees * w;
+                                    if v > Decimal::ZERO {
+                                        map.insert(*idx, v);
+                                    }
+                                }
+                                // Overwrite buckets we have decoded values for.
+                                for (idx, v) in local_map {
+                                    map.insert(*idx, v.clone());
+                                }
+                                if !map.is_empty() {
+                                    println!(
+                                        "🧪 Using local decoded swaps + timing proxy (decoded={} merged={})",
+                                        local_map.len(),
+                                        map.len()
+                                    );
+                                    swap_index = Some(map);
+                                } else {
+                                    swap_index = Some(local_map.clone());
+                                }
+                            } else {
+                                swap_index = Some(local_map.clone());
+                            }
+                        } else {
+                            swap_index = Some(local_map.clone());
+                        }
+                    } else {
+                        println!(
+                            "🧪 Using local decoded swaps from data/swaps ({} steps).",
+                            local_map.len()
+                        );
+                        swap_index = Some(local_map.clone());
+                    }
+                }
+            }
+            if swap_index.as_ref().map(|m| m.is_empty()).unwrap_or(true) {
+                if let Some(counts) = raw_swap_counts_by_step.as_ref() {
+                    let total_count: u64 = counts.values().copied().sum();
+                    if total_count > 0 {
+                        let total_pool_fees: Decimal = step_data
+                            .iter()
+                            .map(|p| p.step_volume_usd * fee_rate)
+                            .sum();
+                        if total_pool_fees > Decimal::ZERO {
+                            let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                            let denom = Decimal::from(total_count);
+                            for (idx, c) in counts {
+                                if *c == 0 {
+                                    continue;
+                                }
+                                let w = Decimal::from(*c) / denom;
+                                let v = total_pool_fees * w;
+                                if v > Decimal::ZERO {
+                                    map.insert(*idx, v);
+                                }
+                            }
+                            if !map.is_empty() {
+                                println!(
+                                    "🧪 Using local raw swaps timing proxy from data/swaps ({} steps).",
+                                    map.len()
+                                );
+                                swap_index = Some(map);
+                            }
+                        }
+                    }
+                }
+            }
 
             // Guardrail: snapshot-fee model is experimental. If implied pool fees are
             // unrealistically high vs candle-based pool fee baseline, disable it and fallback.
@@ -1342,6 +1656,10 @@ async fn main() -> Result<()> {
             let mut fee_steps_swaps: usize = 0;
             let mut fee_steps_candles: usize = 0;
             let mut fee_steps_zero: usize = 0;
+            let mut fee_total_candles_lp = Decimal::ZERO;
+            let mut fee_total_swaps_lp = Decimal::ZERO;
+            let mut fee_total_snapshots_lp = Decimal::ZERO;
+            let mut fee_cmp_steps = 0usize;
 
             for (idx, price) in prices.iter().enumerate() {
                 let p = step_data.get(idx).copied().unwrap_or(crate::backtest_engine::StepDataPoint {
@@ -1362,6 +1680,21 @@ async fn main() -> Result<()> {
                     && price.value <= tracker.current_range.upper_price.value;
 
                 let step_fees = if in_range {
+                    fee_cmp_steps += 1;
+                    let candles_lp = p.step_volume_usd * fee_rate * p.lp_share;
+                    let swaps_lp = swap_index
+                        .as_ref()
+                        .and_then(|idx_map| idx_map.get(&idx).cloned())
+                        .map(|v| v * p.lp_share)
+                        .unwrap_or(Decimal::ZERO);
+                    let snapshots_lp = snapshot_fee_index
+                        .as_ref()
+                        .and_then(|idx_map| idx_map.get(&idx).cloned())
+                        .map(|v| v * p.lp_share)
+                        .unwrap_or(Decimal::ZERO);
+                    fee_total_candles_lp += candles_lp;
+                    fee_total_swaps_lp += swaps_lp;
+                    fee_total_snapshots_lp += snapshots_lp;
                     match fee_source {
                         FeeSourceArg::Candles => {
                             fee_steps_candles += 1;
@@ -1461,6 +1794,35 @@ async fn main() -> Result<()> {
                 "🧾 Fee source breakdown (in-range steps): snapshots={} swaps={} candles={} zero={} | total steps={}",
                 fee_steps_snapshots, fee_steps_swaps, fee_steps_candles, fee_steps_zero, total_steps
             );
+            println!(
+                "🧪 Fee compare totals (LP, in-range): candles=${:.4} swaps=${:.4} snapshots=${:.4} steps={}",
+                fee_total_candles_lp, fee_total_swaps_lp, fee_total_snapshots_lp, fee_cmp_steps
+            );
+            {
+                let out_dir = std::path::Path::new("data").join("reports");
+                std::fs::create_dir_all(&out_dir)?;
+                let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                let out = out_dir.join(format!("backtest_fee_compare_{}.json", ts));
+                let payload = serde_json::json!({
+                    "ts_utc": chrono::Utc::now().to_rfc3339(),
+                    "pair": display_label,
+                    "fee_source_selected": format!("{:?}", fee_source),
+                    "in_range_steps": fee_cmp_steps,
+                    "totals_lp_usd": {
+                        "candles": fee_total_candles_lp,
+                        "swaps": fee_total_swaps_lp,
+                        "snapshots": fee_total_snapshots_lp
+                    },
+                    "step_breakdown": {
+                        "snapshots_steps": fee_steps_snapshots,
+                        "swaps_steps": fee_steps_swaps,
+                        "candles_steps": fee_steps_candles,
+                        "zero_steps": fee_steps_zero
+                    }
+                });
+                std::fs::write(&out, serde_json::to_string_pretty(&payload)?)?;
+                println!("📝 Fee compare report saved: {}", out.display());
+            }
 
             // Determine pair label for reporting (supports optional quote token)
             let pair_label = if let Some(sb) = symbol_b {
@@ -1507,6 +1869,7 @@ async fn main() -> Result<()> {
             resolution_seconds,
             snapshot_protocol,
             snapshot_pool_address,
+            fee_swap_decode_status,
         } => {
             let api_key = env::var("BIRDEYE_API_KEY")
                 .expect("BIRDEYE_API_KEY must be set in .env or environment");
@@ -1664,8 +2027,12 @@ async fn main() -> Result<()> {
                 )
             });
             let swaps_ref: Option<&[clmm_lp_data::swaps::SwapEvent]> = swaps.as_deref();
+            let require_decode_ok =
+                matches!(*fee_swap_decode_status, FeeSwapDecodeStatusArg::Ok);
 
             use backtest_engine::{build_step_data, fee_realism, run_grid, GridRunParams, StratConfig};
+            use std::collections::BTreeMap;
+            use std::sync::Arc;
 
             let steps_per_window = candles.len() / (*windows).max(1);
             let window_ranges: Vec<std::ops::Range<usize>> = (0..*windows)
@@ -1807,6 +2174,51 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                let local_pool_fees_arc: Option<Arc<BTreeMap<usize, Decimal>>> = {
+                    let use_local =
+                        dune_swaps.is_none() || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
+                    if !use_local {
+                        None
+                    } else if let (Some(proto), Some(pool)) = (
+                        snapshot_protocol.as_ref(),
+                        snapshot_pool_address
+                            .as_deref()
+                            .or(whirlpool_address.as_deref()),
+                    ) {
+                        let pdir = match proto {
+                            SnapshotProtocolArg::Orca => "orca",
+                            SnapshotProtocolArg::Raydium => "raydium",
+                            SnapshotProtocolArg::Meteora => "meteora",
+                        };
+                        match crate::local_swap_fees::build_local_pool_fees_usd(
+                            pdir,
+                            pool,
+                            &step_data,
+                            res,
+                            token_a_decimals,
+                            token_b_decimals,
+                            fee_rate,
+                            require_decode_ok,
+                        ) {
+                            Some(m) if !m.is_empty() => {
+                                println!(
+                                    "🧪 backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
+                                    pdir,
+                                    m.len()
+                                );
+                                Some(Arc::new(m))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        if dune_swaps.is_none() {
+                            println!(
+                                "ℹ️ backtest-optimize: no Dune swaps; set --snapshot-protocol and --snapshot-pool-address (or --whirlpool-address) to use local data/swaps fees."
+                            );
+                        }
+                        None
+                    }
+                };
                 let (fv, fe100) = fee_realism(&step_data, fee_rate);
                 let rows = run_grid(
                     &step_data,
@@ -1816,6 +2228,7 @@ async fn main() -> Result<()> {
                     &strategies,
                     &grid_params,
                     swaps_ref,
+                    local_pool_fees_arc,
                 );
                 let mut r: Vec<_> = rows
                     .into_iter()
@@ -1933,6 +2346,39 @@ async fn main() -> Result<()> {
                         fee_check_expected_100 = fe100;
                         audit_step_data = Some(step_data.clone());
                     }
+                    let local_pool_fees_arc: Option<Arc<BTreeMap<usize, Decimal>>> = {
+                        let use_local = dune_swaps.is_none()
+                            || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
+                        if !use_local {
+                            None
+                        } else if let (Some(proto), Some(pool)) = (
+                            snapshot_protocol.as_ref(),
+                            snapshot_pool_address
+                                .as_deref()
+                                .or(whirlpool_address.as_deref()),
+                        ) {
+                            let pdir = match proto {
+                                SnapshotProtocolArg::Orca => "orca",
+                                SnapshotProtocolArg::Raydium => "raydium",
+                                SnapshotProtocolArg::Meteora => "meteora",
+                            };
+                            match crate::local_swap_fees::build_local_pool_fees_usd(
+                                pdir,
+                                pool,
+                                &step_data,
+                                res,
+                                token_a_decimals,
+                                token_b_decimals,
+                                fee_rate,
+                                require_decode_ok,
+                            ) {
+                                Some(m) if !m.is_empty() => Some(Arc::new(m)),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    };
                     let rows = run_grid(
                         &step_data,
                         entry_price,
@@ -1941,6 +2387,7 @@ async fn main() -> Result<()> {
                         &strategies,
                         &grid_params,
                         swaps_ref,
+                        local_pool_fees_arc,
                     );
                     for (wp_frac, lower, upper, strat_name, summary) in rows {
                         let key = (format!("{:.6}", wp_frac), strat_name.clone());
@@ -3829,6 +4276,42 @@ async fn main() -> Result<()> {
                 status.errors.len()
             );
             println!("📝 Run status appended: {}", status_path.display());
+        }
+        Commands::SwapsSyncCuratedAll {
+            limit,
+            max_signatures,
+        } => {
+            crate::swap_sync::sync_curated_all(*limit, *max_signatures).await?;
+        }
+        Commands::SwapsEnrichCuratedAll {
+            limit,
+            max_decode,
+            decode_timeout_secs,
+            decode_retries,
+            refresh_decoded,
+        } => {
+            crate::swap_sync::enrich_curated_all(
+                *limit,
+                *max_decode,
+                *decode_timeout_secs,
+                *decode_retries,
+                *refresh_decoded,
+            )
+            .await?;
+        }
+        Commands::SwapsDecodeAudit { limit, save_report } => {
+            crate::swap_sync::decode_audit_curated_all(*limit, *save_report)?;
+        }
+        Commands::DataHealthCheck {
+            max_age_minutes,
+            min_decode_ok_pct,
+            fail_on_alert,
+        } => {
+            crate::swap_sync::health_check_curated_all(
+                *max_age_minutes,
+                *min_decode_ok_pct,
+                *fail_on_alert,
+            )?;
         }
         Commands::SnapshotStatusLast => {
             use serde_json::Value;

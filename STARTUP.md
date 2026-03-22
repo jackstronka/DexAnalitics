@@ -252,6 +252,87 @@ cargo run --bin clmm-lp-cli -- backtest \
 
 **Free / low-cost price alternatives to Birdeye** (for other modes): Dexscreener, Jupiter price API, CoinGecko public endpoints, or **your own Solana RPC** + pool account decode (what snapshots already do for Orca).
 
+### Swaps sync (P1 MVP, on-chain raw stream)
+
+To reduce fee heuristics further, sync raw on-chain transaction stream for curated pools:
+
+```bash
+cargo run --bin clmm-lp-cli -- swaps-sync-curated-all --max-signatures 300
+
+# P1.1 decode stage (build decoded_swaps.jsonl from raw signatures)
+cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --max-decode 120
+# After a decoder bugfix, rebuild decoded files from raw:
+# cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --max-decode 2000 --refresh-decoded
+# optional tuning for slow RPC:
+#   --decode-timeout-secs 30 --decode-retries 3
+
+# P1.1 quality audit
+cargo run --bin clmm-lp-cli -- swaps-decode-audit --save-report
+
+# monitoring / alerts (for scheduler)
+cargo run --bin clmm-lp-cli -- data-health-check --max-age-minutes 30 --min-decode-ok-pct 65 --fail-on-alert
+```
+
+Useful options:
+- `--limit N` (debug/test: first N pools per protocol)
+- `--max-signatures N` (how many newest signatures to fetch per pool each run)
+
+Data output (append-only JSONL):
+- `data/swaps/orca/<pool>/swaps.jsonl`
+- `data/swaps/raydium/<pool>/swaps.jsonl`
+- `data/swaps/meteora/<pool>/swaps.jsonl`
+
+Current P1 format is raw chain stream (`signature`, `slot`, `block_time`, status/error).  
+Next step (P1.1) is decoding swap fields (`amount_in/out`, `fee_amount`, direction, tick/sqrt after).
+Decoded output is written to:
+- `data/swaps/orca/<pool>/decoded_swaps.jsonl`
+- `data/swaps/raydium/<pool>/decoded_swaps.jsonl`
+- `data/swaps/meteora/<pool>/decoded_swaps.jsonl`
+
+Backtest behavior:
+- `--fee-source swaps` uses local decoded swaps first (if present).
+- Dune swaps are only used when you pass `--dune-swaps <query_id>`.
+
+### Scheduler setup (recommended)
+
+Run two jobs in parallel:
+- Job A: `snapshot-run-curated-all` (state snapshots, already configured)
+- Job B: `swaps-sync-curated-all --max-signatures 300` (raw swap stream)
+
+Best practice:
+- keep separate log files per job,
+- keep the same `Start in` (repo root),
+- keep a redundant/backup task per job (same command, different trigger/log) for resilience.
+
+### Alternatives to Task Scheduler (Windows)
+
+Task Scheduler is brittle for short-interval repetition (sleep/battery/“missed” runs, 107 vs 110 confusion). A common pattern is **one long-lived process** that loops and sleeps, registered as a **Windows service** so it starts at boot and runs whether or not anyone is logged in.
+
+**1. Loop scripts (in this repo)**
+
+- `scripts/windows/run-snapshot-loop.ps1` — `snapshot-run-curated-all` every N minutes (default 10), logs to `data/snapshot_logs/snapshot-loop.log`.
+- `scripts/windows/run-swaps-pipeline-loop.ps1` — `swaps-sync-curated-all` then `swaps-enrich-curated-all` each cycle, logs to `data/snapshot_logs/swaps-pipeline-loop.log`.
+
+Manual test (from anywhere):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop.ps1 -IntervalMinutes 10
+```
+
+**2. [Shawl](https://github.com/mtkennerly/shawl)** (wraps any command as a service; good fit for the scripts above)
+
+Example (adjust paths):
+
+```text
+shawl add --name clmm-snapshot-loop --cwd F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop.ps1
+```
+
+Then `shawl run --name clmm-snapshot-loop` (or start the service from `services.msc`). Use a **second** service for `run-swaps-pipeline-loop.ps1` if you still want two parallel pipelines.
+
+**3. [NSSM](https://nssm.cc/)** — same idea as Shawl (GUI + CLI); set *Application* to `powershell.exe`, *Arguments* to `-NoProfile -ExecutionPolicy Bypass -File "...\run-snapshot-loop.ps1"`, *Startup directory* to repo root.
+
+**4. Docker** — if you already run the stack in Compose, a small sidecar with `cron` or [Ofelia](https://github.com/mcuadros/ofelia) can invoke the CLI on a schedule inside Linux; on Windows this is only worth it if you are comfortable bind-mounting the repo and RPC access from the container.
+
 ---
 
 ## Docker Compose (Full Stack)

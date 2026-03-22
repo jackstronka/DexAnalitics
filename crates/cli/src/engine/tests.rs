@@ -82,6 +82,7 @@ mod tests {
             StratConfig::Periodic(1),
             &params,
             None::<&[_]>,
+            None,
         );
 
         assert_eq!(summary.total_fees, Decimal::ZERO);

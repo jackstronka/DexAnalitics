@@ -222,7 +222,11 @@ fn index_swaps_by_step<'a>(
 }
 
 /// Run a single backtest (one range, one strategy) over step data. Returns (lower, upper, strat_name, summary).
-/// If `swaps` is provided, fees are computed from Dune swap data (step_swap_fees_usd) instead of candle volume.
+///
+/// Fee precedence per step:
+/// 1) `local_pool_fees_usd` if non-empty map (decoded / timing proxy from local JSONL)
+/// 2) `swaps` (Dune `SwapEvent` slice), if non-empty
+/// 3) candle volume × `fee_rate`
 pub fn run_single(
     step_data: &[StepData],
     entry_price: Price,
@@ -231,6 +235,7 @@ pub fn run_single(
     strat: StratConfig,
     params: &GridRunParams,
     swaps: Option<&[SwapEvent]>,
+    local_pool_fees_usd: Option<&BTreeMap<usize, Decimal>>,
 ) -> (f64, f64, String, TrackerSummary) {
     let capital_dec = params.capital_dec;
     let tx_cost_dec = params.tx_cost_dec;
@@ -315,8 +320,9 @@ pub fn run_single(
         fee_engine::FeeShareModel::LegacyLpShare
     };
 
-    let swap_index: Option<BTreeMap<usize, Vec<&SwapEvent>>> =
-        swaps.map(|s| index_swaps_by_step(s, step_data, params.step_seconds.max(1)));
+    let swap_index: Option<BTreeMap<usize, Vec<&SwapEvent>>> = swaps
+        .filter(|s| !s.is_empty())
+        .map(|s| index_swaps_by_step(s, step_data, params.step_seconds.max(1)));
 
     for (i, p) in step_data.iter().enumerate() {
         steps_since_rebalance += 1;
@@ -326,7 +332,9 @@ pub fn run_single(
             in_range_steps += 1;
         }
 
-        let pool_fees = if let Some(ref idx) = swap_index {
+        let pool_fees = if let Some(m) = local_pool_fees_usd.filter(|m| !m.is_empty()) {
+            m.get(&i).copied().unwrap_or(Decimal::ZERO)
+        } else if let Some(ref idx) = swap_index {
             idx.get(&i)
                 .map(|swaps_here| {
                     swaps_here.iter().fold(Decimal::ZERO, |acc, s| {
@@ -492,7 +500,6 @@ pub fn run_single(
 }
 
 /// Run grid of (width_pct, strategy) in parallel. Returns (width_pct, lower, upper, strat_name, summary).
-/// If `swaps` is provided, fees are computed from Dune swap data per step.
 pub fn run_grid(
     step_data: &[StepData],
     entry_price: Price,
@@ -501,6 +508,7 @@ pub fn run_grid(
     strategies: &[StratConfig],
     params: &GridRunParams,
     swaps: Option<&[SwapEvent]>,
+    local_pool_fees_usd: Option<Arc<BTreeMap<usize, Decimal>>>,
 ) -> Vec<(f64, f64, f64, String, TrackerSummary)> {
     let step_data = Arc::new(step_data.to_vec());
     let swaps_arc: Option<Arc<Vec<SwapEvent>>> = swaps.map(|s| Arc::new(s.to_vec()));
@@ -511,6 +519,7 @@ pub fn run_grid(
     jobs.par_iter()
         .map(|(wp, strat)| {
             let swaps_ref: Option<&[SwapEvent]> = swaps_arc.as_deref().map(|v| v.as_slice());
+            let local_ref = local_pool_fees_usd.as_deref();
             let (lower, upper, strat_name, summary) = run_single(
                 step_data.as_ref(),
                 entry_price,
@@ -519,6 +528,7 @@ pub fn run_grid(
                 *strat,
                 params,
                 swaps_ref,
+                local_ref,
             );
             (*wp, lower, upper, strat_name, summary)
         })

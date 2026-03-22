@@ -6,7 +6,9 @@
 mod fetcher;
 mod parser;
 mod types;
+pub mod whirlpool_traded;
 
 pub use fetcher::*;
 pub use parser::*;
 pub use types::*;
+pub use whirlpool_traded::{parse_traded_event_for_pool, WhirlpoolTradedEvent, TRADED_EVENT_DISCRIMINATOR};

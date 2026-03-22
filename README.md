@@ -1,779 +1,203 @@
-[![Dual License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-[![Stars](https://img.shields.io/github/stars/joaquinbejar/CLMM-Liquidity-Provider.svg)](https://github.com/joaquinbejar/CLMM-Liquidity-Provider/stargazers)
-[![Issues](https://img.shields.io/github/issues/joaquinbejar/CLMM-Liquidity-Provider.svg)](https://github.com/joaquinbejar/CLMM-Liquidity-Provider/issues)
-[![PRs](https://img.shields.io/github/issues-pr/joaquinbejar/CLMM-Liquidity-Provider.svg)](https://github.com/joaquinbejar/CLMM-Liquidity-Provider/pulls)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/joaquinbejar/CLMM-Liquidity-Provider/build.yml)](https://github.com/joaquinbejar/CLMM-Liquidity-Provider/actions)
-[![Coverage](https://img.shields.io/codecov/c/github/joaquinbejar/CLMM-Liquidity-Provider)](https://codecov.io/gh/joaquinbejar/CLMM-Liquidity-Provider)
-[![Rust Version](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://www.rust-lang.org/)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://github.com/joaquinbejar/CLMM-Liquidity-Provider/pkgs/container/clmm-liquidity-provider)
+# CLMM Liquidity Provider (aktualny stan projektu)
 
-### Crates
+Repozytorium ewoluowało: obecnie to przede wszystkim **workspace Rust** do analizy i backtestów LP na Solanie, z naciskiem na:
 
-| Crate | Version | Docs |
-|-------|---------|------|
-| `clmm-lp-domain` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-domain.svg)](https://crates.io/crates/clmm-lp-domain) | [![Docs](https://docs.rs/clmm-lp-domain/badge.svg)](https://docs.rs/clmm-lp-domain) |
-| `clmm-lp-simulation` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-simulation.svg)](https://crates.io/crates/clmm-lp-simulation) | [![Docs](https://docs.rs/clmm-lp-simulation/badge.svg)](https://docs.rs/clmm-lp-simulation) |
-| `clmm-lp-optimization` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-optimization.svg)](https://crates.io/crates/clmm-lp-optimization) | [![Docs](https://docs.rs/clmm-lp-optimization/badge.svg)](https://docs.rs/clmm-lp-optimization) |
-| `clmm-lp-protocols` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-protocols.svg)](https://crates.io/crates/clmm-lp-protocols) | [![Docs](https://docs.rs/clmm-lp-protocols/badge.svg)](https://docs.rs/clmm-lp-protocols) |
-| `clmm-lp-execution` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-execution.svg)](https://crates.io/crates/clmm-lp-execution) | [![Docs](https://docs.rs/clmm-lp-execution/badge.svg)](https://docs.rs/clmm-lp-execution) |
-| `clmm-lp-data` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-data.svg)](https://crates.io/crates/clmm-lp-data) | [![Docs](https://docs.rs/clmm-lp-data/badge.svg)](https://docs.rs/clmm-lp-data) |
-| `clmm-lp-cli` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-cli.svg)](https://crates.io/crates/clmm-lp-cli) | [![Docs](https://docs.rs/clmm-lp-cli/badge.svg)](https://docs.rs/clmm-lp-cli) |
-| `clmm-lp-api` | [![Crates.io](https://img.shields.io/crates/v/clmm-lp-api.svg)](https://crates.io/crates/clmm-lp-api) | [![Docs](https://docs.rs/clmm-lp-api/badge.svg)](https://docs.rs/clmm-lp-api) |
+- lokalne snapshoty on-chain (`pool-snapshots`)
+- lokalny sync strumienia swapów (`swaps` + `decoded_swaps`)
+- backtesty i optymalizację zakresów dla CLMM/DLMM
 
-<div style="text-align: center;">
-<img src="https://raw.githubusercontent.com/joaquinbejar/CLMM-Liquidity-Provider/main/doc/images/logo.png" alt="CLMM Liquidity Provider" style="width: 100%; height: 100%;">
-</div>
+Obsługiwane protokoły:
 
-# CLMM Liquidity Provider Strategy Optimizer - Solana
+- Orca Whirlpool
+- Raydium CLMM
+- Meteora DLMM
 
-A powerful, production-ready strategy optimization and execution engine for liquidity providers on Solana Concentrated Liquidity Market Makers (CLMMs). This project supports **Orca Whirlpools**, **Raydium CLMM**, and **Meteora DLMM**.
+## Co tu jest najważniejsze dzisiaj
 
-Built for market makers and sophisticated LPs who need to:
-- Analyze pools and calculate impermanent loss (IL) in real-time
-- Simulate positions over historical data with multiple rebalancing strategies
-- Execute automated rebalancing based on volatility, volume, and asset correlation
-- Monitor positions with real-time alerts and notifications
-- Access everything via CLI, REST API, or Web Dashboard
+- **CLI jako główny interfejs** (`crates/cli`)
+- **pipeline danych lokalnych** zamiast pełnego oparcia o płatne API
+- **porównywanie strategii/range'ów** na tych samych danych historycznych
 
-## 🚀 Value Proposition
+## Struktura workspace
 
-DeFi market making requires more than just chasing high APY. This project solves three critical problems:
-1.  **Risk Quantification**: Precise calculation of impermanent loss risks before entering positions.
-2.  **Range Optimization**: Finding the mathematical optimal tick ranges to maximize fee capture while minimizing IL.
-3.  **Scenario Simulation**: Stress-testing positions against historical and Monte Carlo simulated market conditions.
+`Cargo.toml` definiuje 8 crate'ów:
 
----
+- `clmm-lp-domain` - model domeny i matematyka CLMM
+- `clmm-lp-simulation` - backtest i tracking pozycji
+- `clmm-lp-optimization` - optymalizacja zakresów i celów
+- `clmm-lp-protocols` - adaptery protokołów Solana
+- `clmm-lp-execution` - logika wykonawcza/monitoring
+- `clmm-lp-data` - providerzy danych i cache
+- `clmm-lp-api` - REST API
+- `clmm-lp-cli` - narzędzie CLI
 
-## 🏗 Architecture
+## Szybki start
 
-The project follows a **Domain-Driven Design (DDD)** approach, separated into modular crates within a cargo workspace.
+Wymagania:
 
-```mermaid
-graph TD
-    subgraph "User Interfaces"
-        User[User]
-        Browser[Web Browser]
-    end
-    
-    User --> CLI[CLI Crate]
-    User --> API[API Crate]
-    Browser --> Dashboard[Web Dashboard]
-    Dashboard --> API
-    
-    subgraph "Application Layer"
-        CLI --> Optimization[Optimization Crate]
-        CLI --> Simulation[Simulation Crate]
-        API --> Execution[Execution Crate]
-        API --> Protocols[Protocols Crate]
-    end
-    
-    subgraph "Core Domain"
-        Optimization --> Domain[Domain Crate]
-        Simulation --> Domain
-        Execution --> Domain
-        Protocols --> Domain
-    end
-    
-    subgraph "Infrastructure"
-        Simulation --> Data[Data Crate]
-        Execution --> Protocols
-        Protocols --> Data
-        Data --> DB[(PostgreSQL)]
-    end
-    
-    subgraph "External Services"
-        Protocols -.-> |RPC| Solana[Solana Blockchain]
-        Data -.-> |HTTP| Birdeye[Birdeye API]
-        Data -.-> |HTTP| Jupiter[Jupiter API]
-        API -.-> |WebSocket| Clients[WS Clients]
-    end
-```
+- Rust (edition 2024)
+- dostęp do Solana RPC
+- opcjonalnie klucze API (np. `BIRDEYE_API_KEY`, `DUNE_API_KEY`) dla wybranych trybów
 
-### Module Overview
-
-| Crate | Description |
-|-------|-------------|
-| **`clmm-lp-domain`** | Core entities, value objects, CLMM math, tick calculations, and IL formulas |
-| **`clmm-lp-simulation`** | Backtesting engine, price path generators, rebalancing strategies |
-| **`clmm-lp-optimization`** | Strategy optimization with Grid Search, objective functions (PnL, Sharpe, IL) |
-| **`clmm-lp-protocols`** | Solana protocol adapters (Orca Whirlpools), RPC provider with failover |
-| **`clmm-lp-execution`** | Live monitoring, PnL tracking, alerts, wallet management, strategy execution |
-| **`clmm-lp-data`** | Data providers (Birdeye, Jupiter), caching, PostgreSQL repositories |
-| **`clmm-lp-cli`** | CLI with analyze, backtest, optimize, monitor commands. Multiple output formats |
-| **`clmm-lp-api`** | REST API with Swagger UI, JWT auth, WebSocket support |
-
-### Web Dashboard
-
-| Component | Description |
-|-----------|-------------|
-| **Dashboard** | Portfolio overview with charts and metrics |
-| **Positions** | Position management with real-time updates |
-| **Strategies** | Strategy configuration and control |
-| **Pools** | Pool explorer with TVL, volume, APY |
-| **Settings** | Configuration and preferences |
-
----
-
-## 🛠 Tech Stack
-
-### Backend (Rust)
-
-| Category | Technology |
-|----------|------------|
-| **Language** | Rust 1.90+ (Edition 2024) |
-| **Async Runtime** | Tokio |
-| **Web Framework** | Axum |
-| **Database** | PostgreSQL (SQLx) |
-| **Blockchain** | `solana-sdk`, `solana-client` |
-| **Math** | `rust_decimal`, fixed-point precision |
-| **Serialization** | Serde, JSON |
-| **Logging** | `tracing` with structured logs |
-| **Testing** | `proptest` for property-based testing |
-| **API Docs** | `utoipa` (OpenAPI/Swagger) |
-
-### Frontend (TypeScript)
-
-| Category | Technology |
-|----------|------------|
-| **Framework** | React 18 |
-| **Build Tool** | Vite |
-| **Styling** | TailwindCSS |
-| **State Management** | React Query (TanStack) |
-| **Routing** | React Router |
-| **Charts** | Recharts |
-| **Icons** | Lucide React |
-
----
-
-## 📅 Roadmap & Status
-
-The project is being built in incremental phases. **Current version: 0.1.1-alpha.2**
-
-| Phase | Name | Status | Progress |
-|-------|------|--------|----------|
-| 0 | Foundation | ✅ Complete | 100% |
-| 1 | Core Domain Models | ✅ Complete | 100% |
-| 2 | Simulation Engine | ✅ Complete | 100% |
-| 3 | Data Integration | ✅ Complete | 100% |
-| 4 | Optimization Engine | ✅ Complete | 100% |
-| 5 | CLI & Reporting | ✅ Complete | 100% |
-| 6 | Database & Persistence | ✅ Complete | 100% |
-| 7 | Blockchain Integration | ✅ Complete | 100% |
-| 8 | Live Monitoring | ✅ Complete | 100% |
-| 9 | Transaction Execution | ✅ Complete | 100% |
-| 10 | Strategy Automation | ✅ Complete | 100% |
-| 11 | REST API | ✅ Complete | 100% |
-| 12 | Web Dashboard | ✅ Complete | 100% |
-| 13 | Production Hardening | ✅ Complete | 100% |
-| 14 | Advanced Features | � Planned | 0% |
-
-**Overall Progress: ~100%** (Phases 0-13 complete, Phase 14 planned for future)
-
----
-
-### Roadmap Idea: On-chain Snapshot Cron (free, local cache)
-
-To reduce reliance on paid analytics (Dune/others) and to improve fee/TVL realism, add a lightweight scheduled “snapshot collector” that runs **every 4h (configurable)** and stores data locally for Orca/Raydium/Meteora pools.
-
-- **What to collect (per pool)**
-  - **Vault balances / TVL proxy**: SPL token balances of `token_vault_a` + `token_vault_b` (convert to USD using cached prices)
-  - **Pool state**: `liquidity`, `sqrt_price`, `tick_current`, `fee_rate`, `protocol_fee_rate`
-  - **Fee accumulators (for fee accrual without swap backfills)**: `fee_growth_global_a/b`, `protocol_fee_owed_a/b` (and equivalents per protocol)
-  - **Local liquidity shape**: tick-array/bin snapshots around current price and around the strategy range (enables active-liquidity share \(L_pos/L_active\))
-  - **Metadata**: slot + blockTime, mint decimals (cached), pool/vault addresses
-  - **Optional (heavier)**: per-pool swap events by parsing on-chain transactions to reconstruct volume/fees without external providers
-
-- **How it’s used**
-  - Backtests can compute **time-varying pool share** from snapshots (TVL-share or preferably active-liquidity share) instead of `capital / daily_TVL` heuristics.
-  - Enables “grounded” fee accrual using on-chain fee-growth deltas when swap-level fees are unavailable.
-  - Enables **cross-protocol comparisons** (same pair, same capital, same time window) by running the same strategy simulation on Orca vs Raydium vs Meteora snapshots.
-  - Supports a later “rotation” workflow: detect periods where volume/fees increase on one venue for the same pair, then compare expected net return and switch venue (future bot).
-
-- **Storage & caching**
-  - Append-only local files (e.g. `data/pool-snapshots/{protocol}/{pool}/snapshots_4h.jsonl`)
-  - Keep retention configurable (e.g. 180–365 days) and never prune below the currently requested backtest range.
-
-- **Scheduling**
-  - Local: Windows Task Scheduler / Linux cron
-  - Free-tier hosted alternative: small VM free-tier (optional later)
-
-#### Snapshot Spec v1 (concrete)
-
-**Goal:** collect a minimal, comparable dataset across **Orca / Raydium / Meteora** every hour (or 4h) that can later drive backtests and “share” heuristics without paid analytics.
-
-- **Storage format**
-  - Append-only JSONL: `data/pool-snapshots/{protocol}/{pool_address}/snapshots.jsonl`
-  - One JSON object per run.
-
-- **Common fields (all protocols)**
-  - `ts_utc`, `slot`, `protocol`, `pool_address`
-  - `token_mint_a`, `token_mint_b`
-  - `token_vault_a`, `token_vault_b`
-  - `vault_amount_a`, `vault_amount_b` (raw SPL base units)
-  - `fee_tier_pct` (base), `protocol_fee_pct` (cut), `effective_fee_pct`
-
-- **Protocol-specific fields (v1 minimal)**
-  - **Orca Whirlpool**
-    - `liquidity_active`, `sqrt_price`, `tick_current`
-    - `fee_growth_global_a`, `fee_growth_global_b`
-  - **Raydium**
-    - v1 stores `pool_account_b64` (raw account data) until a proper parser is implemented
-    - optional: `liquidity_active`/ticks once parser is added
-  - **Meteora DLMM**
-    - v1 stores `pool_account_b64` (raw account data) until a proper parser is implemented
-    - later: bin state around price / active liquidity per bin
-
-- **Collection source**
-  - Solana RPC only (on-chain), no paid APIs.
-  - Vault balances from SPL Token accounts (decode `spl_token::state::Account`).
-
-- **Next upgrades**
-  - Add true Raydium/Meteora parsers to auto-derive vaults, fee params, and active liquidity.
-  - Add optional “tick/bin neighborhood” snapshots for accurate \(L_{active}(t)\).
-  - Add backtest integration modes:
-    - `lp_share(t)` from snapshot TVL proxy (`capital / TVL(t)`)
-    - (later) `lp_share(t)` from active-liquidity share (`L_pos / L_active(t)`)
-    - (later) fee accrual from on-chain accumulators when available (reduce reliance on paid swap backfills)
-  - Add a “compare venues” command: run the same strategy across Orca/Raydium/Meteora over the same period and rank by net PnL (fees - IL - tx costs).
-
-### Deferred (needs design): Hosted scheduler + object storage (R2/S3/B2)
-
-This is a **deep topic** and should be designed deliberately before implementation.
-
-- **Key questions to decide**
-  - **Where the job runs**: GitHub Actions schedule vs self-hosted runner vs Always-Free VM vs Jenkins
-  - **Where snapshots live**: local disk vs object storage (Cloudflare R2 / AWS S3 / Backblaze B2 / etc.)
-  - **Cost drivers**: storage (GB-month), request counts (PUT/LIST/GET), and egress (important for S3; R2 egress is typically free)
-  - **Data layout**: append-only JSONL “monthly” files vs many small files (request/list amplification)
-  - **Retention & pruning**: configurable retention, and never pruning below the currently requested backtest range
-  - **Secrets & access**: RPC endpoints, optional pricing APIs, and secure credential storage
-
-- **Goal**
-  - Achieve a **free/low-cost** setup that reliably collects snapshots and keeps historical data without vendor lock-in.
-
-## ✨ Features
-
-### Core Capabilities
-
-- **CLMM Mathematics**: Full implementation of concentrated liquidity math (tick ↔ price, sqrt_price, liquidity calculations)
-- **Impermanent Loss**: Precise IL calculation for concentrated positions with range boundaries
-- **Backtesting**: Simulate LP positions against historical price data with multiple rebalancing strategies
-- **Optimization**: Find optimal tick ranges using Grid Search with configurable objective functions
-- **Multi-Protocol**: Support for Orca Whirlpools, Raydium CLMM (Meteora DLMM planned)
-
-### Rebalancing Strategies
-
-| Strategy | Description |
-|----------|-------------|
-| **Static** | Hold position without rebalancing |
-| **Periodic** | Rebalance at fixed time intervals |
-| **Threshold** | Rebalance when price moves beyond threshold |
-| **IL Limit** | Rebalance when impermanent loss exceeds limit |
-
-### Optimization Objectives
-
-- **Maximize Net PnL** - Total return after fees and IL
-- **Maximize Fee Earnings** - Focus on fee capture
-- **Maximize Sharpe Ratio** - Risk-adjusted returns
-- **Minimize IL** - Conservative IL minimization
-- **Maximize Time in Range** - Optimize for range efficiency
-
-### Live Monitoring
-
-- **Position Tracking**: Real-time position state from on-chain
-- **PnL Calculation**: Entry value, current value, fees, IL, net PnL, APY
-- **Alert System**: Configurable rules for range exit, IL thresholds, PnL targets
-- **Multi-Channel Notifications**: Console, file, webhook
-
-### REST API
-
-- **OpenAPI/Swagger**: Full API documentation at `/docs`
-- **JWT Authentication**: Secure API access with role-based permissions
-- **API Key Support**: Alternative authentication method
-- **WebSocket**: Real-time position updates and alerts
-
-### Web Dashboard
-
-- **Portfolio Overview**: Total value, PnL, fees, impermanent loss
-- **Position Management**: View, rebalance, collect fees, close positions
-- **Strategy Control**: Create, configure, start/stop automated strategies
-- **Pool Explorer**: Browse pools with TVL, volume, and APY metrics
-- **Real-time Updates**: WebSocket integration for live data
-
----
-
-## ⚡️ Quick Start
-
-### Prerequisites
-
-- **Rust**: 1.90+ (edition 2024)
-- **Node.js**: 18+ (for web dashboard)
-- **Make**: Build automation
-- **Docker**: Optional, for PostgreSQL
-- **PostgreSQL**: 14+ (optional, for persistence)
-
-### Installation
+Budowanie i testy:
 
 ```bash
-# Clone the repository
-git clone https://github.com/joaquinbejar/CLMM-Liquidity-Provider.git
-cd CLMM-Liquidity-Provider
-
-# Build the project
 make build
-
-# Run tests
 make test
-
-# Install CLI globally (optional)
-cargo install --path crates/cli
 ```
 
-### Common Commands
-
-The project includes a comprehensive `Makefile` for common tasks:
+Uruchamianie CLI:
 
 ```bash
-# Build the project
-make build
-
-# Run all tests (Unit & Integration)
-make test
-
-# Format code
-make fmt
-
-# Run Clippy lints
-make lint
-
-# Fix linting issues automatically
-make lint-fix
-
-# Pre-push checks (format + lint + test)
-make pre-push
-
-# Generate Documentation
-make doc-open
+cargo run --bin clmm-lp-cli -- --help
 ```
 
-### Running the API Server
+## Najczęściej używane komendy CLI
+
+### 1) Snapshoty curated pooli (Orca + Raydium + Meteora)
 
 ```bash
-# Start the API server (default port 8080)
-cargo run --bin clmm-lp-api
-
-# Or with environment variables
-RUST_LOG=info API_PORT=8080 cargo run --bin clmm-lp-api
+cargo run --bin clmm-lp-cli -- snapshot-run-curated-all
 ```
 
-The API will be available at:
-- **REST API**: `http://localhost:8080/api/v1`
-- **Swagger UI**: `http://localhost:8080/docs`
-- **WebSocket**: `ws://localhost:8080/ws`
-
-### Running the Web Dashboard
+Opcjonalnie:
 
 ```bash
-# Navigate to web directory
-cd web
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
+cargo run --bin clmm-lp-cli -- snapshot-run-curated-all --limit 1
 ```
 
-The dashboard will be available at `http://localhost:3000`.
-
-> **Note**: The web dashboard requires the API server to be running on port 8080.
-
-### CLI Usage
+### 2) Sync surowych swapów (P1)
 
 ```bash
-# Analyze a trading pair
-clmm-lp-cli analyze --symbol-a SOL --symbol-b USDC --days 30
-
-# Run a backtest with periodic rebalancing
-clmm-lp-cli backtest --symbol-a SOL --symbol-b USDC \
-  --capital 10000 --lower-price 80 --upper-price 120 \
-  --strategy periodic --rebalance-interval 24
-
-# Optimize range parameters
-clmm-lp-cli optimize --symbol-a SOL --symbol-b USDC \
-  --capital 10000 --objective sharpe
-
-# Fetch and cache market data
-clmm-lp-cli data fetch --symbol SOL --days 90
-
-# Monitor a live position
-clmm-lp-cli monitor --position <POSITION_ADDRESS> --interval 30
+cargo run --bin clmm-lp-cli -- swaps-sync-curated-all --max-signatures 300
 ```
 
-### Output Formats
-
-The CLI supports multiple output formats:
-
-- **Table**: Rich formatted tables (default)
-- **JSON**: Machine-readable JSON output
-- **CSV**: Spreadsheet-compatible export
-- **HTML**: Web-ready reports
-- **Markdown**: Documentation-friendly format
-
----
-
-## 📂 Project Structure
-
-```text
-CLMM-Liquidity-Provider/
-├── Cargo.toml              # Workspace configuration
-├── Makefile                # Task runner
-├── .env.example            # Environment variables template
-├── crates/
-│   ├── api/                # REST API (Axum)
-│   │   ├── handlers/       # Request handlers
-│   │   ├── models.rs       # API request/response models
-│   │   ├── auth.rs         # JWT & API key authentication
-│   │   ├── openapi.rs      # Swagger/OpenAPI documentation
-│   │   └── websocket.rs    # WebSocket handlers
-│   ├── cli/                # CLI application
-│   │   ├── commands/       # analyze, backtest, optimize, data, monitor
-│   │   └── output/         # table, chart, export modules
-│   ├── data/               # Data layer
-│   │   ├── providers/      # Birdeye, Jupiter API clients
-│   │   ├── repositories/   # PostgreSQL repositories
-│   │   ├── cache/          # In-memory and file caching
-│   │   └── migrations/     # SQL migration files
-│   ├── domain/             # Core business logic
-│   │   ├── entities/       # Pool, Position, Token
-│   │   ├── metrics/        # IL, fees, PnL calculations
-│   │   └── math/           # Tick math, liquidity, sqrt_price
-│   ├── execution/          # Live execution engine
-│   │   ├── alerts/         # Alert rules and notifiers
-│   │   ├── monitor/        # Position monitor, PnL tracker
-│   │   ├── strategy/       # Decision engine, executor
-│   │   ├── transaction/    # Builder, manager
-│   │   └── wallet/         # Wallet management
-│   ├── optimization/       # Strategy optimization
-│   │   ├── grid_search.rs  # Grid search optimizer
-│   │   └── objectives.rs   # Objective functions
-│   ├── protocols/          # Blockchain adapters
-│   │   ├── orca/           # Whirlpool reader, executor
-│   │   ├── rpc/            # RPC provider with failover
-│   │   └── events/         # Event fetcher and parser
-│   └── simulation/         # Backtesting engine
-│       ├── models/         # Price path, volume, liquidity
-│       └── strategies/     # Static, Periodic, Threshold, IL Limit
-├── web/                    # Web Dashboard (React)
-│   ├── src/
-│   │   ├── components/     # UI components
-│   │   ├── pages/          # Page components
-│   │   ├── lib/            # API client, utilities
-│   │   └── hooks/          # React hooks
-│   ├── package.json
-│   └── vite.config.ts
-├── Docker/                 # Docker deployment
-│   ├── docker-compose.yml  # Docker Swarm configuration
-│   ├── api.Dockerfile      # API server image
-│   ├── cli.Dockerfile      # CLI tool image
-│   ├── web.Dockerfile      # Web dashboard image
-│   ├── nginx.conf          # Nginx reverse proxy
-│   └── monitoring/         # Prometheus, Grafana, AlertManager
-├── tests/
-│   └── load/k6/            # Load testing scripts
-└── doc/                    # Documentation
-    ├── steps.md            # Implementation roadmap
-    ├── resume.md           # Project overview
-    ├── PROGRESS.md         # Development progress tracker
-    └── BACKUP_DISASTER_RECOVERY.md  # DR procedures
-```
-
-## 🧪 Testing Strategy
-
-We employ a rigorous testing strategy to ensure financial safety:
-
-1. **Unit Tests**: For all mathematical formulas (Tick Math, IL)
-2. **Property-Based Tests**: To verify invariants (e.g., "Liquidity can never be negative")
-3. **Integration Tests**: Mocked RPC calls to verify protocol adapters
-4. **Simulation Tests**: Monte Carlo runs to stress-test strategies
-5. **End-to-End Tests**: Full workflow testing with test fixtures
+### 3) Dekodowanie swapów do `decoded_swaps.jsonl` (P1.1)
 
 ```bash
-# Run all tests
-make test
-
-# Run with coverage
-make coverage
-
-# Run specific crate tests
-cargo test -p clmm-lp-domain
-cargo test -p clmm-lp-simulation
+cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --max-decode 120
 ```
 
----
-
-## 🔧 Configuration
-
-### Environment Variables
-
-Create a `.env` file based on `.env.example`:
+Dla wolnego RPC:
 
 ```bash
-# Solana RPC
-SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-SOLANA_RPC_BACKUP_URL=https://solana-api.projectserum.com
-
-# Database (optional)
-DATABASE_URL=postgres://user:pass@localhost:5432/clmm_lp
-
-# API Configuration
-API_HOST=0.0.0.0
-API_PORT=8080
-JWT_SECRET=your-secret-key-change-in-production
-
-# Data Providers
-BIRDEYE_API_KEY=your-birdeye-api-key
-JUPITER_API_URL=https://price.jup.ag/v4
-
-# Logging
-RUST_LOG=info,clmm_lp=debug
+cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --max-decode 120 --decode-timeout-secs 30 --decode-retries 3
 ```
 
-### Strategy Configuration
-
-Strategies can be configured via JSON files:
-
-```json
-{
-  "name": "SOL-USDC Rebalancer",
-  "strategy_type": "threshold",
-  "pool_address": "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ",
-  "parameters": {
-    "rebalance_threshold_pct": 5.0,
-    "max_il_pct": 2.0,
-    "min_rebalance_interval_hours": 4,
-    "range_width_pct": 10.0
-  }
-}
-```
-
----
-
-## 🔒 Security Considerations
-
-- **Dry Run Mode**: Always test strategies in dry-run mode before live execution
-- **API Keys**: Never commit API keys or secrets to version control
-- **Wallet Security**: Use hardware wallets or secure key management for production
-- **Rate Limiting**: Built-in rate limiting for RPC and API calls
-- **Circuit Breaker**: Automatic strategy pause on excessive losses
-
----
-
-## 📊 API Endpoints
-
-### Health & Metrics
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/health` | Health check |
-| GET | `/api/v1/metrics` | System metrics |
-
-### Positions
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/positions` | List all positions |
-| GET | `/api/v1/positions/:address` | Get position details |
-| POST | `/api/v1/positions` | Open new position |
-| DELETE | `/api/v1/positions/:address` | Close position |
-| POST | `/api/v1/positions/:address/rebalance` | Rebalance position |
-| POST | `/api/v1/positions/:address/collect` | Collect fees |
-
-### Strategies
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/strategies` | List all strategies |
-| GET | `/api/v1/strategies/:id` | Get strategy details |
-| POST | `/api/v1/strategies` | Create strategy |
-| PUT | `/api/v1/strategies/:id` | Update strategy |
-| DELETE | `/api/v1/strategies/:id` | Delete strategy |
-| POST | `/api/v1/strategies/:id/start` | Start strategy |
-| POST | `/api/v1/strategies/:id/stop` | Stop strategy |
-
-### Pools
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/pools` | List available pools |
-| GET | `/api/v1/pools/:address` | Get pool details |
-| GET | `/api/v1/pools/:address/state` | Get current pool state |
-
-### Analytics
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/analytics/portfolio` | Portfolio analytics |
-| POST | `/api/v1/analytics/simulate` | Run simulation |
-
----
-
-## 🐳 Docker Deployment
-
-The project includes full Docker support for production deployment.
-
-### Quick Start with Docker Compose
+Po poprawce dekodera — przebudowa `decoded_swaps.jsonl` z surowych sygnatur:
 
 ```bash
-# Navigate to Docker directory
-cd Docker
-
-# Copy environment template
-cp .env.example .env
-
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
+cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --max-decode 2000 --refresh-decoded
 ```
 
-### Available Services
-
-| Service | Port | Description |
-|---------|------|-------------|
-| API | 8080 | REST API server |
-| Web | 80 | Web dashboard (Nginx) |
-| PostgreSQL | 5432 | Database |
-| Prometheus | 9090 | Metrics collection |
-| Grafana | 3001 | Monitoring dashboards |
-| AlertManager | 9093 | Alert routing |
-
-### Docker Images
-
-Pre-built images are available on GitHub Container Registry:
+Audyt jakości dekodowania:
 
 ```bash
-# Pull images
-docker pull ghcr.io/joaquinbejar/clmm-liquidity-provider/api:latest
-docker pull ghcr.io/joaquinbejar/clmm-liquidity-provider/cli:latest
-docker pull ghcr.io/joaquinbejar/clmm-liquidity-provider/web:latest
-
-# Run CLI commands
-docker run --rm ghcr.io/joaquinbejar/clmm-liquidity-provider/cli:latest --help
+cargo run --bin clmm-lp-cli -- swaps-decode-audit --save-report
 ```
 
-### Building Images Locally
+Monitoring/alerty:
 
 ```bash
-# Build all images
-docker build -f Docker/api.Dockerfile -t clmm-lp-api .
-docker build -f Docker/cli.Dockerfile -t clmm-lp-cli .
-docker build -f Docker/web.Dockerfile -t clmm-lp-web .
+cargo run --bin clmm-lp-cli -- data-health-check --max-age-minutes 30 --min-decode-ok-pct 65 --fail-on-alert
 ```
 
-### Monitoring Stack
-
-Start the monitoring infrastructure:
+### 4) Backtest na danych historycznych
 
 ```bash
-cd Docker/monitoring
-docker-compose -f docker-compose.monitoring.yml up -d
+cargo run --bin clmm-lp-cli -- backtest \
+  --symbol-a SOL \
+  --mint-a So11111111111111111111111111111111111111112 \
+  --lower 140 \
+  --upper 180 \
+  --days 30 \
+  --strategy static
 ```
 
-Access dashboards:
-- **Grafana**: http://localhost:3001 (admin/admin)
-- **Prometheus**: http://localhost:9090
-- **AlertManager**: http://localhost:9093
-
----
-
-## 🧪 Load Testing
-
-Load tests are implemented using [k6](https://k6.io/):
+Backtest z lokalnymi snapshotami jako źródłem ścieżki ceny:
 
 ```bash
-# Install k6
-brew install k6  # macOS
-
-# Run smoke test
-k6 run --vus 1 --duration 30s tests/load/k6/api-load-test.js
-
-# Run full load test
-k6 run tests/load/k6/api-load-test.js
-
-# With custom API URL
-k6 run -e API_BASE_URL=http://api.example.com tests/load/k6/api-load-test.js
+cargo run --bin clmm-lp-cli -- backtest \
+  --symbol-a whETH \
+  --mint-a 7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs \
+  --symbol-b SOL \
+  --mint-b So11111111111111111111111111111111111111112 \
+  --hours 12 \
+  --lower 22.89 \
+  --upper 24.67 \
+  --strategy static \
+  --price-path-source snapshots \
+  --snapshot-protocol orca \
+  --snapshot-pool-address HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF \
+  --fee-source snapshots
 ```
 
-Test scenarios include:
-- **Smoke**: Verify system works (1 VU, 30s)
-- **Load**: Normal load (20-50 VUs, 9m)
-- **Stress**: Find breaking point (100-200 VUs, 16m)
-- **Spike**: Sudden traffic spike (0-100 VUs)
+### 5) Backtest-optimize (grid po range + strategiach)
 
----
+Bez `--dune-swaps`: jeśli podasz `--snapshot-protocol` i `--snapshot-pool-address` (lub `--whirlpool-address`), opłaty mogą być liczone z lokalnego `data/swaps` (jak w `backtest`). Opcja `--fee-swap-decode-status loose|ok`.
 
-## 🔄 CI/CD Pipeline
+```bash
+cargo run --bin clmm-lp-cli -- backtest-optimize \
+  --symbol-a whETH \
+  --mint-a 7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs \
+  --symbol-b SOL \
+  --mint-b So11111111111111111111111111111111111111112 \
+  --days 30 \
+  --capital 7000 \
+  --objective vs_hodl \
+  --top-n 5
+```
 
-The project uses GitHub Actions for continuous integration and deployment:
+### 6) Monte Carlo optimize
 
-| Workflow | Trigger | Description |
-|----------|---------|-------------|
-| **Build** | Push/PR | Compile all crates |
-| **Tests** | Push/PR | Run unit and integration tests |
-| **Lint** | Push/PR | Clippy linting |
-| **Format** | Push/PR | rustfmt check |
-| **Coverage** | Push/PR | Code coverage with Codecov |
-| **Docker** | Push to main/tags | Build and push Docker images |
-| **Semver** | Push/PR | Semantic versioning checks |
+```bash
+cargo run --bin clmm-lp-cli -- optimize \
+  --symbol-a SOL \
+  --mint-a So11111111111111111111111111111111111111112 \
+  --days 30 \
+  --capital 1000 \
+  --iterations 100
+```
 
-All workflows run on every push and pull request to ensure code quality.
+## Gdzie lądują dane
 
----
+- Snapshoty:
+  - `data/pool-snapshots/orca/<pool>/snapshots.jsonl`
+  - `data/pool-snapshots/raydium/<pool>/snapshots.jsonl`
+  - `data/pool-snapshots/meteora/<pool>/snapshots.jsonl`
+- Swapy:
+  - `data/swaps/orca/<pool>/swaps.jsonl`
+  - `data/swaps/raydium/<pool>/swaps.jsonl`
+  - `data/swaps/meteora/<pool>/swaps.jsonl`
+- Zdekodowane swapy:
+  - `data/swaps/orca/<pool>/decoded_swaps.jsonl`
+  - `data/swaps/raydium/<pool>/decoded_swaps.jsonl`
+  - `data/swaps/meteora/<pool>/decoded_swaps.jsonl`
 
-## 🤝 Contributing
+## Aktualny workflow (praktycznie)
 
-We welcome contributions! Please follow these steps:
+1. Odpal cyklicznie snapshoty (`snapshot-run-curated-all`).
+2. Równolegle zbieraj swapy (`swaps-sync-curated-all`).
+3. Dokładaj dekodowanie (`swaps-enrich-curated-all`).
+4. Uruchamiaj `backtest` / `backtest-optimize` na lokalnym cache.
+5. Porównuj protokoły i strategie na tych samych oknach czasu.
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/amazing-feature`
-3. Make your changes and ensure tests pass: `make pre-push`
-4. Commit with conventional commits: `git commit -m 'feat: add amazing feature'`
-5. Push to your fork: `git push origin feature/amazing-feature`
-6. Open a Pull Request
+## Dalsza dokumentacja
 
-### Development Guidelines
+- `STARTUP.md` - procedury startowe i przykłady end-to-end
+- `doc/PROJECT_OVERVIEW.md` - skrócony opis architektury i pipeline
+- `doc/ONCHAIN_FEES_TRUTH_PLAN.md` - plan dojścia do bardziej "on-chain truth" dla fee accounting
+- `doc/TODO_ONCHAIN_NEXT_STEPS.md` - **co jest do zrobienia** (fazy A–E) i log wykonania
 
-- Follow Rust idioms and best practices
-- Add documentation for all public items
-- Write tests for new functionality
-- Keep PRs focused and atomic
-- Use `make lint-fix` before committing
+`backtest` z lokalnym `decoded_swaps.jsonl`: domyślnie tylko wiersze z `decode_status=ok` (`--fee-swap-decode-status loose` = poprzednie zachowanie).
 
----
+## Licencja
 
-## 📞 Contact
+Dual license:
 
-- **Author**: Joaquín Béjar García
-- **Email**: jb@taunais.com
-- **Telegram**: [@joaquin_bejar](https://t.me/joaquin_bejar)
-- **Repository**: <https://github.com/joaquinbejar/CLMM-Liquidity-Provider>
-- **Documentation**: <https://docs.rs/clmm-liquidity-provider>
+- MIT (`LICENSE-MIT`)
+- Apache-2.0 (`LICENSE-APACHE`)
 
----
+## Disclaimer
 
-## ✍️ License
-
-This project is dual-licensed under:
-
-- **MIT License** ([LICENSE-MIT](./LICENSE-MIT) or http://opensource.org/licenses/MIT)
-- **Apache License 2.0** ([LICENSE-APACHE](./LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-
-You may choose either license.
-
----
-
-## ⚠️ Disclaimer
-
-This software is provided for educational and research purposes. Trading cryptocurrencies and providing liquidity involves significant risk. The authors are not responsible for any financial losses incurred through the use of this software. Always do your own research and never invest more than you can afford to lose.
+To narzędzie badawcze/analityczne. LP i trading na krypto wiążą się z ryzykiem. Używasz na własną odpowiedzialność.

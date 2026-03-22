@@ -26,6 +26,8 @@ pub async fn orca_snapshot(pool_address: &str) -> Result<()> {
         vault_amount_b: u64,
         liquidity_active: String,
         tick_current: i32,
+        tick_spacing: u16,
+        tick_neighborhood: [i32; 5],
         sqrt_price_x64: String,
         fee_rate_raw: u16,
         protocol_fee_rate_bps: u16,
@@ -75,6 +77,14 @@ pub async fn orca_snapshot(pool_address: &str) -> Result<()> {
         vault_amount_b,
         liquidity_active: state.liquidity.to_string(),
         tick_current: state.tick_current,
+        tick_spacing: state.tick_spacing,
+        tick_neighborhood: [
+            state.tick_current - (state.tick_spacing as i32 * 2),
+            state.tick_current - state.tick_spacing as i32,
+            state.tick_current,
+            state.tick_current + state.tick_spacing as i32,
+            state.tick_current + (state.tick_spacing as i32 * 2),
+        ],
         sqrt_price_x64: state.sqrt_price.to_string(),
         fee_rate_raw: state.fee_rate_bps,
         protocol_fee_rate_bps: state.protocol_fee_rate_bps,
@@ -197,6 +207,8 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
             vault_amount_b: u64,
             liquidity_active: String,
             tick_current: i32,
+            tick_spacing: u16,
+            tick_neighborhood: [i32; 5],
             sqrt_price_x64: String,
             fee_rate_raw: u16,
             protocol_fee_rate_bps: u16,
@@ -246,6 +258,14 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
             vault_amount_b,
             liquidity_active: state.liquidity.to_string(),
             tick_current: state.tick_current,
+            tick_spacing: state.tick_spacing,
+            tick_neighborhood: [
+                state.tick_current - (state.tick_spacing as i32 * 2),
+                state.tick_current - state.tick_spacing as i32,
+                state.tick_current,
+                state.tick_current + state.tick_spacing as i32,
+                state.tick_current + (state.tick_spacing as i32 * 2),
+            ],
             sqrt_price_x64: state.sqrt_price.to_string(),
             fee_rate_raw: state.fee_rate_bps,
             protocol_fee_rate_bps: state.protocol_fee_rate_bps,
@@ -397,6 +417,8 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
         #[serde(skip_serializing_if = "Option::is_none")]
         tick_current: Option<i32>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        tick_neighborhood: Option<[i32; 5]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         sqrt_price_x64: Option<String>,
 
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -467,6 +489,15 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
             mint_decimals_b: parsed.as_ref().map(|p| p.mint_decimals1),
             liquidity_active: parsed.as_ref().map(|p| p.liquidity_active.to_string()),
             tick_current: parsed.as_ref().map(|p| p.tick_current),
+            tick_neighborhood: parsed.as_ref().map(|p| {
+                [
+                    p.tick_current - 100,
+                    p.tick_current - 10,
+                    p.tick_current,
+                    p.tick_current + 10,
+                    p.tick_current + 100,
+                ]
+            }),
             sqrt_price_x64: parsed.as_ref().map(|p| p.sqrt_price_x64.to_string()),
             fee_growth_global_a_x64: parsed.as_ref().map(|p| p.fee_growth_global0_x64.to_string()),
             fee_growth_global_b_x64: parsed.as_ref().map(|p| p.fee_growth_global1_x64.to_string()),
@@ -589,6 +620,8 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
         #[serde(skip_serializing_if = "Option::is_none")]
         active_id: Option<i32>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        active_bin_neighborhood: Option<[i32; 5]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         bin_step: Option<u16>,
 
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -654,6 +687,15 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
             parse_ok,
             parse_error,
             active_id: parsed.as_ref().map(|p| p.active_id),
+            active_bin_neighborhood: parsed.as_ref().map(|p| {
+                [
+                    p.active_id - 2,
+                    p.active_id - 1,
+                    p.active_id,
+                    p.active_id + 1,
+                    p.active_id + 2,
+                ]
+            }),
             bin_step: parsed.as_ref().map(|p| p.bin_step),
             token_mint_a: parsed.as_ref().map(|p| p.token_mint_x.to_string()),
             token_mint_b: parsed.as_ref().map(|p| p.token_mint_y.to_string()),

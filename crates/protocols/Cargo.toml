@@ -17,6 +17,7 @@ spl-token = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 borsh = { workspace = true }
+base64 = { workspace = true }
 primitive-types = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
