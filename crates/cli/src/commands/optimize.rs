@@ -141,24 +141,77 @@ pub async fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let periodic_candidates =
         param_optimizer.optimize_periodic(&config, best_width, &MaximizeNetPnL);
 
-    let best_threshold = threshold_candidates
-        .first()
-        .map(|c| StrategyRecommendation {
-            strategy_type: "Threshold".to_string(),
-            params: format!(
-                "price_threshold={:.1}%, il_threshold={:.1}%",
-                c.params.price_threshold * Decimal::from(100),
-                c.params.il_threshold * Decimal::from(100)
-            ),
-            expected_rebalances: c.expected_rebalances,
-            score: c.score,
-        });
+    let il_limit_candidates = param_optimizer.optimize_il_limit(&config, best_width, &MaximizeNetPnL);
+    let retouch_candidates =
+        param_optimizer.optimize_retouch_shift(&config, best_width, &MaximizeNetPnL);
+    let static_candidate = param_optimizer.optimize_static_range(&config, best_width, &MaximizeNetPnL);
+
+    let best_threshold = threshold_candidates.first().map(|c| StrategyRecommendation {
+        strategy_type: "threshold".to_string(),
+        params: format!(
+            "price_threshold={:.1}%, il_threshold={:.1}%",
+            c.params.price_threshold * Decimal::from(100),
+            c.params.il_threshold * Decimal::from(100)
+        ),
+        expected_rebalances: c.expected_rebalances,
+        score: c.score,
+    });
 
     let best_periodic = periodic_candidates.first().map(|c| StrategyRecommendation {
-        strategy_type: "Periodic".to_string(),
+        strategy_type: "periodic".to_string(),
         params: format!("interval={}h", c.params.interval),
         expected_rebalances: c.expected_rebalances,
         score: c.score,
+    });
+    let best_il_limit = il_limit_candidates.first().map(|c| StrategyRecommendation {
+        strategy_type: "il_limit".to_string(),
+        params: match c.params.close_il {
+            Some(close) => format!(
+                "max_il={:.1}%, close_il={:.1}%, grace={} steps",
+                c.params.max_il * Decimal::from(100),
+                close * Decimal::from(100),
+                c.params.grace_period
+            ),
+            None => format!(
+                "max_il={:.1}%, close_il=none, grace={} steps",
+                c.params.max_il * Decimal::from(100),
+                c.params.grace_period
+            ),
+        },
+        expected_rebalances: c.expected_rebalances,
+        score: c.score,
+    });
+    let best_retouch = retouch_candidates.first().map(|c| StrategyRecommendation {
+        strategy_type: "retouch_shift".to_string(),
+        params: format!(
+            "threshold={:.1}%, cooldown={} steps",
+            c.params.price_threshold * Decimal::from(100),
+            c.params.cooldown_steps
+        ),
+        expected_rebalances: c.expected_rebalances,
+        score: c.score,
+    });
+    let best_static = Some(StrategyRecommendation {
+        strategy_type: "static_range".to_string(),
+        params: "baseline (no rebalances)".to_string(),
+        expected_rebalances: static_candidate.expected_rebalances,
+        score: static_candidate.score,
+    });
+
+    let mut strategy_recommendations: Vec<StrategyRecommendation> = vec![
+        best_static,
+        best_threshold,
+        best_periodic,
+        best_il_limit,
+        best_retouch,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    strategy_recommendations.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let report = OptimizationReport {
@@ -168,10 +221,7 @@ pub async fn run_optimize(args: OptimizeArgs) -> Result<()> {
         capital: args.capital,
         objective: format!("{:?}", args.objective),
         candidates: range_candidates,
-        strategy_recommendations: vec![best_threshold, best_periodic]
-            .into_iter()
-            .flatten()
-            .collect(),
+        strategy_recommendations,
     };
 
     // Output the report

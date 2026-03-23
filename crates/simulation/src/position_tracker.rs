@@ -222,7 +222,7 @@ impl PositionTracker {
             .map(|s| s.position_value_usd)
             .unwrap_or(self.initial_capital);
         let final_pnl = final_snapshot.map(|s| s.net_pnl).unwrap_or(Decimal::ZERO);
-        let final_il = final_snapshot.map(|s| s.il_pct).unwrap_or(Decimal::ZERO);
+        let final_il_segment = final_snapshot.map(|s| s.il_pct);
 
         // Calculate max drawdown
         let mut peak = self.initial_capital;
@@ -245,12 +245,20 @@ impl PositionTracker {
         // 50/50 USD split across both legs (A and B) using their USD prices.
         let hodl_value = self.initial_capital;
         let vs_hodl = final_value - hodl_value;
+        let position_value_before_fees = final_value - self.cumulative_fees + self.total_rebalance_cost;
+        let il_vs_hodl_ex_fees_pct = if self.initial_capital > Decimal::ZERO {
+            (position_value_before_fees - hodl_value) / self.initial_capital
+        } else {
+            Decimal::ZERO
+        };
 
         TrackerSummary {
             total_steps,
             final_value,
             final_pnl,
-            final_il_pct: final_il,
+            final_il_pct: il_vs_hodl_ex_fees_pct,
+            final_il_segment_pct: final_il_segment,
+            final_il_vs_hodl_ex_fees_pct: il_vs_hodl_ex_fees_pct,
             total_fees: self.cumulative_fees,
             time_in_range_pct,
             rebalance_count: self.rebalance_count,
@@ -271,8 +279,13 @@ pub struct TrackerSummary {
     pub final_value: Decimal,
     /// Final net PnL.
     pub final_pnl: Decimal,
-    /// Final impermanent loss percentage.
+    /// Backward-compatible IL field used by older reports/objectives.
+    /// Equals `final_il_vs_hodl_ex_fees_pct`.
     pub final_il_pct: Decimal,
+    /// Last-segment concentrated IL (entry at last rebalance, current range/price).
+    pub final_il_segment_pct: Option<Decimal>,
+    /// End-of-backtest IL-like metric: LP underlying (excluding fees/costs) vs HODL benchmark.
+    pub final_il_vs_hodl_ex_fees_pct: Decimal,
     /// Total fees earned.
     pub total_fees: Decimal,
     /// Percentage of time in range.
@@ -363,5 +376,30 @@ mod tests {
         // 2/3 in range
         assert!(summary.time_in_range_pct > dec!(0.66));
         assert!(summary.time_in_range_pct < dec!(0.67));
+    }
+
+    #[test]
+    fn test_il_fields_are_not_mixed_after_rebalance() {
+        use crate::strategies::ThresholdRebalance;
+
+        let mut tracker = PositionTracker::new(
+            dec!(1000),
+            Price::new(dec!(100)),
+            PriceRange::new(Price::new(dec!(90)), Price::new(dec!(110))),
+            dec!(5),
+        );
+
+        let strategy = ThresholdRebalance::new(dec!(0.05), dec!(0.2));
+        tracker.record_step(Price::new(dec!(100)), Decimal::ZERO, Some(&strategy));
+        tracker.record_step(Price::new(dec!(120)), Decimal::ZERO, Some(&strategy)); // rebalance
+        tracker.record_step(Price::new(dec!(120)), Decimal::ZERO, Some(&strategy)); // same as segment entry
+
+        let summary = tracker.summary();
+        let seg_il = summary.final_il_segment_pct.unwrap_or(dec!(0));
+
+        // At segment entry price IL is ~0, but IL-vs-HODL includes realized path/cost effects.
+        assert!(seg_il.abs() < dec!(0.000001));
+        assert!(summary.final_il_vs_hodl_ex_fees_pct < Decimal::ZERO);
+        assert_eq!(summary.final_il_pct, summary.final_il_vs_hodl_ex_fees_pct);
     }
 }

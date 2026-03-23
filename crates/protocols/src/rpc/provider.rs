@@ -13,6 +13,15 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+/// Lightweight signature status snapshot returned by `get_signature_status`.
+#[derive(Debug, Clone)]
+pub struct SignatureStatusInfo {
+    /// Slot where the status was observed.
+    pub slot: u64,
+    /// Transaction error if execution failed.
+    pub err: Option<solana_sdk::transaction::TransactionError>,
+}
+
 /// RPC provider with automatic failover and health checking.
 pub struct RpcProvider {
     /// Configuration.
@@ -224,7 +233,7 @@ impl RpcProvider {
     pub async fn get_signature_status(
         &self,
         signature: &Signature,
-    ) -> Result<Option<solana_sdk::transaction::TransactionError>> {
+    ) -> Result<Option<SignatureStatusInfo>> {
         let sig = *signature;
         self.execute_with_retry(|client| async move {
             let statuses = client
@@ -232,10 +241,12 @@ impl RpcProvider {
                 .await
                 .context("Failed to get signature status")?;
 
-            Ok(statuses
-                .value
-                .first()
-                .and_then(|s| s.as_ref().and_then(|status| status.err.clone())))
+            Ok(statuses.value.first().and_then(|s| {
+                s.as_ref().map(|status| SignatureStatusInfo {
+                    slot: status.slot,
+                    err: status.err.clone(),
+                })
+            }))
         })
         .await
     }

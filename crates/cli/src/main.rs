@@ -206,6 +206,13 @@ enum Commands {
         /// Slippage in basis points on rebalance notional (used when --use-realistic-rebalance-cost).
         #[arg(long, default_value_t = 5.0)]
         slippage_bps: f64,
+        /// Multiplier `k` for range-aware LP share calibration.
+        /// Final share uses: clamp(k * share_est, 0, min(1, legacy_share * share_cap_mult)).
+        #[arg(long, default_value_t = 1.0)]
+        range_share_k: f64,
+        /// Upper cap multiplier vs legacy TVL-share proxy in range-aware mode.
+        #[arg(long, default_value_t = 3.0)]
+        range_share_cap_mult: f64,
 
         /// Optional Whirlpool pool address to use real Dune volume data
         #[arg(long)]
@@ -291,6 +298,12 @@ enum Commands {
         /// Slippage in basis points on rebalance notional (used when --use-realistic-rebalance-cost).
         #[arg(long, default_value_t = 5.0)]
         slippage_bps: f64,
+        /// Multiplier `k` for range-aware LP share calibration.
+        #[arg(long, default_value_t = 1.0)]
+        range_share_k: f64,
+        /// Upper cap multiplier vs legacy TVL-share proxy in range-aware mode.
+        #[arg(long, default_value_t = 3.0)]
+        range_share_cap_mult: f64,
         /// Optional Whirlpool pool address for Dune TVL/volume
         #[arg(long)]
         whirlpool_address: Option<String>,
@@ -327,9 +340,21 @@ enum Commands {
         /// Number of rolling windows; 1 = single period, >1 = average score over windows
         #[arg(long, default_value_t = 1)]
         windows: usize,
+        /// IL-limit max threshold in percent (e.g. 5 = 5%).
+        #[arg(long, default_value_t = 5.0)]
+        il_max_pct: f64,
+        /// Optional IL-limit close threshold in percent (must be >= --il-max-pct).
+        #[arg(long)]
+        il_close_pct: Option<f64>,
+        /// Grace period in steps before IL-limit can trigger.
+        #[arg(long, default_value_t = 0)]
+        il_grace_steps: u64,
         /// Use Dune swap-level fees: orca, meteora, raydium, or a Dune query ID (e.g. 6848259). Requires DUNE_API_KEY.
         #[arg(long)]
         dune_swaps: Option<String>,
+        /// Fee source model: auto (default), candles, swaps, or snapshots.
+        #[arg(long, value_enum, default_value_t = FeeSourceArg::Auto)]
+        fee_source: FeeSourceArg,
         /// Candle resolution in seconds (e.g. 3600=1h, 900=15m, 300=5m, 60=1m).
         #[arg(long, default_value_t = 3600)]
         resolution_seconds: u64,
@@ -695,6 +720,8 @@ async fn main() -> Result<()> {
             priority_fee_usd,
             jito_tip_usd,
             slippage_bps,
+            range_share_k,
+            range_share_cap_mult,
             whirlpool_address,
             lp_share,
             dune_swaps,
@@ -1714,6 +1741,10 @@ async fn main() -> Result<()> {
             let mut fee_total_swaps_lp = Decimal::ZERO;
             let mut fee_total_snapshots_lp = Decimal::ZERO;
             let mut fee_cmp_steps = 0usize;
+            let range_share_k_dec = Decimal::from_f64(*range_share_k).unwrap_or(Decimal::ONE);
+            let range_share_cap_mult_dec = Decimal::from_f64(*range_share_cap_mult)
+                .unwrap_or(Decimal::from(3u32))
+                .max(Decimal::ONE);
 
             for (idx, price) in prices.iter().enumerate() {
                 let p = step_data.get(idx).copied().unwrap_or(crate::backtest_engine::StepDataPoint {
@@ -1763,7 +1794,10 @@ async fn main() -> Result<()> {
                         .map(|v| Decimal::from_u128(v).unwrap_or(Decimal::ONE))
                         .unwrap_or(Decimal::ONE);
                     if pool_l_dec > Decimal::ZERO {
-                        (pos_l_dec / pool_l_dec).clamp(Decimal::ZERO, Decimal::ONE)
+                        let est = (pos_l_dec / pool_l_dec).clamp(Decimal::ZERO, Decimal::ONE);
+                        let upper_cap = (p.lp_share * range_share_cap_mult_dec)
+                            .clamp(Decimal::ZERO, Decimal::ONE);
+                        (est * range_share_k_dec).clamp(Decimal::ZERO, upper_cap)
                     } else {
                         p.lp_share
                     }
@@ -1970,6 +2004,8 @@ async fn main() -> Result<()> {
             priority_fee_usd,
             jito_tip_usd,
             slippage_bps,
+            range_share_k,
+            range_share_cap_mult,
             whirlpool_address,
             lp_share,
             objective,
@@ -1982,13 +2018,19 @@ async fn main() -> Result<()> {
             alpha,
             static_only,
             windows,
+            il_max_pct,
+            il_close_pct,
+            il_grace_steps,
             dune_swaps,
+            fee_source,
             resolution_seconds,
             snapshot_protocol,
             snapshot_pool_address,
             fee_swap_decode_status,
             price_path_source,
         } => {
+            // TODO(E2.6): wire these calibration params into optimize path as well.
+            let _ = (range_share_k, range_share_cap_mult);
             let (token_a_decimals_guess, token_b_decimals_guess): (u8, u8) = {
                 use crate::engine::token_meta::fetch_mint_decimals;
                 use clmm_lp_protocols::rpc::RpcProvider;
@@ -2017,6 +2059,11 @@ async fn main() -> Result<()> {
             };
 
             let snapshots_only = matches!(price_path_source, PricePathSourceArg::Snapshots);
+            if matches!(fee_source, FeeSourceArg::Snapshots) && !snapshots_only {
+                anyhow::bail!(
+                    "--fee-source snapshots in backtest-optimize requires --price-path-source snapshots"
+                );
+            }
             if snapshots_only {
                 if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
                     anyhow::bail!(
@@ -2078,6 +2125,7 @@ async fn main() -> Result<()> {
             let res = *resolution_seconds;
             let mut candles: Vec<clmm_lp_domain::entities::price_candle::PriceCandle> = Vec::new();
             let mut snapshot_step_data_full: Option<Vec<crate::backtest_engine::StepData>> = None;
+            let mut snapshot_fee_index_full: Option<BTreeMap<usize, Decimal>> = None;
 
             let quote_usd_map: Option<HashMap<u64, Decimal>> = if snapshots_only {
                 None
@@ -2161,6 +2209,7 @@ async fn main() -> Result<()> {
                     prep.step_data.len(),
                     pool
                 );
+                snapshot_fee_index_full = prep.per_step_fees_usd;
                 snapshot_step_data_full = Some(prep.step_data);
             }
 
@@ -2250,8 +2299,12 @@ async fn main() -> Result<()> {
                 .map(|w| (w * steps_per_window)..((w + 1) * steps_per_window))
                 .collect();
 
-            let strategies: Vec<StratConfig> =
-                crate::commands::backtest_optimize::default_strategies(*static_only);
+            let strategies: Vec<StratConfig> = crate::commands::backtest_optimize::default_strategies(
+                *static_only,
+                *il_max_pct,
+                *il_close_pct,
+                *il_grace_steps,
+            );
 
             let min_frac = (*min_range_pct / 100.0).clamp(0.001, 1.0);
             let max_frac = (*max_range_pct / 100.0).clamp(min_frac + 0.001, 2.0);
@@ -2409,48 +2462,73 @@ async fn main() -> Result<()> {
                     }
                 }
                 let local_pool_fees_arc: Option<Arc<BTreeMap<usize, Decimal>>> = {
-                    let use_local =
-                        dune_swaps.is_none() || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
-                    if !use_local {
-                        None
-                    } else if let (Some(proto), Some(pool)) = (
-                        snapshot_protocol.as_ref(),
-                        snapshot_pool_address
-                            .as_deref()
-                            .or(whirlpool_address.as_deref()),
-                    ) {
-                        let pdir = match proto {
-                            SnapshotProtocolArg::Orca => "orca",
-                            SnapshotProtocolArg::Raydium => "raydium",
-                            SnapshotProtocolArg::Meteora => "meteora",
-                        };
-                        match crate::local_swap_fees::build_local_pool_fees_usd(
-                            pdir,
-                            pool,
-                            &step_data,
-                            res,
-                            token_a_decimals,
-                            token_b_decimals,
-                            fee_rate,
-                            require_decode_ok,
-                        ) {
+                    let use_snapshot_fees = matches!(fee_source, FeeSourceArg::Snapshots)
+                        || (matches!(fee_source, FeeSourceArg::Auto)
+                            && snapshots_only
+                            && snapshot_fee_index_full
+                                .as_ref()
+                                .map(|m| !m.is_empty())
+                                .unwrap_or(false));
+                    if use_snapshot_fees {
+                        match snapshot_fee_index_full.as_ref() {
                             Some(m) if !m.is_empty() => {
                                 println!(
-                                    "đź§Ş backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
-                                    pdir,
+                                    "🧪 backtest-optimize: snapshot pool fees from snapshots index ({} step buckets).",
                                     m.len()
                                 );
-                                Some(Arc::new(m))
+                                Some(Arc::new(m.clone()))
                             }
-                            _ => None,
+                            _ => {
+                                println!(
+                                    "⚠️ backtest-optimize: snapshot fee index unavailable/empty; fees may fall back to candles."
+                                );
+                                None
+                            }
                         }
                     } else {
-                        if dune_swaps.is_none() {
-                            println!(
-                                "â„ąď¸Ź backtest-optimize: no Dune swaps; set --snapshot-protocol and --snapshot-pool-address (or --whirlpool-address) to use local data/swaps fees."
-                            );
+                        let use_local =
+                            dune_swaps.is_none() || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
+                        if !use_local {
+                            None
+                        } else if let (Some(proto), Some(pool)) = (
+                            snapshot_protocol.as_ref(),
+                            snapshot_pool_address
+                                .as_deref()
+                                .or(whirlpool_address.as_deref()),
+                        ) {
+                            let pdir = match proto {
+                                SnapshotProtocolArg::Orca => "orca",
+                                SnapshotProtocolArg::Raydium => "raydium",
+                                SnapshotProtocolArg::Meteora => "meteora",
+                            };
+                            match crate::local_swap_fees::build_local_pool_fees_usd(
+                                pdir,
+                                pool,
+                                &step_data,
+                                res,
+                                token_a_decimals,
+                                token_b_decimals,
+                                fee_rate,
+                                require_decode_ok,
+                            ) {
+                                Some(m) if !m.is_empty() => {
+                                    println!(
+                                        "🧪 backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
+                                        pdir,
+                                        m.len()
+                                    );
+                                    Some(Arc::new(m))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            if dune_swaps.is_none() {
+                                println!(
+                                    "ℹ️ backtest-optimize: no Dune swaps; set --snapshot-protocol and --snapshot-pool-address (or --whirlpool-address) to use local data/swaps fees."
+                                );
+                            }
+                            None
                         }
-                        None
                     }
                 };
                 let (fv, fe100) = fee_realism(&step_data, fee_rate);
@@ -2596,36 +2674,63 @@ async fn main() -> Result<()> {
                         audit_step_data = Some(step_data.clone());
                     }
                     let local_pool_fees_arc: Option<Arc<BTreeMap<usize, Decimal>>> = {
-                        let use_local = dune_swaps.is_none()
-                            || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
-                        if !use_local {
-                            None
-                        } else if let (Some(proto), Some(pool)) = (
-                            snapshot_protocol.as_ref(),
-                            snapshot_pool_address
-                                .as_deref()
-                                .or(whirlpool_address.as_deref()),
-                        ) {
-                            let pdir = match proto {
-                                SnapshotProtocolArg::Orca => "orca",
-                                SnapshotProtocolArg::Raydium => "raydium",
-                                SnapshotProtocolArg::Meteora => "meteora",
-                            };
-                            match crate::local_swap_fees::build_local_pool_fees_usd(
-                                pdir,
-                                pool,
-                                &step_data,
-                                res,
-                                token_a_decimals,
-                                token_b_decimals,
-                                fee_rate,
-                                require_decode_ok,
-                            ) {
-                                Some(m) if !m.is_empty() => Some(Arc::new(m)),
-                                _ => None,
+                        let use_snapshot_fees = matches!(fee_source, FeeSourceArg::Snapshots)
+                            || (matches!(fee_source, FeeSourceArg::Auto)
+                                && snapshots_only
+                                && snapshot_fee_index_full
+                                    .as_ref()
+                                    .map(|m| !m.is_empty())
+                                    .unwrap_or(false));
+                        if use_snapshot_fees {
+                            if let Some(full) = snapshot_fee_index_full.as_ref() {
+                                let mut win_map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                                let win_start = range.start;
+                                let win_end = range.end;
+                                for (idx, v) in full.iter() {
+                                    if *idx >= win_start && *idx < win_end {
+                                        win_map.insert(*idx - win_start, *v);
+                                    }
+                                }
+                                if !win_map.is_empty() {
+                                    Some(Arc::new(win_map))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
                             }
                         } else {
-                            None
+                            let use_local = dune_swaps.is_none()
+                                || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
+                            if !use_local {
+                                None
+                            } else if let (Some(proto), Some(pool)) = (
+                                snapshot_protocol.as_ref(),
+                                snapshot_pool_address
+                                    .as_deref()
+                                    .or(whirlpool_address.as_deref()),
+                            ) {
+                                let pdir = match proto {
+                                    SnapshotProtocolArg::Orca => "orca",
+                                    SnapshotProtocolArg::Raydium => "raydium",
+                                    SnapshotProtocolArg::Meteora => "meteora",
+                                };
+                                match crate::local_swap_fees::build_local_pool_fees_usd(
+                                    pdir,
+                                    pool,
+                                    &step_data,
+                                    res,
+                                    token_a_decimals,
+                                    token_b_decimals,
+                                    fee_rate,
+                                    require_decode_ok,
+                                ) {
+                                    Some(m) if !m.is_empty() => Some(Arc::new(m)),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
                         }
                     };
                     let rows = run_grid(
@@ -4430,8 +4535,18 @@ fn print_backtest_report(
     ]);
     perf_table.add_row(row!["Fees Earned", format!("${:.2}", summary.total_fees)]);
     perf_table.add_row(row![
-        "Impermanent Loss",
-        format!("{:.2}%", summary.final_il_pct * Decimal::from(100))
+        "IL vs HODL (ex-fees)",
+        format!(
+            "{:.2}%",
+            summary.final_il_vs_hodl_ex_fees_pct * Decimal::from(100)
+        )
+    ]);
+    perf_table.add_row(row![
+        "IL Segment (last)",
+        summary
+            .final_il_segment_pct
+            .map(|v| format!("{:.2}%", v * Decimal::from(100)))
+            .unwrap_or_else(|| "n/a".to_string())
     ]);
     perf_table.printstd();
 

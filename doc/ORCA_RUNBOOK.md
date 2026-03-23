@@ -101,6 +101,17 @@ cargo run --bin clmm-lp-cli -- backtest-optimize `
 Dla komendy `backtest` (nie `backtest-optimize`) strategię rebalance wybierasz flagą `--strategy`:
 - `--strategy periodic --rebalance_interval <HOURS>` (periodic co N godzin)
 - `--strategy threshold --threshold_pct <PCT>` (threshold gdy cena przekroczy próg)
+- `--strategy il_limit` (IL-aware rebalance/close logic w warstwie strategii)
+
+W `backtest-optimize` domyślna siatka obejmuje 5 strategii: `static_range`, `periodic`, `threshold`, `il_limit`, `retouch_shift`.
+Parametry IL-limit dla gridu:
+- `--il-max-pct <PCT>` (domyślnie 5),
+- `--il-close-pct <PCT>` (opcjonalny próg zamknięcia),
+- `--il-grace-steps <N>` (domyślnie 0).
+
+Różnica komend:
+- `optimize` -> warstwa analityczna (szybkie rekomendacje parametrów),
+- `backtest-optimize` -> warstwa historyczna (grid po świecach/swapach).
 
 Okres historyczny (czas dla backtestu) jest podawany przez użytkownika i jest to:
 - `--days <DAYS>` oraz opcjonalnie `--hours <HOURS>` (nadpisuje `--days`), albo
@@ -121,4 +132,49 @@ Okres historyczny (czas dla backtestu) jest podawany przez użytkownika i jest t
    - run `snapshot-readiness --protocol orca --pool-address <POOL>` jeszcze raz po nowym snapshot-run.
 3. Jeśli dalej dominują `partial`:
    - porównaj 5–10 konkretnych sygnatur `decoded_swaps.jsonl` (w raporcie z `swaps-decode-audit --save-report`).
+
+## Sprint 1: Bot Dry-Run Session (Orca-first)
+
+Cel:
+- uruchomić pełny loop decyzji i execution bez ryzyka on-chain,
+- potwierdzić, że tx lifecycle (simulate/send/confirm path) i lifecycle events działają spójnie.
+
+Zakres:
+- tylko Orca,
+- jeden pool na start: `HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF`,
+- `dry_run=true`.
+
+### Checklist przed startem dry-run
+- [ ] Aktualny build/test zielony dla `clmm-lp-execution`.
+- [ ] Strategy config ustawiony dla targetowego poola.
+- [ ] Tryb `dry_run=true` potwierdzony.
+- [ ] Alert stream aktywny (log/API/ws).
+- [ ] Lifecycle tracker zapisuje eventy.
+
+### Co obserwować w trakcie sesji
+- [ ] Decyzje są zgodne ze strategią (price-reactive, bez sztucznego tłumienia triggerów).
+- [ ] Przy `Rebalance` powód (`reason`) jest poprawnie tagowany (`Periodic`, `RangeExit`, `RetouchShift`, itp.).
+- [ ] Przy flow rebalance fee collection jest próbowane przed zmianą zakresu.
+- [ ] Brak cichych sukcesów: nieudane operacje zwracają błąd i są widoczne w logach.
+- [ ] Brak pętli powtarzalnych błędów bez eskalacji.
+
+### Minimalne kryteria zaliczenia dry-run
+- [ ] Co najmniej jedna pełna ścieżka decyzji `Hold` i jedna `Rebalance` przeszła przez loop.
+- [ ] Brak krytycznych błędów nieobsłużonych przez retry/eskalację.
+- [ ] Spójność: to co w logach == to co w lifecycle.
+- [ ] Worklog z sesji został dopisany (co działało, co nie, co poprawiono).
+
+## Go/No-Go do Limited Live (Stage 1)
+
+**GO** jeśli wszystkie warunki:
+- [ ] Dry-run zaliczony wg sekcji powyżej.
+- [ ] Retry/simulation/confirmation path działa stabilnie.
+- [ ] Operator ma gotowy wallet (`PRIVATE_KEY`) i procedurę stop/rollback.
+- [ ] Uzgodniony mały kapitał testowy i okno nadzoru operatora.
+- [ ] Brak otwartych krytycznych incydentów z ostatniej sesji.
+
+**NO-GO** jeśli którykolwiek warunek:
+- [ ] Niespójność między decyzją a wykonaniem (ghost success/failure).
+- [ ] Powtarzalne błędy tx bez jasnego root cause.
+- [ ] Brak potwierdzonej procedury emergency stop.
 

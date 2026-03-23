@@ -72,12 +72,16 @@ impl Default for ILLimitParams {
 /// Result of parameter optimization.
 #[derive(Debug, Clone)]
 pub struct ParameterOptimizationResult {
+    /// Baseline static range candidate.
+    pub static_range: Option<StaticRangeCandidate>,
     /// Best threshold parameters found.
     pub threshold_params: Option<ThresholdParams>,
     /// Best periodic parameters found.
     pub periodic_params: Option<PeriodicParams>,
     /// Best IL limit parameters found.
     pub il_limit_params: Option<ILLimitParams>,
+    /// Best retouch-shift parameters found.
+    pub retouch_shift_params: Option<RetouchShiftParams>,
     /// Expected performance metrics.
     pub expected_fees: Decimal,
     /// Expected IL.
@@ -101,6 +105,8 @@ pub struct ParameterOptimizer {
     il_thresholds: Vec<Decimal>,
     /// Grid of intervals to search.
     intervals: Vec<u64>,
+    /// Grid of retouch cooldown intervals in steps.
+    retouch_cooldowns: Vec<u64>,
 }
 
 impl Default for ParameterOptimizer {
@@ -124,6 +130,7 @@ impl ParameterOptimizer {
                 .filter_map(Decimal::from_f64)
                 .collect(),
             intervals: vec![6, 12, 24, 48, 72, 168], // 6h to 1 week
+            retouch_cooldowns: vec![1, 3, 6, 12, 24],
         }
     }
 
@@ -145,6 +152,13 @@ impl ParameterOptimizer {
     #[must_use]
     pub fn with_intervals(mut self, intervals: Vec<u64>) -> Self {
         self.intervals = intervals;
+        self
+    }
+
+    /// Sets custom retouch cooldown grid.
+    #[must_use]
+    pub fn with_retouch_cooldowns(mut self, cooldowns: Vec<u64>) -> Self {
+        self.retouch_cooldowns = cooldowns;
         self
     }
 
@@ -305,6 +319,63 @@ impl ParameterOptimizer {
         candidates
     }
 
+    /// Baseline candidate for static range (no rebalances).
+    pub fn optimize_static_range<O: ObjectiveFunction>(
+        &self,
+        config: &OptimizationConfig,
+        range_width: Decimal,
+        objective: &O,
+    ) -> StaticRangeCandidate {
+        let time_in_range = estimate_time_in_range(range_width, config.volatility, 0);
+        let fees = estimate_base_fees(config, range_width, time_in_range);
+        let il = estimate_base_il(range_width, config.volatility);
+        let sim_result = create_sim_result(&(fees, il, 0));
+        let score = objective.evaluate(&sim_result);
+        StaticRangeCandidate {
+            expected_fees: fees,
+            expected_il: il,
+            expected_rebalances: 0,
+            score,
+        }
+    }
+
+    /// Optimizes retouch-shift style parameters.
+    pub fn optimize_retouch_shift<O: ObjectiveFunction>(
+        &self,
+        config: &OptimizationConfig,
+        range_width: Decimal,
+        objective: &O,
+    ) -> Vec<RetouchShiftCandidate> {
+        let mut candidates = Vec::new();
+        for &price_threshold in &self.price_thresholds {
+            if !self.constraints.is_valid_price_threshold(price_threshold) {
+                continue;
+            }
+            for &cooldown_steps in &self.retouch_cooldowns {
+                let params = RetouchShiftParams {
+                    price_threshold,
+                    cooldown_steps,
+                };
+                let result = self.estimate_retouch_shift_performance(&params, config, range_width);
+                let sim_result = create_sim_result(&result);
+                let score = objective.evaluate(&sim_result);
+                candidates.push(RetouchShiftCandidate {
+                    params,
+                    expected_fees: result.0,
+                    expected_il: result.1,
+                    expected_rebalances: result.2,
+                    score,
+                });
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates
+    }
+
     /// Estimates performance for threshold strategy.
     fn estimate_threshold_performance(
         &self,
@@ -393,6 +464,37 @@ impl ParameterOptimizer {
 
         (net_fees, effective_il, expected_rebalances)
     }
+
+    /// Estimates performance for retouch-shift style strategy.
+    fn estimate_retouch_shift_performance(
+        &self,
+        params: &RetouchShiftParams,
+        config: &OptimizationConfig,
+        range_width: Decimal,
+    ) -> (Decimal, Decimal, u32) {
+        let vol_dec = Decimal::from_f64(config.volatility).unwrap_or(Decimal::ZERO);
+        let steps = config.simulation_steps as u32;
+        let trigger_rate = if params.price_threshold > Decimal::ZERO {
+            vol_dec / params.price_threshold
+        } else {
+            Decimal::ZERO
+        };
+        let cooldown_penalty = Decimal::from(params.cooldown_steps.max(1));
+        let expected_rebalances = (Decimal::from(steps) * trigger_rate / cooldown_penalty)
+            .to_u32()
+            .unwrap_or(0)
+            .min(steps);
+
+        let time_in_range =
+            estimate_time_in_range(range_width, config.volatility, expected_rebalances);
+        let base_fees = estimate_base_fees(config, range_width, time_in_range);
+        let base_il = estimate_base_il(range_width, config.volatility);
+        let il_reduction = Decimal::from(expected_rebalances) * Decimal::from_f64(0.006).unwrap();
+        let effective_il = (base_il - il_reduction).max(Decimal::ZERO);
+        let tx_costs = Decimal::from(expected_rebalances) * config.tx_cost;
+        let net_fees = base_fees - tx_costs;
+        (net_fees, effective_il, expected_rebalances)
+    }
 }
 
 /// Candidate result for threshold optimization.
@@ -430,6 +532,43 @@ pub struct PeriodicCandidate {
 pub struct ILLimitCandidate {
     /// The parameters.
     pub params: ILLimitParams,
+    /// Expected fees.
+    pub expected_fees: Decimal,
+    /// Expected IL.
+    pub expected_il: Decimal,
+    /// Expected number of rebalances.
+    pub expected_rebalances: u32,
+    /// Objective score.
+    pub score: Decimal,
+}
+
+/// Candidate result for static-range baseline.
+#[derive(Debug, Clone)]
+pub struct StaticRangeCandidate {
+    /// Expected fees.
+    pub expected_fees: Decimal,
+    /// Expected IL.
+    pub expected_il: Decimal,
+    /// Expected number of rebalances.
+    pub expected_rebalances: u32,
+    /// Objective score.
+    pub score: Decimal,
+}
+
+/// Parameters for a retouch-shift strategy.
+#[derive(Debug, Clone)]
+pub struct RetouchShiftParams {
+    /// Price threshold that arms a retouch.
+    pub price_threshold: Decimal,
+    /// Minimum cooldown between retouches (in steps).
+    pub cooldown_steps: u64,
+}
+
+/// Candidate result for retouch-shift optimization.
+#[derive(Debug, Clone)]
+pub struct RetouchShiftCandidate {
+    /// The parameters.
+    pub params: RetouchShiftParams,
     /// Expected fees.
     pub expected_fees: Decimal,
     /// Expected IL.
@@ -546,6 +685,27 @@ mod tests {
 
         let candidates = optimizer.optimize_il_limit(&config, range_width, &MaximizeNetPnL);
 
+        assert!(!candidates.is_empty());
+        for i in 1..candidates.len() {
+            assert!(candidates[i - 1].score >= candidates[i].score);
+        }
+    }
+
+    #[test]
+    fn test_optimize_static_range() {
+        let optimizer = ParameterOptimizer::new();
+        let config = OptimizationConfig::default();
+        let range_width = Decimal::from_f64(0.10).unwrap();
+        let candidate = optimizer.optimize_static_range(&config, range_width, &MaximizeNetPnL);
+        assert_eq!(candidate.expected_rebalances, 0);
+    }
+
+    #[test]
+    fn test_optimize_retouch_shift() {
+        let optimizer = ParameterOptimizer::new();
+        let config = OptimizationConfig::default();
+        let range_width = Decimal::from_f64(0.10).unwrap();
+        let candidates = optimizer.optimize_retouch_shift(&config, range_width, &MaximizeNetPnL);
         assert!(!candidates.is_empty());
         for i in 1..candidates.len() {
             assert!(candidates[i - 1].score >= candidates[i].score);

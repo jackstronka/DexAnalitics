@@ -156,6 +156,8 @@ pub enum StrategyType {
     Threshold,
     /// IL limit strategy.
     IlLimit,
+    /// Shift only the exiting edge of the range towards current price.
+    RetouchShift,
 }
 
 /// Strategy parameters.
@@ -164,6 +166,10 @@ pub struct StrategyParameters {
     /// Tick range width.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_width: Option<i32>,
+    /// Range width percentage (e.g. 4.0 for 4%).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_width_pct: Option<Decimal>,
     /// Rebalance threshold percentage.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]

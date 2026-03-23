@@ -145,6 +145,8 @@ pub struct RebalanceData {
 pub enum RebalanceReason {
     /// Price exited range.
     RangeExit,
+    /// RetouchShift: shift only the exiting edge towards current price.
+    RetouchShift,
     /// IL exceeded threshold.
     ILThreshold,
     /// Periodic rebalance.

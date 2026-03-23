@@ -99,8 +99,54 @@ pub fn print_best_block(
     if let (Some(pool_l), Some(step_data)) = (pool_active_liquidity, audit_step_data)
         && pool_l > 0
     {
-        use crate::engine::{hodl as hodl_engine, liquidity as liq_engine};
-        let (hodl_a, hodl_b_amt) = hodl_engine::hodl_amounts_50_50_usd(step_data, capital_dec);
+        use crate::engine::liquidity as liq_engine;
+        use crate::engine::pricing::{from_base_units, price_ab_human_to_raw, price_to_sqrt_q64};
+
+        // HODL benchmark: hold the same initial token amounts that correspond to
+        // the LP entry liquidity for the BEST initial range.
+        let first = step_data.first().expect("step_data must be non-empty");
+        let lower_usd = Decimal::from_f64(best.0).unwrap_or(Decimal::ZERO);
+        let upper_usd = Decimal::from_f64(best.1).unwrap_or(Decimal::ZERO);
+        let quote_usd = first.quote_usd;
+
+        let lower_ab = if quote_usd > Decimal::ZERO {
+            lower_usd / quote_usd
+        } else {
+            Decimal::ZERO
+        };
+        let upper_ab = if quote_usd > Decimal::ZERO {
+            upper_usd / quote_usd
+        } else {
+            Decimal::ZERO
+        };
+
+        let l_pos_hodl = liq_engine::estimate_position_liquidity(
+            step_data,
+            lower_usd,
+            upper_usd,
+            capital_dec,
+            token_a_decimals,
+            token_b_decimals,
+        );
+
+        let lower_ab_raw =
+            price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
+        let upper_ab_raw =
+            price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
+        let entry_ab_raw = price_ab_human_to_raw(
+            first.price_ab.value,
+            token_a_decimals,
+            token_b_decimals,
+        );
+
+        let sqrt_l = price_to_sqrt_q64(lower_ab_raw);
+        let sqrt_u = price_to_sqrt_q64(upper_ab_raw);
+        let sqrt_p = price_to_sqrt_q64(entry_ab_raw);
+
+        let (hodl_a_base, hodl_b_base) =
+            liq_engine::amounts_from_liquidity_at_price(l_pos_hodl, sqrt_l, sqrt_p, sqrt_u);
+        let hodl_a = from_base_units(hodl_a_base, token_a_decimals);
+        let hodl_b_amt = from_base_units(hodl_b_base, token_b_decimals);
         // LP end amounts for static range can be reconstructed from L.
         // For rebalancing strategies, end amounts depend on the rebalance path and must come
         // directly from the simulator state (not available here), so we skip the misleading estimate.
@@ -162,7 +208,7 @@ pub fn print_best_block(
         }
         if let Some(bsym) = symbol_b {
             println!(
-                "   HODL amounts (entry 50/50 USD): {:.6} {} + {:.6} {}",
+                "   HODL amounts (entry LP-derived): {:.6} {} + {:.6} {}",
                 hodl_a, symbol_a, hodl_b_amt, bsym
             );
             if best.2 == "static" {

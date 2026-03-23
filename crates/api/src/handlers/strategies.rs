@@ -36,6 +36,7 @@ pub async fn list_strategies(
             let params: StrategyParameters =
                 serde_json::from_value(s.config.clone()).unwrap_or(StrategyParameters {
                     tick_width: None,
+                    range_width_pct: None,
                     rebalance_threshold_pct: None,
                     max_il_pct: None,
                     eval_interval_secs: None,
@@ -100,6 +101,7 @@ pub async fn get_strategy(
     let params: StrategyParameters =
         serde_json::from_value(strategy.config.clone()).unwrap_or(StrategyParameters {
             tick_width: None,
+            range_width_pct: None,
             rebalance_threshold_pct: None,
             max_il_pct: None,
             eval_interval_secs: None,

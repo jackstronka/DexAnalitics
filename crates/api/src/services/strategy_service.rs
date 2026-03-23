@@ -1,8 +1,11 @@
 //! Strategy service for managing automated strategies.
 
 use crate::error::ApiError;
+use crate::models::StrategyType;
 use crate::state::{AlertUpdate, AppState};
-use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor};
+use clmm_lp_execution::prelude::{
+    DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode,
+};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -101,40 +104,59 @@ impl StrategyService {
         };
 
         // Create strategy executor
-        let executor = StrategyExecutor::new(
+        let mut executor = StrategyExecutor::new(
             self.state.provider.clone(),
             self.state.monitor.clone(),
             self.state.tx_manager.clone(),
             executor_config,
         );
 
-        // Configure decision engine if parameters provided (config built for future use when executor supports it).
+        // Configure decision engine from stored strategy config.
+        let strategy_type = strategy.config
+            .get("strategy_type")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(StrategyType::StaticRange);
+
+        let mut decision_config = DecisionConfig::default();
+        decision_config.strategy_mode = match strategy_type {
+            StrategyType::StaticRange => StrategyMode::StaticRange,
+            StrategyType::Periodic => StrategyMode::Periodic,
+            StrategyType::Threshold => StrategyMode::Threshold,
+            StrategyType::IlLimit => StrategyMode::IlLimit,
+            StrategyType::RetouchShift => StrategyMode::RetouchShift,
+        };
+
         if let Some(params) = strategy.config.get("parameters") {
-            let mut _decision_config = DecisionConfig::default();
-
-            if let Some(threshold) = params.get("rebalance_threshold_pct")
-                && let Some(val) = threshold.as_f64()
-            {
-                _decision_config.il_rebalance_threshold =
-                    Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(5, 2));
+            // Common: width and periodic / thresholds.
+            if let Some(range_width_pct) = params.get("range_width_pct").and_then(|v| v.as_f64()) {
+                decision_config.range_width_pct = Decimal::from_f64_retain(range_width_pct / 100.0)
+                    .unwrap_or(decision_config.range_width_pct);
             }
 
-            if let Some(max_il) = params.get("max_il_pct")
-                && let Some(val) = max_il.as_f64()
-            {
-                _decision_config.il_close_threshold =
-                    Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
+            if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(|v| v.as_f64()) {
+                decision_config.threshold_pct =
+                    Decimal::from_f64_retain(threshold / 100.0).unwrap_or(decision_config.threshold_pct);
             }
 
-            if let Some(min_hours) = params.get("min_rebalance_interval_hours")
-                && let Some(val) = min_hours.as_u64()
-            {
-                _decision_config.min_rebalance_interval_hours = val;
+            if let Some(min_hours) = params.get("min_rebalance_interval_hours").and_then(|v| v.as_u64()) {
+                decision_config.periodic_interval_hours = min_hours;
+                decision_config.min_rebalance_interval_hours = min_hours;
             }
 
-            // Note: Would need mutable access to set config
-            // executor.set_decision_config(_decision_config);
+            // IL-specific knobs (only meaningful for IlLimit strategy mode).
+            if let StrategyMode::IlLimit = decision_config.strategy_mode {
+                if let Some(max_il) = params.get("max_il_pct").and_then(|v| v.as_f64()) {
+                    decision_config.il_close_threshold =
+                        Decimal::from_f64_retain(max_il / 100.0).unwrap_or(decision_config.il_close_threshold);
+                }
+                if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(|v| v.as_f64()) {
+                    decision_config.il_rebalance_threshold =
+                        Decimal::from_f64_retain(threshold / 100.0).unwrap_or(decision_config.il_rebalance_threshold);
+                }
+            }
         }
+
+        executor.set_decision_config(decision_config);
 
         let executor = Arc::new(RwLock::new(executor));
 

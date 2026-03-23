@@ -6,15 +6,37 @@ use clmm_lp_protocols::prelude::WhirlpoolState;
 use rust_decimal::Decimal;
 use tracing::debug;
 
+/// Which strategy semantics to apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyMode {
+    /// No rebalancing; only optional fee collection.
+    StaticRange,
+    /// Rebalance periodically regardless of range status.
+    Periodic,
+    /// Rebalance when out of range OR when deviation from range midpoint exceeds threshold.
+    Threshold,
+    /// Shift only the exiting edge towards current price, once per out-of-range episode.
+    RetouchShift,
+    /// IL-based close/rebalance (legacy / future).
+    IlLimit,
+}
+
 /// Configuration for the decision engine.
 #[derive(Debug, Clone)]
 pub struct DecisionConfig {
+    /// Strategy semantics.
+    pub strategy_mode: StrategyMode,
     /// IL threshold for rebalancing (as percentage).
     pub il_rebalance_threshold: Decimal,
     /// IL threshold for closing (as percentage).
     pub il_close_threshold: Decimal,
     /// Minimum time between rebalances in hours.
     pub min_rebalance_interval_hours: u64,
+    /// For `Periodic`: rebalance every N hours.
+    pub periodic_interval_hours: u64,
+    /// For `Threshold`: deviation from range midpoint that triggers rebalance.
+    /// Expressed as a ratio (e.g. 0.05 = 5%).
+    pub threshold_pct: Decimal,
     /// Range width for new positions (as percentage).
     pub range_width_pct: Decimal,
     /// Whether to auto-collect fees.
@@ -26,9 +48,12 @@ pub struct DecisionConfig {
 impl Default for DecisionConfig {
     fn default() -> Self {
         Self {
+            strategy_mode: StrategyMode::IlLimit,
             il_rebalance_threshold: Decimal::new(5, 2), // 5%
             il_close_threshold: Decimal::new(15, 2),    // 15%
             min_rebalance_interval_hours: 24,
+            periodic_interval_hours: 24,
+            threshold_pct: Decimal::new(5, 3), // 0.5% by default
             range_width_pct: Decimal::new(10, 2), // 10%
             auto_collect_fees: true,
             min_fees_to_collect: Decimal::new(10, 0), // $10
@@ -45,6 +70,8 @@ pub struct DecisionContext {
     pub pool: WhirlpoolState,
     /// Hours since last rebalance.
     pub hours_since_rebalance: u64,
+    /// For `RetouchShift`: whether we are allowed to retouch given the current out-of-range episode.
+    pub retouch_armed: Option<bool>,
 }
 
 /// Decision engine for automated strategy execution.
@@ -72,53 +99,134 @@ impl DecisionEngine {
             "Evaluating position"
         );
 
-        // Check for critical IL - close position
-        if position.pnl.il_pct.abs() > self.config.il_close_threshold {
-            debug!("IL exceeds close threshold, recommending close");
-            return Decision::Close;
-        }
-
-        // Check for fee collection
+        // Fee collection can be useful independent of the rebalance semantics.
         if self.config.auto_collect_fees && position.pnl.fees_usd > self.config.min_fees_to_collect
         {
             debug!("Fees exceed threshold, recommending collection");
             return Decision::CollectFees;
         }
 
-        // Check if out of range
-        if !position.in_range {
-            // Check if enough time has passed since last rebalance
-            if context.hours_since_rebalance >= self.config.min_rebalance_interval_hours {
-                let (new_lower, new_upper) = self.calculate_new_range(pool);
+        match self.config.strategy_mode {
+            StrategyMode::StaticRange => Decision::Hold,
+
+            StrategyMode::Periodic => {
+                if context.hours_since_rebalance >= self.config.periodic_interval_hours {
+                    let (new_lower, new_upper) = self.calculate_new_range(pool);
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        "Periodic rebalance"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+                Decision::Hold
+            }
+
+            StrategyMode::Threshold => {
+                if !position.in_range {
+                    let (new_lower, new_upper) = self.calculate_new_range(pool);
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        "Threshold: out of range"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+
+                // In-range: rebalance only if we are far enough from midpoint.
+                let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_lower);
+                let upper_price = clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_upper);
+                let mid = (lower_price + upper_price) / Decimal::from(2u32);
+                if mid.is_zero() {
+                    return Decision::Hold;
+                }
+                let change = (pool.price - mid).abs() / mid;
+                if change >= self.config.threshold_pct {
+                    let (new_lower, new_upper) = self.calculate_new_range(pool);
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        change = %change,
+                        "Threshold: midpoint deviation"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+
+                Decision::Hold
+            }
+
+            StrategyMode::RetouchShift => {
+                if position.in_range {
+                    return Decision::Hold;
+                }
+                let armed = context.retouch_armed.unwrap_or(false);
+                if !armed {
+                    return Decision::Hold;
+                }
+
+                let (new_lower, new_upper) = self.calculate_retouch_range(position, pool);
                 debug!(
                     new_lower = new_lower,
                     new_upper = new_upper,
-                    "Position out of range, recommending rebalance"
+                    "RetouchShift: rebalance range edge"
                 );
                 return Decision::Rebalance {
                     new_tick_lower: new_lower,
                     new_tick_upper: new_upper,
                 };
             }
-        }
 
-        // Check for IL-based rebalancing
-        if position.pnl.il_pct.abs() > self.config.il_rebalance_threshold
-            && context.hours_since_rebalance >= self.config.min_rebalance_interval_hours
-        {
-            let (new_lower, new_upper) = self.calculate_new_range(pool);
-            debug!(
-                il_pct = %position.pnl.il_pct,
-                "IL exceeds threshold, recommending rebalance"
-            );
-            return Decision::Rebalance {
-                new_tick_lower: new_lower,
-                new_tick_upper: new_upper,
-            };
-        }
+            StrategyMode::IlLimit => {
+                // Check for critical IL - close position
+                if position.pnl.il_pct.abs() > self.config.il_close_threshold {
+                    debug!("IL exceeds close threshold, recommending close");
+                    return Decision::Close;
+                }
 
-        // Default: hold
-        Decision::Hold
+                // Check if out of range
+                if !position.in_range {
+                    // Check if enough time has passed since last rebalance
+                    if context.hours_since_rebalance >= self.config.min_rebalance_interval_hours {
+                        let (new_lower, new_upper) = self.calculate_new_range(pool);
+                        debug!(
+                            new_lower = new_lower,
+                            new_upper = new_upper,
+                            "Position out of range, recommending rebalance"
+                        );
+                        return Decision::Rebalance {
+                            new_tick_lower: new_lower,
+                            new_tick_upper: new_upper,
+                        };
+                    }
+                }
+
+                // Check for IL-based rebalancing
+                if position.pnl.il_pct.abs() > self.config.il_rebalance_threshold
+                    && context.hours_since_rebalance >= self.config.min_rebalance_interval_hours
+                {
+                    let (new_lower, new_upper) = self.calculate_new_range(pool);
+                    debug!(
+                        il_pct = %position.pnl.il_pct,
+                        "IL exceeds threshold, recommending rebalance"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+
+                Decision::Hold
+            }
+        }
     }
 
     /// Calculates a new range centered on current price.
@@ -128,6 +236,48 @@ impl DecisionEngine {
             self.config.range_width_pct,
             pool.tick_spacing,
         )
+    }
+
+    /// RetouchShift: shift only the exiting edge, keeping the original price-width.
+    fn calculate_retouch_range(
+        &self,
+        position: &MonitoredPosition,
+        pool: &WhirlpoolState,
+    ) -> (i32, i32) {
+        let spacing = pool.tick_spacing as i32;
+
+        let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_lower);
+        let upper_price = clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_upper);
+        let current_price = pool.price;
+
+        let (new_lower_price, new_upper_price) = if current_price > upper_price {
+            let overflow = current_price - upper_price;
+            (lower_price + overflow, current_price)
+        } else {
+            // current_price < lower_price
+            let overflow = lower_price - current_price;
+            (current_price, upper_price - overflow)
+        };
+
+        let mut new_lower_tick =
+            clmm_lp_protocols::prelude::price_to_tick(new_lower_price.max(Decimal::ZERO));
+        let mut new_upper_tick =
+            clmm_lp_protocols::prelude::price_to_tick(new_upper_price.max(Decimal::ZERO));
+
+        // Round to nearest allowed tick spacing.
+        if spacing > 0 {
+            new_lower_tick =
+                ((new_lower_tick as f64) / (spacing as f64)).round() as i32 * spacing;
+            new_upper_tick =
+                ((new_upper_tick as f64) / (spacing as f64)).round() as i32 * spacing;
+        }
+
+        // Ensure sane ordering after rounding.
+        if new_upper_tick <= new_lower_tick {
+            new_upper_tick = new_lower_tick + spacing.max(1);
+        }
+
+        (new_lower_tick, new_upper_tick)
     }
 
     /// Updates the configuration.
@@ -182,6 +332,8 @@ mod tests {
             address: String::new(),
             token_mint_a: Pubkey::new_unique(),
             token_mint_b: Pubkey::new_unique(),
+            token_vault_a: Pubkey::new_unique(),
+            token_vault_b: Pubkey::new_unique(),
             tick_current: 0,
             tick_spacing: 64,
             sqrt_price: 1 << 64,
@@ -189,6 +341,8 @@ mod tests {
             liquidity: 1000000,
             fee_rate_bps: 30,
             protocol_fee_rate_bps: 0,
+            protocol_fee_owed_a: 0,
+            protocol_fee_owed_b: 0,
             fee_growth_global_a: 0,
             fee_growth_global_b: 0,
         };
@@ -197,7 +351,14 @@ mod tests {
             position,
             pool,
             hours_since_rebalance: 48,
+            retouch_armed: None,
         }
+    }
+
+    fn engine_with_mode(mode: StrategyMode) -> DecisionEngine {
+        let mut cfg = DecisionConfig::default();
+        cfg.strategy_mode = mode;
+        DecisionEngine::new(cfg)
     }
 
     #[test]
@@ -225,5 +386,38 @@ mod tests {
 
         let decision = engine.decide(&context);
         assert!(matches!(decision, Decision::Close));
+    }
+
+    #[test]
+    fn test_retouch_shift_rebalances_when_armed_and_out_of_range() {
+        let engine = engine_with_mode(StrategyMode::RetouchShift);
+        let mut context = create_test_context(false, Decimal::ZERO);
+        context.retouch_armed = Some(true);
+        context.pool.price = Decimal::from(2u32); // clearly above upper tick price for test range
+
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Rebalance { .. }));
+    }
+
+    #[test]
+    fn test_retouch_shift_holds_when_not_armed() {
+        let engine = engine_with_mode(StrategyMode::RetouchShift);
+        let mut context = create_test_context(false, Decimal::ZERO);
+        context.retouch_armed = Some(false);
+        context.pool.price = Decimal::from(2u32);
+
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Hold));
+    }
+
+    #[test]
+    fn test_retouch_shift_holds_when_back_in_range() {
+        let engine = engine_with_mode(StrategyMode::RetouchShift);
+        let mut context = create_test_context(true, Decimal::ZERO);
+        context.retouch_armed = Some(true);
+        context.pool.price = Decimal::ONE;
+
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Hold));
     }
 }

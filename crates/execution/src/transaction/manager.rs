@@ -3,6 +3,7 @@
 use super::TransactionResult;
 use anyhow::Result;
 use clmm_lp_protocols::prelude::RpcProvider;
+use clmm_lp_protocols::rpc::SignatureStatusInfo;
 use solana_sdk::signature::Signature;
 use solana_sdk::transaction::Transaction;
 use std::sync::Arc;
@@ -79,10 +80,18 @@ impl TransactionManager {
     }
 
     /// Tries to send a transaction once.
-    async fn try_send_transaction(&self, _transaction: &Transaction) -> Result<Signature> {
-        // TODO: Implement actual transaction sending
-        // For now, return a placeholder
-        Err(anyhow::anyhow!("Transaction sending not implemented"))
+    async fn try_send_transaction(&self, transaction: &Transaction) -> Result<Signature> {
+        if self.config.simulate_before_send {
+            let sim = self.simulate(transaction).await?;
+            if !sim.success {
+                let sim_err = sim
+                    .error
+                    .unwrap_or_else(|| "simulation failed without error details".to_string());
+                return Err(anyhow::anyhow!("Transaction simulation failed: {}", sim_err));
+            }
+        }
+
+        self.provider.send_transaction(transaction).await
     }
 
     /// Waits for transaction confirmation.
@@ -98,7 +107,8 @@ impl TransactionManager {
             }
 
             match self.check_confirmation(signature).await {
-                Ok(Some(result)) => {
+                Ok(Some(mut result)) => {
+                    result.confirmation_time = start.elapsed();
                     info!(
                         signature = %signature,
                         slot = result.slot,
@@ -122,33 +132,45 @@ impl TransactionManager {
     /// Checks if a transaction is confirmed.
     async fn check_confirmation(&self, signature: &Signature) -> Result<Option<TransactionResult>> {
         let status = self.provider.get_signature_status(signature).await?;
-
-        match status {
-            Some(err) => {
-                // Transaction failed
-                Err(anyhow::anyhow!("Transaction failed: {:?}", err))
-            }
-            None => {
-                // Check if confirmed by getting slot
-                // For now, assume not confirmed
-                Ok(None)
-            }
-        }
+        map_signature_status(signature, status)
     }
 
     /// Sends and confirms a transaction.
     pub async fn send_and_confirm(&self, transaction: &Transaction) -> Result<TransactionResult> {
+        // If requested, do an explicit preflight simulation before sending.
+        if self.config.simulate_before_send {
+            let sim = self.simulate(transaction).await?;
+            if !sim.success {
+                let sim_err = sim
+                    .error
+                    .unwrap_or_else(|| "simulation failed without error details".to_string());
+                return Err(anyhow::anyhow!("Transaction simulation failed: {}", sim_err));
+            }
+        }
+
         let signature = self.send_transaction(transaction).await?;
         self.wait_for_confirmation(&signature).await
     }
 
     /// Simulates a transaction.
-    pub async fn simulate(&self, _transaction: &Transaction) -> Result<SimulationResult> {
-        // TODO: Implement transaction simulation
+    pub async fn simulate(&self, transaction: &Transaction) -> Result<SimulationResult> {
+        let result = self.provider.simulate_transaction(transaction).await?;
+        let logs = result.logs.unwrap_or_default();
+        let compute_units = result.units_consumed.unwrap_or(0);
+
+        if let Some(err) = result.err {
+            return Ok(SimulationResult {
+                success: false,
+                logs,
+                compute_units,
+                error: Some(format!("{:?}", err)),
+            });
+        }
+
         Ok(SimulationResult {
             success: true,
-            logs: vec![],
-            compute_units: 0,
+            logs,
+            compute_units,
             error: None,
         })
     }
@@ -165,4 +187,74 @@ pub struct SimulationResult {
     pub compute_units: u64,
     /// Error message if failed.
     pub error: Option<String>,
+}
+
+fn map_signature_status(
+    signature: &Signature,
+    status: Option<SignatureStatusInfo>,
+) -> Result<Option<TransactionResult>> {
+    match status {
+        Some(status) => {
+            // A present status with no error is considered confirmed for our lifecycle.
+            if let Some(err) = status.err {
+                return Err(anyhow::anyhow!("Transaction failed: {:?}", err));
+            }
+
+            Ok(Some(TransactionResult {
+                signature: *signature,
+                slot: status.slot,
+                confirmation_time: Duration::from_millis(0),
+                compute_units: None,
+                fee: 0,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_sdk::instruction::InstructionError;
+    use solana_sdk::transaction::TransactionError;
+
+    #[test]
+    fn map_signature_status_none_is_pending() {
+        let sig = Signature::default();
+        let out = map_signature_status(&sig, None).expect("mapping should succeed");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn map_signature_status_ok_is_confirmed() {
+        let sig = Signature::default();
+        let out = map_signature_status(
+            &sig,
+            Some(SignatureStatusInfo {
+                slot: 42,
+                err: None,
+            }),
+        )
+        .expect("mapping should succeed");
+        let out = out.expect("status should be confirmed");
+        assert_eq!(out.signature, sig);
+        assert_eq!(out.slot, 42);
+    }
+
+    #[test]
+    fn map_signature_status_err_is_failure() {
+        let sig = Signature::default();
+        let err = map_signature_status(
+            &sig,
+            Some(SignatureStatusInfo {
+                slot: 42,
+                err: Some(TransactionError::InstructionError(
+                    0,
+                    InstructionError::Custom(123),
+                )),
+            }),
+        )
+        .expect_err("should map to failure");
+        assert!(err.to_string().contains("Transaction failed"));
+    }
 }

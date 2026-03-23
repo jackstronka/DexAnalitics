@@ -188,6 +188,11 @@ cargo run --bin clmm-lp-cli -- optimize \
 - `doc/PROJECT_OVERVIEW.md` - skrócony opis architektury i pipeline
 - `doc/ONCHAIN_FEES_TRUTH_PLAN.md` - plan dojścia do bardziej "on-chain truth" dla fee accounting
 - `doc/TODO_ONCHAIN_NEXT_STEPS.md` - **co jest do zrobienia** (fazy A–E) i log wykonania
+- `doc/BOT_RESEARCH_DECISION_2026-03-23.md` - decyzja researchowa: opcje botów, macierz porównawcza, rekomendowany kierunek
+- `doc/BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md` - finalne domknięcie decyzji: scoring wagowy + kontrakt hybrydowy (co importujemy i gdzie)
+- `doc/BOT_HYBRID_DEFINITION_OF_READY_2026-03-23.md` - checklista gotowości do startu sprintu implementacyjnego (Go/No-Go)
+- `doc/BOT_OPERATIONS_MODEL_2026-03-23.md` - model operacyjny bota: tryby pracy, procedury, alerty, override i eskalacja
+- `doc/BOT_WORKLOG_2026-03-23.md` - dziennik: co zostało zrobione i dlaczego (kontekst + uzasadnienia)
 
 `backtest` z lokalnym `decoded_swaps.jsonl`: domyślnie tylko wiersze z `decode_status=ok` (`--fee-swap-decode-status loose` = poprzednie zachowanie).
 

@@ -40,6 +40,7 @@ pub use crate::scheduler::{Schedule, ScheduleBuilder, ScheduledTask, Scheduler, 
 pub use crate::strategy::{
     Decision, DecisionConfig, DecisionContext, DecisionEngine, ExecutorConfig, ProfitabilityCheck,
     RebalanceConfig, RebalanceExecutor, RebalanceParams, RebalanceResult, StrategyExecutor,
+    StrategyMode,
 };
 
 // Sync

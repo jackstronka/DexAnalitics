@@ -68,6 +68,19 @@
 - [ ] **E2.6** Anty-przeszacowanie: dodać kalibrację skalującą model share/fee (np. `share_calibrated = clamp(k * share_est, 0, 1)`) wyznaczaną na bazowym „referencyjnym” zakresie (najlepiej z `TIR ~ 100%`) tak, żeby model nie generował nierealnie wysokich `Fees Earned` dla wąskich range’ów.
 - [ ] **E2.7** Guardrail sanity-check: porównywać “modeled pool fees vs snapshot pool fees” oraz monitorować “share mass balance” po rebalansie (jeśli przekracza X%, log + clamp/fallback do legacy share).
 
+## Faza F — IL semantics unification (backtest)
+
+Cel: wyeliminować mieszanie różnych definicji IL pod jedną etykietą w raportach.
+
+- [x] **F1** Raporty CLI: rozdzielić metryki na:
+  - `IL vs HODL (ex-fees)` (metryka end-of-backtest),
+  - `IL Segment (last)` (klasyczne CLMM IL dla ostatniego segmentu po rebalansach).
+- [x] **F2** `TrackerSummary`: dodać jawne pola dla obu metryk i zachować kompatybilność (`final_il_pct` jako alias legacy do `IL vs HODL (ex-fees)`).
+- [x] **F3** Ujednolicić źródła metryk w `backtest_engine` i `position_tracker`, żeby pola miały tę samą semantykę.
+- [x] **F4** Test regresyjny: static vs threshold (wielokrotne rebalance) i asercje, że:
+  - `IL Segment (last)` może różnić się od `IL vs HODL (ex-fees)`,
+  - etykiety/metryki nie są już mylone.
+
 ## Tech debt
 
 - [x] **T1** Usunąć martwy kod po `return` w handlerach snapshot w `main.rs` (ostrzeżenia `unreachable_code`).

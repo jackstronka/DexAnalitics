@@ -2,7 +2,7 @@
 
 use super::{
     Decision, DecisionConfig, DecisionContext, DecisionEngine, RebalanceConfig, RebalanceExecutor,
-    RebalanceParams,
+    RebalanceParams, StrategyMode,
 };
 use crate::emergency::CircuitBreaker;
 use crate::lifecycle::{LifecycleTracker, RebalanceReason};
@@ -11,9 +11,11 @@ use crate::transaction::TransactionManager;
 use crate::wallet::Wallet;
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for strategy execution.
@@ -66,6 +68,8 @@ pub struct StrategyExecutor {
     running: std::sync::atomic::AtomicBool,
     /// Pool reader for fetching state.
     pool_reader: WhirlpoolReader,
+    /// For `RetouchShift`: gating to allow only one retouch per out-of-range episode.
+    retouch_armed: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, bool>>>,
 }
 
 impl StrategyExecutor {
@@ -79,6 +83,7 @@ impl StrategyExecutor {
         let lifecycle = Arc::new(LifecycleTracker::new());
         let circuit_breaker = Arc::new(CircuitBreaker::default());
         let pool_reader = WhirlpoolReader::new(provider.clone());
+        let retouch_armed = Arc::new(RwLock::new(HashMap::new()));
 
         let mut rebalance_executor = RebalanceExecutor::new(
             provider,
@@ -99,6 +104,7 @@ impl StrategyExecutor {
             config,
             running: std::sync::atomic::AtomicBool::new(false),
             pool_reader,
+            retouch_armed,
         }
     }
 
@@ -223,10 +229,22 @@ impl StrategyExecutor {
             .calculate_hours_since_rebalance(&position.address)
             .await;
 
+        let retouch_armed = if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
+            let mut map = self.retouch_armed.write().await;
+            let entry = map.entry(position.address).or_insert(true);
+            if position.in_range {
+                *entry = true;
+            }
+            Some(*entry)
+        } else {
+            None
+        };
+
         let context = DecisionContext {
             position: position.clone(),
             pool: pool.clone(),
             hours_since_rebalance,
+            retouch_armed,
         };
 
         let decision = self.decision_engine.decide(&context);
@@ -290,6 +308,31 @@ impl StrategyExecutor {
                 new_tick_lower,
                 new_tick_upper,
             } => {
+                // Update retouch gate once we decide to rebalance for RetouchShift.
+                if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
+                    let mut map = self.retouch_armed.write().await;
+                    map.insert(position.address, false);
+                }
+
+                let reason = match self.decision_engine.config().strategy_mode {
+                    StrategyMode::RetouchShift => RebalanceReason::RetouchShift,
+                    StrategyMode::Periodic => RebalanceReason::Periodic,
+                    StrategyMode::Threshold => {
+                        if !position.in_range {
+                            RebalanceReason::RangeExit
+                        } else {
+                            RebalanceReason::Optimization
+                        }
+                    }
+                    StrategyMode::StaticRange => RebalanceReason::Manual,
+                    StrategyMode::IlLimit => {
+                        if !position.in_range {
+                            RebalanceReason::RangeExit
+                        } else {
+                            RebalanceReason::ILThreshold
+                        }
+                    }
+                };
                 let params = RebalanceParams {
                     position: position.address,
                     pool: position.pool,
@@ -298,11 +341,7 @@ impl StrategyExecutor {
                     new_tick_lower: *new_tick_lower,
                     new_tick_upper: *new_tick_upper,
                     current_liquidity: position.on_chain.liquidity,
-                    reason: if !position.in_range {
-                        RebalanceReason::RangeExit
-                    } else {
-                        RebalanceReason::ILThreshold
-                    },
+                    reason,
                     current_il_pct: position.pnl.il_pct,
                 };
 

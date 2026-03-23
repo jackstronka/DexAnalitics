@@ -260,6 +260,7 @@ mod regression_tests {
                 step_volume_usd: vol,
                 quote_usd: Decimal::ONE,
                 lp_share: Decimal::new(1, 3),
+                pool_liquidity_active: None,
                 start_timestamp: STEP_BASE_TS + (i as u64) * 3600,
             })
             .collect()

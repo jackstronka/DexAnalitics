@@ -1,5 +1,13 @@
 # Project Overview
 
+## Decision and Worklog Docs
+
+For bot direction and historical context of recent work, see:
+- `doc/BOT_RESEARCH_DECISION_2026-03-23.md` (research-based decision and comparison matrix)
+- `doc/BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md` (weighted scoring and hybrid implementation contract)
+- `doc/BOT_OPERATIONS_MODEL_2026-03-23.md` (how we operate the bot in practice: modes, alerts, escalation, overrides)
+- `doc/BOT_WORKLOG_2026-03-23.md` (what was done and why)
+
 ## What this project is
 
 CLMM Liquidity Provider is a Solana strategy optimizer and execution engine for liquidity providers (LPs) operating on Concentrated Liquidity Market Makers (CLMMs).
@@ -68,7 +76,14 @@ Key commands live in `crates/cli/src/main.rs`:
   - `DataHealthCheck` (staleness + decode OK%)
 - Backtesting/optimization:
   - `Backtest`
-  - `BacktestOptimize` (grid search over ranges + 3 strategy types; opcjonalnie lokalne `data/swaps` gdy brak Dune)
+  - `BacktestOptimize` (grid search over ranges + 5 strategy types; opcjonalnie lokalne `data/swaps` gdy brak Dune)
+
+## Strategy coverage by layer
+
+- Implemented strategy catalog (5): `static_range`, `periodic`, `threshold`, `il_limit`, `retouch_shift`.
+- `backtest-optimize`: evaluates all 5 strategies on historical grid runs.
+- `optimize`: reports strategy recommendations for all 5 (analytical layer).
+- `ParameterOptimizer`: contains parameter-search/estimation candidates for all 5 (including static baseline and retouch path).
 
 The curated pool addresses are defined in `STARTUP.md`.
 

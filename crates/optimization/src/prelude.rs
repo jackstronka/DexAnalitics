@@ -25,7 +25,8 @@ pub use crate::optimizer::{
 // Parameter optimizer
 pub use crate::parameter_optimizer::{
     ILLimitCandidate, ILLimitParams, ParameterOptimizationResult, ParameterOptimizer,
-    PeriodicCandidate, PeriodicParams, ThresholdCandidate, ThresholdParams,
+    PeriodicCandidate, PeriodicParams, RetouchShiftCandidate, RetouchShiftParams,
+    StaticRangeCandidate, ThresholdCandidate, ThresholdParams,
 };
 
 // Range optimizer
