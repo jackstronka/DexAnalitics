@@ -81,3 +81,12 @@ Zobacz **`doc/TODO_ONCHAIN_NEXT_STEPS.md`** — pełna lista faz A–E + tech de
 - Raydium / Meteora: protocol-specific event or instruction parsing (same tier as Orca `Traded`).
 - Replace Raydium coarse tick neighborhood with real tick-spacing-aware neighborhood.
 - Extend P2 with account-level neighborhood liquidity snapshots (tick/bin arrays), not just index neighborhoods.
+
+## E2.5 Milestone (2026-03-23)
+
+- **Range-aware fee share in snapshot-only mode**:
+  - added `pool_liquidity_active` per timestamp to `StepDataPoint` (`crates/cli/src/backtest_engine.rs`)
+  - `snapshot_price_path::build_from_orca_snapshots` now fills it from snapshot `liquidity_active`
+  - `backtest` now computes the LP fee share as `L_pos / L_active(t)` (instead of relying on a fixed `lp_share` / pool-wide constant)
+- **Result**: `Fees Earned` became range-sensitive again (narrower ranges can earn meaningfully different fees even when `Time in Range ~ 100%`).
+- **Guardrail kept**: snapshot-fee sanity check vs candle baseline still falls back if snapshot-derived totals look implausible (see `snapshot_pool_fees vs candle_pool_fees` ratio guard in `crates/cli/src/main.rs`).

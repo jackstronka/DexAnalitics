@@ -5,7 +5,19 @@ use crate::backtest_engine::StepData;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// `data/` at runtime (cwd) or workspace `data/` during unit tests (stable paths, no `set_current_dir`).
+fn repo_data_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+    }
+    #[cfg(not(test))]
+    {
+        Path::new("data").to_path_buf()
+    }
+}
 
 /// Raw tx counts per step (for timing proxy).
 pub fn raw_swap_counts_by_step(
@@ -107,7 +119,7 @@ pub fn decoded_swap_fees_usd_by_step(
     if step_data.is_empty() {
         return None;
     }
-    let path = Path::new("data")
+    let path = repo_data_dir()
         .join("swaps")
         .join(protocol_dir)
         .join(pool)
@@ -132,7 +144,7 @@ pub fn decoded_swap_fees_usd_by_step(
         };
         if require_decode_ok {
             let st = v.get("decode_status").and_then(|x| x.as_str());
-            if !matches!(st, Some("ok") | Some("ok_traded_event")) {
+            if !matches!(st, Some("ok") | Some("ok_traded_event") | Some("ok_swap_event")) {
                 continue;
             }
         }
@@ -225,4 +237,56 @@ pub fn build_local_pool_fees_usd(
             if timing.is_empty() { None } else { Some(timing) }
         }
     }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    //! C3: one fixed pool + step grid → expect non-empty local fee map from decoded rows (`decode_status` ok / ok_traded_event / ok_swap_event).
+
+    use super::*;
+    use crate::backtest_engine::StepData;
+    use clmm_lp_domain::prelude::Price;
+
+    const ORCA_POOL_FIXTURE: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE";
+    /// Align with `decoded_swaps.jsonl` rows that have `decode_status` ok / ok_traded_event (see block_time ~1773957198).
+    const STEP_BASE_TS: u64 = 1_773_957_000;
+
+    fn synthetic_steps(n: usize) -> Vec<StepData> {
+        let vol = Decimal::from(10_000u64);
+        (0..n)
+            .map(|i| StepData {
+                price_usd: Price::new(Decimal::from(130)),
+                price_ab: Price::new(Decimal::ONE),
+                step_volume_usd: vol,
+                quote_usd: Decimal::ONE,
+                lp_share: Decimal::new(1, 3),
+                start_timestamp: STEP_BASE_TS + (i as u64) * 3600,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_local_pool_fees_uses_decoded_swaps_when_strict_ok() {
+        let steps = synthetic_steps(48);
+        let fee_rate = Decimal::new(3, 3);
+        let m = build_local_pool_fees_usd(
+            "orca",
+            ORCA_POOL_FIXTURE,
+            &steps,
+            3600,
+            9,
+            6,
+            fee_rate,
+            true,
+        )
+        .expect("expected non-empty local pool fees from fixture decoded_swaps.jsonl");
+
+        let sum: Decimal = m.values().copied().sum();
+        assert!(
+            sum > Decimal::ZERO,
+            "fee map should contain positive USD fees, got {:?}",
+            m
+        );
+    }
+
 }

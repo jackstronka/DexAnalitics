@@ -27,6 +27,9 @@ pub struct StepDataPoint {
     pub quote_usd: Decimal,
     /// LP share proxy (legacy; replaced by liquidity-share model when available).
     pub lp_share: Decimal,
+    /// Active pool liquidity (from protocol state) at this step.
+    /// Only available in snapshot-only price path mode.
+    pub pool_liquidity_active: Option<u128>,
     /// Candle start timestamp (seconds).
     pub start_timestamp: u64,
 }
@@ -46,6 +49,9 @@ pub enum StratConfig {
 pub struct GridRunParams {
     pub capital_dec: Decimal,
     pub tx_cost_dec: Decimal,
+    /// Optional realistic rebalance cost model:
+    /// cost = fixed_cost_usd + notional_usd * slippage_bps / 10_000.
+    pub rebalance_cost_model: Option<RebalanceCostModel>,
     pub fee_rate: Decimal,
     pub pool_active_liquidity: Option<u128>,
     pub token_a_decimals: u32,
@@ -55,6 +61,28 @@ pub struct GridRunParams {
     /// If true, use liquidity-based fee share when pool liquidity is known.
     /// If false, always use `StepDataPoint.lp_share` (e.g. when `--lp-share` is provided).
     pub use_liquidity_share: bool,
+}
+
+/// Realistic rebalance cost model.
+#[derive(Clone, Copy, Debug)]
+pub struct RebalanceCostModel {
+    /// Fixed USD component charged on each rebalance
+    /// (network + priority + optional tip + extra fixed overhead).
+    pub fixed_cost_usd: Decimal,
+    /// Slippage in basis points applied to current rebalanced notional.
+    pub slippage_bps: Decimal,
+}
+
+impl RebalanceCostModel {
+    #[must_use]
+    pub fn cost_for_notional(&self, notional_usd: Decimal) -> Decimal {
+        let slip = if self.slippage_bps > Decimal::ZERO && notional_usd > Decimal::ZERO {
+            notional_usd * self.slippage_bps / Decimal::from(10_000u32)
+        } else {
+            Decimal::ZERO
+        };
+        self.fixed_cost_usd + slip
+    }
 }
 
 /// Build step data (price, volume, share) for each candle.
@@ -158,6 +186,7 @@ pub fn build_step_data(
                 step_volume_usd: step_vol,
                 quote_usd,
                 lp_share: share,
+                pool_liquidity_active: None,
                 start_timestamp: candle.start_timestamp,
             }
         })
@@ -239,6 +268,7 @@ pub fn run_single(
 ) -> (f64, f64, String, TrackerSummary) {
     let capital_dec = params.capital_dec;
     let tx_cost_dec = params.tx_cost_dec;
+    let rebalance_cost_model = params.rebalance_cost_model;
     let fee_rate = params.fee_rate;
     let pool_active_liquidity = params.pool_active_liquidity;
     let token_a_decimals = params.token_a_decimals;
@@ -408,12 +438,17 @@ pub fn run_single(
         };
 
         if should_rebalance && liquidity_l > 0 {
-            total_rebalance_cost += tx_cost_dec;
+            let rebalance_cost = if let Some(model) = rebalance_cost_model {
+                model.cost_for_notional(position_value_usd)
+            } else {
+                tx_cost_dec
+            };
+            total_rebalance_cost += rebalance_cost;
             rebalance_count += 1;
             steps_since_rebalance = 0;
 
             // Re-deploy current position value minus tx cost; fees are NOT compounded here.
-            let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
+            let capital_usd_now = (position_value_usd - rebalance_cost).max(Decimal::ZERO);
             let center_ab_now = price_ab.to_f64().unwrap_or(1.0);
             let new_lower_ab = Decimal::from_f64(center_ab_now * (1.0 - half)).unwrap();
             let new_upper_ab = Decimal::from_f64(center_ab_now * (1.0 + half)).unwrap();

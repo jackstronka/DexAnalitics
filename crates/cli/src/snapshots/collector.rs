@@ -634,6 +634,11 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
         token_vault_b: Option<String>,
 
         #[serde(skip_serializing_if = "Option::is_none")]
+        token_vault_owner_a: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        token_vault_owner_b: Option<String>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
         vault_amount_a: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         vault_amount_b: Option<u64>,
@@ -651,29 +656,54 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
             Err(e) => (None, false, Some(e.to_string())),
         };
 
-        let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
-            let accounts = rpc
-                .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
-                .await
-                .ok();
-            if let Some(accounts) = accounts {
-                let a = accounts
-                    .get(0)
-                    .and_then(|a| a.as_ref())
-                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                    .map(|a| a.amount);
-                let b = accounts
-                    .get(1)
-                    .and_then(|a| a.as_ref())
-                    .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                    .map(|a| a.amount);
-                (a, b)
+        let (vault_amount_a, token_vault_owner_a, vault_amount_b, token_vault_owner_b) =
+            if let Some(ref p) = parsed {
+                // Try bulk first (cheaper RPC), but fall back to individual fetches
+                // if the bulk request was partially/fully missing.
+                let accounts_bulk = rpc
+                    .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
+                    .await
+                    .ok();
+
+                let unpack_a = accounts_bulk.as_ref().and_then(|accounts| {
+                    accounts
+                        .get(0)
+                        .and_then(|a| a.as_ref())
+                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                });
+                let unpack_b = accounts_bulk.as_ref().and_then(|accounts| {
+                    accounts
+                        .get(1)
+                        .and_then(|a| a.as_ref())
+                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                });
+
+                let a = if unpack_a.is_some() {
+                    unpack_a
+                } else {
+                    rpc.get_account_by_address(&p.reserve_x.to_string())
+                        .await
+                        .ok()
+                        .and_then(|acc| SplTokenAccount::unpack(&acc.data).ok())
+                };
+                let b = if unpack_b.is_some() {
+                    unpack_b
+                } else {
+                    rpc.get_account_by_address(&p.reserve_y.to_string())
+                        .await
+                        .ok()
+                        .and_then(|acc| SplTokenAccount::unpack(&acc.data).ok())
+                };
+
+                (
+                    a.as_ref().map(|a| a.amount),
+                    a.as_ref().map(|a| a.owner.to_string()),
+                    b.as_ref().map(|b| b.amount),
+                    b.as_ref().map(|b| b.owner.to_string()),
+                )
             } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
+                (None, None, None, None)
+            };
 
         let snap = MeteoraLbPairSnapshot {
             ts_utc: chrono::Utc::now().to_rfc3339(),
@@ -701,6 +731,8 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
             token_mint_b: parsed.as_ref().map(|p| p.token_mint_y.to_string()),
             token_vault_a: parsed.as_ref().map(|p| p.reserve_x.to_string()),
             token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
+            token_vault_owner_a,
+            token_vault_owner_b,
             vault_amount_a,
             vault_amount_b,
             protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),

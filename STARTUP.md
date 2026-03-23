@@ -512,7 +512,7 @@ Implementation: `crates/simulation/src/position_tracker.rs` (fields `segment_ent
 
 The **`backtest-optimize`** command finds a good range and strategy for a given pair and period by running many backtests on the same historical data:
 
-- Fetches **one** price path (Birdeye) and optional Dune TVL/volume.
+- Fetches **one** price path: default **Birdeye**, or **`--price-path-source snapshots`** (Orca `data/pool-snapshots/orca/<pool>/snapshots.jsonl`, cross-pair required, no `BIRDEYE_API_KEY`) — same model as `backtest --price-path-source snapshots`. Optional **`--start-date` / `--end-date`** (UTC `YYYY-MM-DD`) for that mode.
 - Builds a **grid**: several range widths (e.g. 1%–15%) × strategies (static, threshold 2%/3%/5%/7%/10%/15%, periodic 12h/24h/48h/72h), or **only static** with `--static-only` for a faster range-only search.
 - Runs backtests in **parallel** (rayon); with `--windows N` (N>1), splits history into N rolling windows and ranks by **average score** across windows for robustness.
 - Applies optional **filters**: `--min-time-in-range` (%), `--max-drawdown` (%) so low TIR or high drawdown configs are dropped.

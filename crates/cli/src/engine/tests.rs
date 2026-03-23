@@ -15,6 +15,7 @@ mod tests {
             step_volume_usd: dec!(1000),
             quote_usd,
             lp_share: dec!(0.0001),
+            pool_liquidity_active: None,
             start_timestamp: 0,
         }
     }

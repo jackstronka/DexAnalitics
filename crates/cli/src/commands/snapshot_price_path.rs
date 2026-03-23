@@ -310,6 +310,7 @@ pub async fn build_from_orca_snapshots(
             step_volume_usd: Decimal::ZERO,
             quote_usd,
             lp_share,
+            pool_liquidity_active: r.liq,
             start_timestamp: r.ts_u64,
         });
     }

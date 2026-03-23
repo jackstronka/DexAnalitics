@@ -1,6 +1,9 @@
 use anyhow::Result;
 use chrono::Utc;
-use clmm_lp_protocols::events::parse_traded_event_for_pool;
+use clmm_lp_protocols::events::{
+    parse_meteora_swap_event_for_pool, parse_raydium_swap_event_for_pool, parse_traded_event_for_pool,
+};
+use clmm_lp_protocols::rpc::RpcProvider;
 use serde::Serialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
@@ -8,6 +11,8 @@ use solana_client::rpc_config::RpcTransactionConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status_client_types::UiTransactionEncoding;
+use spl_token::solana_program::program_pack::Pack;
+use spl_token::state::Account as SplTokenAccount;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -51,6 +56,13 @@ struct PoolMeta {
     token_vault_b: String,
     token_mint_a: String,
     token_mint_b: String,
+    token_vault_owner_a: Option<String>,
+    token_vault_owner_b: Option<String>,
+}
+
+fn is_debug_meteora_pool(pool: &str) -> bool {
+    // Temporary targeted debug path for Meteora investigations.
+    pool == "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"
 }
 
 #[derive(Debug, Serialize)]
@@ -167,7 +179,75 @@ fn latest_pool_meta(protocol: Proto, pool: &str) -> Option<PoolMeta> {
         token_vault_b: v.get("token_vault_b")?.as_str()?.to_string(),
         token_mint_a: v.get("token_mint_a")?.as_str()?.to_string(),
         token_mint_b: v.get("token_mint_b")?.as_str()?.to_string(),
+        token_vault_owner_a: v.get("token_vault_owner_a").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        token_vault_owner_b: v.get("token_vault_owner_b").and_then(|x| x.as_str()).map(|s| s.to_string()),
     })
+}
+
+async fn fill_meteora_token_vault_owners(
+    rpc_provider: &RpcProvider,
+    pool: &str,
+    meta: &mut PoolMeta,
+) -> Result<()> {
+    // This is used as a robustness fallback when snapshot parsing can't retrieve
+    // SPL token reserve accounts (e.g. RPC transient failures).
+    if meta.token_vault_owner_a.is_some() && meta.token_vault_owner_b.is_some() {
+        return Ok(());
+    }
+
+    if meta.token_vault_owner_a.is_none() {
+        let pk = Pubkey::from_str(&meta.token_vault_a)?;
+        if let Ok(Ok(acct)) =
+            timeout(Duration::from_secs(4), rpc_provider.get_account(&pk)).await
+        {
+            if let Ok(spl) = SplTokenAccount::unpack(&acct.data) {
+                meta.token_vault_owner_a = Some(spl.owner.to_string());
+                if is_debug_meteora_pool(pool) {
+                    eprintln!(
+                        "[meteora-debug] owner-fill a ok pool={} vault_a={} owner_a={}",
+                        pool, meta.token_vault_a, spl.owner
+                    );
+                }
+            }
+        } else if is_debug_meteora_pool(pool) {
+            eprintln!(
+                "[meteora-debug] owner-fill a failed pool={} vault_a={}",
+                pool, meta.token_vault_a
+            );
+        }
+    }
+    if meta.token_vault_owner_b.is_none() {
+        let pk = Pubkey::from_str(&meta.token_vault_b)?;
+        if let Ok(Ok(acct)) =
+            timeout(Duration::from_secs(4), rpc_provider.get_account(&pk)).await
+        {
+            if let Ok(spl) = SplTokenAccount::unpack(&acct.data) {
+                meta.token_vault_owner_b = Some(spl.owner.to_string());
+                if is_debug_meteora_pool(pool) {
+                    eprintln!(
+                        "[meteora-debug] owner-fill b ok pool={} vault_b={} owner_b={}",
+                        pool, meta.token_vault_b, spl.owner
+                    );
+                }
+            }
+        } else if is_debug_meteora_pool(pool) {
+            eprintln!(
+                "[meteora-debug] owner-fill b failed pool={} vault_b={}",
+                pool, meta.token_vault_b
+            );
+        }
+    }
+
+    if is_debug_meteora_pool(pool) {
+        eprintln!(
+            "[meteora-debug] owner-fill final pool={} has_owner_a={} has_owner_b={}",
+            pool,
+            meta.token_vault_owner_a.is_some(),
+            meta.token_vault_owner_b.is_some()
+        );
+    }
+
+    Ok(())
 }
 
 fn as_arr<'a>(v: &'a serde_json::Value, k1: &str, k2: &str) -> &'a [serde_json::Value] {
@@ -202,13 +282,283 @@ fn token_amount_by_index(meta: &serde_json::Value, account_index: u64, key: &str
     None
 }
 
+fn token_amount_by_mint_owner(
+    meta: &serde_json::Value,
+    mint: &str,
+    owner: &str,
+    key: &str,
+) -> Option<u128> {
+    let arr = as_arr(meta, key, key);
+    let mut sum: u128 = 0;
+    let mut found = false;
+
+    for b in arr {
+        let b_mint = b
+            .get("mint")
+            .and_then(|x| x.as_str())
+            .or_else(|| b.get("tokenMint").and_then(|x| x.as_str()))
+            .or_else(|| b.get("token_mint").and_then(|x| x.as_str()))?;
+        if b_mint != mint {
+            continue;
+        }
+
+        let b_owner = b
+            .get("owner")
+            .and_then(|x| x.as_str())
+            .or_else(|| b.get("tokenOwner").and_then(|x| x.as_str()))
+            .or_else(|| b.get("token_owner").and_then(|x| x.as_str()))?;
+        if b_owner != owner {
+            continue;
+        }
+
+        let amt = b
+            .get("uiTokenAmount")
+            .and_then(|x| x.get("amount"))
+            .and_then(|x| x.as_str())
+            .or_else(|| {
+                b.get("ui_token_amount")
+                    .and_then(|x| x.get("amount"))
+                    .and_then(|x| x.as_str())
+            })?
+            .parse::<u128>()
+            .ok()?;
+
+        sum = sum.saturating_add(amt);
+        found = true;
+    }
+
+    found.then_some(sum)
+}
+
+fn choose_largest_mint_delta(meta: &serde_json::Value, mint: &str) -> Option<i128> {
+    largest_mint_deltas(meta)
+        .into_iter()
+        .find_map(|(m, d)| if m == mint { Some(d) } else { None })
+}
+
+fn largest_mint_deltas(meta: &serde_json::Value) -> Vec<(String, i128)> {
+    let pre_arr = as_arr(meta, "preTokenBalances", "pre_token_balances");
+    let post_arr = as_arr(meta, "postTokenBalances", "post_token_balances");
+
+    fn parse_amt(b: &serde_json::Value) -> Option<u128> {
+        b.get("uiTokenAmount")
+            .and_then(|x| x.get("amount"))
+            .and_then(|x| {
+                if let Some(s) = x.as_str() {
+                    s.parse::<u128>().ok()
+                } else if let Some(n) = x.as_u64() {
+                    Some(n as u128)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                b.get("ui_token_amount")
+                    .and_then(|x| x.get("amount"))
+                    .and_then(|x| x.as_str()?.parse::<u128>().ok())
+            })
+    }
+
+    fn parse_mint(b: &serde_json::Value) -> Option<&str> {
+        b.get("mint")
+            .and_then(|x| x.as_str())
+            .or_else(|| b.get("tokenMint").and_then(|x| x.as_str()))
+            .or_else(|| b.get("token_mint").and_then(|x| x.as_str()))
+    }
+
+    fn parse_idx(b: &serde_json::Value) -> Option<u64> {
+        b.get("accountIndex")
+            .and_then(|x| x.as_u64())
+            .or_else(|| b.get("account_index").and_then(|x| x.as_u64()))
+    }
+
+    let mut pre_by_key: BTreeMap<(u64, String), u128> = BTreeMap::new();
+    for b in pre_arr {
+        let Some(mint) = parse_mint(&b) else { continue };
+        let Some(idx) = parse_idx(&b) else { continue };
+        let Some(amt) = parse_amt(&b) else { continue };
+        pre_by_key.insert((idx, mint.to_string()), amt);
+    }
+
+    let mut post_by_key: BTreeMap<(u64, String), u128> = BTreeMap::new();
+    for b in post_arr {
+        let Some(post_mint) = parse_mint(&b) else { continue };
+        let Some(idx) = parse_idx(&b) else { continue };
+        let Some(post_amt) = parse_amt(&b) else { continue };
+        post_by_key.insert((idx, post_mint.to_string()), post_amt);
+    }
+
+    let mut best_by_mint: BTreeMap<String, i128> = BTreeMap::new();
+    // Compute deltas per (idx,mint), defaulting missing side to 0.
+    for (k, pre_amt) in &pre_by_key {
+        let post_amt = *post_by_key.get(k).unwrap_or(&0);
+        let delta = post_amt as i128 - *pre_amt as i128;
+        let e = best_by_mint.entry(k.1.clone()).or_insert(0);
+        if delta.abs() > e.abs() {
+            *e = delta;
+        }
+    }
+    for (k, post_amt) in &post_by_key {
+        if pre_by_key.contains_key(k) {
+            continue;
+        }
+        let delta = *post_amt as i128; // pre assumed 0
+        let e = best_by_mint.entry(k.1.clone()).or_insert(0);
+        if delta.abs() > e.abs() {
+            *e = delta;
+        }
+    }
+
+    let mut out = best_by_mint.into_iter().collect::<Vec<_>>();
+    out.sort_by(|a, b| b.1.abs().cmp(&a.1.abs()));
+    out
+}
+
+fn debug_dump_token_balances(meta: &serde_json::Value, pool: &str, sig: &Signature) {
+    let pre = as_arr(meta, "preTokenBalances", "pre_token_balances");
+    let post = as_arr(meta, "postTokenBalances", "post_token_balances");
+    eprintln!(
+        "[meteora-debug] token-balances pool={} sig={} pre_len={} post_len={}",
+        pool,
+        sig,
+        pre.len(),
+        post.len()
+    );
+
+    for (label, arr) in [("pre", pre), ("post", post)] {
+        for (i, row) in arr.iter().take(2).enumerate() {
+            let account_index = row
+                .get("accountIndex")
+                .and_then(|x| x.as_u64())
+                .or_else(|| row.get("account_index").and_then(|x| x.as_u64()));
+            let mint = row
+                .get("mint")
+                .and_then(|x| x.as_str())
+                .or_else(|| row.get("tokenMint").and_then(|x| x.as_str()))
+                .or_else(|| row.get("token_mint").and_then(|x| x.as_str()));
+            let owner = row
+                .get("owner")
+                .and_then(|x| x.as_str())
+                .or_else(|| row.get("tokenOwner").and_then(|x| x.as_str()))
+                .or_else(|| row.get("token_owner").and_then(|x| x.as_str()));
+            let amount = row
+                .get("uiTokenAmount")
+                .and_then(|x| x.get("amount"))
+                .and_then(|x| x.as_str())
+                .or_else(|| {
+                    row.get("ui_token_amount")
+                        .and_then(|x| x.get("amount"))
+                        .and_then(|x| x.as_str())
+                });
+
+            eprintln!(
+                "[meteora-debug] token-balance-sample pool={} sig={} side={} idx={} account_index={:?} mint={:?} owner={:?} amount={:?} keys={:?}",
+                pool,
+                sig,
+                label,
+                i,
+                account_index,
+                mint,
+                owner,
+                amount,
+                row.as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            );
+        }
+    }
+}
+
+fn parse_amount_from_transfer_info(info: &serde_json::Value) -> Option<u128> {
+    info.get("amount")
+        .and_then(|x| {
+            if let Some(s) = x.as_str() {
+                s.parse::<u128>().ok()
+            } else if let Some(n) = x.as_u64() {
+                Some(n as u128)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            info.get("tokenAmount")
+                .and_then(|x| x.get("amount"))
+                .and_then(|x| {
+                    if let Some(s) = x.as_str() {
+                        s.parse::<u128>().ok()
+                    } else if let Some(n) = x.as_u64() {
+                        Some(n as u128)
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
+fn infer_vault_deltas_from_inner_instructions(
+    meta: &serde_json::Value,
+    pool_meta: &PoolMeta,
+) -> (Option<i128>, Option<i128>) {
+    let mut da: i128 = 0;
+    let mut db: i128 = 0;
+    let mut seen_a = false;
+    let mut seen_b = false;
+
+    let inners = as_arr(meta, "innerInstructions", "inner_instructions");
+    for inner in inners {
+        let instructions = as_arr(inner, "instructions", "instructions");
+        for ix in instructions {
+            let parsed = ix.get("parsed");
+            let Some(parsed) = parsed else { continue };
+            let ix_type = parsed.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            if ix_type != "transfer" && ix_type != "transferChecked" {
+                continue;
+            }
+            let Some(info) = parsed.get("info") else { continue };
+            let source = info.get("source").and_then(|x| x.as_str());
+            let destination = info.get("destination").and_then(|x| x.as_str());
+            let Some(amount) = parse_amount_from_transfer_info(info) else {
+                continue;
+            };
+
+            // Track signed vault deltas directly from transfer direction:
+            // destination vault => positive, source vault => negative.
+            if source == Some(pool_meta.token_vault_a.as_str()) {
+                da -= amount as i128;
+                seen_a = true;
+            }
+            if destination == Some(pool_meta.token_vault_a.as_str()) {
+                da += amount as i128;
+                seen_a = true;
+            }
+            if source == Some(pool_meta.token_vault_b.as_str()) {
+                db -= amount as i128;
+                seen_b = true;
+            }
+            if destination == Some(pool_meta.token_vault_b.as_str()) {
+                db += amount as i128;
+                seen_b = true;
+            }
+        }
+    }
+
+    (seen_a.then_some(da), seen_b.then_some(db))
+}
+
 fn account_index_of(account_keys: &[serde_json::Value], key: &str) -> Option<u64> {
     let target = key.to_ascii_lowercase();
     account_keys.iter().enumerate().find_map(|(i, v)| {
+        // `getTransaction(jsonParsed)` can encode pubkeys either as:
+        // - strings: "..."
+        // - objects: { "pubkey": "...", ... } (or sometimes `{ "pubKey": "..." }`)
         let pubkey = if let Some(s) = v.as_str() {
             Some(s.to_string())
+        } else if let Some(s) = v.get("pubkey").and_then(|x| x.as_str()) {
+            Some(s.to_string())
+        } else if let Some(s) = v.get("pubKey").and_then(|x| x.as_str()) {
+            Some(s.to_string())
         } else {
-            v.get("pubkey").and_then(|x| x.as_str()).map(|s| s.to_string())
+            None
         }?;
         if pubkey.to_ascii_lowercase() == target {
             Some(i as u64)
@@ -260,6 +610,16 @@ fn append_loaded_address_pubkeys(keys: &mut Vec<serde_json::Value>, meta: &serde
         if let Some(arr) = obj.get(k).and_then(|x| x.as_array()) {
             for addr in arr {
                 if let Some(s) = addr.as_str() {
+                    keys.push(serde_json::Value::String(s.to_string()));
+                    continue;
+                }
+                // Sometimes loaded address entries are objects like `{ "pubkey": "..." }`.
+                // Be tolerant to key casing.
+                let pk = addr
+                    .get("pubkey")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| addr.get("pubKey").and_then(|x| x.as_str()));
+                if let Some(s) = pk {
                     keys.push(serde_json::Value::String(s.to_string()));
                 }
             }
@@ -389,7 +749,7 @@ async fn decode_one_signature(
     let mut has_swap_log = logs
         .iter()
         .any(|s| s.contains("Swap") || s.contains("swap"));
-    let (mut fee_amount_raw, tick_after, mut sqrt_price_x64_after, log_swap_mentions) =
+    let (mut fee_amount_raw, mut tick_after, mut sqrt_price_x64_after, log_swap_mentions) =
         extract_from_logs(&logs);
 
     let traded_ev = if matches!(protocol, Proto::Orca) {
@@ -397,17 +757,30 @@ async fn decode_one_signature(
     } else {
         None
     };
-    if traded_ev.is_some() {
+    let raydium_swap_ev = if matches!(protocol, Proto::Raydium) {
+        parse_raydium_swap_event_for_pool(&logs, pool)
+    } else {
+        None
+    };
+    let meteora_swap_ev = if matches!(protocol, Proto::Meteora) {
+        parse_meteora_swap_event_for_pool(&logs, pool)
+    } else {
+        None
+    };
+    if traded_ev.is_some() || raydium_swap_ev.is_some() || meteora_swap_ev.is_some() {
         has_swap_log = true;
     }
 
     let account_keys = full_account_keys_for_tx(&j);
+    let debug_meteora = matches!(protocol, Proto::Meteora) && is_debug_meteora_pool(pool);
 
     let mut va_delta: Option<i128> = None;
     let mut vb_delta: Option<i128> = None;
     let mut amount_in_raw: Option<u128> = None;
     let mut amount_out_raw: Option<u128> = None;
     let mut direction: Option<String> = None;
+    let mut out_token_mint_a = pool_meta.token_mint_a.clone();
+    let mut out_token_mint_b = pool_meta.token_mint_b.clone();
     let mut decode_status = if meta.is_some() {
         "partial".to_string()
     } else {
@@ -476,7 +849,219 @@ async fn decode_one_signature(
                 decode_status = "missing_token_balances".to_string();
             }
         } else {
-            decode_status = "missing_vault_indices".to_string();
+            // B2 Meteora: sometimes vault token accounts are present in logs/balances but
+            // can't be resolved to `accountIndex` reliably. Fallback:
+            // use token-mint + token-vault-owner matching inside pre/postTokenBalances.
+            if matches!(protocol, Proto::Meteora) {
+                // First fallback: infer vault deltas from SPL inner transfers touching pool vaults.
+                let (inner_da, inner_db) = infer_vault_deltas_from_inner_instructions(m, pool_meta);
+                if let (Some(da), Some(db)) = (inner_da, inner_db) {
+                    va_delta = Some(da);
+                    vb_delta = Some(db);
+                    if da > 0 && db < 0 {
+                        amount_in_raw = Some(da.unsigned_abs());
+                        amount_out_raw = Some(db.unsigned_abs());
+                        direction = Some("a_to_b".to_string());
+                        decode_status = "ok".to_string();
+                    } else if db > 0 && da < 0 {
+                        amount_in_raw = Some(db.unsigned_abs());
+                        amount_out_raw = Some(da.unsigned_abs());
+                        direction = Some("b_to_a".to_string());
+                        decode_status = "ok".to_string();
+                    } else if has_swap_log {
+                        let choose_da = da.abs() >= db.abs();
+                        let chosen_delta = if choose_da { da } else { db };
+                        let other_delta = if choose_da { db } else { da };
+                        let input_is_a = chosen_delta >= 0;
+                        amount_in_raw = Some(chosen_delta.unsigned_abs());
+                        amount_out_raw = Some(other_delta.unsigned_abs());
+                        direction = Some(if input_is_a {
+                            "a_to_b".to_string()
+                        } else {
+                            "b_to_a".to_string()
+                        });
+                        decode_status = "loose_inferred_vault_delta".to_string();
+                    } else {
+                        decode_status = "ambiguous_vault_delta".to_string();
+                    }
+                    if debug_meteora {
+                        eprintln!(
+                            "[meteora-debug] inner-transfer fallback pool={} sig={} da={} db={} status={}",
+                            pool, sig, da, db, decode_status
+                        );
+                    }
+                } else if let (Some(owner_a), Some(owner_b)) = (
+                    pool_meta.token_vault_owner_a.as_deref(),
+                    pool_meta.token_vault_owner_b.as_deref(),
+                ) {
+                    if debug_meteora {
+                        eprintln!(
+                            "[meteora-debug] owner+mint fallback pool={} sig={} owner_a={} owner_b={}",
+                            pool, sig, owner_a, owner_b
+                        );
+                    }
+                    let pre_a = token_amount_by_mint_owner(
+                        m,
+                        &pool_meta.token_mint_a,
+                        owner_a,
+                        "preTokenBalances",
+                    );
+                    let post_a = token_amount_by_mint_owner(
+                        m,
+                        &pool_meta.token_mint_a,
+                        owner_a,
+                        "postTokenBalances",
+                    );
+                    let pre_b = token_amount_by_mint_owner(
+                        m,
+                        &pool_meta.token_mint_b,
+                        owner_b,
+                        "preTokenBalances",
+                    );
+                    let post_b = token_amount_by_mint_owner(
+                        m,
+                        &pool_meta.token_mint_b,
+                        owner_b,
+                        "postTokenBalances",
+                    );
+
+                    if let (Some(pa), Some(qa), Some(pb), Some(qb)) =
+                        (pre_a, post_a, pre_b, post_b)
+                    {
+                        let da = qa as i128 - pa as i128;
+                        let db = qb as i128 - pb as i128;
+                        va_delta = Some(da);
+                        vb_delta = Some(db);
+
+                        if da > 0 && db < 0 {
+                            amount_in_raw = Some(da as u128);
+                            amount_out_raw = Some((-db) as u128);
+                            direction = Some("a_to_b".to_string());
+                            decode_status = "ok".to_string();
+                        } else if db > 0 && da < 0 {
+                            amount_in_raw = Some(db as u128);
+                            amount_out_raw = Some((-da) as u128);
+                            direction = Some("b_to_a".to_string());
+                            decode_status = "ok".to_string();
+                        } else if da == 0 && db == 0 {
+                            decode_status = "no_vault_change".to_string();
+                        } else if has_swap_log {
+                            // Loose inference, same idea as vault-index based version.
+                            let choose_da = da.abs() >= db.abs();
+                            let chosen_delta = if choose_da { da } else { db };
+                            let other_delta = if choose_da { db } else { da };
+
+                            let input_is_a = if chosen_delta >= 0 {
+                                choose_da
+                            } else {
+                                !choose_da
+                            };
+
+                            amount_in_raw = Some(chosen_delta.unsigned_abs());
+                            amount_out_raw = Some(other_delta.unsigned_abs());
+                            direction = Some(if input_is_a {
+                                "a_to_b".to_string()
+                            } else {
+                                "b_to_a".to_string()
+                            });
+                            decode_status = "loose_inferred_vault_delta".to_string();
+                        } else {
+                            decode_status = "ambiguous_vault_delta".to_string();
+                        }
+                    } else {
+                        if debug_meteora {
+                            debug_dump_token_balances(m, pool, &sig);
+                            eprintln!(
+                                "[meteora-debug] owner+mint missing balances pool={} sig={} pre_a={:?} post_a={:?} pre_b={:?} post_b={:?}",
+                                pool, sig, pre_a, post_a, pre_b, post_b
+                            );
+                        }
+                        decode_status = "missing_token_balances".to_string();
+                    }
+                } else {
+                    // Without vault owners we can't match balances robustly.
+                    // Mint-only fallback: choose the largest mint delta by `accountIndex`
+                    // and infer direction from the sign pattern.
+                    let mut da = choose_largest_mint_delta(m, &pool_meta.token_mint_a);
+                    let mut db = choose_largest_mint_delta(m, &pool_meta.token_mint_b);
+                    if da.is_none() || db.is_none() {
+                        // Auto-correct mint mapping when snapshot mints differ from what tx reports.
+                        let pairs = largest_mint_deltas(m);
+                        let pos = pairs.iter().find(|(_, d)| *d > 0);
+                        let neg = pairs.iter().find(|(_, d)| *d < 0);
+                        if let (Some((mint_in, d_in)), Some((mint_out, d_out))) = (pos, neg) {
+                            out_token_mint_a = mint_in.clone();
+                            out_token_mint_b = mint_out.clone();
+                            da = Some(*d_in);
+                            db = Some(*d_out);
+                            if debug_meteora {
+                                eprintln!(
+                                    "[meteora-debug] dynamic-mint-map pool={} sig={} mint_a={} da={} mint_b={} db={}",
+                                    pool, sig, out_token_mint_a, d_in, out_token_mint_b, d_out
+                                );
+                            }
+                        }
+                    }
+                    if debug_meteora {
+                        eprintln!(
+                            "[meteora-debug] mint-only fallback pool={} sig={} has_owner_a={} has_owner_b={} da={:?} db={:?}",
+                            pool,
+                            sig,
+                            pool_meta.token_vault_owner_a.is_some(),
+                            pool_meta.token_vault_owner_b.is_some(),
+                            da,
+                            db
+                        );
+                    }
+                    if let (Some(da), Some(db)) = (da, db) {
+                        va_delta = Some(da);
+                        vb_delta = Some(db);
+                        if da > 0 && db < 0 {
+                            amount_in_raw = Some(da.unsigned_abs());
+                            amount_out_raw = Some(db.unsigned_abs());
+                            direction = Some("a_to_b".to_string());
+                            decode_status = "ok".to_string();
+                        } else if db > 0 && da < 0 {
+                            amount_in_raw = Some(db.unsigned_abs());
+                            amount_out_raw = Some(da.unsigned_abs());
+                            direction = Some("b_to_a".to_string());
+                            decode_status = "ok".to_string();
+                        } else if has_swap_log {
+                            let choose_da = da.abs() >= db.abs();
+                            let chosen_delta = if choose_da { da } else { db };
+                            let other_delta = if choose_da { db } else { da };
+
+                            let input_is_a = chosen_delta >= 0;
+                            amount_in_raw = Some(chosen_delta.unsigned_abs());
+                            amount_out_raw = Some(other_delta.unsigned_abs());
+                            direction = Some(if input_is_a {
+                                "a_to_b".to_string()
+                            } else {
+                                "b_to_a".to_string()
+                            });
+                            decode_status = "loose_inferred_vault_delta".to_string();
+                        } else {
+                            decode_status = "ambiguous_vault_delta".to_string();
+                        }
+                    } else {
+                        if debug_meteora {
+                            debug_dump_token_balances(m, pool, &sig);
+                            eprintln!(
+                                "[meteora-debug] final missing_vault_indices pool={} sig={} token_mint_a={} token_mint_b={} has_swap_log={} log_swap_mentions={}",
+                                pool,
+                                sig,
+                                pool_meta.token_mint_a,
+                                pool_meta.token_mint_b,
+                                has_swap_log,
+                                log_swap_mentions
+                            );
+                        }
+                        decode_status = "missing_vault_indices".to_string();
+                    }
+                }
+            } else {
+                decode_status = "missing_vault_indices".to_string();
+            }
         }
     }
 
@@ -504,6 +1089,70 @@ async fn decode_one_signature(
         }
     }
 
+    // B2 (Raydium): Anchor `SwapEvent` in `Program data:` (same pattern as Orca).
+    // Assumes snapshot `token_mint_a` / vault order matches pool token0 (mint0).
+    if let Some(ref ev) = raydium_swap_ev {
+        sqrt_price_x64_after = Some(ev.sqrt_price_x64);
+        tick_after = Some(ev.tick);
+        if amount_in_raw.is_none() {
+            let (ain, aout) = if ev.zero_for_one {
+                (ev.amount0, ev.amount1)
+            } else {
+                (ev.amount1, ev.amount0)
+            };
+            amount_in_raw = Some(ain as u128);
+            amount_out_raw = Some(aout as u128);
+            direction = Some(
+                if ev.zero_for_one {
+                    "a_to_b".to_string()
+                } else {
+                    "b_to_a".to_string()
+                },
+            );
+        }
+        if fee_amount_raw.is_none() {
+            fee_amount_raw = Some(
+                ev.transfer_fee0
+                    .saturating_add(ev.transfer_fee1) as u128,
+            );
+        }
+        match decode_status.as_str() {
+            "ok" => {}
+            "missing_meta" | "partial" => {}
+            _ if success => {
+                decode_status = "ok_swap_event".to_string();
+            }
+            _ => {}
+        }
+    }
+
+    // B2 (Meteora DLMM): Anchor `event:Swap` in `Program data:` (IDL name `Swap`; see `meteora_swap_event.rs`).
+    // Snapshot `token_mint_a` / `token_mint_b` follow pool token X / Y (same as LB pair reserves).
+    if let Some(ref ev) = meteora_swap_ev {
+        if amount_in_raw.is_none() {
+            amount_in_raw = Some(ev.amount_in as u128);
+            amount_out_raw = Some(ev.amount_out as u128);
+            direction = Some(
+                if ev.swap_for_y {
+                    "a_to_b".to_string()
+                } else {
+                    "b_to_a".to_string()
+                },
+            );
+        }
+        if fee_amount_raw.is_none() {
+            fee_amount_raw = Some(ev.fee.saturating_add(ev.protocol_fee) as u128);
+        }
+        match decode_status.as_str() {
+            "ok" => {}
+            "missing_meta" | "partial" => {}
+            _ if success => {
+                decode_status = "ok_swap_event".to_string();
+            }
+            _ => {}
+        }
+    }
+
     Ok(DecodedSwapTx {
         ts_utc: Utc::now().to_rfc3339(),
         protocol: protocol.dir().to_string(),
@@ -513,8 +1162,8 @@ async fn decode_one_signature(
         block_time,
         success,
         tx_fee_lamports: tx_fee,
-        token_mint_a: pool_meta.token_mint_a.clone(),
-        token_mint_b: pool_meta.token_mint_b.clone(),
+        token_mint_a: out_token_mint_a,
+        token_mint_b: out_token_mint_b,
         vault_a_delta_raw: va_delta,
         vault_b_delta_raw: vb_delta,
         amount_in_raw,
@@ -667,6 +1316,7 @@ pub async fn enrich_curated_all(
     refresh_decoded: bool,
 ) -> Result<()> {
     let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+    let rpc_provider = RpcProvider::mainnet();
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),
         (Proto::Raydium, parse_curated_pool_addrs(Proto::Raydium)?),
@@ -680,10 +1330,17 @@ pub async fn enrich_curated_all(
             pools.truncate(l);
         }
         for pool in pools {
-            let Some(meta) = latest_pool_meta(proto, &pool) else {
+            let Some(mut meta) = latest_pool_meta(proto, &pool) else {
                 println!("⚠️ skip enrich {} {}: missing snapshot meta", proto.dir(), pool);
                 continue;
             };
+
+            // For Meteora, decode fallback may need token-vault owners. If snapshots
+            // couldn't fetch SPL token accounts (transient RPC issues), fill owners
+            // once per pool here.
+            if matches!(proto, Proto::Meteora) {
+                let _ = fill_meteora_token_vault_owners(&rpc_provider, &pool, &mut meta).await;
+            }
             let mut raw_path = PathBuf::from("data");
             raw_path.push("swaps");
             raw_path.push(proto.dir());
@@ -790,7 +1447,7 @@ fn load_decode_quality(path: &std::path::Path) -> DecodeQuality {
         q.decoded_rows += 1;
         if matches!(
             v.get("decode_status").and_then(|x| x.as_str()),
-            Some("ok") | Some("ok_traded_event")
+            Some("ok") | Some("ok_traded_event") | Some("ok_swap_event")
         ) {
             q.ok_rows += 1;
         }
