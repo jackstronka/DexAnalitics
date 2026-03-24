@@ -19,3 +19,5 @@ pub mod position;
 /// Token entities and logic.
 pub mod token;
 pub mod value_objects;
+/// JSON artifact from CLI `backtest-optimize` (`--optimize-result-json`).
+pub mod optimize_result;

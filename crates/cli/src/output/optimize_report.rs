@@ -42,10 +42,11 @@ fn bounds_in_quote_units(lower_usd: f64, upper_usd: f64, quote_usd: Decimal) -> 
     (lo, up)
 }
 
+/// `period_label` should match the fetched span, e.g. `last 24 hour(s)` or `last 30 day(s)`.
 #[allow(clippy::too_many_arguments)]
 pub fn print_best_block(
     pair_label: &str,
-    days: &u64,
+    period_label: &str,
     capital: &f64,
     windows: &usize,
     objective_label: &str,
@@ -54,7 +55,7 @@ pub fn print_best_block(
     strategies_len: usize,
     min_time_in_range: &Option<f64>,
     max_drawdown: &Option<f64>,
-    best: &(f64, f64, String, TrackerSummary, Decimal),
+    best: &(f64, f64, f64, String, TrackerSummary, Decimal),
     capital_dec: Decimal,
     effective_fee_rate: Decimal,
     pool_active_liquidity: Option<u128>,
@@ -65,34 +66,38 @@ pub fn print_best_block(
     symbol_b: Option<&str>,
 ) {
     println!();
-    println!("📊 BACKTEST OPTIMIZE: {} ({} days, capital ${}, {} window(s))", pair_label, days, capital, windows);
+    println!(
+        "📊 BACKTEST OPTIMIZE: {} ({} — capital ${}, {} window(s))",
+        pair_label, period_label, capital, windows
+    );
     println!(
         "   Objective: {}   Range: {:.1}%-{:.1}%   Strategies: {}   Filters: TIR>={:?}%  DD<={:?}%",
         objective_label, min_range_pct, max_range_pct, strategies_len, min_time_in_range, max_drawdown
     );
     println!();
     println!(
-        "🏆 BEST: range ${:.2} - ${:.2}   strategy {}   Score: {}   PnL: {}   vs HODL: {}",
-        best.0,
+        "🏆 BEST: width {:.2}%   range ${:.2} - ${:.2}   strategy {}   Score: {}   PnL: {}   vs HODL: {}",
+        best.0 * 100.0,
         best.1,
         best.2,
-        round2(best.4),
-        round2(best.3.final_pnl),
-        round2(best.3.vs_hodl),
+        best.3,
+        round2(best.5),
+        round2(best.4.final_pnl),
+        round2(best.4.vs_hodl),
     );
     println!(
         "   Final value: ${:.2}   Fees: ${:.2}   Drag(ex-fees vs HODL): {:.2}%   TIR: {:.1}%   Rebalances: {} (${:.2})",
-        best.3.final_value,
-        best.3.total_fees,
-        best.3.final_il_pct * Decimal::from(100),
-        best.3.time_in_range_pct * Decimal::from(100),
-        best.3.rebalance_count,
-        best.3.total_rebalance_cost,
+        best.4.final_value,
+        best.4.total_fees,
+        best.4.final_il_pct * Decimal::from(100),
+        best.4.time_in_range_pct * Decimal::from(100),
+        best.4.rebalance_count,
+        best.4.total_rebalance_cost,
     );
-    let hodl_pnl = best.3.hodl_value - capital_dec;
+    let hodl_pnl = best.4.hodl_value - capital_dec;
     println!(
         "   HODL: final ${:.2}   PnL {:+.2}",
-        round2(best.3.hodl_value),
+        round2(best.4.hodl_value),
         round2(hodl_pnl)
     );
 
@@ -105,8 +110,8 @@ pub fn print_best_block(
         // HODL benchmark: hold the same initial token amounts that correspond to
         // the LP entry liquidity for the BEST initial range.
         let first = step_data.first().expect("step_data must be non-empty");
-        let lower_usd = Decimal::from_f64(best.0).unwrap_or(Decimal::ZERO);
-        let upper_usd = Decimal::from_f64(best.1).unwrap_or(Decimal::ZERO);
+        let lower_usd = Decimal::from_f64(best.1).unwrap_or(Decimal::ZERO);
+        let upper_usd = Decimal::from_f64(best.2).unwrap_or(Decimal::ZERO);
         let quote_usd = first.quote_usd;
 
         let lower_ab = if quote_usd > Decimal::ZERO {
@@ -150,11 +155,11 @@ pub fn print_best_block(
         // LP end amounts for static range can be reconstructed from L.
         // For rebalancing strategies, end amounts depend on the rebalance path and must come
         // directly from the simulator state (not available here), so we skip the misleading estimate.
-        let (lp_a, lp_b, l_pos) = if best.2 == "static" {
+        let (lp_a, lp_b, l_pos) = if best.3 == "static" {
             liq_engine::estimate_lp_end_amounts(
                 step_data,
-                Decimal::from_f64(best.0).unwrap(),
                 Decimal::from_f64(best.1).unwrap(),
+                Decimal::from_f64(best.2).unwrap(),
                 capital_dec,
                 token_a_decimals,
                 token_b_decimals,
@@ -176,8 +181,8 @@ pub fn print_best_block(
 
         // Sanity: compute in-range volume (USD) for BEST range, and implied share from earned fees.
         // IMPORTANT: "in range" is defined in quote units (A/B), not USD.
-        let lo_usd = Decimal::from_f64(best.0).unwrap();
-        let up_usd = Decimal::from_f64(best.1).unwrap();
+        let lo_usd = Decimal::from_f64(best.1).unwrap();
+        let up_usd = Decimal::from_f64(best.2).unwrap();
         let q0 = step_data.first().map(|p| p.quote_usd).unwrap_or(Decimal::ZERO);
         let lo_ab = if q0 > Decimal::ZERO { lo_usd / q0 } else { Decimal::ZERO };
         let up_ab = if q0 > Decimal::ZERO { up_usd / q0 } else { Decimal::ZERO };
@@ -193,7 +198,7 @@ pub fn print_best_block(
             }
         }
         if in_range_vol > Decimal::ZERO && effective_fee_rate > Decimal::ZERO {
-            let implied_share = best.3.total_fees / (in_range_vol * effective_fee_rate);
+            let implied_share = best.4.total_fees / (in_range_vol * effective_fee_rate);
             let avg_lp_share = if in_range_steps > 0 {
                 sum_lp_share / Decimal::from(in_range_steps)
             } else {
@@ -211,7 +216,7 @@ pub fn print_best_block(
                 "   HODL amounts (entry LP-derived): {:.6} {} + {:.6} {}",
                 hodl_a, symbol_a, hodl_b_amt, bsym
             );
-            if best.2 == "static" {
+            if best.3 == "static" {
                 println!(
                     "   LP amounts (approx, end): {:.6} {} + {:.6} {}",
                     lp_a, symbol_a, lp_b, bsym
@@ -225,8 +230,8 @@ pub fn print_best_block(
             && first.quote_usd > Decimal::ZERO
             && symbol_b.is_some()
         {
-            let lo_b = Decimal::from_f64(best.0).unwrap() / first.quote_usd;
-            let up_b = Decimal::from_f64(best.1).unwrap() / first.quote_usd;
+            let lo_b = Decimal::from_f64(best.1).unwrap() / first.quote_usd;
+            let up_b = Decimal::from_f64(best.2).unwrap() / first.quote_usd;
             println!(
                 "   Range (quote units): {:.3} - {:.3} {} (using quote≈${:.2})",
                 lo_b,
@@ -239,7 +244,7 @@ pub fn print_best_block(
 }
 
 pub fn build_results_table(
-    results: &[(f64, f64, String, TrackerSummary, Decimal)],
+    results: &[(f64, f64, f64, String, TrackerSummary, Decimal)],
     top_n: usize,
     use_cross_pair: bool,
     quote_usd_for_table: Option<Decimal>,
@@ -266,7 +271,7 @@ pub fn build_results_table(
         "Drag%"
     ]);
 
-    for (i, (lo, up, name, s, sc)) in results.iter().take(top_n).enumerate() {
+    for (i, (_wp, lo, up, name, s, sc)) in results.iter().take(top_n).enumerate() {
         let (lo_b, up_b) = if use_cross_pair {
             if let Some(q) = quote_usd_for_table.filter(|q| *q > Decimal::ZERO) {
                 let l = Decimal::from_f64(*lo).unwrap() / q;
@@ -303,7 +308,7 @@ pub fn build_results_table(
 }
 
 pub fn print_candidate_sets(
-    results: &[(f64, f64, String, TrackerSummary, Decimal)],
+    results: &[(f64, f64, f64, String, TrackerSummary, Decimal)],
     top_n: usize,
     use_cross_pair: bool,
     audit_step_data: Option<&Vec<StepData>>,
@@ -318,17 +323,17 @@ pub fn print_candidate_sets(
 
     // Helper: pick top-K by a key
     let mut by_fees = results.to_vec();
-    by_fees.sort_by(|a, b| b.3.total_fees.partial_cmp(&a.3.total_fees).unwrap_or(std::cmp::Ordering::Equal));
+    by_fees.sort_by(|a, b| b.4.total_fees.partial_cmp(&a.4.total_fees).unwrap_or(std::cmp::Ordering::Equal));
     let mut by_vs = results.to_vec();
-    by_vs.sort_by(|a, b| b.3.vs_hodl.partial_cmp(&a.3.vs_hodl).unwrap_or(std::cmp::Ordering::Equal));
+    by_vs.sort_by(|a, b| b.4.vs_hodl.partial_cmp(&a.4.vs_hodl).unwrap_or(std::cmp::Ordering::Equal));
     let mut by_dd = results.to_vec();
-    by_dd.sort_by(|a, b| a.3.max_drawdown.partial_cmp(&b.3.max_drawdown).unwrap_or(std::cmp::Ordering::Equal));
+    by_dd.sort_by(|a, b| a.4.max_drawdown.partial_cmp(&b.4.max_drawdown).unwrap_or(std::cmp::Ordering::Equal));
     let mut by_tir = results.to_vec();
-    by_tir.sort_by(|a, b| b.3.time_in_range_pct.partial_cmp(&a.3.time_in_range_pct).unwrap_or(std::cmp::Ordering::Equal));
+    by_tir.sort_by(|a, b| b.4.time_in_range_pct.partial_cmp(&a.4.time_in_range_pct).unwrap_or(std::cmp::Ordering::Equal));
 
     fn print_section(
         title: &str,
-        rows: &[(f64, f64, String, TrackerSummary, Decimal)],
+        rows: &[(f64, f64, f64, String, TrackerSummary, Decimal)],
         top_n: usize,
         use_cross_pair: bool,
         q: Option<Decimal>,
@@ -351,7 +356,7 @@ pub fn print_candidate_sets(
             "DD%",
             "Rebals"
         ]);
-        for (i, (lo_usd, up_usd, name, s, _sc)) in rows.iter().take(top_n).enumerate() {
+        for (i, (_wp, lo_usd, up_usd, name, s, _sc)) in rows.iter().take(top_n).enumerate() {
             let (lo_b, up_b) = if use_cross_pair {
                 if let Some(qv) = q {
                     let (lo, up) = bounds_in_quote_units(*lo_usd, *up_usd, qv);

@@ -397,6 +397,15 @@ pub async fn rebalance_position(
                 tx_cost_lamports: 0,
                 il_at_rebalance: position.pnl.il_pct,
                 reason: RebalanceReason::Manual,
+                amount_a_before: None,
+                amount_b_before: None,
+                amount_a_after: None,
+                amount_b_after: None,
+                price_ab_before: None,
+                price_ab_after: None,
+                fees_a_collected: None,
+                fees_b_collected: None,
+                optimization_run_id: None,
             },
         )
         .await;

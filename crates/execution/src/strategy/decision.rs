@@ -15,6 +15,8 @@ pub enum StrategyMode {
     Periodic,
     /// Rebalance when out of range OR when deviation from range midpoint exceeds threshold.
     Threshold,
+    /// Rebalance only when price exits the range (matches backtest `OorRecenter`; no in-range midpoint recenters).
+    OorRecenter,
     /// Shift only the exiting edge towards current price, once per out-of-range episode.
     RetouchShift,
     /// IL-based close/rebalance (legacy / future).
@@ -116,6 +118,22 @@ impl DecisionEngine {
                         new_lower = new_lower,
                         new_upper = new_upper,
                         "Periodic rebalance"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+                Decision::Hold
+            }
+
+            StrategyMode::OorRecenter => {
+                if !position.in_range {
+                    let (new_lower, new_upper) = self.calculate_new_range(pool);
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        "OorRecenter: out of range"
                     );
                     return Decision::Rebalance {
                         new_tick_lower: new_lower,

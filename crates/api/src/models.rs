@@ -154,6 +154,8 @@ pub enum StrategyType {
     Periodic,
     /// Threshold-based rebalancing.
     Threshold,
+    /// Rebalance only when out of range (backtest `OorRecenter`).
+    OorRecenter,
     /// IL limit strategy.
     IlLimit,
     /// Shift only the exiting edge of the range towards current price.
@@ -184,6 +186,23 @@ pub struct StrategyParameters {
     /// Minimum rebalance interval in hours.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rebalance_interval_hours: Option<u64>,
+
+    /// Run `clmm-lp-cli backtest-optimize` once when the strategy starts (before the executor loop).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimize_on_start: Option<bool>,
+    /// Period in seconds between background optimize runs (0 = disabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimize_interval_secs: Option<u64>,
+    /// argv for the CLI: `[program, subcommand, ...]` e.g. `["clmm-lp-cli","backtest-optimize",...]`.
+    /// If `--optimize-result-json` is omitted, the API appends it using `optimize_result_json_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimize_command: Option<Vec<String>>,
+    /// Path passed to `--optimize-result-json` (written by CLI, read by API).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimize_result_json_path: Option<String>,
+    /// Append IL / rebalance ledger lines (JSONL) to this file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub il_ledger_path: Option<String>,
 }
 
 /// Strategy response.

@@ -36,6 +36,62 @@ pub struct StepDataPoint {
 
 pub type StepData = StepDataPoint;
 
+/// How `StratConfig::Periodic(hours)` measures elapsed time since the last rebalance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PeriodicTimeBasis {
+    /// Elapsed = `steps_since_rebalance * step_seconds` (legacy; synthetic step series).
+    StepsTimesStepSeconds,
+    /// Elapsed = current step `start_timestamp - anchor_timestamp` (wall clock; Birdeye candles, pool snapshots).
+    #[default]
+    WallClockSeconds,
+}
+
+/// Optional repeat policy for [`StratConfig::RetouchShift`] while price stays out of range.
+///
+/// After the **first** retouch in an out-of-range episode, further retouches are allowed only when
+/// wall time since the last retouch is at least [`Self::cooldown_secs`], and **either**
+/// - at least [`Self::rearm_after_secs`] have passed since that retouch, **or**
+/// - price has moved at least [`Self::extra_move_pct`] further in the adverse direction vs the
+///   A/B price at the last retouch (`extra_move_pct` is a fraction, e.g. `0.003` = 0.3%).
+///
+/// When `None`, behavior is legacy: at most one retouch per continuous OOR episode until price
+/// returns in range.
+#[derive(Clone, Copy, Debug)]
+pub struct RetouchRepeatConfig {
+    pub cooldown_secs: u64,
+    pub rearm_after_secs: u64,
+    pub extra_move_pct: f64,
+}
+
+/// Signed extension of A/B price vs `ref_ab` in the direction of the current OOR side, as a fraction of `ref_ab`.
+fn retouch_signed_extra_move_pct(
+    price_ab: Decimal,
+    ref_ab: Decimal,
+    lower: Decimal,
+    upper: Decimal,
+) -> Decimal {
+    let ref_d = if ref_ab > Decimal::ZERO {
+        ref_ab
+    } else {
+        return Decimal::ZERO;
+    };
+    if price_ab > upper {
+        if price_ab > ref_ab {
+            (price_ab - ref_ab) / ref_d
+        } else {
+            Decimal::ZERO
+        }
+    } else if price_ab < lower {
+        if price_ab < ref_ab {
+            (ref_ab - price_ab) / ref_d
+        } else {
+            Decimal::ZERO
+        }
+    } else {
+        Decimal::ZERO
+    }
+}
+
 /// Strategy variant for grid search.
 #[derive(Clone, Copy, Debug)]
 pub enum StratConfig {
@@ -50,7 +106,17 @@ pub enum StratConfig {
     },
     /// Shift only the exiting edge of the range towards current price,
     /// keeping the original range width, with "once until back in range" gating.
+    ///
+    /// **Economics:** On-chain this is still “remove liquidity + open a new position” with a new
+    /// range (same as any rebalance): the simulator charges `tx_cost` / `rebalance_cost_model`,
+    /// increments `rebalance_count`, and redeploys `position_value − cost` into the shifted range.
     RetouchShift,
+    /// Symmetric band around spot using grid `width_pct` (`half = width_pct/2` multiplicative).
+    ///
+    /// Rebalance **only** when A/B exits `[lower, upper]`. On rebalance, opens a new position
+    /// centered on the current price with the same relative width — i.e. “follow spot, ±half until
+    /// OOR”, with **no** in-range recenters from mid-deviation (unlike [`StratConfig::Threshold`]).
+    OorRecenter,
 }
 
 /// Shared parameters for a single backtest or grid run (capital, fees, pool, decimals).
@@ -67,6 +133,10 @@ pub struct GridRunParams {
     pub token_b_decimals: u32,
     /// Step duration in seconds (candle resolution), e.g. 3600 for 1H.
     pub step_seconds: i64,
+    /// Wall-clock basis matches real `start_timestamp` gaps (required for dense snapshot paths).
+    pub periodic_time_basis: PeriodicTimeBasis,
+    /// Hybrid time / % repeat policy for [`StratConfig::RetouchShift`]; `None` = once per OOR episode.
+    pub retouch_repeat: Option<RetouchRepeatConfig>,
     /// If true, use liquidity-based fee share when pool liquidity is known.
     /// If false, always use `StepDataPoint.lp_share` (e.g. when `--lp-share` is provided).
     pub use_liquidity_share: bool,
@@ -356,11 +426,15 @@ pub fn run_single(
     );
     let mut hodl_a_entry = from_base_units(hodl_a_entry_base, token_a_decimals);
     let mut hodl_b_entry = from_base_units(hodl_b_entry_base, token_b_decimals);
+    let hodl_a_initial = hodl_a_entry;
+    let hodl_b_initial = hodl_b_entry;
 
     let mut total_fees = Decimal::ZERO;
     let mut total_rebalance_cost = Decimal::ZERO;
     let mut rebalance_count: u32 = 0;
     let mut steps_since_rebalance: u64 = 0;
+    // Anchor for `PeriodicTimeBasis::WallClockSeconds` (last open / rebalance wall time).
+    let mut periodic_anchor_ts: u64 = first.start_timestamp;
     let mut in_range_steps: u64 = 0;
 
     // equity curve for max drawdown
@@ -368,6 +442,9 @@ pub fn run_single(
     let mut max_drawdown = Decimal::ZERO;
     let is_retouch = matches!(strat, StratConfig::RetouchShift);
     let mut retouch_armed = true;
+    // Hybrid retouch: wall time and ref A/B price at last retouch (`None` = no retouch this OOR episode yet).
+    let mut retouch_last_ts: Option<u64> = None;
+    let mut retouch_ref_ab: Option<Decimal> = None;
     let mut position_closed = false;
     let mut closed_cash_value_usd = Decimal::ZERO;
 
@@ -389,6 +466,7 @@ pub fn run_single(
             None => format!("il_limit_{:.0}%_grace_{}", max_il * 100.0, grace_steps),
         },
         StratConfig::RetouchShift => "retouch_shift".to_string(),
+        StratConfig::OorRecenter => "oor_recenter".to_string(),
     };
 
     let mut fee_share_model = if params.use_liquidity_share {
@@ -427,8 +505,14 @@ pub fn run_single(
         if in_range {
             in_range_steps += 1;
             if is_retouch {
-                // Re-arm retouch after price has returned inside the range.
-                retouch_armed = true;
+                if params.retouch_repeat.is_some() {
+                    // New in-range episode: next OOR may do an immediate first retouch again.
+                    retouch_last_ts = None;
+                    retouch_ref_ab = None;
+                } else {
+                    // Legacy: re-arm single retouch after price has returned inside the range.
+                    retouch_armed = true;
+                }
             }
         }
 
@@ -509,8 +593,16 @@ pub fn run_single(
                 }
             }
             StratConfig::Periodic(interval_hours) => {
-                let elapsed = (steps_since_rebalance as i64) * params.step_seconds.max(1);
-                elapsed as u64 >= interval_hours.saturating_mul(3600)
+                let interval_sec = interval_hours.saturating_mul(3600);
+                match params.periodic_time_basis {
+                    PeriodicTimeBasis::WallClockSeconds => {
+                        p.start_timestamp.saturating_sub(periodic_anchor_ts) >= interval_sec
+                    }
+                    PeriodicTimeBasis::StepsTimesStepSeconds => {
+                        let elapsed = (steps_since_rebalance as i64) * params.step_seconds.max(1);
+                        elapsed as u64 >= interval_sec
+                    }
+                }
             }
             StratConfig::ILLimit {
                 max_il,
@@ -527,9 +619,37 @@ pub fn run_single(
                         >= Decimal::from_f64(max_il).unwrap_or(Decimal::ZERO).abs()
                 }
             }
+            StratConfig::OorRecenter => !in_range,
             StratConfig::RetouchShift => {
-                // Only retouch once per continuous out-of-range segment.
-                !in_range && retouch_armed
+                if in_range {
+                    false
+                } else if let Some(cfg) = params.retouch_repeat {
+                    // First OOR step of an episode: shift immediately. Later: cooldown, then time OR %.
+                    match retouch_last_ts {
+                        None => true,
+                        Some(last_ts) => {
+                            let dt = p.start_timestamp.saturating_sub(last_ts);
+                            if dt < cfg.cooldown_secs {
+                                false
+                            } else if dt >= cfg.rearm_after_secs {
+                                true
+                            } else {
+                                let ref_ab = retouch_ref_ab.unwrap_or(price_ab);
+                                let pct_move = retouch_signed_extra_move_pct(
+                                    price_ab,
+                                    ref_ab,
+                                    current_lower_ab,
+                                    current_upper_ab,
+                                );
+                                let threshold =
+                                    Decimal::from_f64(cfg.extra_move_pct).unwrap_or(Decimal::ZERO);
+                                pct_move >= threshold
+                            }
+                        }
+                    }
+                } else {
+                    !in_range && retouch_armed
+                }
             }
         };
         let should_close = match strat {
@@ -553,10 +673,14 @@ pub fn run_single(
             total_rebalance_cost += close_cost;
             rebalance_count += 1;
             steps_since_rebalance = 0;
+            periodic_anchor_ts = p.start_timestamp;
             closed_cash_value_usd = (position_value_usd - close_cost).max(Decimal::ZERO);
             liquidity_l = 0;
             position_closed = true;
         } else if should_rebalance && liquidity_l > 0 {
+            // Includes `RetouchShift`: same accounting as other rebalances (cost, `rebalance_count`,
+            // redeploy NAV minus cost into the new range); only the *geometry* of the new bounds differs.
+            //
             // Benchmark (HODL) is updated at rebalance time as well:
             // we "rebalance" the benchmark holdings to match the LP token composition
             // for the new range, without paying tx costs.
@@ -590,13 +714,18 @@ pub fn run_single(
                 let new_lower_usd_for_delta = new_lower_ab * p.quote_usd;
                 let new_upper_usd_for_delta = new_upper_ab * p.quote_usd;
 
-                let liquidity_l_for_delta = liquidity::estimate_position_liquidity(
+                let liquidity_l_for_delta = liquidity::estimate_position_liquidity_with_overrides(
                     step_data,
                     new_lower_usd_for_delta,
                     new_upper_usd_for_delta,
                     capital_usd_for_delta,
                     token_a_decimals,
                     token_b_decimals,
+                    liquidity::LiquidityEstimateOverrides {
+                        quote_usd: Some(p.quote_usd),
+                        price_ab: Some(price_ab),
+                        price_a_usd: Some(p.price_usd.value),
+                    },
                 );
 
                 let lower_ab_raw_for_delta =
@@ -621,8 +750,11 @@ pub fn run_single(
                 let notional_b_usd = (tgt_b - amt_b).abs() * p.quote_usd.max(Decimal::ZERO);
                 let delta_notional_usd = notional_a_usd.max(notional_b_usd);
 
-                // Fallback: if delta computation collapses, revert to old approximation.
-                let notional_for_cost = if delta_notional_usd > Decimal::ZERO {
+                // Retouch = withdraw entire position and mint a new one with shifted ticks. Slippage
+                // should scale with full position notional, not only the ideal token-delta swap size.
+                let notional_for_cost = if is_retouch {
+                    position_value_usd.max(Decimal::ZERO)
+                } else if delta_notional_usd > Decimal::ZERO {
                     delta_notional_usd
                 } else {
                     position_value_usd.max(Decimal::ZERO)
@@ -636,33 +768,44 @@ pub fn run_single(
             total_rebalance_cost += rebalance_cost;
             rebalance_count += 1;
             steps_since_rebalance = 0;
+            periodic_anchor_ts = p.start_timestamp;
 
             // Re-deploy current position value minus rebalance cost; fees are NOT compounded here.
             let capital_usd_now = (position_value_usd - rebalance_cost).max(Decimal::ZERO);
             current_lower_ab = new_lower_ab;
             current_upper_ab = new_upper_ab;
             if is_retouch {
-                // Ensure we don't spam retouches while price stays out-of-range.
-                retouch_armed = false;
+                if params.retouch_repeat.is_some() {
+                    retouch_last_ts = Some(p.start_timestamp);
+                    retouch_ref_ab = Some(price_ab);
+                } else {
+                    // Legacy: at most one retouch until back in range.
+                    retouch_armed = false;
+                }
             }
 
             // Convert AB bounds to USD using current quote USD for liquidity estimation.
             let new_lower_usd = current_lower_ab * p.quote_usd;
             let new_upper_usd = current_upper_ab * p.quote_usd;
-            liquidity_l = liquidity::estimate_position_liquidity(
+            liquidity_l = liquidity::estimate_position_liquidity_with_overrides(
                 step_data,
                 new_lower_usd,
                 new_upper_usd,
                 capital_usd_now,
                 token_a_decimals,
                 token_b_decimals,
+                liquidity::LiquidityEstimateOverrides {
+                    quote_usd: Some(p.quote_usd),
+                    price_ab: Some(price_ab),
+                    price_a_usd: Some(p.price_usd.value),
+                },
             );
 
             // Update benchmark token amounts to the new segment start.
             // Token amounts scale linearly with capital for a fixed range and price,
             // so we derive LP's token amounts after rebalance and scale them up to
             // match `benchmark_capital_now_usd` (i.e. ignore tx costs for the benchmark).
-            if capital_usd_now > Decimal::ZERO {
+            if capital_usd_now > Decimal::ZERO && liquidity_l > 0 {
                 let lower_ab_raw_for_bench =
                     price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
                 let upper_ab_raw_for_bench =
@@ -683,9 +826,13 @@ pub fn run_single(
                 let lp_a = from_base_units(amt_a_base_bench, token_a_decimals);
                 let lp_b = from_base_units(amt_b_base_bench, token_b_decimals);
 
-                let scale = benchmark_capital_now_usd / capital_usd_now;
-                hodl_a_entry = lp_a * scale;
-                hodl_b_entry = lp_b * scale;
+                // If L or amounts degenerate to zero, keep the previous HODL benchmark instead of
+                // zeroing it (avoids absurd `hodl_value == 0` rows in optimize tables).
+                if !lp_a.is_zero() || !lp_b.is_zero() {
+                    let scale = benchmark_capital_now_usd / capital_usd_now;
+                    hodl_a_entry = lp_a * scale;
+                    hodl_b_entry = lp_b * scale;
+                }
             }
 
             if params.use_liquidity_share {
@@ -726,8 +873,19 @@ pub fn run_single(
 
     let final_value = position_value_usd + total_fees;
     let final_pnl = final_value - capital_dec;
-    let hodl_value = (hodl_a_entry * last.price_usd.value)
-        + (hodl_b_entry * last.quote_usd.max(Decimal::ZERO));
+    let hodl_value = {
+        let v = (hodl_a_entry * last.price_usd.value)
+            + (hodl_b_entry * last.quote_usd.max(Decimal::ZERO));
+        if hodl_a_entry.is_zero()
+            && hodl_b_entry.is_zero()
+            && (!hodl_a_initial.is_zero() || !hodl_b_initial.is_zero())
+        {
+            (hodl_a_initial * last.price_usd.value)
+                + (hodl_b_initial * last.quote_usd.max(Decimal::ZERO))
+        } else {
+            v
+        }
+    };
     let vs_hodl = final_value - hodl_value;
 
     // "IL%" in amount-based mode: define as **under/over-performance vs HODL excluding fees**,
@@ -796,4 +954,87 @@ pub fn run_grid(
             (*wp, lower, upper, strat_name, summary)
         })
         .collect()
+}
+
+fn pct_token_to_ratio(s: &str) -> Option<f64> {
+    s.strip_suffix('%')?
+        .parse::<f64>()
+        .ok()
+        .map(|x| x / 100.0)
+}
+
+fn parse_il_limit_label(label: &str) -> Option<StratConfig> {
+    let rest = label.strip_prefix("il_limit_")?;
+    let (mid, grace_s) = rest.split_once("_grace_")?;
+    let grace_steps: u64 = grace_s.parse().ok()?;
+    if let Some((max_s, close_s)) = mid.split_once("_close_") {
+        let max_il = pct_token_to_ratio(max_s)?;
+        let close_il = pct_token_to_ratio(close_s)?;
+        Some(StratConfig::ILLimit {
+            max_il,
+            close_il: Some(close_il),
+            grace_steps,
+        })
+    } else {
+        let max_il = pct_token_to_ratio(mid)?;
+        Some(StratConfig::ILLimit {
+            max_il,
+            close_il: None,
+            grace_steps,
+        })
+    }
+}
+
+/// Parse grid strategy name (from `run_single`) back to [`StratConfig`].
+pub fn parse_strategy_label(label: &str) -> Option<StratConfig> {
+    match label {
+        "static" => return Some(StratConfig::Static),
+        "retouch_shift" => return Some(StratConfig::RetouchShift),
+        "oor_recenter" => return Some(StratConfig::OorRecenter),
+        _ => {}
+    }
+    if let Some(h) = label
+        .strip_prefix("periodic_")
+        .and_then(|s| s.strip_suffix('h'))
+    {
+        return h.parse::<u64>().ok().map(StratConfig::Periodic);
+    }
+    if let Some(p) = label
+        .strip_prefix("threshold_")
+        .and_then(|s| s.strip_suffix('%'))
+    {
+        return p
+            .parse::<f64>()
+            .ok()
+            .map(|pct| StratConfig::Threshold(pct / 100.0));
+    }
+    if label.starts_with("il_limit_") {
+        return parse_il_limit_label(label);
+    }
+    None
+}
+
+#[cfg(test)]
+mod strat_label_tests {
+    use super::{parse_strategy_label, StratConfig};
+
+    #[test]
+    fn parse_periodic_threshold_il() {
+        assert!(matches!(
+            parse_strategy_label("periodic_24h"),
+            Some(StratConfig::Periodic(24))
+        ));
+        match parse_strategy_label("threshold_5%") {
+            Some(StratConfig::Threshold(p)) => assert!((p - 0.05).abs() < 1e-9),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_strategy_label("il_limit_5%_grace_0").unwrap() {
+            StratConfig::ILLimit {
+                max_il,
+                close_il: None,
+                grace_steps: 0,
+            } => assert!((max_il - 0.05).abs() < 1e-9),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

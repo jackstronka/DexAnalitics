@@ -36,6 +36,10 @@ pub use crate::monitor::{
 // Scheduler
 pub use crate::scheduler::{Schedule, ScheduleBuilder, ScheduledTask, Scheduler, TaskEvent};
 
+pub use crate::optimize_profile::{
+    decision_config_from_optimize_result, parse_optimize_result_json, OptimizeProfileError,
+};
+
 // Strategy
 pub use crate::strategy::{
     Decision, DecisionConfig, DecisionContext, DecisionEngine, ExecutorConfig, ProfitabilityCheck,

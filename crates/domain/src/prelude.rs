@@ -56,3 +56,7 @@ pub use crate::value_objects::simulation_result::SimulationResult;
 pub use crate::value_objects::{
     FeeEarnings, ImpermanentLossResult, PoolMetrics, RiskMetrics, VolatilityEstimate,
 };
+
+pub use crate::optimize_result::{
+    OptimizeResultFile, OptimizeRetouchRepeat, OptimizeTrackerSummary, OptimizeWinner,
+};

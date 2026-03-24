@@ -100,6 +100,9 @@ pub struct PositionOpenedData {
     pub entry_price: Decimal,
     /// Entry value in USD.
     pub entry_value_usd: Decimal,
+    /// Spot **token B per token A** at entry (for IL logs); same convention as rebalance ledger.
+    #[serde(default)]
+    pub price_ab: Option<Decimal>,
 }
 
 /// Data for liquidity change event.
@@ -138,6 +141,27 @@ pub struct RebalanceData {
     pub il_at_rebalance: Decimal,
     /// Reason for rebalance.
     pub reason: RebalanceReason,
+    /// Token amounts in vault/position units before rebalance (for IL reconstruction).
+    #[serde(default)]
+    pub amount_a_before: Option<u64>,
+    #[serde(default)]
+    pub amount_b_before: Option<u64>,
+    #[serde(default)]
+    pub amount_a_after: Option<u64>,
+    #[serde(default)]
+    pub amount_b_after: Option<u64>,
+    /// **Token B per token A** before / after (spot or pool-derived).
+    #[serde(default)]
+    pub price_ab_before: Option<Decimal>,
+    #[serde(default)]
+    pub price_ab_after: Option<Decimal>,
+    #[serde(default)]
+    pub fees_a_collected: Option<u64>,
+    #[serde(default)]
+    pub fees_b_collected: Option<u64>,
+    /// Optional id of the last successful optimize JSON application.
+    #[serde(default)]
+    pub optimization_run_id: Option<String>,
 }
 
 /// Reason for rebalancing.
@@ -177,6 +201,9 @@ pub struct PositionClosedData {
     pub amount_a: u64,
     /// Token B received.
     pub amount_b: u64,
+    /// **Token B per token A** at close (for IL vs HODL).
+    #[serde(default)]
+    pub price_ab: Option<Decimal>,
     /// Total fees earned over lifetime.
     pub total_fees_a: u64,
     /// Total fees earned over lifetime.
@@ -226,10 +253,31 @@ mod tests {
                 amount_b: 100000000,
                 entry_price: Decimal::new(100, 0),
                 entry_value_usd: Decimal::new(1000, 0),
+                price_ab: None,
             }),
         );
 
         assert_eq!(event.event_type, LifecycleEventType::PositionOpened);
         assert!(event.signature.is_none());
+    }
+
+    /// Older persisted rows without IL-ledger fields should still deserialize.
+    #[test]
+    fn rebalance_data_deserializes_without_optional_ledger_fields() {
+        let j = r#"{
+            "old_tick_lower": 1,
+            "old_tick_upper": 2,
+            "new_tick_lower": 3,
+            "new_tick_upper": 4,
+            "old_liquidity": 10,
+            "new_liquidity": 10,
+            "tx_cost_lamports": 0,
+            "il_at_rebalance": "0",
+            "reason": "Manual"
+        }"#;
+        let d: RebalanceData = serde_json::from_str(j).expect("rebalance JSON");
+        assert!(d.amount_a_before.is_none());
+        assert!(d.price_ab_before.is_none());
+        assert_eq!(d.reason, RebalanceReason::Manual);
     }
 }

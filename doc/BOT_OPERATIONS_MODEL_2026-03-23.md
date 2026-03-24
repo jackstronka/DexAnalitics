@@ -182,6 +182,75 @@ This operations model complements:
 
 If procedures conflict, this file defines operator behavior and escalation precedence.
 
+## Cyclic optimization + IL ledger (2026-03)
+
+### Optimize result JSON (`backtest-optimize`)
+
+- CLI flag: `--optimize-result-json <PATH>` writes schema version `1` (see `clmm_lp_domain::optimize_result::OptimizeResultFile`).
+- Live API applies this file via `clmm_lp_execution::optimize_profile::decision_config_from_optimize_result` → updates `StrategyExecutor`’s `DecisionConfig` without restart.
+
+### Strategy parameters (API)
+
+- `optimize_on_start`: run the CLI subprocess once before the executor loop; requires `optimize_command` + `optimize_result_json_path`.
+- `optimize_interval_secs`: background interval to re-run the same command and re-apply the JSON (skips if a run is already in progress).
+- `optimize_command`: argv vector, first element = program path; if `--optimize-result-json` is missing, the API appends it using `optimize_result_json_path`.
+- `il_ledger_path`: optional JSONL file; lifecycle rows for `position_opened`, `rebalance`, `position_closed` are appended for offline IL / PnL reconstruction.
+
+### Price convention for IL logs
+
+- **`price_ab`**: **token B per token A** (same side as pool/oracle “price” used in execution logs). Use this consistently when joining ledger lines to simulator/backtest prices.
+- Amounts are **raw on-chain units** (lamports/smallest units) when present; `None` means not yet wired from RPC.
+
+### Offline IL pipeline (sketch)
+
+1. Load JSONL from `il_ledger_path` (filter `event == "rebalance"`).
+2. Pair `price_ab_before` / `price_ab_after` with `amount_*_before` / `amount_*_after` at each step.
+3. Compare holding LP vs HODL of the same initial bundle using your IL definition (e.g. vs external USD oracle or vs `price_ab` path only).
+
+---
+
+## Ciągłość: logi ruchów bota, IL i decyzje (PL)
+
+Ten podrozdział opisuje **jeden spójny łańcuch operacyjny**: co bot robi na łańcuchu → co trafia do logów → jak z tego liczyć IL i audytować ścieżkę → jak to się łączy z **podejmowaniem decyzji** (w tym z cykliczną optymalizacją). Chodzi o **ciągłość w czasie**: żadna decyzja nie „wisi w powietrzu” bez śladu w ledgerze, a zmiana strategii nie kasuje historii.
+
+### 1. Oś czasu zdarzeń (nieprzerwana narracja)
+
+- Każdy istotny ruch powinien dać się ułożyć w **jedną oś czasu** dla danej pozycji / strategii: `position_opened` → zero lub więcej `rebalance` → ewentualnie `position_closed`.
+- Wiersze JSONL (gdy ustawiono `il_ledger_path`) mają `schema_version`, znacznik czasu (`timestamp`), `position`, `pool` oraz pola pod IL — dzięki temu można **odtworzyć stan** „tuż przed” i „tuż po” każdym kroku.
+- **IL w CLMM jest ścieżkozależny**: ta sama para tokenów przy tym samym końcowym kursie może mieć inny wynik, jeśli inna była kolejność rebalansów i kosztów. Dlatego ciągłość = **zachowanie kolejności i kompletności** logów, nie tylko „snapshot końcowy”.
+
+### 2. Co logujemy pod kątem IL
+
+- **Ceny**: konwencja **`price_ab`** = *ile tokena B na 1 token A* (spójnie z logiką executora / pool); używaj tej samej definicji w skryptach analitycznych co w polach `price_ab_before` / `price_ab_after` (i `price_ab` przy otwarciu/zamknięciu).
+- **Ilości**: surowe jednostki on-chain (`amount_*`), gdy są dostępne; jeśli pole jest puste, w danym buildzie traktuj je jako „jeszcze nie podpięte z RPC”, ale **reszta łańcucha czasu** nadal jest wartościowa (ticki, powód rebalance, `il_at_rebalance` w evencie lifecycle).
+- **Powód / kontekst**: typ zdarzenia i przyczyna rebalance (np. okresowy, wyjście z zakresu, profil z optymalizacji) pozwalają powiązać **ruch** z **aktualną polityką** `DecisionConfig`.
+
+### 3. Jak z logów liczyć IL (ciągłość między krokami)
+
+1. Wczytaj JSONL posortowany po czasie.
+2. Dla każdego `rebalance` weź parę **stan przed** / **stan po** (tokeny + `price_ab` jeśli jest).
+3. Zdefiniuj benchmark (np. HODL tej samej paczki tokenów co na wejściu do LP, zaktualizowany według ustalonych reguł przy rebalance) i porównuj **krok po kroku** z wartością pozycji LP (w USD lub w jednostce referencyjnej).
+4. Sumuj opłaty transakcyjne / slippage według tego, co macie w modelu (ledger może mieć tylko część — uzupełniaj z kosztów on-chain lub z osobnej tabeli kosztów).
+
+Wynik: **ciągła krzywa** „wartość LP vs benchmark” i przyrost IL między kolejnymi ruchami — to jest podstawa pod raporty post-mortem i pod walidację, czy bot faktycznie realizuje założoną strategię.
+
+### 4. Jak decyzje łączą się z tą ciągłością
+
+- **Pętla live** (`StrategyExecutor`): w każdym cyklu decyzje (hold / rebalance / …) biorą się z **bieżącego** `DecisionConfig` (tryb strategii, szerokość zakresu, progi, itd.) oraz ze stanu pozycji i poola z monitora.
+- **Cykliczna optymalizacja** (`backtest-optimize` → JSON → `set_decision_config`): co jakiś czas **odświeża politykę** (np. inny tryb lub parametry), ale **nie zastępuje ledgera** — nowy profil działa **od następnych** ewaluacji / rebalansów; historia w JSONL zostaje.
+- **Ciągłość decyzyjna** oznacza więc:
+  - *ex ante*: decyzja wynika z aktualnej polityki + stanu rynku;
+  - *ex post*: ten sam moment można znaleźć w logu jako zdarzenie z cenami/ilościami i zrekonstruować IL na tej ścieżce;
+  - *audyt*: można sprawdzić, czy po zmianie profilu z optymalizacji pojawiają się oczekiwane wzorce w logach (częstotliwość rebalansów, powody, szerokości).
+
+### 5. Operacyjnie: co pilnować
+
+- **Jedna ścieżka pliku** `il_ledger_path` per strategia (lub jasny podział), żeby nie rozbić osi czasu.
+- **Backup / rotacja** plików JSONL tak jak logów aplikacji — to źródło prawdy pod sporami i analizą IL.
+- Po wdrożeniu pełnego odczytu tokenów z RPC: uzupełniać pola `amount_*` w `RebalanceData`, żeby IL offline i online były **zbieżne**.
+
+*(Powyższe uzupełnia anglojęzyczne sekcje „Cyclic optimization + IL ledger” i „Price convention”; mają być czytane razem.)*
+
 ## Stage 1 Operational Constraints
 
 - Orca-only live runtime.

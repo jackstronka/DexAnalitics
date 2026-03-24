@@ -31,3 +31,5 @@ pub mod sync;
 pub mod transaction;
 /// Wallet management.
 pub mod wallet;
+/// CLI optimize-result JSON → `DecisionConfig`.
+pub mod optimize_profile;

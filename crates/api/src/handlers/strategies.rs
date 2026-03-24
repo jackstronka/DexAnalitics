@@ -33,14 +33,22 @@ pub async fn list_strategies(
     let responses: Vec<StrategyResponse> = strategies
         .values()
         .map(|s| {
-            let params: StrategyParameters =
-                serde_json::from_value(s.config.clone()).unwrap_or(StrategyParameters {
+            let params: StrategyParameters = s
+                .config
+                .get("parameters")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or(StrategyParameters {
                     tick_width: None,
                     range_width_pct: None,
                     rebalance_threshold_pct: None,
                     max_il_pct: None,
                     eval_interval_secs: None,
                     min_rebalance_interval_hours: None,
+                    optimize_on_start: None,
+                    optimize_interval_secs: None,
+                    optimize_command: None,
+                    optimize_result_json_path: None,
+                    il_ledger_path: None,
                 });
 
             StrategyResponse {
@@ -98,14 +106,22 @@ pub async fn get_strategy(
         .get(&id)
         .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
 
-    let params: StrategyParameters =
-        serde_json::from_value(strategy.config.clone()).unwrap_or(StrategyParameters {
+    let params: StrategyParameters = strategy
+        .config
+        .get("parameters")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or(StrategyParameters {
             tick_width: None,
             range_width_pct: None,
             rebalance_threshold_pct: None,
             max_il_pct: None,
             eval_interval_secs: None,
             min_rebalance_interval_hours: None,
+            optimize_on_start: None,
+            optimize_interval_secs: None,
+            optimize_command: None,
+            optimize_result_json_path: None,
+            il_ledger_path: None,
         });
 
     let response = StrategyResponse {

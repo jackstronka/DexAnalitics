@@ -76,14 +76,14 @@ Key commands live in `crates/cli/src/main.rs`:
   - `DataHealthCheck` (staleness + decode OK%)
 - Backtesting/optimization:
   - `Backtest`
-  - `BacktestOptimize` (grid search over ranges + 5 strategy types; opcjonalnie lokalne `data/swaps` gdy brak Dune)
+  - `BacktestOptimize` (grid search over ranges + default strategy set; opcjonalnie lokalne `data/swaps` gdy brak Dune)
 
 ## Strategy coverage by layer
 
-- Implemented strategy catalog (5): `static_range`, `periodic`, `threshold`, `il_limit`, `retouch_shift`.
-- `backtest-optimize`: evaluates all 5 strategies on historical grid runs.
-- `optimize`: reports strategy recommendations for all 5 (analytical layer).
-- `ParameterOptimizer`: contains parameter-search/estimation candidates for all 5 (including static baseline and retouch path).
+- Implemented **backtest / backtest-optimize** strategy catalog: `static`, `oor_recenter`, `periodic`, `threshold`, `il_limit`, `retouch_shift`. Szczegóły semantyki: **`doc/BACKTEST_OPTIMIZE_STRATEGIES.md`**.
+- `backtest-optimize`: evaluates the default strategy set on historical grid runs (`commands/backtest_optimize.rs::default_strategies`).
+- `optimize`: analytical layer (Monte Carlo / synthetic paths); liczba nazw strategii w warstwie analitycznej może różnić się od siatki CLI — patrz kod `clmm-lp-optimization`.
+- `ParameterOptimizer`: parameter-search candidates (warstwa optymalizacji analitycznej).
 
 The curated pool addresses are defined in `STARTUP.md`.
 

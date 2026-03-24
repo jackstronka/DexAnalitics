@@ -135,6 +135,11 @@ impl StrategyExecutor {
         &self.lifecycle
     }
 
+    /// Optional JSONL path for IL / rebalance ledger (see `LifecycleTracker::set_il_ledger_path`).
+    pub fn set_il_ledger_path(&self, path: Option<std::path::PathBuf>) {
+        self.lifecycle.set_il_ledger_path(path);
+    }
+
     /// Starts the strategy execution loop.
     pub async fn start(&self) {
         self.running
@@ -292,7 +297,7 @@ impl StrategyExecutor {
         &self,
         position: &crate::monitor::MonitoredPosition,
         decision: &Decision,
-        _pool: &WhirlpoolState,
+        pool: &WhirlpoolState,
     ) -> anyhow::Result<()> {
         info!(
             position = %position.address,
@@ -317,6 +322,7 @@ impl StrategyExecutor {
                 let reason = match self.decision_engine.config().strategy_mode {
                     StrategyMode::RetouchShift => RebalanceReason::RetouchShift,
                     StrategyMode::Periodic => RebalanceReason::Periodic,
+                    StrategyMode::OorRecenter => RebalanceReason::RangeExit,
                     StrategyMode::Threshold => {
                         if !position.in_range {
                             RebalanceReason::RangeExit
@@ -343,6 +349,13 @@ impl StrategyExecutor {
                     current_liquidity: position.on_chain.liquidity,
                     reason,
                     current_il_pct: position.pnl.il_pct,
+                    amount_a_before: None,
+                    amount_b_before: None,
+                    price_ab_before: Some(pool.price),
+                    amount_a_after: None,
+                    amount_b_after: None,
+                    price_ab_after: Some(pool.price),
+                    optimization_run_id: None,
                 };
 
                 let result = self.rebalance_executor.execute(params).await;

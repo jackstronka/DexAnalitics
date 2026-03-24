@@ -7,9 +7,11 @@ use super::{
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Summary of a position's lifecycle.
 #[derive(Debug, Clone)]
@@ -48,6 +50,10 @@ pub struct LifecycleTracker {
     events: Arc<RwLock<HashMap<Pubkey, Vec<LifecycleEvent>>>>,
     /// Position summaries.
     summaries: Arc<RwLock<HashMap<Pubkey, PositionSummary>>>,
+    /// Optional JSONL path for IL / rebalance ledger lines.
+    il_ledger_path: Arc<Mutex<Option<PathBuf>>>,
+    /// Monotonic id for optimize applications (optional stamping on events).
+    optimization_seq: Arc<AtomicU64>,
 }
 
 impl LifecycleTracker {
@@ -57,6 +63,52 @@ impl LifecycleTracker {
         Self {
             events: Arc::new(RwLock::new(HashMap::new())),
             summaries: Arc::new(RwLock::new(HashMap::new())),
+            il_ledger_path: Arc::new(Mutex::new(None)),
+            optimization_seq: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Sets optional JSONL path for IL-oriented lifecycle rows (rebalance, etc.).
+    pub fn set_il_ledger_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut g) = self.il_ledger_path.lock() {
+            *g = path;
+        }
+    }
+
+    /// Bump after a successful optimize JSON apply; returns new id as string.
+    pub fn bump_optimization_run_id(&self) -> String {
+        let n = self.optimization_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        format!("opt-{n}")
+    }
+
+    async fn append_il_ledger_jsonl(&self, row: serde_json::Value) {
+        let path_opt = self
+            .il_ledger_path
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+        let Some(path) = path_opt else {
+            return;
+        };
+        let line = match serde_json::to_string(&row) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "il ledger serialize failed");
+                return;
+            }
+        };
+        let res = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            writeln!(f, "{line}")?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await;
+        if let Err(e) = res {
+            warn!(error = %e, "il ledger task failed");
         }
     }
 
@@ -101,6 +153,20 @@ impl LifecycleTracker {
             tick_upper = data.tick_upper,
             "Position opened"
         );
+
+        let row = serde_json::json!({
+            "schema_version": 1,
+            "event": "position_opened",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "position": position.to_string(),
+            "pool": pool.to_string(),
+            "amount_a": data.amount_a,
+            "amount_b": data.amount_b,
+            "entry_price": data.entry_price.to_string(),
+            "entry_value_usd": data.entry_value_usd.to_string(),
+            "price_ab": data.price_ab.map(|d| d.to_string()),
+        });
+        self.append_il_ledger_jsonl(row).await;
     }
 
     /// Records a liquidity change event.
@@ -157,6 +223,26 @@ impl LifecycleTracker {
             reason = ?data.reason,
             "Position rebalanced"
         );
+
+        let row = serde_json::json!({
+            "schema_version": 1,
+            "event": "rebalance",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "position": position.to_string(),
+            "pool": pool.to_string(),
+            "amount_a_before": data.amount_a_before,
+            "amount_b_before": data.amount_b_before,
+            "amount_a_after": data.amount_a_after,
+            "amount_b_after": data.amount_b_after,
+            "price_ab_before": data.price_ab_before.map(|d| d.to_string()),
+            "price_ab_after": data.price_ab_after.map(|d| d.to_string()),
+            "fees_a_collected": data.fees_a_collected,
+            "fees_b_collected": data.fees_b_collected,
+            "il_at_rebalance": data.il_at_rebalance.to_string(),
+            "reason": format!("{:?}", data.reason),
+            "optimization_run_id": data.optimization_run_id,
+        });
+        self.append_il_ledger_jsonl(row).await;
     }
 
     /// Records a fees collected event.
@@ -222,6 +308,20 @@ impl LifecycleTracker {
             reason = ?data.reason,
             "Position closed"
         );
+
+        let row = serde_json::json!({
+            "schema_version": 1,
+            "event": "position_closed",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "position": position.to_string(),
+            "pool": pool.to_string(),
+            "amount_a": data.amount_a,
+            "amount_b": data.amount_b,
+            "price_ab": data.price_ab.map(|d| d.to_string()),
+            "total_il_pct": data.total_il_pct.to_string(),
+            "final_pnl_usd": data.final_pnl_usd.to_string(),
+        });
+        self.append_il_ledger_jsonl(row).await;
     }
 
     /// Adds an event to the tracker.
@@ -351,6 +451,7 @@ mod tests {
                     amount_b: 100000000,
                     entry_price: Decimal::new(100, 0),
                     entry_value_usd: Decimal::new(1000, 0),
+                    price_ab: None,
                 },
             )
             .await;

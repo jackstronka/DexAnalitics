@@ -56,6 +56,16 @@ pub struct RebalanceParams {
     pub reason: RebalanceReason,
     /// Current IL percentage.
     pub current_il_pct: Decimal,
+    /// IL ledger: token balances before (raw units), if known.
+    pub amount_a_before: Option<u64>,
+    pub amount_b_before: Option<u64>,
+    /// **Token B per token A** before rebalance.
+    pub price_ab_before: Option<Decimal>,
+    /// After rebalance (filled when known).
+    pub amount_a_after: Option<u64>,
+    pub amount_b_after: Option<u64>,
+    pub price_ab_after: Option<Decimal>,
+    pub optimization_run_id: Option<String>,
 }
 
 /// Result of a rebalance operation.
@@ -245,6 +255,8 @@ impl RebalanceExecutor {
         // Orca open_position() already performs the initial liquidity increase.
         result.liquidity_added = params.current_liquidity;
 
+        let (fa, fb) = result.fees_collected.unwrap_or((0, 0));
+
         // Record rebalance in lifecycle
         self.lifecycle
             .record_rebalance(
@@ -260,6 +272,15 @@ impl RebalanceExecutor {
                     tx_cost_lamports: result.tx_cost_lamports,
                     il_at_rebalance: params.current_il_pct,
                     reason: params.reason,
+                    amount_a_before: params.amount_a_before,
+                    amount_b_before: params.amount_b_before,
+                    amount_a_after: params.amount_a_after,
+                    amount_b_after: params.amount_b_after,
+                    price_ab_before: params.price_ab_before,
+                    price_ab_after: params.price_ab_after,
+                    fees_a_collected: Some(fa),
+                    fees_b_collected: Some(fb),
+                    optimization_run_id: params.optimization_run_id.clone(),
                 },
             )
             .await;

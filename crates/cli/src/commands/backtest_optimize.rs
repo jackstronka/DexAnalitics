@@ -107,6 +107,7 @@ pub fn default_strategies(
     } else {
         vec![
             StratConfig::Static,
+            StratConfig::OorRecenter,
             StratConfig::Threshold(0.02),
             StratConfig::Threshold(0.03),
             StratConfig::Threshold(0.05),

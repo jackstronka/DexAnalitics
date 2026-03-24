@@ -2,14 +2,23 @@
 
 use crate::error::ApiError;
 use crate::models::StrategyType;
+use crate::services::optimization_runner::{
+    apply_optimize_result_json, merge_optimize_result_json_arg, run_optimize_cycle,
+    run_optimize_subprocess,
+};
 use crate::state::{AlertUpdate, AppState};
 use clmm_lp_execution::prelude::{
     DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode,
 };
 use rust_decimal::Decimal;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::info;
+use tokio::time::interval;
+use tracing::{info, warn};
 
 /// Result of a strategy operation.
 #[derive(Debug, Clone)]
@@ -44,6 +53,8 @@ pub struct StrategyService {
     state: AppState,
     /// Active strategy executors.
     executors: Arc<RwLock<std::collections::HashMap<String, Arc<RwLock<StrategyExecutor>>>>>,
+    /// Prevents overlapping `backtest-optimize` subprocess runs per strategy.
+    optimization_busy: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl StrategyService {
@@ -52,6 +63,7 @@ impl StrategyService {
         Self {
             state,
             executors: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            optimization_busy: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -62,37 +74,85 @@ impl StrategyService {
     ) -> Result<StrategyOperationResult, ApiError> {
         info!(strategy_id = %strategy_id, "Starting strategy");
 
-        // Get strategy configuration
+        let config_snapshot = {
+            let mut strategies = self.state.strategies.write().await;
+            let strategy = strategies
+                .get_mut(strategy_id)
+                .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+            if strategy.running {
+                return Err(ApiError::Conflict(
+                    "Strategy is already running".to_string(),
+                ));
+            }
+            strategy.config.clone()
+        };
+
+        let dry_run = config_snapshot
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let auto_execute = config_snapshot
+            .get("auto_execute")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let params_json = config_snapshot
+            .get("parameters")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        let eval_interval_secs = params_json
+            .get("eval_interval_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
+
+        let optimize_on_start = params_json
+            .get("optimize_on_start")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let optimize_interval_secs = params_json
+            .get("optimize_interval_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let optimize_command: Option<Vec<String>> = params_json
+            .get("optimize_command")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let optimize_result_json_path: Option<String> = params_json
+            .get("optimize_result_json_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let il_ledger_path: Option<String> = params_json
+            .get("il_ledger_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let result_path_buf = optimize_result_json_path
+            .as_ref()
+            .map(std::path::PathBuf::from);
+
+        if optimize_on_start {
+            match (&optimize_command, &result_path_buf) {
+                (Some(cmd), Some(rp)) => {
+                    let argv =
+                        merge_optimize_result_json_arg(cmd.clone(), &rp.to_string_lossy());
+                    run_optimize_subprocess(&argv).await?;
+                }
+                _ => {
+                    return Err(ApiError::bad_request(
+                        "optimize_on_start requires optimize_command and optimize_result_json_path",
+                    ));
+                }
+            }
+        }
+
         let mut strategies = self.state.strategies.write().await;
         let strategy = strategies
             .get_mut(strategy_id)
             .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
-
         if strategy.running {
             return Err(ApiError::Conflict(
                 "Strategy is already running".to_string(),
             ));
         }
-
-        // Parse configuration
-        let dry_run = strategy
-            .config
-            .get("dry_run")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let auto_execute = strategy
-            .config
-            .get("auto_execute")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let eval_interval_secs = strategy
-            .config
-            .get("parameters")
-            .and_then(|p| p.get("eval_interval_secs"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(300);
 
         // Create executor configuration
         let executor_config = ExecutorConfig {
@@ -112,7 +172,8 @@ impl StrategyService {
         );
 
         // Configure decision engine from stored strategy config.
-        let strategy_type = strategy.config
+        let strategy_type = strategy
+            .config
             .get("strategy_type")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(StrategyType::StaticRange);
@@ -122,6 +183,7 @@ impl StrategyService {
             StrategyType::StaticRange => StrategyMode::StaticRange,
             StrategyType::Periodic => StrategyMode::Periodic,
             StrategyType::Threshold => StrategyMode::Threshold,
+            StrategyType::OorRecenter => StrategyMode::OorRecenter,
             StrategyType::IlLimit => StrategyMode::IlLimit,
             StrategyType::RetouchShift => StrategyMode::RetouchShift,
         };
@@ -160,10 +222,65 @@ impl StrategyService {
 
         let executor = Arc::new(RwLock::new(executor));
 
+        if let Some(ref rp) = result_path_buf {
+            if optimize_on_start || std::path::Path::new(rp).exists() {
+                if let Err(e) = apply_optimize_result_json(rp, executor.as_ref()).await {
+                    warn!(error = %e, "Could not apply optimize JSON; using static config");
+                }
+            }
+        }
+
+        if let Some(p) = il_ledger_path.as_deref() {
+            executor
+                .read()
+                .await
+                .set_il_ledger_path(Some(PathBuf::from(p)));
+        }
+
+        let busy = {
+            let mut m = self.optimization_busy.write().await;
+            let e = m
+                .entry(strategy_id.to_string())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .clone();
+            e
+        };
+
         // Store executor
         {
             let mut executors = self.executors.write().await;
             executors.insert(strategy_id.to_string(), executor.clone());
+        }
+
+        if optimize_interval_secs > 0 {
+            match (&optimize_command, &result_path_buf) {
+                (Some(cmd), Some(rp)) => {
+                    let argv = merge_optimize_result_json_arg(cmd.clone(), &rp.to_string_lossy());
+                    let sid = strategy_id.to_string();
+                    let execs = self.executors.clone();
+                    let busy_c = busy.clone();
+                    let path = rp.clone();
+                    tokio::spawn(async move {
+                        let mut ticker = interval(Duration::from_secs(optimize_interval_secs));
+                        ticker.tick().await;
+                        loop {
+                            ticker.tick().await;
+                            let ex_opt = execs.read().await.get(&sid).cloned();
+                            let Some(ex) = ex_opt else {
+                                break;
+                            };
+                            if let Err(e) =
+                                run_optimize_cycle(&argv, &path, &ex, &busy_c).await
+                            {
+                                warn!(strategy_id = %sid, error = %e, "Periodic optimization failed");
+                            }
+                        }
+                    });
+                }
+                _ => {
+                    warn!(strategy_id = %strategy_id, "optimize_interval_secs set but missing optimize_command or optimize_result_json_path — skipping periodic optimize");
+                }
+            }
         }
 
         // Start executor in background task
@@ -232,6 +349,11 @@ impl StrategyService {
         {
             let mut executors = self.executors.write().await;
             executors.remove(strategy_id);
+        }
+
+        {
+            let mut busy = self.optimization_busy.write().await;
+            busy.remove(strategy_id);
         }
 
         // Update strategy state

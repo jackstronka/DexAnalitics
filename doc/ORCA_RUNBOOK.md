@@ -90,6 +90,9 @@ cargo run --bin clmm-lp-cli -- backtest-optimize `
   --snapshot-protocol orca `
   --snapshot-pool-address <WHIRLPOOL_ADDRESS>
 ```
+- **Pełna siatka** (cała tabela, bez „top 10”): `--all-rows` (to samo co `--full-ranking`). `top-n` wtedy nie obcina głównej tabeli; sekcje `Max Fees` / `Conservative` / … nadal po kilka wierszy.
+- **Skrypt** `scripts/export_optimize_merged_24_48_72_full.ps1` — **domyślnie** te same flagi co powyżej (snapshot path + `fee-source snapshots`) i **`--objective vs-hodl`**. Parametr **`-Objective fees`** → ranking po **`total_fees`** (opłaty nadal ze snapshotów); wyjście: `optimize_tables_merged_24_48_72_fees.txt`. Skrót: **`scripts/export_optimize_merged_24_48_72_fees_snapshots.ps1`**. Bez pliku `data/pool-snapshots/orca/<POOL>/snapshots.jsonl` skrypt zakończy się błędem; jawny fallback: **`-UseBirdeye`**.
+
 2. Sukces: wyniki są stabilne (nie “skaczą” drastycznie po ponownym runie) i nie ma systematycznych ostrych regresji vs-hodl/pnl.
 
 ## Koszty Rebalansów (gdzie to się mapuje w projekcie)
@@ -103,11 +106,17 @@ Dla komendy `backtest` (nie `backtest-optimize`) strategię rebalance wybierasz 
 - `--strategy threshold --threshold_pct <PCT>` (threshold gdy cena przekroczy próg)
 - `--strategy il_limit` (IL-aware rebalance/close logic w warstwie strategii)
 
-W `backtest-optimize` domyślna siatka obejmuje 5 strategii: `static_range`, `periodic`, `threshold`, `il_limit`, `retouch_shift`.
+**Pełny opis strategii siatki `backtest-optimize`** (w tym `oor_recenter`, różnice `threshold` vs OOR-only, `retouch_shift`, planowane rozszerzenia):  
+→ **`doc/BACKTEST_OPTIMIZE_STRATEGIES.md`**
+
+Skrót: domyślna siatka obejmuje m.in. `static`, **`oor_recenter`**, `threshold` (wiele progów %), `periodic` (12/24/48/72 h), `il_limit`, `retouch_shift`.
+
 Parametry IL-limit dla gridu:
 - `--il-max-pct <PCT>` (domyślnie 5),
 - `--il-close-pct <PCT>` (opcjonalny próg zamknięcia),
 - `--il-grace-steps <N>` (domyślnie 0).
+
+**RetouchShift (hybryda czas + %)** — gdy nadal jesteś poza zakresem po pierwszym retouchu, kolejne retouchy są dozwolone po min. `--retouch-repeat-cooldown-secs`, jeśli minęło `--retouch-repeat-rearm-secs` od ostatniego retouchu *albo* cena oddaliła się o co najmniej `--retouch-repeat-extra-move-pct` w złym kierunku względem ceny z ostatniego retouchu. **Domyślne parametry startowe:** próg ruchu **0,3%** (`--retouch-repeat-extra-move-pct 0.003`) oraz **1 h** (`--retouch-repeat-rearm-secs 3600`); cooldown między retouchami domyślnie **300 s** (żeby próg % mógł zadziałać przed upływem godziny). Wyłączenie hybrydy (stare: jeden retouch na epizod OOR aż do powrotu w range): `--retouch-repeat-off`.
 
 Różnica komend:
 - `optimize` -> warstwa analityczna (szybkie rekomendacje parametrów),

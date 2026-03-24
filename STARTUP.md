@@ -510,16 +510,34 @@ Implementation: `crates/simulation/src/position_tracker.rs` (fields `segment_ent
 
 ## Backtest optimize (auto range + strategy)
 
-The **`backtest-optimize`** command finds a good range and strategy for a given pair and period by running many backtests on the same historical data:
+The **`backtest-optimize`** command finds a good range and strategy for a given pair and period by running many backtests on the same historical data.
 
-- Fetches **one** price path: default **Birdeye**, or **`--price-path-source snapshots`** (Orca `data/pool-snapshots/orca/<pool>/snapshots.jsonl`, cross-pair required, no `BIRDEYE_API_KEY`) — same model as `backtest --price-path-source snapshots`. Optional **`--start-date` / `--end-date`** (UTC `YYYY-MM-DD`) for that mode.
-- Builds a **grid**: several range widths (e.g. 1%–15%) × strategies (static, threshold 2%/3%/5%/7%/10%/15%, periodic 12h/24h/48h/72h), or **only static** with `--static-only` for a faster range-only search.
+**Strategy semantics (all grid variants, including `oor_recenter`):** see **`doc/BACKTEST_OPTIMIZE_STRATEGIES.md`**.
+
+- Fetches **one** price path. **Zalecane (Orca / spójność z `backtest`):** **`--price-path-source snapshots`** + `--snapshot-protocol orca` + `--snapshot-pool-address <pool>` + cross-pair mintów; plik `data/pool-snapshots/orca/<pool>/snapshots.jsonl`. Opłaty: **`--fee-source snapshots`** (wymaga tej samej ścieżki cenowej). Opcjonalnie **`--start-date` / `--end-date`** (UTC `YYYY-MM-DD`). **Alternatywa** bez snapshotów: domyślny fetch **Birdeye** (`BIRDEYE_API_KEY`) — tylko gdy nie macie jeszcze JSONL.
+- Builds a **grid**: several range widths (e.g. 1%–15%) × strategies (**static**, **`oor_recenter`** (OOR-only + recenter), **threshold** 2%/3%/5%/7%/10%/15%, **periodic** 12h/24h/48h/72h, **il_limit**, **retouch_shift**), or **only static** with `--static-only` for a faster range-only search.
 - Runs backtests in **parallel** (rayon); with `--windows N` (N>1), splits history into N rolling windows and ranks by **average score** across windows for robustness.
 - Applies optional **filters**: `--min-time-in-range` (%), `--max-drawdown` (%) so low TIR or high drawdown configs are dropped.
-- Ranks by **objective**: `pnl`, `vs_hodl`, `composite` (fees − α·|IL|·capital − cost, `--alpha`), or `risk_adj` (PnL / (1 + max_drawdown)).
+- Ranks by **objective**: `pnl`, `vs_hodl`, `fees`, `composite` (fees − α·|IL|·capital − cost, `--alpha`), or `risk_adj` (PnL / (1 + max_drawdown)).
 - Prints the **best** (range + strategy) and a **table** with Score, PnL, vs HODL, **TIR%**, **IL%** (rounded to 2 decimals).
 
-Example (whETH/SOL, 30 days, maximize vs HODL):
+**Przykład kanoniczny (snapshoty Orca + fee ze snapshotów)** — tak jak w `doc/ORCA_RUNBOOK.md` i skrypcie `scripts/export_optimize_merged_24_48_72_full.ps1`:
+
+```bash
+cargo run --bin clmm-lp-cli -- backtest-optimize \
+  --symbol-a whETH --mint-a 7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs \
+  --symbol-b SOL --mint-b So11111111111111111111111111111111111111112 \
+  --days 30 --capital 7000 --tx-cost 0.1 \
+  --whirlpool-address HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF \
+  --price-path-source snapshots --snapshot-protocol orca \
+  --snapshot-pool-address HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF \
+  --fee-source snapshots --fee-swap-decode-status ok \
+  --lp-share 0.0001 --objective vs-hodl --top-n 5
+```
+
+**Ta sama ścieżka danych, ale optymalizacja zakresu pod opłaty (fees ze snapshotów):** zamień cel na **`--objective fees`**. Pełna siatka 24/48/72h: PowerShell **`.\scripts\export_optimize_merged_24_48_72_fees_snapshots.ps1`** albo **`.\scripts\export_optimize_merged_24_48_72_full.ps1 -Objective fees`** → plik `data/snapshot_logs/optimize_tables_merged_24_48_72_fees.txt`.
+
+Przykład **Birdeye** (tylko gdy nie macie `snapshots.jsonl`):
 
 ```bash
 cargo run --bin clmm-lp-cli -- backtest-optimize \
@@ -530,7 +548,7 @@ cargo run --bin clmm-lp-cli -- backtest-optimize \
   --lp-share 0.0001 --objective vs_hodl --top-n 5
 ```
 
-Options: `--objective pnl | vs_hodl | composite | risk_adj`, `--alpha` (for composite), `--range-steps`, `--min-range-pct` / `--max-range-pct`, `--top-n`, `--min-time-in-range` (%), `--max-drawdown` (%), `--static-only`, `--windows` (1 = single period, >1 = rolling windows, score averaged).
+Options: `--objective pnl | vs_hodl | fees | composite | risk_adj` (`vs_hodl` default often picks **wide** ranges; use **`fees`** or **`composite`** for fee-centric or balanced range picks; cap width with `--max-range-pct`), `--alpha` (for composite), `--range-steps`, `--min-range-pct` / `--max-range-pct`, `--top-n`, `--min-time-in-range` (%), `--max-drawdown` (%), `--static-only`, `--windows` (1 = single period, >1 = rolling windows, score averaged). Low **Fees** in output: check `--lp-share` (tiny share → tiny fees) and fee source (`--dune-swaps`, `--fee-source snapshots`, local swaps).
 
 **Fee realism:** The BEST block prints a **Fee check** line: period volume (USD), expected fees if 100% TIR (`volume × lp_share × fee_tier`), and simulated fees. With **one window** (`--windows 1`), the ratio (simulated / expected) should be ≤ 100% and close to your fee-weighted time-in-range. With **multiple windows** (`--windows 3` etc.), expected is from the first window and simulated is from the last window of the best config, so the ratio can exceed 100% and is for reference only; use `--windows 1` to compare like-with-like.
 

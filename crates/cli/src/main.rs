@@ -65,6 +65,9 @@ enum BacktestObjectiveArg {
     #[default]
     #[value(alias = "vs_hodl")]
     VsHodl,
+    /// Maximize **gross fees** only (ignores IL / vs HODL). Often picks **narrower** ranges than `vs_hodl` when volume concentrates while in-range.
+    #[value(alias = "max_fees")]
+    Fees,
     /// Composite: fees - alpha*|IL|*capital - rebalance_cost (use --alpha)
     #[value(alias = "composite")]
     Composite,
@@ -310,7 +313,7 @@ enum Commands {
         /// Optional fixed LP share (e.g. 0.0001 = 0.01%)
         #[arg(long)]
         lp_share: Option<f64>,
-        /// Objective to maximize: pnl or vs_hodl
+        /// What to maximize when ranking the grid. `vs_hodl` (default) often favors **wide** ranges (high TIR, stay near HODL). For **fee-seeking** ranges use `fees` or tune `composite`; cap width with `--max-range-pct`.
         #[arg(long, value_enum, default_value_t = BacktestObjectiveArg::VsHodl)]
         objective: BacktestObjectiveArg,
         /// Number of range widths to try (from min to max). E.g. 10 â†’ 1%, 2%, ..., 10%
@@ -322,9 +325,12 @@ enum Commands {
         /// Maximum range width in percent (e.g. 15 = 15%)
         #[arg(long, default_value_t = 15.0)]
         max_range_pct: f64,
-        /// Show top N results (0 = only best)
+        /// Show top N rows in the main ranking table (`0` = skip that table; BEST block still prints).
         #[arg(long, default_value_t = 5)]
         top_n: usize,
+        /// Print the full main ranking table (all grid rows). Overrides `--top-n` for table size.
+        #[arg(long, visible_alias = "all-rows", default_value_t = false)]
+        full_ranking: bool,
         /// Min time-in-range %% to keep (0-100, e.g. 20)
         #[arg(long)]
         min_time_in_range: Option<f64>,
@@ -374,6 +380,23 @@ enum Commands {
         /// Price path: Birdeye OHLCV (default) or local Orca snapshots only (no `BIRDEYE_API_KEY`; same requirements as `backtest`).
         #[arg(long, value_enum, default_value_t = PricePathSourceArg::Birdeye)]
         price_path_source: PricePathSourceArg,
+
+        /// RetouchShift hybrid: min seconds between consecutive retouches (anti-spam). Default 300 s so the 0.3% branch can fire before the 1 h rearm window.
+        #[arg(long, default_value_t = 300)]
+        retouch_repeat_cooldown_secs: u64,
+        /// RetouchShift hybrid: allow another retouch when still OOR for at least this many seconds since last retouch (default 3600 = 1 h).
+        #[arg(long, default_value_t = 3600)]
+        retouch_repeat_rearm_secs: u64,
+        /// RetouchShift hybrid: extra adverse A/B move vs last retouch price (default 0.003 = 0.3%).
+        #[arg(long, default_value_t = 0.003)]
+        retouch_repeat_extra_move_pct: f64,
+        /// Disable hybrid RetouchShift repeat (legacy: one retouch per OOR episode until back in range).
+        #[arg(long, default_value_t = false)]
+        retouch_repeat_off: bool,
+
+        /// Write machine-readable grid winner JSON for bots / API (`clmm-lp-execution::optimize_profile`).
+        #[arg(long, value_name = "PATH")]
+        optimize_result_json: Option<std::path::PathBuf>,
     },
     /// Optimize price range for LP position
     Optimize {
@@ -1777,13 +1800,18 @@ async fn main() -> Result<()> {
                         .last()
                         .map(|s| s.position_value_usd.max(Decimal::ZERO))
                         .unwrap_or(capital_dec);
-                    let pos_l = crate::engine::liquidity::estimate_position_liquidity(
+                    let pos_l = crate::engine::liquidity::estimate_position_liquidity_with_overrides(
                         &step_data,
                         lower_usd,
                         upper_usd,
                         capital_now,
                         token_a_decimals as u32,
                         token_b_decimals as u32,
+                        crate::engine::liquidity::LiquidityEstimateOverrides {
+                            quote_usd: Some(p.quote_usd),
+                            price_ab: Some(p.price_ab.value),
+                            price_a_usd: Some(p.price_usd.value),
+                        },
                     );
                     let pos_l_dec = Decimal::from_u128(pos_l).unwrap_or(Decimal::ZERO);
                     let pool_l_dec_opt = p
@@ -2013,6 +2041,7 @@ async fn main() -> Result<()> {
             min_range_pct,
             max_range_pct,
             top_n,
+            full_ranking,
             min_time_in_range,
             max_drawdown,
             alpha,
@@ -2028,6 +2057,11 @@ async fn main() -> Result<()> {
             snapshot_pool_address,
             fee_swap_decode_status,
             price_path_source,
+            retouch_repeat_cooldown_secs,
+            retouch_repeat_rearm_secs,
+            retouch_repeat_extra_move_pct,
+            retouch_repeat_off,
+            optimize_result_json,
         } => {
             // TODO(E2.6): wire these calibration params into optimize path as well.
             let _ = (range_share_k, range_share_cap_mult);
@@ -2285,7 +2319,10 @@ async fn main() -> Result<()> {
             let require_decode_ok =
                 matches!(*fee_swap_decode_status, FeeSwapDecodeStatusArg::Ok);
 
-            use backtest_engine::{build_step_data, fee_realism, run_grid, GridRunParams, StratConfig};
+            use backtest_engine::{
+                build_step_data, fee_realism, run_grid, GridRunParams, PeriodicTimeBasis,
+                RetouchRepeatConfig, StratConfig,
+            };
             use std::collections::BTreeMap;
             use std::sync::Arc;
 
@@ -2329,6 +2366,15 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+            let retouch_repeat = if *retouch_repeat_off {
+                None
+            } else {
+                Some(RetouchRepeatConfig {
+                    cooldown_secs: *retouch_repeat_cooldown_secs,
+                    rearm_after_secs: *retouch_repeat_rearm_secs,
+                    extra_move_pct: *retouch_repeat_extra_move_pct,
+                })
+            };
             let grid_params = GridRunParams {
                 capital_dec,
                 tx_cost_dec,
@@ -2338,6 +2384,8 @@ async fn main() -> Result<()> {
                 token_a_decimals: token_a_decimals as u32,
                 token_b_decimals: token_b_decimals as u32,
                 step_seconds: res as i64,
+                periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
+                retouch_repeat,
                 use_liquidity_share: lp_share_override.is_none(),
             };
 
@@ -2345,6 +2393,7 @@ async fn main() -> Result<()> {
                 match objective {
                     BacktestObjectiveArg::Pnl => s.final_pnl,
                     BacktestObjectiveArg::VsHodl => s.vs_hodl,
+                    BacktestObjectiveArg::Fees => s.total_fees,
                     BacktestObjectiveArg::Composite => {
                         let il_amt = (s.final_il_pct.abs() * capital_dec).min(capital_dec);
                         s.total_fees - (Decimal::from_f64(*alpha).unwrap() * il_amt) - s.total_rebalance_cost
@@ -2361,7 +2410,7 @@ async fn main() -> Result<()> {
             };
 
             #[allow(clippy::type_complexity)]
-            let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<(f64, f64, String, TrackerSummary, Decimal)>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
+            let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<(f64, f64, f64, String, TrackerSummary, Decimal)>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
                 let (mut step_data, entry_price, center) = if snapshots_only {
                     let sd = snapshot_step_data_full.clone().expect("snapshot price path");
                     let entry = sd
@@ -2544,16 +2593,17 @@ async fn main() -> Result<()> {
                 );
                 let mut r: Vec<_> = rows
                     .into_iter()
-                    .map(|(_, lower, upper, name, summary)| {
+                    .map(|(wp, lower, upper, name, summary)| {
                     let sc = score_fn(&summary);
-                    (lower, upper, name, summary, sc)
+                    (wp, lower, upper, name, summary, sc)
                 })
                     .collect();
-                r.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+                r.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
                 (r, fv, fe100, Some(step_data))
             } else {
                 type AggKey = (String, String);
-                let mut agg: HashMap<AggKey, (Decimal, u32, f64, f64, TrackerSummary)> = HashMap::new();
+                let mut agg: HashMap<AggKey, (Decimal, u32, f64, f64, f64, TrackerSummary)> =
+                    HashMap::new();
                 let mut fee_check_vol = Decimal::ZERO;
                 let mut fee_check_expected_100 = Decimal::ZERO;
                 let mut audit_step_data: Option<Vec<backtest_engine::StepData>> = None;
@@ -2750,25 +2800,26 @@ async fn main() -> Result<()> {
                             .and_modify(|e| {
                                 e.0 += sc;
                                 e.1 += 1;
-                                e.2 = lower;
-                                e.3 = upper;
-                                e.4 = summary.clone();
+                                e.2 = wp_frac;
+                                e.3 = lower;
+                                e.4 = upper;
+                                e.5 = summary.clone();
                             })
-                            .or_insert((sc, 1, lower, upper, summary));
+                            .or_insert((sc, 1, wp_frac, lower, upper, summary));
                     }
                 }
                 let mut r: Vec<_> = agg
                     .into_iter()
-                    .map(|((_, strat_name), (sum_score, count, lower, upper, summary))| {
+                    .map(|((_, strat_name), (sum_score, count, wp, lower, upper, summary))| {
                         let avg = if count > 0 {
                             sum_score / Decimal::from(count)
                         } else {
                             sum_score
                         };
-                        (lower, upper, strat_name, summary, avg)
+                        (wp, lower, upper, strat_name, summary, avg)
                     })
                     .collect();
-                r.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+                r.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
                 (r, fee_check_vol, fee_check_expected_100, audit_step_data)
             };
 
@@ -2776,12 +2827,16 @@ async fn main() -> Result<()> {
 
             let min_tir = min_time_in_range.map(|x| Decimal::from_f64(x / 100.0).unwrap());
             let max_dd = max_drawdown.map(|x| Decimal::from_f64(x / 100.0).unwrap());
-            results.retain(|(_, _, _, s, _)| {
+            results.retain(|(_, _, _, _, s, _)| {
                 min_tir.is_none_or(|m| s.time_in_range_pct >= m)
                     && max_dd.is_none_or(|m| s.max_drawdown <= m)
             });
 
-            let n = (*top_n).min(results.len());
+            let n = if *full_ranking {
+                results.len()
+            } else {
+                (*top_n).min(results.len())
+            };
             let best = match results.first() {
                 Some(b) => b,
                 None => {
@@ -2789,10 +2844,21 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             };
+            let optimize_period_label = if let Some(h) = hours.as_ref() {
+                if *windows <= 1 {
+                    format!("last {h} hour(s)")
+                } else {
+                    format!("last {h} hour(s) × {} rolling windows", *windows)
+                }
+            } else if *windows <= 1 {
+                format!("last {days} day(s)")
+            } else {
+                format!("last {days} day(s) × {} rolling windows", *windows)
+            };
             use crate::output::optimize_report;
             optimize_report::print_best_block(
                 &pair_label,
-                days,
+                &optimize_period_label,
                 capital,
                 windows,
                 &format!("{:?}", objective),
@@ -2811,18 +2877,44 @@ async fn main() -> Result<()> {
                 symbol_a,
                 symbol_b.as_deref(),
             );
-            if fee_check_expected_100 > Decimal::ZERO {
-                let ratio_pct = best.3.total_fees / fee_check_expected_100 * Decimal::from(100);
-                if *windows <= 1 {
-                    println!("   Fee check: period volume ${:.0}, expected (100% TIR) ${:.2}, simulated ${:.2} (ratio {:.1}%)",
-                        fee_check_vol, fee_check_expected_100, best.3.total_fees, ratio_pct);
-                } else {
-                    println!("   Fee check (first window only): period volume ${:.0}, expected (100% TIR) ${:.2}; BEST simulated ${:.2} is from last window (ratio {:.1}% vs first window)",
-                        fee_check_vol, fee_check_expected_100, best.3.total_fees, ratio_pct);
+            if matches!(objective, BacktestObjectiveArg::VsHodl) {
+                println!(
+                    "   ℹ️  Objective `vs_hodl` rewards staying close to a HODL benchmark → **wide** ranges often win (high TIR). For **narrower / fee-focused** optimization try `--objective fees` or `--objective composite`, and/or lower `--max-range-pct`."
+                );
+            }
+            if let Some(h) = hours.as_ref() {
+                if *h < 72 {
+                    println!(
+                        "   ℹ️  Short horizon ({h}h): `periodic_48h` / `periodic_72h` cannot fire; they match static if nothing else triggers. Many identical rows usually mean **0 rebalances** (price in range, no time/IL triggers)."
+                    );
                 }
             }
-            if n > 1 {
+            if fee_check_expected_100 > Decimal::ZERO {
+                let ratio_pct = best.4.total_fees / fee_check_expected_100 * Decimal::from(100);
+                if *windows <= 1 {
+                    println!("   Fee check: period volume ${:.0}, expected (100% TIR) ${:.2}, simulated ${:.2} (ratio {:.1}%)",
+                        fee_check_vol, fee_check_expected_100, best.4.total_fees, ratio_pct);
+                } else {
+                    println!("   Fee check (first window only): period volume ${:.0}, expected (100% TIR) ${:.2}; BEST simulated ${:.2} is from last window (ratio {:.1}% vs first window)",
+                        fee_check_vol, fee_check_expected_100, best.4.total_fees, ratio_pct);
+                }
+            }
+            // Main ranking table (same columns as `optimize_report::build_results_table`); show for any
+            // `top_n >= 1` so `--top-n 1` still gets a table (not only `print_candidate_sets`).
+            if n > 0 {
                 println!();
+                if *full_ranking {
+                    let win_label = hours
+                        .map(|h| format!("{h}h"))
+                        .unwrap_or_else(|| format!("{days}d"));
+                    println!(
+                        "### BACKTEST OPTIMIZE — MAIN RANKING TABLE (fee-source {:?}, objective {:?})",
+                        fee_source, objective
+                    );
+                    println!("{}", "=".repeat(80));
+                    println!("WINDOW: {win_label}");
+                    println!("{}", "=".repeat(80));
+                }
                 let quote_usd_for_table: Option<Decimal> = if use_cross_pair {
                     audit_step_data
                         .as_ref()
@@ -2849,6 +2941,37 @@ async fn main() -> Result<()> {
                 capital_dec,
             );
             println!();
+
+            if let Some(out_path) = optimize_result_json.as_ref() {
+                let pool_addr = whirlpool_address
+                    .clone()
+                    .or_else(|| snapshot_pool_address.clone());
+                let file = crate::output::optimize_result_json::build_optimize_result_file(
+                    chrono::Utc::now().to_rfc3339(),
+                    &format!("{:?}", objective),
+                    pair_label.clone(),
+                    token_a.mint_address.clone(),
+                    token_b.mint_address.clone(),
+                    token_a_decimals,
+                    token_b_decimals,
+                    pool_addr,
+                    &format!("{:?}", price_path_source),
+                    &format!("{:?}", fee_source),
+                    *windows,
+                    best.0,
+                    best.1,
+                    best.2,
+                    best.3.as_str(),
+                    &best.4,
+                    best.5,
+                    retouch_repeat,
+                )?;
+                crate::output::optimize_result_json::write_optimize_result_json(out_path, &file)?;
+                println!(
+                    "Optimize result JSON written to {}",
+                    out_path.display()
+                );
+            }
         }
         Commands::Optimize {
             symbol_a,
