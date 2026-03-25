@@ -1,0 +1,13 @@
+---
+description: Rust workspace defaults — edition, scope, errors, no drive-by refactors
+alwaysApply: true
+---
+
+# Workspace (Rust)
+
+- **Edition:** 2024. Prefer `cargo fmt` / `clippy` before large merges when touching Rust.
+- **Scope:** Change only what the task requires. No unrelated refactors, renames, or formatting sweeps across files you were not asked to touch.
+- **Errors:** Use `thiserror` for library error types; `anyhow::Result` is fine at CLI and top-level app code. Match existing patterns in the touched crate.
+- **Dependencies:** Add workspace deps in root [`Cargo.toml`](Cargo.toml) `[workspace.dependencies]` when shared; use `{ workspace = true }` in member crates per existing style.
+- **Testing:** Prefer extending existing `#[cfg(test)]` modules or `crates/*/tests/` rather than new ad-hoc test harnesses.
+- **Substantial code changes:** Append a short searchable entry to [`doc/ENGINEERING_NOTES.md`](doc/ENGINEERING_NOTES.md) (see rule *engineering-notes*). Use a **`keywords:`** line for AI/grep discovery.

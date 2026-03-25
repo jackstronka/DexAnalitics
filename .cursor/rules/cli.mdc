@@ -1,0 +1,14 @@
+---
+description: CLI — new subcommands follow existing Clap patterns
+globs: crates/cli/**/*.rs
+alwaysApply: false
+---
+
+# CLI (`clmm-lp-cli`)
+
+- **Entry:** [`crates/cli/src/main.rs`](crates/cli/src/main.rs) — `Cli` / `Commands` enum and dispatch. Keep subcommand variants and handler wiring consistent with existing style.
+- **Handlers:** Prefer `crates/cli/src/commands/<name>.rs` (or existing module layout) instead of inflating `main.rs` with business logic.
+- **Args:** Use `clap` derives and enums (`ValueEnum`) like existing commands; mirror naming of flags already used in `backtest` / `backtest-optimize` when adding related options.
+- **Output:** Follow existing `tracing` and table/output patterns in the same command family.
+
+Before adding a command, grep for a similar one and copy its structure (error handling, `Result` boundaries).

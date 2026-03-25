@@ -11,9 +11,25 @@ Siatka zawsze skanuje **wiele** szerokości (`--min-range-pct` … `--max-range-
 | **`vs_hodl`** (domyślny) | Nadwyżka LP vs benchmark HODL | Często **najszersze** pasmo z siatki (wysoki TIR, mała „dźwignia” vs HODL) |
 | **`fees`** | Suma zebranych opłat | Częściej **węższe** pasma (więcej fee na jednostkę czasu *gdy* jesteś w zakresie i idzie wolumen) — **bez** kary za IL vs HODL w score |
 | **`composite`** | `fees − α·|IL|·capital − koszty` | Kompromis fee / drag; strojenie `--alpha` |
-| **`pnl`**, **`risk_adj`** | Zysk końcowy / ryzyko | Zależy od ścieżki i kosztów rebalance |
+| **`pnl`** | `final_pnl` (wartość końcowa − kapitał) | Maksymalizacja zysku w USD w modelu |
+| **`risk_adj`** | `final_pnl / (1 + max_drawdown)` | Kara za głębokie obsunięcie equity; **to nie jest wskaźnik Sharpe** (patrz niżej) |
 
 **Niskie fee w raporcie** zwykle oznacza: bardzo mały **`--lp-share`** (np. `0.0001` = 0.01% puli), krótki horyzont, lub **słaby model wolumenu** (np. Birdeye bez Dune — skala dzienna z puli). Pełniejszy model: **`--dune-swaps`**, **`--fee-source snapshots`** + lokalne `data/swaps`, lub snapshot pool fees.
+
+### `risk_adj` vs Sharpe
+
+- **`--objective risk_adj`** w `backtest-optimize` maksymalizuje **`final_pnl / (1 + max_drawdown)`** (drawdown z ścieżki equity w symulacji).
+- To **nie** jest **współczynnik Sharpe** (średnia nadwyżki / odchylenie standardowe zwrotów w czasie). Inna komenda / inny silnik (`optimize` z celem Sharpe) może używać uproszczonego obiektywu „Sharpe-like” — nie myl z `risk_adj` w siatce backtestu.
+
+### Benchmark HODL (amount-based, domyślna semantyka)
+
+W silniku `run_single` ([`crates/cli/src/backtest_engine.rs`](../crates/cli/src/backtest_engine.rs)) benchmark **HODL** jest zdefiniowany tak:
+
+1. **Start:** ilości tokenów A/B odpowiadają **temu samemu** rozkładowi co pozycja LP przy wejściu (z `capital_dec` i początkowym `[lower, upper]` przy cenie wejścia) — nie jest to wymuszony 50/50 USD.
+2. **Przy każdym rebalance strategii LP:** benchmark jest **aktualizowany**: nowe ilości HODL odpowiadają składowi tokenów dla **nowego zakresu** przy cenie rebalance, przeskalowane tak, by wartość benchmarku (w USD) pasowała do ścieżki (szczegóły w kodzie przy `benchmark_capital_now_usd`). **Benchmark nie płaci kosztów transakcji** rebalance — to porównanie „ten sam reset ekspozycji co LP, bez kosztów tx”.
+3. **`vs_hodl`** = `final_value − hodl_value` (LP z fee i kosztami rebalance **vs** ten benchmark).
+
+**To nie jest** „klasyczny buy-and-hold **początkowych** tokenów bez żadnej zmiany przez cały backtest”. Takiego drugiego benchmarku **nie** wypisujemy obecnie w głównej tabeli optimize; interpretacja `vs_hodl` zawsze dotyczy **powyższej** definicji.
 
 ## Wspólne założenia
 
@@ -132,4 +148,4 @@ Nagłówek raportu `BACKTEST OPTIMIZE` musi pokazywać **rzeczywisty** horyzont 
 
 - `doc/ORCA_RUNBOOK.md` — komendy, koszty rebalance, flagi retouch; **zalecana ścieżka: snapshoty Orca** (`--price-path-source snapshots`, `--fee-source snapshots`).
 - `STARTUP.md` — skrót `backtest-optimize`: przykład **najpierw ze snapshotami**, Birdeye jako alternatywa.
-- `scripts/export_optimize_merged_24_48_72_full.ps1` — domyślnie snapshoty + `vs-hodl`; `-Objective fees` (lub `export_optimize_merged_24_48_72_fees_snapshots.ps1`) — ranking pod opłaty przy fee ze snapshotów; `-UseBirdeye` tylko świadomie.
+- `scripts/export_optimize_merged_24_48_72_full.ps1` — domyślnie snapshoty + `vs-hodl`; `-Hours 24,48` — jeden plik tylko 24h+48h; skrót `export_optimize_merged_24_48_snapshots.ps1`. `-Objective fees` (lub `export_optimize_merged_24_48_72_fees_snapshots.ps1`) — ranking pod opłaty przy fee ze snapshotów; `-UseBirdeye` tylko świadomie.

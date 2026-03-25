@@ -251,6 +251,22 @@ Wynik: **ciągła krzywa** „wartość LP vs benchmark” i przyrost IL między
 
 *(Powyższe uzupełnia anglojęzyczne sekcje „Cyclic optimization + IL ledger” i „Price convention”; mają być czytane razem.)*
 
+## Aktualny stan implementacji (MVP bota) vs wymagania ciągłości
+
+Na podstawie tego, co jest wdrożone w kodzie dziś:
+
+- Cykliczna optymalizacja (CLI JSON → API → `set_decision_config`) jest wpięta, z blokadą przed równoległymi runami.
+- IL ledger (JSONL przez `il_ledger_path`) jest zapisywany jako spójna oś czasu: `position_opened` → `rebalance` → `position_closed`.
+- Konwencja ceny w ledgerze to `price_ab` = token B na 1 token A.
+
+Natomiast na dziś ciągłość “IL liczona z ruchów bota i używana do decyzji” nie jest jeszcze w pełni domknięta, bo:
+
+- Live onboarding: bot **nie otwiera pozycji** samodzielnie po wybraniu zwycięskiego profilu; API `open_position` i liczenie entry dla IL nie są jeszcze kompletne (w praktyce bot robi rebalance tylko na już monitorowanych pozycjach).
+- “IL z ruchów bota”: w momencie rebalansu ledger zapisuje już komplet pól pod rekonstrukcję wartości “przed/po” (token split z on-chain liquidity + pool state oraz `price_ab_after` pobierane po tx). Dla części starszych wpisów/ścieżek nadal mogą wystąpić pola puste.
+- `IlLimit` jako tryb decyzji zależy od `PositionMonitor.il_pct`; obecnie `PositionMonitor` wylicza `il_pct` na podstawie `entry_price` (ustawianego przy `add_position`) oraz bieżącej ceny poola i granic ticków.
+
+W kolejnych iteracjach te luki są priorytetem: najpierw uzupełniamy ledger “przed/po” z on-chain state, a potem spinamy to z trybami decyzyjnymi opartymi o IL.
+
 ## Stage 1 Operational Constraints
 
 - Orca-only live runtime.

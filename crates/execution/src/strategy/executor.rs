@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::time::interval;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+use std::sync::Mutex;
 
 /// Configuration for strategy execution.
 #[derive(Debug, Clone)]
@@ -70,6 +71,8 @@ pub struct StrategyExecutor {
     pool_reader: WhirlpoolReader,
     /// For `RetouchShift`: gating to allow only one retouch per out-of-range episode.
     retouch_armed: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, bool>>>,
+    /// Latest optimization profile id (for IL ledger continuity / auditing).
+    optimization_run_id: Mutex<Option<String>>,
 }
 
 impl StrategyExecutor {
@@ -105,6 +108,7 @@ impl StrategyExecutor {
             running: std::sync::atomic::AtomicBool::new(false),
             pool_reader,
             retouch_armed,
+            optimization_run_id: Mutex::new(None),
         }
     }
 
@@ -115,8 +119,14 @@ impl StrategyExecutor {
     }
 
     /// Sets the decision engine configuration.
-    pub fn set_decision_config(&mut self, config: DecisionConfig) {
+    pub fn set_decision_config(&self, config: DecisionConfig) {
         self.decision_engine.set_config(config);
+    }
+
+    /// Sets the current optimization run id used to stamp lifecycle/ledger rows.
+    pub fn set_optimization_run_id(&self, run_id: Option<String>) {
+        let mut g = self.optimization_run_id.lock().expect("optimization_run_id lock");
+        *g = run_id;
     }
 
     /// Enables or disables dry run mode.
@@ -347,6 +357,8 @@ impl StrategyExecutor {
                     new_tick_lower: *new_tick_lower,
                     new_tick_upper: *new_tick_upper,
                     current_liquidity: position.on_chain.liquidity,
+                    pool_tick_current: pool.tick_current,
+                    pool_sqrt_price: pool.sqrt_price,
                     reason,
                     current_il_pct: position.pnl.il_pct,
                     amount_a_before: None,
@@ -354,8 +366,12 @@ impl StrategyExecutor {
                     price_ab_before: Some(pool.price),
                     amount_a_after: None,
                     amount_b_after: None,
-                    price_ab_after: Some(pool.price),
-                    optimization_run_id: None,
+                    price_ab_after: None,
+                    optimization_run_id: self
+                        .optimization_run_id
+                        .lock()
+                        .expect("optimization_run_id lock")
+                        .clone(),
                 };
 
                 let result = self.rebalance_executor.execute(params).await;
@@ -364,6 +380,35 @@ impl StrategyExecutor {
                     && let Some(err) = result.error
                 {
                     error!(error = %err, "Rebalance failed");
+                }
+
+                // Keep the monitor set in sync with the actual rebalance outcome:
+                // - old position is closed
+                // - new position is opened
+                if result.success {
+                    let old_addr = position.address;
+                    self.monitor.remove_position(&old_addr).await;
+
+                    if let Some(new_pos) = result.new_position {
+                        if let Err(e) = self
+                            .monitor
+                            .add_position(&new_pos.to_string())
+                            .await
+                        {
+                            warn!(
+                                error = %e,
+                                old_position = %old_addr,
+                                new_position = %new_pos,
+                                "Failed to add new position to monitor"
+                            );
+                        }
+                    }
+
+                    // Retouch gate housekeeping (avoid unbounded growth).
+                    if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
+                        let mut m = self.retouch_armed.write().await;
+                        m.remove(&old_addr);
+                    }
                 }
             }
             Decision::Close => {

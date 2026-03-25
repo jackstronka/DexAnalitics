@@ -2,6 +2,7 @@
 
 use crate::alerts::{Alert, AlertRule};
 use clmm_lp_protocols::prelude::*;
+use clmm_lp_domain::metrics::impermanent_loss::calculate_il_concentrated;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
@@ -58,6 +59,9 @@ pub struct MonitoredPosition {
 /// PnL data for a position.
 #[derive(Debug, Clone, Default)]
 pub struct PositionPnL {
+    /// Entry price (token B per token A) captured when the position is first added.
+    /// Used to compute IL for `IlLimit` mode.
+    pub entry_price: Option<Decimal>,
     /// Entry value in USD.
     pub entry_value_usd: Decimal,
     /// Current value in USD.
@@ -119,12 +123,27 @@ impl PositionMonitor {
     pub async fn add_position(&self, position_address: &str) -> anyhow::Result<()> {
         let position = self.position_reader.get_position(position_address).await?;
 
+        let pool_state = self.pool_reader.get_pool_state(&position.pool.to_string()).await?;
+        let in_range = pool_state.is_tick_in_range(position.tick_lower, position.tick_upper);
+        let entry_price = pool_state.price;
+        let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
+        let upper_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_upper);
+        let il_pct = calculate_il_concentrated(entry_price, entry_price, lower_price, upper_price)
+            .unwrap_or(Decimal::ZERO);
+
+        // Ensure IL starts at 0 (or very close) right after being added.
+        let pnl = PositionPnL {
+            entry_price: Some(entry_price),
+            il_pct,
+            ..PositionPnL::default()
+        };
+
         let monitored = MonitoredPosition {
             address: position.address,
             pool: position.pool,
             on_chain: position.clone(),
-            pnl: PositionPnL::default(),
-            in_range: true,
+            pnl,
+            in_range,
             last_updated: chrono::Utc::now(),
         };
 
@@ -212,6 +231,21 @@ impl PositionMonitor {
             // Update PnL
             monitored.pnl.fees_earned_a = position.fees_owed_a;
             monitored.pnl.fees_earned_b = position.fees_owed_b;
+
+            // Update IL percentage if we have an entry price.
+            if let Some(entry_price) = monitored.pnl.entry_price {
+                let lower_price =
+                    clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
+                let upper_price =
+                    clmm_lp_protocols::prelude::tick_to_price(position.tick_upper);
+                let il = calculate_il_concentrated(entry_price, pool_state.price, lower_price, upper_price)
+                    .unwrap_or(Decimal::ZERO);
+                monitored.pnl.il_pct = il;
+            } else {
+                // If entry price wasn't set, treat current price as entry to avoid NaNs.
+                monitored.pnl.entry_price = Some(pool_state.price);
+                monitored.pnl.il_pct = Decimal::ZERO;
+            }
 
             debug!(
                 position = %address,

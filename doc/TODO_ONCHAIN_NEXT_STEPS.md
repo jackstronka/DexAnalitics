@@ -30,6 +30,18 @@
 - [x] **B2 (Raydium)** — Anchor `SwapEvent` z `Program data:` → `decode_status = ok_swap_event`; filtry `ok` / `local_swap_fees` jak Orca.
 - [x] **B2 (Meteora)** — DLMM `MeteoraDlmmSwapEvent` (Borsh jak carbon decoder); dyskryminatory `event:SwapEvent` i `event:Swap`; `lb_pair` == pool; `decode_status = ok_swap_event`.
 - [ ] **B4** Rate limiting / kolejka RPC w enrich (opcjonalnie).
+  - **Problem (symptomy):** `swaps-enrich-curated-all` ma dużo `decode_status=partial` (czasem też "timeout"), przez co nie da sie uzyskac sensownego pokrycia do wyliczenia wolumenu na bazie `decoded_swaps.jsonl`.
+  - **Najczęstsza przyczyna:** publiczne RPC rate-limitują lub nie utrzymują wystarczająco długiej historii dla `getTransaction` (czasem `getAccount` działa, ale `getTransaction` zwraca timeout / brak danych typu "history not available").
+  - **Stan kodu (zrobione w repo):** `swap_sync` korzysta z `RpcProvider` (retry + rotacja endpointów), dekoduje najnowsze sygnatury jako pierwsze i filtruje do okna ~72h; jest też env-override endpointów:
+    - `SOLANA_RPC_URL`
+    - `SOLANA_RPC_FALLBACK_URLS` (comma-separated)
+  - **Co jeszcze dopiąć (TODO, zalezne od RPC):** potwierdzić, że na Twoim RPC `getTransaction` odpowiada szybko dla sygnatur z okna 24h/48h i rośnie pokrycie `decode_status=ok`; jeśli nadal dominują timeouty, przejść na RPC typu archival/dedykowany (albo paid plan) oraz ewentualnie podnieść `--decode-timeout-secs` / dostosować limity równoległości w enrich.
+  - **Kierunki z internetu (kontekst):**
+    - `getTransaction` (parametry/encoding): https://solana.com/docs/rpc/http/gettransaction
+    - czasem pomagają drobiazgi typu poprawny endpoint URL (bez portu `:8899` w adresie, jeśli używasz standardowych hostów)
+    - strategie retry/backoff: https://solana.com/docs/advanced/retry
+    - ograniczenia historycznych danych na standardowych RPC (archival): https://docs.solanalabs.com/implemented-proposals/rpc-transaction-history
+    - archival/historical data provider (np. Helius): https://www.helius.dev/docs/rpc/historical-data
 
 ## Faza C — spójność `backtest` vs `backtest-optimize`
 

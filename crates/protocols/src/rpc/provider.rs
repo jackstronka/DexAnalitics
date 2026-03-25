@@ -3,9 +3,13 @@
 use super::{HealthChecker, RpcConfig};
 use anyhow::{Context, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+use solana_client::rpc_config::RpcTransactionConfig;
+use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
+use solana_transaction_status_client_types::{EncodedConfirmedTransactionWithStatusMeta, UiTransactionEncoding};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -215,6 +219,72 @@ impl RpcProvider {
                 .await
                 .context("Failed to get balance")
         })
+        .await
+    }
+
+    /// Fetch recent signatures for an address (getSignaturesForAddress).
+    pub async fn get_signatures_for_address_with_config(
+        &self,
+        address: &Pubkey,
+        config: GetConfirmedSignaturesForAddress2Config,
+    ) -> Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+        let addr = *address;
+        // `GetConfirmedSignaturesForAddress2Config` is not `Clone` in some Solana versions,
+        // so we decompose it and rebuild for each retry attempt.
+        let before = config.before;
+        let until = config.until;
+        let limit = config.limit;
+        let commitment = config.commitment;
+
+        self.execute_with_retry(|client| {
+            let cfg = GetConfirmedSignaturesForAddress2Config {
+                before: before.clone(),
+                until: until.clone(),
+                limit,
+                commitment,
+            };
+            async move {
+                client
+                    .get_signatures_for_address_with_config(&addr, cfg)
+                    .await
+                    .context("Failed to get signatures for address")
+            }
+        })
+        .await
+    }
+
+    /// Fetch a transaction with config (getTransaction).
+    pub async fn get_transaction_with_config(
+        &self,
+        signature: &Signature,
+        config: RpcTransactionConfig,
+    ) -> Result<EncodedConfirmedTransactionWithStatusMeta> {
+        let sig = *signature;
+        self.execute_with_retry(|client| {
+            let config = config.clone();
+            async move {
+                client
+                    .get_transaction_with_config(&sig, config)
+                    .await
+                    .context("Failed to get transaction")
+            }
+        })
+        .await
+    }
+
+    /// Convenience: getTransaction(jsonParsed) with safe defaults.
+    pub async fn get_transaction_json_parsed(
+        &self,
+        signature: &Signature,
+    ) -> Result<EncodedConfirmedTransactionWithStatusMeta> {
+        self.get_transaction_with_config(
+            signature,
+            RpcTransactionConfig {
+                encoding: Some(UiTransactionEncoding::JsonParsed),
+                commitment: None,
+                max_supported_transaction_version: Some(0),
+            },
+        )
         .await
     }
 

@@ -63,11 +63,20 @@ pub async fn apply_optimize_result_json(
         .map_err(|e| ApiError::internal(format!("parse optimize JSON: {e}")))?;
     let cfg = decision_config_from_optimize_result(&file)
         .map_err(|e| ApiError::internal(format!("optimize profile → DecisionConfig: {e}")))?;
-    let mut g = executor.write().await;
+
+    // Important: the executor start loop holds only a read lock.
+    // We must not require a write lock here, otherwise cyclic optimization would stall.
+    let g = executor.read().await;
     g.set_decision_config(cfg);
+
+    // Stamp ledger rows with a monotonic optimization run id.
+    let run_id = g.lifecycle().bump_optimization_run_id();
+    g.set_optimization_run_id(Some(run_id.clone()));
+
     info!(
         strategy_kind = %file.winner.strategy_kind,
         width_pct = file.winner.width_pct,
+        optimization_run_id = %run_id,
         "Applied optimize-result JSON to StrategyExecutor"
     );
     Ok(())

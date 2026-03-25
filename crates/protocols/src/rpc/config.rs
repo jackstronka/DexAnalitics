@@ -25,12 +25,28 @@ pub struct RpcConfig {
 
 impl Default for RpcConfig {
     fn default() -> Self {
+        // Allow overriding RPC endpoints via environment variables.
+        // This is critical for `getTransaction`-heavy workflows (swap decoding) where public
+        // endpoints may rate-limit, time out, or disable transaction history.
+        let env_primary = std::env::var("SOLANA_RPC_URL").ok().filter(|s| !s.trim().is_empty());
+        let env_fallbacks = std::env::var("SOLANA_RPC_FALLBACK_URLS")
+            .ok()
+            .unwrap_or_default();
+        let mut fallback_urls: Vec<String> = env_fallbacks
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Default public fallbacks (still useful even when SOLANA_RPC_URL is set).
+        fallback_urls.extend(vec![
+            "https://solana-api.projectserum.com".to_string(),
+            "https://rpc.ankr.com/solana".to_string(),
+        ]);
+
         Self {
-            primary_url: "https://api.mainnet-beta.solana.com".to_string(),
-            fallback_urls: vec![
-                "https://solana-api.projectserum.com".to_string(),
-                "https://rpc.ankr.com/solana".to_string(),
-            ],
+            primary_url: env_primary.unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string()),
+            fallback_urls,
             timeout: Duration::from_secs(30),
             max_retries: 3,
             retry_base_delay_ms: 100,

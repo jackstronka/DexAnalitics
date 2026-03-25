@@ -91,9 +91,106 @@ cargo run --bin clmm-lp-cli -- backtest-optimize `
   --snapshot-pool-address <WHIRLPOOL_ADDRESS>
 ```
 - **Pełna siatka** (cała tabela, bez „top 10”): `--all-rows` (to samo co `--full-ranking`). `top-n` wtedy nie obcina głównej tabeli; sekcje `Max Fees` / `Conservative` / … nadal po kilka wierszy.
-- **Skrypt** `scripts/export_optimize_merged_24_48_72_full.ps1` — **domyślnie** te same flagi co powyżej (snapshot path + `fee-source snapshots`) i **`--objective vs-hodl`**. Parametr **`-Objective fees`** → ranking po **`total_fees`** (opłaty nadal ze snapshotów); wyjście: `optimize_tables_merged_24_48_72_fees.txt`. Skrót: **`scripts/export_optimize_merged_24_48_72_fees_snapshots.ps1`**. Bez pliku `data/pool-snapshots/orca/<POOL>/snapshots.jsonl` skrypt zakończy się błędem; jawny fallback: **`-UseBirdeye`**.
+- **Skrypt** `scripts/export_optimize_merged_24_48_72_full.ps1` — **domyślnie** te same flagi co powyżej (snapshot path + `fee-source snapshots`) i **`--objective vs-hodl`**. Parametr **`-Hours 24,48`** (lub skrypt **`scripts/export_optimize_merged_24_48_snapshots.ps1`**) — pełna siatka tylko dla **24h i 48h** w **jednym** pliku `optimize_tables_merged_24_48_h.txt`. Parametr **`-Objective fees`** → ranking po **`total_fees`** (opłaty nadal ze snapshotów); wyjście: `optimize_tables_merged_24_48_72_fees.txt`. Skrót: **`scripts/export_optimize_merged_24_48_72_fees_snapshots.ps1`**. Bez pliku `data/pool-snapshots/orca/<POOL>/snapshots.jsonl` skrypt zakończy się błędem; jawny fallback: **`-UseBirdeye`**.
 
 2. Sukces: wyniki są stabilne (nie “skaczą” drastycznie po ponownym runie) i nie ma systematycznych ostrych regresji vs-hodl/pnl.
+
+## Real-world validation log (Orca, whETH/SOL)
+
+Cel: porownac wynik realnych pozycji LP z backtestem dla identycznego okna czasu, kapitalu i zakresu.
+
+### Sesja testowa
+- Data: 2026-03-24 (local)
+- Godzina startu: 11:00 (local)
+- Para: `whETH/SOL`
+- Pool: `HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF`
+- Kapital testowy: 3 czesci po 100 USD (oddzielne pozycje)
+- Uwagi: zakresy sa dostosowane do tickow Orca.
+
+Zakresy otwarte:
+- `23.279` do `23.749`
+- `23.391` do `23.635`
+- `23.447` do `23.560`
+- `23.038` do `23.978` (wariant 4% wokol ceny ~23.515; zakres finalny po dostosowaniu do tickow Orca)
+
+Co zapisac po zamknieciu testu (dla kazdej czesci):
+- final value (USD), zebrane fees (USD), koszt tx/rebalance (USD),
+- timestamp wyjscia (UTC/local),
+- backtest uruchomiony na tym samym oknie i tym samym zakresie.
+
+### Ważne: kapital realny vs kapital planowany
+
+Do porownania z backtestem uzywamy **kapitalu realnie zdeponowanego on-chain**, a nie nominalnego "planowanego" (np. 100 USD).
+
+Definicja robocza (per pozycja):
+- `effective_entry_capital` = wartosc tokenow faktycznie wniesionych do LP (A+B),
+- uwzglednij net effect rent (`rent fee` wyslane - rent zwrocony),
+- `network fee` licz osobno jako koszt transakcyjny (nie jako kapital pozycji).
+
+Praktyka operacyjna:
+- Dla kazdej pozycji zapisz z historii tx/contract calls:
+  - ile realnie zeszlo `SOL`,
+  - ile realnie zeszlo `whETH`,
+  - rent out / rent refund,
+  - network fee.
+- Przelicz `SOL` i `whETH` do USD na timestamp wejscia i policz `effective_entry_capital`.
+- Do backtestu podstawiaj ten `effective_entry_capital`, a nie "100 USD".
+
+Checklist dla wszystkich aktywnych zakresow:
+- [ ] `23.279` - `23.749`: policzony `effective_entry_capital`
+- [ ] `23.391` - `23.635`: policzony `effective_entry_capital`
+- [ ] `23.447` - `23.560`: policzony `effective_entry_capital`
+- [ ] `23.038` - `23.978`: policzony `effective_entry_capital`
+
+## Snapshot-only porównanie Orca / Raydium / Meteora (SOL/USD)
+Cel: porównać wyniki backtest-optimize pomiędzy protokołami bez `Dune` i bez `Birdeye` (oraz bez Dexscreener na USD price). Opieramy się wyłącznie o informacje z lokalnych `snapshots.jsonl` (oraz ewentualnie ich dekodowanie z `data_b64`).
+
+### Co jest teraz gotowe
+- `backtest-optimize --price-path-source snapshots` i `--fee-source snapshots` działa jako “snapshot-only” dla **Orca** oraz **Raydium**.
+- `backtest-optimize --price-path-source snapshots` i `--fee-source snapshots` działa również dla **Meteory** jako snapshot-only proxy:
+  - cena: z formuły DLMM dla `active_id` i `bin_step` (proxy “spot”),
+  - opłaty: z delty `protocol_fee_amount_{x,y}` między snapshotami (proxy fee-accrual na poziomie pary).
+  - Uwaga: dla porównywalności w snapshot-only trybie Meteora wymaga podania `--lp-share` (brak `tvl/liquidity_active` w `lb_pair`).
+
+### Czego brakuje (do implementacji)
+1. Ceny z snapshotów dla pozostałych protokołów
+   - Raydium: zrobione — liczymy `price_ab` z `sqrt_price_x64/tick_current` i per-step fees z delta `fee_growth_global*_x64` + `liquidity_active`.
+   - Meteora: zrobione częściowo — mamy proxy price z `active_id/bin_step`, ale nadal brakuje pełnego “bin-by-bin” neighbourhood modelu (bin arrays / fee-growth w binach), więc to jest przybliżenie.
+
+2. Fee-model “snapshot-only” dla Raydium i Meteory
+   - Raydium: zrobione — per-step fees są liczone z delta `fee_growth_global*_x64` (fallback na `protocol_fees_token*`).
+   - Meteora: zrobione jako proxy — per-step fees z delty `protocol_fee_amount_{x,y}` (poziom pary), bez bin-level fee-growth.
+
+3. Eliminacja zewnętrznych serwisów do USD
+   - Aktualny kod Orca snapshot-to-USD używa Dexscreener do wyznaczenia `quote_usd`.
+   - Dla porównania `SOL/USDC` i `SOL/USDT` można całkowicie usunąć Dexscreener przez regułę: `USDC=1.0 USD`, `USDT=1.0 USD`.
+   - Zrobione dla `USDC/USDT`: snapshot-only nie wykonuje wywołań do Dexscreenera, bo `quote_usd` jest mapowane do `1.0` z samego mintu.
+
+### Plan działania (snapshot-only)
+1. Raydium
+   - Zrobione: `backtest-optimize` wspiera `--snapshot-protocol raydium --price-path-source snapshots --fee-source snapshots`.
+
+2. Meteora
+   - Ustalić, jakie dane posiadamy w snapshotach:
+     - jeśli nie mamy “bin prices” i “bin fee-growth”, trzeba rozszerzyć snapshot pipeline o bin arrays (snapshot neighbourhood wokół `active_id`) — to nadal jest “docelowo dokładne” zamiast proxy.
+   - Zaimplementować `build_from_meteora_snapshots(...)`:
+     - dekodować `lb_pair` z `data_b64` (zrobione),
+     - proxy price i fees są już zaimplementowane — ale bin-level precision jest jeszcze do dopięcia.
+   - Wpiąć w `backtest-optimize` dla `--snapshot-protocol meteora`.
+
+3. USDC/USDT bez zewnętrznych USD oracle
+   - Dodać mapowanie `quote_usd`:
+     - `USDC (EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v)` -> `1.0`
+     - `USDT (Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB)` -> `1.0`
+   - Jeśli token B nie jest USDC/USDT: tryb “snapshot-only” ma z failować (żeby nie produkować senseless wyników).
+
+### Kryteria akceptacji porównania “Orca vs Raydium vs Meteora”
+- Uruchomienie `backtest-optimize` dla wszystkich 3 protokołów z:
+  - `--price-path-source snapshots`
+  - `--fee-source snapshots`
+  - bez `--dune-swaps`
+  - bez `BIRDEYE_API_KEY`
+- Powtarzalność: wyniki dla tego samego okna czasowego i zakresu nie powinny “skakać” od różnic w mapowaniu USD.
 
 ## Koszty Rebalansów (gdzie to się mapuje w projekcie)
 - W backtest/optimize koszt rebalansu jest liczone jako: `fixed(network+priority+jito+tx_cost) + slippage_bps * rebalanced_notional`.

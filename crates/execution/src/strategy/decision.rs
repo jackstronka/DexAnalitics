@@ -4,6 +4,7 @@ use super::Decision;
 use crate::monitor::MonitoredPosition;
 use clmm_lp_protocols::prelude::WhirlpoolState;
 use rust_decimal::Decimal;
+use std::sync::RwLock;
 use tracing::debug;
 
 /// Which strategy semantics to apply.
@@ -79,20 +80,24 @@ pub struct DecisionContext {
 /// Decision engine for automated strategy execution.
 pub struct DecisionEngine {
     /// Configuration.
-    config: DecisionConfig,
+    config: RwLock<DecisionConfig>,
 }
 
 impl DecisionEngine {
     /// Creates a new decision engine.
     #[must_use]
     pub fn new(config: DecisionConfig) -> Self {
-        Self { config }
+        Self {
+            config: RwLock::new(config),
+        }
     }
 
     /// Makes a decision for a position.
     pub fn decide(&self, context: &DecisionContext) -> Decision {
         let position = &context.position;
         let pool = &context.pool;
+
+        let cfg = self.config.read().expect("decision config lock");
 
         debug!(
             position = %position.address,
@@ -102,17 +107,17 @@ impl DecisionEngine {
         );
 
         // Fee collection can be useful independent of the rebalance semantics.
-        if self.config.auto_collect_fees && position.pnl.fees_usd > self.config.min_fees_to_collect
+        if cfg.auto_collect_fees && position.pnl.fees_usd > cfg.min_fees_to_collect
         {
             debug!("Fees exceed threshold, recommending collection");
             return Decision::CollectFees;
         }
 
-        match self.config.strategy_mode {
+        match cfg.strategy_mode {
             StrategyMode::StaticRange => Decision::Hold,
 
             StrategyMode::Periodic => {
-                if context.hours_since_rebalance >= self.config.periodic_interval_hours {
+                if context.hours_since_rebalance >= cfg.periodic_interval_hours {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
                         new_lower = new_lower,
@@ -165,7 +170,7 @@ impl DecisionEngine {
                     return Decision::Hold;
                 }
                 let change = (pool.price - mid).abs() / mid;
-                if change >= self.config.threshold_pct {
+                if change >= cfg.threshold_pct {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
                         new_lower = new_lower,
@@ -205,7 +210,7 @@ impl DecisionEngine {
 
             StrategyMode::IlLimit => {
                 // Check for critical IL - close position
-                if position.pnl.il_pct.abs() > self.config.il_close_threshold {
+                if position.pnl.il_pct.abs() > cfg.il_close_threshold {
                     debug!("IL exceeds close threshold, recommending close");
                     return Decision::Close;
                 }
@@ -213,7 +218,7 @@ impl DecisionEngine {
                 // Check if out of range
                 if !position.in_range {
                     // Check if enough time has passed since last rebalance
-                    if context.hours_since_rebalance >= self.config.min_rebalance_interval_hours {
+                    if context.hours_since_rebalance >= cfg.min_rebalance_interval_hours {
                         let (new_lower, new_upper) = self.calculate_new_range(pool);
                         debug!(
                             new_lower = new_lower,
@@ -228,8 +233,8 @@ impl DecisionEngine {
                 }
 
                 // Check for IL-based rebalancing
-                if position.pnl.il_pct.abs() > self.config.il_rebalance_threshold
-                    && context.hours_since_rebalance >= self.config.min_rebalance_interval_hours
+                if position.pnl.il_pct.abs() > cfg.il_rebalance_threshold
+                    && context.hours_since_rebalance >= cfg.min_rebalance_interval_hours
                 {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
@@ -249,9 +254,10 @@ impl DecisionEngine {
 
     /// Calculates a new range centered on current price.
     fn calculate_new_range(&self, pool: &WhirlpoolState) -> (i32, i32) {
+        let cfg = self.config.read().expect("decision config lock");
         clmm_lp_protocols::prelude::calculate_tick_range(
             pool.tick_current,
-            self.config.range_width_pct,
+            cfg.range_width_pct,
             pool.tick_spacing,
         )
     }
@@ -299,14 +305,14 @@ impl DecisionEngine {
     }
 
     /// Updates the configuration.
-    pub fn set_config(&mut self, config: DecisionConfig) {
-        self.config = config;
+    pub fn set_config(&self, config: DecisionConfig) {
+        *self.config.write().expect("decision config lock") = config;
     }
 
     /// Gets the current configuration.
     #[must_use]
-    pub fn config(&self) -> &DecisionConfig {
-        &self.config
+    pub fn config(&self) -> DecisionConfig {
+        self.config.read().expect("decision config lock").clone()
     }
 }
 

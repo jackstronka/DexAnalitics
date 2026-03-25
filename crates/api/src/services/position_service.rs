@@ -310,6 +310,8 @@ impl PositionService {
                 new_tick_lower: request.new_tick_lower,
                 new_tick_upper: request.new_tick_upper,
                 current_liquidity: position.on_chain.liquidity,
+                pool_tick_current: pool_state.tick_current,
+                pool_sqrt_price: pool_state.sqrt_price,
                 reason: RebalanceReason::Manual,
                 current_il_pct: position.pnl.il_pct,
                 amount_a_before: None,

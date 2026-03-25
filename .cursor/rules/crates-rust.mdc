@@ -1,0 +1,17 @@
+---
+description: Crate boundaries — domain, simulation, protocols, data, execution
+globs: crates/**/*.rs
+alwaysApply: false
+---
+
+# Crate boundaries
+
+- **`clmm-lp-domain`:** Pure domain: math, ticks/prices, IL, types. No Solana RPC or HTTP clients here.
+- **`clmm-lp-simulation`:** Backtest and simulation; depends on domain (and protocol-agnostic shapes as already modeled).
+- **`clmm-lp-protocols`:** Chain/RPC and protocol-specific decoding/execution. Keep protocol quirks here, not in domain.
+- **`clmm-lp-data`:** External data providers, caches, local file repos (swaps/snapshots paths as implemented).
+- **`clmm-lp-execution`:** Live loops, monitoring, strategy application, alerts — not backtest grid search (that’s optimization/simulation).
+- **`clmm-lp-optimization`:** Analytical optimizers and objectives used by CLI/API.
+- **`clmm-lp-api` / `clmm-lp-cli`:** Thin wiring: HTTP or Clap over the layers above.
+
+When adding features, place code in the **lowest** crate that can own the concern; avoid new circular dependencies between crates.

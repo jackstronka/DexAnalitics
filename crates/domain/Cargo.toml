@@ -11,7 +11,7 @@ description = { workspace = true }
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-rust_decimal = { workspace = true }
+rust_decimal = { workspace = true, features = ["maths"] }
 primitive-types = { workspace = true }
 uuid = { workspace = true }
 

@@ -3,9 +3,8 @@ use chrono::Utc;
 use clmm_lp_protocols::events::{
     parse_meteora_swap_event_for_pool, parse_raydium_swap_event_for_pool, parse_traded_event_for_pool,
 };
-use clmm_lp_protocols::rpc::RpcProvider;
+use clmm_lp_protocols::rpc::{RpcConfig, RpcProvider};
 use serde::Serialize;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcTransactionConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -709,23 +708,23 @@ fn extract_from_logs(logs: &[String]) -> (Option<u128>, Option<i32>, Option<u128
 }
 
 async fn decode_one_signature(
-    client: &RpcClient,
+    rpc: &RpcProvider,
     protocol: Proto,
     pool: &str,
     pool_meta: &PoolMeta,
     sig: &str,
 ) -> Result<DecodedSwapTx> {
     let sig = Signature::from_str(sig)?;
-    let tx = client
-        .get_transaction_with_config(
-            &sig,
-            RpcTransactionConfig {
-                encoding: Some(UiTransactionEncoding::JsonParsed),
-                commitment: None,
-                max_supported_transaction_version: Some(0),
-            },
-        )
-        .await?;
+    let tx = rpc.get_transaction_with_config(
+        &sig,
+        RpcTransactionConfig {
+            // `JsonParsed` is significantly heavier and can time out on public RPC endpoints.
+            // We only need meta (token balances/logs) + account keys, so `Json` is sufficient.
+            encoding: Some(UiTransactionEncoding::Json),
+            commitment: None,
+            max_supported_transaction_version: Some(0),
+        },
+    ).await?;
     let j = serde_json::to_value(&tx)?;
     let slot = j.get("slot").and_then(|x| x.as_u64()).unwrap_or(0);
     let block_time = j.get("blockTime").and_then(|x| x.as_i64());
@@ -1181,7 +1180,7 @@ async fn decode_one_signature(
 }
 
 async fn decode_one_signature_with_retry(
-    client: &RpcClient,
+    rpc: &RpcProvider,
     protocol: Proto,
     pool: &str,
     pool_meta: &PoolMeta,
@@ -1193,7 +1192,7 @@ async fn decode_one_signature_with_retry(
 
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..=decode_retries {
-        let fut = decode_one_signature(client, protocol, pool, pool_meta, sig);
+        let fut = decode_one_signature(rpc, protocol, pool, pool_meta, sig);
         match timeout(Duration::from_secs(decode_timeout_secs), fut).await {
             Ok(Ok(row)) => return Ok(row),
             Ok(Err(e)) => {
@@ -1215,7 +1214,7 @@ async fn decode_one_signature_with_retry(
 }
 
 async fn sync_one_pool(
-    client: &RpcClient,
+    rpc: &RpcProvider,
     protocol: Proto,
     pool: &str,
     max_signatures: usize,
@@ -1227,7 +1226,7 @@ async fn sync_one_pool(
         limit: Some(max_signatures),
         commitment: None,
     };
-    let rows = client.get_signatures_for_address_with_config(&pubkey, cfg).await?;
+    let rows = rpc.get_signatures_for_address_with_config(&pubkey, cfg).await?;
 
     let mut dir = PathBuf::from("data");
     dir.push("swaps");
@@ -1274,7 +1273,7 @@ async fn sync_one_pool(
 }
 
 pub async fn sync_curated_all(limit: Option<usize>, max_signatures: usize) -> Result<()> {
-    let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+    let rpc = RpcProvider::mainnet();
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),
         (Proto::Raydium, parse_curated_pool_addrs(Proto::Raydium)?),
@@ -1288,7 +1287,7 @@ pub async fn sync_curated_all(limit: Option<usize>, max_signatures: usize) -> Re
             pools.truncate(l);
         }
         for pool in pools {
-            let (seen, new_rows) = sync_one_pool(&client, proto, &pool, max_signatures).await?;
+            let (seen, new_rows) = sync_one_pool(&rpc, proto, &pool, max_signatures).await?;
             total_seen += seen;
             total_new += new_rows;
             println!(
@@ -1315,8 +1314,15 @@ pub async fn enrich_curated_all(
     decode_retries: usize,
     refresh_decoded: bool,
 ) -> Result<()> {
-    let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
-    let rpc_provider = RpcProvider::mainnet();
+    // Use a tighter RPC timeout for swap decoding so the command remains responsive.
+    // The outer `decode_timeout_secs` still guards the full decode path; this mainly
+    // prevents individual RPC endpoints from hanging too long before failover.
+    let rpc_timeout = Duration::from_secs(decode_timeout_secs.clamp(4, 15));
+    let rpc_provider = RpcProvider::new(
+        RpcConfig::default()
+            .with_timeout(rpc_timeout)
+            .with_max_retries(decode_retries.min(3) as u32),
+    );
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),
         (Proto::Raydium, parse_curated_pool_addrs(Proto::Raydium)?),
@@ -1358,10 +1364,21 @@ pub async fn enrich_curated_all(
             let known = existing_sigs(&out_path);
             let txt = std::fs::read_to_string(&raw_path)?;
             let mut to_decode: Vec<String> = Vec::new();
-            for line in txt.lines().filter(|l| !l.trim().is_empty()) {
+            // Focus decode on recent history to avoid archive-missing transactions.
+            // The raw swaps file includes `block_time` from getSignaturesForAddress.
+            let min_block_time = Utc::now().timestamp().saturating_sub(72 * 3600);
+            // Decode newest first: raw swaps file is append-only, so the newest signatures
+            // are near the end. This makes "last 24h/48h" audits meaningful quickly.
+            let lines: Vec<&str> = txt.lines().filter(|l| !l.trim().is_empty()).collect();
+            for line in lines.iter().rev() {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;
                 };
+                if let Some(bt) = v.get("block_time").and_then(|x| x.as_i64()) {
+                    if bt > 0 && bt < min_block_time {
+                        continue;
+                    }
+                }
                 let Some(sig) = v.get("signature").and_then(|x| x.as_str()) else {
                     continue;
                 };
@@ -1381,9 +1398,17 @@ pub async fn enrich_curated_all(
             let mut ok = 0usize;
             let mut skipped = 0usize;
             let mut retried = 0usize;
+            println!(
+                "🔎 swaps enrich {} {}: decoding {} newest signatures (timeout={}s retries={})",
+                proto.dir(),
+                pool,
+                to_decode.len(),
+                decode_timeout_secs,
+                decode_retries
+            );
             for sig in to_decode {
                 match decode_one_signature_with_retry(
-                    &client,
+                    &rpc_provider,
                     proto,
                     &pool,
                     &meta,
@@ -1404,7 +1429,25 @@ pub async fn enrich_curated_all(
                             retried += 1;
                         }
                         skipped += 1;
+                        if skipped <= 3 {
+                            println!(
+                                "⚠️ decode failed {} {} sig={} err={}",
+                                proto.dir(),
+                                pool,
+                                sig,
+                                e
+                            );
+                        }
                     }
+                }
+                if (ok + skipped) % 10 == 0 {
+                    println!(
+                        "… progress {} {}: decoded_ok={} skipped={}",
+                        proto.dir(),
+                        pool,
+                        ok,
+                        skipped
+                    );
                 }
             }
             decoded_total += ok;

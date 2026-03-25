@@ -1,0 +1,13 @@
+---
+description: Markdown docs — index updates, avoid duplicating PROJECT_OVERVIEW
+globs: doc/**/*.md
+alwaysApply: false
+---
+
+# Documentation (`doc/`)
+
+- **Index:** Adding a new **standalone** doc under `doc/`? Add one row to the appropriate table in [`doc/README.md`](doc/README.md).
+- **Canonical architecture:** Prefer linking to [`doc/PROJECT_OVERVIEW.md`](doc/PROJECT_OVERVIEW.md) instead of copying long crate lists or mermaid diagrams into multiple files.
+- **README root:** User-facing Polish quick-start stays in [`README.md`](README.md); keep it in sync only for CLI paths or breaking workflow changes, not for every small edit in `doc/`.
+- **Historical docs:** Files with fixed dates in the name (e.g. `BOT_*_2026-03-23.md`) are decision snapshots; do not rewrite them as if they were current runbooks—add a new doc or update `PROJECT_OVERVIEW` / runbooks instead.
+- **Code change log:** Non-trivial implementation work should leave a trace in [`doc/ENGINEERING_NOTES.md`](doc/ENGINEERING_NOTES.md) (keywords line for search); do not replace `PROJECT_OVERVIEW` with duplicate narrative—cross-link if needed.

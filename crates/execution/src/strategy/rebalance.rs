@@ -52,6 +52,10 @@ pub struct RebalanceParams {
     pub new_tick_upper: i32,
     /// Current liquidity.
     pub current_liquidity: u128,
+    /// Current pool tick at the time of decision (for IL reconstruction).
+    pub pool_tick_current: i32,
+    /// Current pool sqrt_price (Q64.64) at the time of decision (for IL reconstruction).
+    pub pool_sqrt_price: u128,
     /// Reason for rebalancing.
     pub reason: RebalanceReason,
     /// Current IL percentage.
@@ -204,6 +208,32 @@ impl RebalanceExecutor {
             return result;
         }
 
+        // IL ledger: compute token split from on-chain liquidity + current pool state.
+        // This gives us a consistent way to reconstruct LP value "before" rebalance.
+        let (amount_a_before_calc, amount_b_before_calc) = {
+            let reader = PositionReader::new(self.provider.clone());
+            let dummy_pos = OnChainPosition {
+                address: params.position,
+                pool: params.pool,
+                owner: Pubkey::default(),
+                tick_lower: params.current_tick_lower,
+                tick_upper: params.current_tick_upper,
+                liquidity: params.current_liquidity,
+                fee_growth_inside_a: 0,
+                fee_growth_inside_b: 0,
+                fees_owed_a: 0,
+                fees_owed_b: 0,
+            };
+            reader.calculate_token_amounts(
+                &dummy_pos,
+                params.pool_tick_current,
+                params.pool_sqrt_price,
+            )
+        };
+
+        let amount_a_before = params.amount_a_before.or(Some(amount_a_before_calc));
+        let amount_b_before = params.amount_b_before.or(Some(amount_b_before_calc));
+
         // Step 1: Collect fees if configured
         if self.config.collect_fees_first {
             match self.collect_fees(&params.position, &params.pool).await {
@@ -257,6 +287,37 @@ impl RebalanceExecutor {
 
         let (fa, fb) = result.fees_collected.unwrap_or((0, 0));
 
+        // IL ledger: compute token split "after" rebalance using the new on-chain state.
+        let (amount_a_after, amount_b_after, price_ab_after) = if let Some(new_pos) = result.new_position
+        {
+            let pool_reader = WhirlpoolReader::new(self.provider.clone());
+            let pool_state = pool_reader.get_pool_state(&params.pool.to_string()).await.ok();
+            if let Some(pool_state) = pool_state {
+                let pos_reader = PositionReader::new(self.provider.clone());
+                if let Ok(on_chain_pos) = pos_reader
+                    .get_position(&new_pos.to_string())
+                    .await
+                {
+                    let (a, b) = pos_reader.calculate_token_amounts(
+                        &on_chain_pos,
+                        pool_state.tick_current,
+                        pool_state.sqrt_price,
+                    );
+                    (
+                        Some(a),
+                        Some(b),
+                        Some(pool_state.price),
+                    )
+                } else {
+                    (None, None, None)
+                }
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (params.amount_a_after, params.amount_b_after, params.price_ab_after)
+        };
+
         // Record rebalance in lifecycle
         self.lifecycle
             .record_rebalance(
@@ -272,12 +333,12 @@ impl RebalanceExecutor {
                     tx_cost_lamports: result.tx_cost_lamports,
                     il_at_rebalance: params.current_il_pct,
                     reason: params.reason,
-                    amount_a_before: params.amount_a_before,
-                    amount_b_before: params.amount_b_before,
-                    amount_a_after: params.amount_a_after,
-                    amount_b_after: params.amount_b_after,
+                    amount_a_before,
+                    amount_b_before,
+                    amount_a_after,
+                    amount_b_after,
                     price_ab_before: params.price_ab_before,
-                    price_ab_after: params.price_ab_after,
+                    price_ab_after,
                     fees_a_collected: Some(fa),
                     fees_b_collected: Some(fb),
                     optimization_run_id: params.optimization_run_id.clone(),

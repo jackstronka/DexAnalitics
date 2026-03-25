@@ -40,7 +40,7 @@ enum OptimizationObjectiveArg {
     Pnl,
     /// Maximize fees earned
     Fees,
-    /// Maximize Sharpe ratio (risk-adjusted returns)
+    /// Maximize simplified Sharpe-style objective in the portfolio `optimize` command (`MaximizeSharpeRatio`). Not used by `backtest-optimize --objective risk_adj`.
     Sharpe,
 }
 
@@ -71,7 +71,7 @@ enum BacktestObjectiveArg {
     /// Composite: fees - alpha*|IL|*capital - rebalance_cost (use --alpha)
     #[value(alias = "composite")]
     Composite,
-    /// Risk-adjusted: PnL / (1 + max_drawdown)
+    /// Risk-adjusted **score** (not Sharpe): `final_pnl / (1 + max_drawdown)` using equity path drawdown in the backtest.
     #[value(alias = "risk_adj")]
     RiskAdj,
 }
@@ -114,6 +114,65 @@ enum FeeSwapDecodeStatusArg {
     Ok,
     /// Any successful tx with `amount_in_raw` (older / looser; may mix non-swap txs).
     Loose,
+}
+
+type OptimizeGridRow = (f64, f64, f64, String, TrackerSummary, Decimal);
+
+/// After primary `score`, break ties so rankings are not an arbitrary permutation (common when
+/// `objective fees` and many strategies share the same range with **zero rebalances** → identical fees).
+fn sort_backtest_optimize_grid(results: &mut Vec<OptimizeGridRow>, objective: BacktestObjectiveArg) {
+    use std::cmp::Ordering;
+    results.sort_by(|a, b| {
+        let primary = b.5.partial_cmp(&a.5).unwrap_or(Ordering::Equal);
+        if primary != Ordering::Equal {
+            return primary;
+        }
+        match objective {
+            BacktestObjectiveArg::Fees => {
+                let t = b.4.vs_hodl.partial_cmp(&a.4.vs_hodl).unwrap_or(Ordering::Equal);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                let t = a.4.rebalance_count.cmp(&b.4.rebalance_count);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                let t = a
+                    .4
+                    .total_rebalance_cost
+                    .partial_cmp(&b.4.total_rebalance_cost)
+                    .unwrap_or(Ordering::Equal);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                a.3.cmp(&b.3)
+            }
+            BacktestObjectiveArg::VsHodl => {
+                let t = b.4.total_fees.partial_cmp(&a.4.total_fees).unwrap_or(Ordering::Equal);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                let t = a.4.rebalance_count.cmp(&b.4.rebalance_count);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                a.3.cmp(&b.3)
+            }
+            BacktestObjectiveArg::Pnl
+            | BacktestObjectiveArg::Composite
+            | BacktestObjectiveArg::RiskAdj => {
+                let t = b.4.total_fees.partial_cmp(&a.4.total_fees).unwrap_or(Ordering::Equal);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                let t = a.4.rebalance_count.cmp(&b.4.rebalance_count);
+                if t != Ordering::Equal {
+                    return t;
+                }
+                a.3.cmp(&b.3)
+            }
+        }
+    });
 }
 
 #[derive(Subcommand)]
@@ -313,7 +372,7 @@ enum Commands {
         /// Optional fixed LP share (e.g. 0.0001 = 0.01%)
         #[arg(long)]
         lp_share: Option<f64>,
-        /// What to maximize when ranking the grid. `vs_hodl` (default) often favors **wide** ranges (high TIR, stay near HODL). For **fee-seeking** ranges use `fees` or tune `composite`; cap width with `--max-range-pct`.
+        /// What to maximize when ranking the grid. `vs_hodl` (default) often favors **wide** ranges (high TIR, stay near HODL). For **fee-seeking** ranges use `fees` or tune `composite`; cap width with `--max-range-pct`. `risk_adj` uses PnL/(1+max_drawdown), not Sharpe — see `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`.
         #[arg(long, value_enum, default_value_t = BacktestObjectiveArg::VsHodl)]
         objective: BacktestObjectiveArg,
         /// Number of range widths to try (from min to max). E.g. 10 â†’ 1%, 2%, ..., 10%
@@ -789,9 +848,14 @@ async fn main() -> Result<()> {
 
             let snapshots_only = matches!(price_path_source, PricePathSourceArg::Snapshots);
             if snapshots_only {
-                if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                if !matches!(
+                    snapshot_protocol,
+                    Some(SnapshotProtocolArg::Orca)
+                        | Some(SnapshotProtocolArg::Raydium)
+                        | Some(SnapshotProtocolArg::Meteora)
+                ) {
                     anyhow::bail!(
-                        "--price-path-source snapshots requires --snapshot-protocol orca (other venues not implemented yet)"
+                        "--price-path-source snapshots requires --snapshot-protocol orca|raydium|meteora"
                     );
                 }
                 if snapshot_pool_address.is_none() {
@@ -2099,9 +2163,14 @@ async fn main() -> Result<()> {
                 );
             }
             if snapshots_only {
-                if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                if !matches!(
+                    snapshot_protocol,
+                    Some(SnapshotProtocolArg::Orca)
+                        | Some(SnapshotProtocolArg::Raydium)
+                        | Some(SnapshotProtocolArg::Meteora)
+                ) {
                     anyhow::bail!(
-                        "--price-path-source snapshots requires --snapshot-protocol orca (other venues not implemented yet)"
+                        "--price-path-source snapshots requires --snapshot-protocol orca|raydium|meteora"
                     );
                 }
                 if snapshot_pool_address.is_none() {
@@ -2218,29 +2287,63 @@ async fn main() -> Result<()> {
 
             if snapshots_only {
                 println!(
-                    "đź”Ť backtest-optimize: price path from Orca snapshots only (window {}): {}/{} â€” no Birdeye",
+                    "đź”Ť backtest-optimize: price path from snapshots only (window {}): {}/{} â€” no Birdeye",
                     display_label,
                     symbol_a,
                     symbol_b.as_deref().unwrap_or("?")
                 );
                 let pool = snapshot_pool_address.as_ref().unwrap();
-                let prep = crate::commands::snapshot_price_path::build_from_orca_snapshots(
-                    pool,
-                    start_time as i64,
-                    end_time as i64,
-                    &token_a,
-                    &token_b,
-                    *capital,
-                    *lp_share,
-                )
-                .await?;
+                let prep = match snapshot_protocol.unwrap() {
+                    SnapshotProtocolArg::Orca => {
+                        crate::commands::snapshot_price_path::build_from_orca_snapshots(
+                            pool,
+                            start_time as i64,
+                            end_time as i64,
+                            &token_a,
+                            &token_b,
+                            *capital,
+                            *lp_share,
+                        )
+                        .await?
+                    }
+                    SnapshotProtocolArg::Raydium => {
+                        crate::commands::snapshot_price_path::build_from_raydium_snapshots(
+                            pool,
+                            start_time as i64,
+                            end_time as i64,
+                            &token_a,
+                            &token_b,
+                            *capital,
+                            *lp_share,
+                        )
+                        .await?
+                    }
+                    SnapshotProtocolArg::Meteora => {
+                        crate::commands::snapshot_price_path::build_from_meteora_snapshots(
+                            pool,
+                            start_time as i64,
+                            end_time as i64,
+                            &token_a,
+                            &token_b,
+                            *capital,
+                            *lp_share,
+                        )
+                        .await?
+                    }
+                };
                 if prep.step_data.is_empty() {
                     println!("âťŚ No snapshot rows in the requested time window.");
                     return Ok(());
                 }
+                let protocol_dir = match snapshot_protocol.unwrap() {
+                    SnapshotProtocolArg::Orca => "orca",
+                    SnapshotProtocolArg::Raydium => "raydium",
+                    SnapshotProtocolArg::Meteora => "meteora",
+                };
                 println!(
-                    "âś… Loaded {} snapshot steps from data/pool-snapshots/orca/{}/snapshots.jsonl",
+                    "âś… Loaded {} snapshot steps from data/pool-snapshots/{}/{}/snapshots.jsonl",
                     prep.step_data.len(),
+                    protocol_dir,
                     pool
                 );
                 snapshot_fee_index_full = prep.per_step_fees_usd;
@@ -2262,13 +2365,30 @@ async fn main() -> Result<()> {
                 .or(snapshot_pool_address.as_ref());
             let (pool_active_liquidity, effective_fee_rate, token_a_decimals, token_b_decimals, pool_vault_a, pool_vault_b): (Option<u128>, Option<Decimal>, u8, u8, Option<String>, Option<String>) =
                 if let Some(pool) = pool_for_onchain_state {
-                    crate::commands::backtest_optimize::fetch_pool_state(
-                        pool,
-                        token_a_decimals_guess,
-                        token_b_decimals_guess,
-                        use_cross_pair,
-                    )
-                    .await?
+                    // Snapshot-only simulation for Raydium/Meteora should not depend on Orca-specific
+                    // on-chain layout parsing. For Orca we still prefer on-chain pool state.
+                    if snapshots_only && matches!(snapshot_protocol, Some(SnapshotProtocolArg::Raydium) | Some(SnapshotProtocolArg::Meteora)) {
+                        let liq = snapshot_step_data_full
+                            .as_ref()
+                            .and_then(|sd| sd.first())
+                            .and_then(|p| p.pool_liquidity_active);
+                        (
+                            liq,
+                            None,
+                            token_a_decimals_guess,
+                            if use_cross_pair { token_b_decimals_guess } else { 6u8 },
+                            None,
+                            None,
+                        )
+                    } else {
+                        crate::commands::backtest_optimize::fetch_pool_state(
+                            pool,
+                            token_a_decimals_guess,
+                            token_b_decimals_guess,
+                            use_cross_pair,
+                        )
+                        .await?
+                    }
                 } else {
                     (
                         None,
@@ -2410,7 +2530,7 @@ async fn main() -> Result<()> {
             };
 
             #[allow(clippy::type_complexity)]
-            let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<(f64, f64, f64, String, TrackerSummary, Decimal)>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
+            let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<OptimizeGridRow>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
                 let (mut step_data, entry_price, center) = if snapshots_only {
                     let sd = snapshot_step_data_full.clone().expect("snapshot price path");
                     let entry = sd
@@ -2598,7 +2718,7 @@ async fn main() -> Result<()> {
                     (wp, lower, upper, name, summary, sc)
                 })
                     .collect();
-                r.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
+                sort_backtest_optimize_grid(&mut r, *objective);
                 (r, fv, fe100, Some(step_data))
             } else {
                 type AggKey = (String, String);
@@ -2819,7 +2939,7 @@ async fn main() -> Result<()> {
                         (wp, lower, upper, strat_name, summary, avg)
                     })
                     .collect();
-                r.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
+                sort_backtest_optimize_grid(&mut r, *objective);
                 (r, fee_check_vol, fee_check_expected_100, audit_step_data)
             };
 
@@ -2880,6 +3000,11 @@ async fn main() -> Result<()> {
             if matches!(objective, BacktestObjectiveArg::VsHodl) {
                 println!(
                     "   ℹ️  Objective `vs_hodl` rewards staying close to a HODL benchmark → **wide** ranges often win (high TIR). For **narrower / fee-focused** optimization try `--objective fees` or `--objective composite`, and/or lower `--max-range-pct`."
+                );
+            }
+            if matches!(objective, BacktestObjectiveArg::Fees) {
+                println!(
+                    "   ℹ️  Objective `fees`: many strategies **tie** on the same `total_fees` for a fixed range when they **do not rebalance** (identical path). Ranking uses tie-breakers: **better vs HODL**, then **fewer rebalances / lower rebalance cost**, then strategy name. Identical Score+Fees rows are economically redundant picks among strategies that behaved the same."
                 );
             }
             if let Some(h) = hours.as_ref() {
