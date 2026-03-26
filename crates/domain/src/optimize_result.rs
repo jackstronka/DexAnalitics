@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Root document written to `--optimize-result-json`.
+///
+/// Extra JSON fields remain accepted (no `deny_unknown_fields`) so older readers stay compatible when the CLI adds columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizeResultFile {
     /// Schema version; bump when fields change.

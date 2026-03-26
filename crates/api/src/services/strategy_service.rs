@@ -1,20 +1,18 @@
 //! Strategy service for managing automated strategies.
 
 use crate::error::ApiError;
+use crate::models::OptimizeApplyPolicy;
 use crate::models::StrategyType;
 use crate::services::optimization_runner::{
     apply_optimize_result_json, merge_optimize_result_json_arg, run_optimize_cycle,
     run_optimize_subprocess,
 };
 use crate::state::{AlertUpdate, AppState};
-use clmm_lp_execution::prelude::{
-    DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode,
-};
+use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::interval;
@@ -53,8 +51,6 @@ pub struct StrategyService {
     state: AppState,
     /// Active strategy executors.
     executors: Arc<RwLock<std::collections::HashMap<String, Arc<RwLock<StrategyExecutor>>>>>,
-    /// Prevents overlapping `backtest-optimize` subprocess runs per strategy.
-    optimization_busy: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl StrategyService {
@@ -63,7 +59,6 @@ impl StrategyService {
         Self {
             state,
             executors: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            optimization_busy: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -114,6 +109,16 @@ impl StrategyService {
             .get("optimize_interval_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let optimize_apply_policy: OptimizeApplyPolicy = params_json
+            .get("optimize_apply_policy")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        if optimize_apply_policy == OptimizeApplyPolicy::ExternalHttp && optimize_interval_secs > 0
+        {
+            return Err(ApiError::bad_request(
+                "parameters.optimize_apply_policy is external_http but optimize_interval_secs > 0; set interval to 0 or use combined".to_string(),
+            ));
+        }
         let optimize_command: Option<Vec<String>> = params_json
             .get("optimize_command")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -132,8 +137,7 @@ impl StrategyService {
         if optimize_on_start {
             match (&optimize_command, &result_path_buf) {
                 (Some(cmd), Some(rp)) => {
-                    let argv =
-                        merge_optimize_result_json_arg(cmd.clone(), &rp.to_string_lossy());
+                    let argv = merge_optimize_result_json_arg(cmd.clone(), &rp.to_string_lossy());
                     run_optimize_subprocess(&argv).await?;
                 }
                 _ => {
@@ -164,7 +168,7 @@ impl StrategyService {
         };
 
         // Create strategy executor
-        let mut executor = StrategyExecutor::new(
+        let executor = StrategyExecutor::new(
             self.state.provider.clone(),
             self.state.monitor.clone(),
             self.state.tx_manager.clone(),
@@ -195,12 +199,18 @@ impl StrategyService {
                     .unwrap_or(decision_config.range_width_pct);
             }
 
-            if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(|v| v.as_f64()) {
-                decision_config.threshold_pct =
-                    Decimal::from_f64_retain(threshold / 100.0).unwrap_or(decision_config.threshold_pct);
+            if let Some(threshold) = params
+                .get("rebalance_threshold_pct")
+                .and_then(|v| v.as_f64())
+            {
+                decision_config.threshold_pct = Decimal::from_f64_retain(threshold / 100.0)
+                    .unwrap_or(decision_config.threshold_pct);
             }
 
-            if let Some(min_hours) = params.get("min_rebalance_interval_hours").and_then(|v| v.as_u64()) {
+            if let Some(min_hours) = params
+                .get("min_rebalance_interval_hours")
+                .and_then(|v| v.as_u64())
+            {
                 decision_config.periodic_interval_hours = min_hours;
                 decision_config.min_rebalance_interval_hours = min_hours;
             }
@@ -208,12 +218,16 @@ impl StrategyService {
             // IL-specific knobs (only meaningful for IlLimit strategy mode).
             if let StrategyMode::IlLimit = decision_config.strategy_mode {
                 if let Some(max_il) = params.get("max_il_pct").and_then(|v| v.as_f64()) {
-                    decision_config.il_close_threshold =
-                        Decimal::from_f64_retain(max_il / 100.0).unwrap_or(decision_config.il_close_threshold);
+                    decision_config.il_close_threshold = Decimal::from_f64_retain(max_il / 100.0)
+                        .unwrap_or(decision_config.il_close_threshold);
                 }
-                if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(|v| v.as_f64()) {
+                if let Some(threshold) = params
+                    .get("rebalance_threshold_pct")
+                    .and_then(|v| v.as_f64())
+                {
                     decision_config.il_rebalance_threshold =
-                        Decimal::from_f64_retain(threshold / 100.0).unwrap_or(decision_config.il_rebalance_threshold);
+                        Decimal::from_f64_retain(threshold / 100.0)
+                            .unwrap_or(decision_config.il_rebalance_threshold);
                 }
             }
         }
@@ -238,7 +252,7 @@ impl StrategyService {
         }
 
         let busy = {
-            let mut m = self.optimization_busy.write().await;
+            let mut m = self.state.optimization_busy.write().await;
             let e = m
                 .entry(strategy_id.to_string())
                 .or_insert_with(|| Arc::new(AtomicBool::new(false)))
@@ -269,9 +283,7 @@ impl StrategyService {
                             let Some(ex) = ex_opt else {
                                 break;
                             };
-                            if let Err(e) =
-                                run_optimize_cycle(&argv, &path, &ex, &busy_c).await
-                            {
+                            if let Err(e) = run_optimize_cycle(&argv, &path, &ex, &busy_c).await {
                                 warn!(strategy_id = %sid, error = %e, "Periodic optimization failed");
                             }
                         }
@@ -308,12 +320,14 @@ impl StrategyService {
         strategy.updated_at = chrono::Utc::now();
 
         // Broadcast alert
-        self.state.broadcast_alert(AlertUpdate {
+        self.state
+            .broadcast_alert(AlertUpdate {
             level: "info".to_string(),
             message: format!("Strategy {} started", strategy_id),
             timestamp: chrono::Utc::now(),
             position_address: None,
-        });
+            })
+            .await;
 
         info!(strategy_id = %strategy_id, "Strategy started successfully");
         Ok(StrategyOperationResult::success())
@@ -352,7 +366,7 @@ impl StrategyService {
         }
 
         {
-            let mut busy = self.optimization_busy.write().await;
+            let mut busy = self.state.optimization_busy.write().await;
             busy.remove(strategy_id);
         }
 
@@ -361,12 +375,14 @@ impl StrategyService {
         strategy.updated_at = chrono::Utc::now();
 
         // Broadcast alert
-        self.state.broadcast_alert(AlertUpdate {
+        self.state
+            .broadcast_alert(AlertUpdate {
             level: "info".to_string(),
             message: format!("Strategy {} stopped", strategy_id),
             timestamp: chrono::Utc::now(),
             position_address: None,
-        });
+            })
+            .await;
 
         info!(strategy_id = %strategy_id, "Strategy stopped successfully");
         Ok(StrategyOperationResult::success())

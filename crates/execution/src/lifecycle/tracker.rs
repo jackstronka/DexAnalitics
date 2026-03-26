@@ -82,11 +82,7 @@ impl LifecycleTracker {
     }
 
     async fn append_il_ledger_jsonl(&self, row: serde_json::Value) {
-        let path_opt = self
-            .il_ledger_path
-            .lock()
-            .ok()
-            .and_then(|g| g.clone());
+        let path_opt = self.il_ledger_path.lock().ok().and_then(|g| g.clone());
         let Some(path) = path_opt else {
             return;
         };

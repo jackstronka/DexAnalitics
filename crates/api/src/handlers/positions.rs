@@ -2,19 +2,19 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    ListPositionsResponse, MessageResponse, OpenPositionRequest, PnLResponse, PositionResponse,
-    PositionStatus, RebalanceRequest,
+    DecreaseLiquidityRequest, ListPositionsResponse, MessageResponse, OpenPositionRequest,
+    PnLResponse, PositionResponse, PositionStatus, RebalanceRequest,
 };
-use crate::state::{AlertUpdate, AppState, PositionUpdate};
+use crate::state::{AppState, PositionUpdate};
 use axum::{
     Json,
     extract::{Path, State},
 };
-use clmm_lp_execution::prelude::{RebalanceData, RebalanceReason};
-use clmm_lp_protocols::prelude::WhirlpoolReader;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
-use tracing::{info, warn};
+use tracing::info;
+
+use crate::services::PositionService;
 
 /// List all positions.
 #[utoipa::path(
@@ -145,42 +145,43 @@ pub async fn open_position(
         "Opening position"
     );
 
-    // Validate tick range
-    if request.tick_lower >= request.tick_upper {
-        return Err(ApiError::Validation(
-            "tick_lower must be less than tick_upper".to_string(),
-        ));
+    let mut svc = PositionService::new(state.clone());
+    svc.set_dry_run(state.dry_run);
+
+    // Non-dry-run: use any available strategy executor (if present).
+    if !state.dry_run {
+        if let Some(exec) = state.executors.read().await.values().next().cloned() {
+            svc.set_executor(exec);
+        }
     }
 
-    // Validate pool exists
-    let pool_reader = WhirlpoolReader::new(state.provider.clone());
-    let pool_state = pool_reader
-        .get_pool_state(&request.pool_address)
-        .await
-        .map_err(|e| ApiError::not_found(format!("Pool not found: {}", e)))?;
-
-    // Validate tick spacing
-    let tick_spacing = pool_state.tick_spacing as i32;
-    if request.tick_lower % tick_spacing != 0 || request.tick_upper % tick_spacing != 0 {
-        return Err(ApiError::Validation(format!(
-            "Tick bounds must be multiples of tick spacing ({})",
-            tick_spacing
-        )));
+    let op = svc.open_position(&request).await?;
+    if op.success {
+        if let Some(m) = op
+            .data
+            .as_ref()
+            .and_then(|d| d.get("message"))
+            .and_then(|v| v.as_str())
+        {
+            return Ok(Json(MessageResponse::new(m.to_string())));
+        }
+        if let Some(pda) = op
+            .data
+            .as_ref()
+            .and_then(|d| d.get("position_pda"))
+            .and_then(|v| v.as_str())
+        {
+            return Ok(Json(MessageResponse::new(format!(
+                "Position opened. PDA: {pda}"
+            ))));
+        }
+        return Ok(Json(MessageResponse::new("Position opened".to_string())));
     }
 
-    if state.dry_run {
-        info!("Dry-run mode: would open position");
-        return Ok(Json(MessageResponse::new(format!(
-            "[DRY-RUN] Would open position in pool {} with range [{}, {}]",
-            request.pool_address, request.tick_lower, request.tick_upper
-        ))));
-    }
-
-    // Actual execution requires wallet configuration
-    warn!("Position opening requires wallet configuration");
-    Ok(Json(MessageResponse::new(
-        "Position opening requires wallet configuration. Set up wallet first.",
-    )))
+    Err(ApiError::ServiceUnavailable(
+        op.error
+            .unwrap_or_else(|| "Position opening failed".to_string()),
+    ))
 }
 
 /// Close a position.
@@ -216,7 +217,8 @@ pub async fn close_position(
         info!("Dry-run mode: would close position");
 
         // Broadcast simulated update
-        state.broadcast_position_update(PositionUpdate {
+        state
+            .broadcast_position_update(PositionUpdate {
             update_type: "close_simulated".to_string(),
             position_address: address.clone(),
             timestamp: chrono::Utc::now(),
@@ -224,7 +226,8 @@ pub async fn close_position(
                 "liquidity": position.on_chain.liquidity.to_string(),
                 "dry_run": true
             }),
-        });
+            })
+            .await;
 
         return Ok(Json(MessageResponse::new(format!(
             "[DRY-RUN] Would close position {} with liquidity {}",
@@ -232,11 +235,23 @@ pub async fn close_position(
         ))));
     }
 
-    // Actual execution requires wallet configuration
-    warn!("Position closing requires wallet configuration");
-    Ok(Json(MessageResponse::new(
-        "Position closing requires wallet configuration. Set up wallet first.",
-    )))
+    let mut svc = PositionService::new(state.clone());
+    svc.set_dry_run(false);
+    if let Some(exec) = state.executors.read().await.values().next().cloned() {
+        svc.set_executor(exec);
+    }
+
+    let op = svc.close_position(&address).await?;
+    if op.success {
+        Ok(Json(MessageResponse::new(format!(
+            "Position closed: {address}"
+        ))))
+    } else {
+        Err(ApiError::ServiceUnavailable(
+            op.error
+                .unwrap_or_else(|| "Position closing failed".to_string()),
+        ))
+    }
 }
 
 /// Collect fees from a position.
@@ -272,7 +287,8 @@ pub async fn collect_fees(
         info!("Dry-run mode: would collect fees");
 
         // Broadcast simulated update
-        state.broadcast_position_update(PositionUpdate {
+        state
+            .broadcast_position_update(PositionUpdate {
             update_type: "fees_collected_simulated".to_string(),
             position_address: address.clone(),
             timestamp: chrono::Utc::now(),
@@ -281,7 +297,8 @@ pub async fn collect_fees(
                 "fees_b": position.pnl.fees_earned_b,
                 "dry_run": true
             }),
-        });
+            })
+            .await;
 
         return Ok(Json(MessageResponse::new(format!(
             "[DRY-RUN] Would collect fees from position {}: {} token A, {} token B",
@@ -289,11 +306,66 @@ pub async fn collect_fees(
         ))));
     }
 
-    // Actual execution requires wallet configuration
-    warn!("Fee collection requires wallet configuration");
-    Ok(Json(MessageResponse::new(
-        "Fee collection requires wallet configuration. Set up wallet first.",
-    )))
+    let mut svc = PositionService::new(state.clone());
+    svc.set_dry_run(false);
+    if let Some(exec) = state.executors.read().await.values().next().cloned() {
+        svc.set_executor(exec);
+    }
+
+    let op = svc.collect_fees(&address).await?;
+    if op.success {
+        Ok(Json(MessageResponse::new(format!(
+            "Fees collected from position: {address}"
+        ))))
+    } else {
+        Err(ApiError::ServiceUnavailable(
+            op.error
+                .unwrap_or_else(|| "Fee collection failed".to_string()),
+        ))
+    }
+}
+
+/// Decrease liquidity from a position.
+#[utoipa::path(
+    post,
+    path = "/positions/{address}/decrease",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position address")
+    ),
+    request_body = DecreaseLiquidityRequest,
+    responses(
+        (status = 200, description = "Liquidity decreased", body = MessageResponse),
+        (status = 404, description = "Position not found")
+    )
+)]
+pub async fn decrease_liquidity(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+    Json(request): Json<DecreaseLiquidityRequest>,
+) -> ApiResult<Json<MessageResponse>> {
+    let mut svc = PositionService::new(state.clone());
+    svc.set_dry_run(state.dry_run);
+
+    if !state.dry_run {
+        if let Some(exec) = state.executors.read().await.values().next().cloned() {
+            svc.set_executor(exec);
+        }
+    }
+
+    let op = svc
+        .decrease_liquidity(&address, request.liquidity_amount)
+        .await?;
+    if op.success {
+        Ok(Json(MessageResponse::new(format!(
+            "Liquidity decreased for position: {address}"
+        ))))
+    } else {
+        Err(ApiError::ServiceUnavailable(
+            op.error
+                .unwrap_or_else(|| "Decrease liquidity failed".to_string()),
+        ))
+    }
 }
 
 /// Rebalance a position.
@@ -315,125 +387,25 @@ pub async fn rebalance_position(
     Path(address): Path<String>,
     Json(request): Json<RebalanceRequest>,
 ) -> ApiResult<Json<MessageResponse>> {
-    let pubkey = Pubkey::from_str(&address)
-        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    let mut svc = PositionService::new(state.clone());
+    svc.set_dry_run(state.dry_run);
 
-    info!(
-        position = %address,
-        new_tick_lower = request.new_tick_lower,
-        new_tick_upper = request.new_tick_upper,
-        dry_run = state.dry_run,
-        "Rebalancing position"
-    );
-
-    // Validate tick range
-    if request.new_tick_lower >= request.new_tick_upper {
-        return Err(ApiError::Validation(
-            "new_tick_lower must be less than new_tick_upper".to_string(),
-        ));
+    if !state.dry_run {
+        if let Some(exec) = state.executors.read().await.values().next().cloned() {
+            svc.set_executor(exec);
+        }
     }
 
-    // Verify position exists
-    let positions = state.monitor.get_positions().await;
-    let position = positions
-        .iter()
-        .find(|p| p.address == pubkey)
-        .ok_or_else(|| ApiError::not_found("Position not found"))?;
-
-    // Fetch pool state for validation
-    let pool_reader = WhirlpoolReader::new(state.provider.clone());
-    let pool_state = pool_reader
-        .get_pool_state(&position.pool.to_string())
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch pool state: {}", e)))?;
-
-    // Validate tick spacing
-    let tick_spacing = pool_state.tick_spacing as i32;
-    if request.new_tick_lower % tick_spacing != 0 || request.new_tick_upper % tick_spacing != 0 {
-        return Err(ApiError::Validation(format!(
-            "Tick bounds must be multiples of tick spacing ({})",
-            tick_spacing
-        )));
+    let op = svc.rebalance_position(&address, &request).await?;
+    if op.success {
+        Ok(Json(MessageResponse::new(
+            "Rebalance requested".to_string(),
+        )))
+    } else {
+        Err(ApiError::ServiceUnavailable(
+            op.error.unwrap_or_else(|| "Rebalance failed".to_string()),
+        ))
     }
-
-    if state.dry_run {
-        info!("Dry-run mode: would rebalance position");
-
-        // Broadcast simulated update
-        state.broadcast_position_update(PositionUpdate {
-            update_type: "rebalance_simulated".to_string(),
-            position_address: address.clone(),
-            timestamp: chrono::Utc::now(),
-            data: serde_json::json!({
-                "old_range": [position.on_chain.tick_lower, position.on_chain.tick_upper],
-                "new_range": [request.new_tick_lower, request.new_tick_upper],
-                "dry_run": true
-            }),
-        });
-
-        return Ok(Json(MessageResponse::new(format!(
-            "[DRY-RUN] Would rebalance position {} from [{}, {}] to [{}, {}]",
-            address,
-            position.on_chain.tick_lower,
-            position.on_chain.tick_upper,
-            request.new_tick_lower,
-            request.new_tick_upper
-        ))));
-    }
-
-    // Record rebalance intent in lifecycle tracker
-    state
-        .lifecycle
-        .record_rebalance(
-            pubkey,
-            position.pool,
-            RebalanceData {
-                old_tick_lower: position.on_chain.tick_lower,
-                old_tick_upper: position.on_chain.tick_upper,
-                new_tick_lower: request.new_tick_lower,
-                new_tick_upper: request.new_tick_upper,
-                old_liquidity: position.on_chain.liquidity,
-                new_liquidity: position.on_chain.liquidity,
-                tx_cost_lamports: 0,
-                il_at_rebalance: position.pnl.il_pct,
-                reason: RebalanceReason::Manual,
-                amount_a_before: None,
-                amount_b_before: None,
-                amount_a_after: None,
-                amount_b_after: None,
-                price_ab_before: None,
-                price_ab_after: None,
-                fees_a_collected: None,
-                fees_b_collected: None,
-                optimization_run_id: None,
-            },
-        )
-        .await;
-
-    // Broadcast update
-    state.broadcast_position_update(PositionUpdate {
-        update_type: "rebalance_initiated".to_string(),
-        position_address: address.clone(),
-        timestamp: chrono::Utc::now(),
-        data: serde_json::json!({
-            "old_range": [position.on_chain.tick_lower, position.on_chain.tick_upper],
-            "new_range": [request.new_tick_lower, request.new_tick_upper]
-        }),
-    });
-
-    // Broadcast alert
-    state.broadcast_alert(AlertUpdate {
-        level: "info".to_string(),
-        message: format!("Rebalance initiated for position {}", address),
-        timestamp: chrono::Utc::now(),
-        position_address: Some(address.clone()),
-    });
-
-    // Actual execution requires wallet configuration
-    warn!("Rebalance recorded - actual execution requires wallet configuration");
-    Ok(Json(MessageResponse::new(
-        "Rebalance recorded. Actual execution requires wallet configuration.",
-    )))
 }
 
 /// Get position PnL details.

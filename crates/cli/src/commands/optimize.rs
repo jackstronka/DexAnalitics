@@ -141,21 +141,25 @@ pub async fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let periodic_candidates =
         param_optimizer.optimize_periodic(&config, best_width, &MaximizeNetPnL);
 
-    let il_limit_candidates = param_optimizer.optimize_il_limit(&config, best_width, &MaximizeNetPnL);
+    let il_limit_candidates =
+        param_optimizer.optimize_il_limit(&config, best_width, &MaximizeNetPnL);
     let retouch_candidates =
         param_optimizer.optimize_retouch_shift(&config, best_width, &MaximizeNetPnL);
-    let static_candidate = param_optimizer.optimize_static_range(&config, best_width, &MaximizeNetPnL);
+    let static_candidate =
+        param_optimizer.optimize_static_range(&config, best_width, &MaximizeNetPnL);
 
-    let best_threshold = threshold_candidates.first().map(|c| StrategyRecommendation {
-        strategy_type: "threshold".to_string(),
-        params: format!(
-            "price_threshold={:.1}%, il_threshold={:.1}%",
-            c.params.price_threshold * Decimal::from(100),
-            c.params.il_threshold * Decimal::from(100)
-        ),
-        expected_rebalances: c.expected_rebalances,
-        score: c.score,
-    });
+    let best_threshold = threshold_candidates
+        .first()
+        .map(|c| StrategyRecommendation {
+            strategy_type: "threshold".to_string(),
+            params: format!(
+                "price_threshold={:.1}%, il_threshold={:.1}%",
+                c.params.price_threshold * Decimal::from(100),
+                c.params.il_threshold * Decimal::from(100)
+            ),
+            expected_rebalances: c.expected_rebalances,
+            score: c.score,
+        });
 
     let best_periodic = periodic_candidates.first().map(|c| StrategyRecommendation {
         strategy_type: "periodic".to_string(),

@@ -41,11 +41,18 @@ export interface Strategy {
   updated_at: string
 }
 
+export type OptimizeApplyPolicy =
+  | 'periodic_subprocess'
+  | 'external_http'
+  | 'combined'
+
 export interface StrategyParameters {
   rebalance_threshold_pct?: number
   max_il_pct?: number
   min_rebalance_interval_hours?: number
   range_width_pct?: number
+  /** Who may apply grid JSON: subprocess only, HTTP only, or both (see PROJECT_OVERVIEW). */
+  optimize_apply_policy?: OptimizeApplyPolicy
 }
 
 // Payload for creating/updating a strategy via API

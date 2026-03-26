@@ -9,7 +9,11 @@ fn pow10_u64(exp: u32) -> u64 {
 ///
 /// If `price_ab_human` is tokenB per tokenA in UI units, then:
 /// `price_ab_raw = price_ab_human * 10^(dec_b - dec_a)`.
-pub fn price_ab_human_to_raw(price_ab_human: Decimal, token_a_decimals: u32, token_b_decimals: u32) -> Decimal {
+pub fn price_ab_human_to_raw(
+    price_ab_human: Decimal,
+    token_a_decimals: u32,
+    token_b_decimals: u32,
+) -> Decimal {
     let da = token_a_decimals.min(18) as i32;
     let db = token_b_decimals.min(18) as i32;
     let exp = db - da;
@@ -62,4 +66,3 @@ pub fn from_base_units(amount: u64, decimals: u32) -> Decimal {
 pub fn clamp_quote_usd(q: Decimal) -> Decimal {
     q.max(Decimal::from_f64(1e-9).unwrap())
 }
-

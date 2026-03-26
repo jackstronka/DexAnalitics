@@ -2,17 +2,24 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    CreateStrategyRequest, ListStrategiesResponse, MessageResponse, StrategyParameters,
-    StrategyPerformanceResponse, StrategyResponse, StrategyType,
+    ApplyOptimizeResultRequest, CreateStrategyRequest, ListStrategiesResponse, MessageResponse,
+    OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse, StrategyResponse,
+    StrategyType,
+};
+use crate::services::optimization_runner::{
+    apply_optimize_result_parsed, end_optimize_busy, try_begin_optimize_busy,
 };
 use crate::state::{AlertUpdate, AppState, StrategyState};
 use axum::{
     Json,
     extract::{Path, State},
 };
-use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor};
+use clmm_lp_execution::prelude::{
+    DecisionConfig, ExecutorConfig, StrategyExecutor, validate_agent_decision,
+};
 use rust_decimal::Decimal;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -37,19 +44,7 @@ pub async fn list_strategies(
                 .config
                 .get("parameters")
                 .and_then(|p| serde_json::from_value(p.clone()).ok())
-                .unwrap_or(StrategyParameters {
-                    tick_width: None,
-                    range_width_pct: None,
-                    rebalance_threshold_pct: None,
-                    max_il_pct: None,
-                    eval_interval_secs: None,
-                    min_rebalance_interval_hours: None,
-                    optimize_on_start: None,
-                    optimize_interval_secs: None,
-                    optimize_command: None,
-                    optimize_result_json_path: None,
-                    il_ledger_path: None,
-                });
+                .unwrap_or_default();
 
             StrategyResponse {
                 id: s.id.clone(),
@@ -110,19 +105,7 @@ pub async fn get_strategy(
         .config
         .get("parameters")
         .and_then(|p| serde_json::from_value(p.clone()).ok())
-        .unwrap_or(StrategyParameters {
-            tick_width: None,
-            range_width_pct: None,
-            rebalance_threshold_pct: None,
-            max_il_pct: None,
-            eval_interval_secs: None,
-            min_rebalance_interval_hours: None,
-            optimize_on_start: None,
-            optimize_interval_secs: None,
-            optimize_command: None,
-            optimize_result_json_path: None,
-            il_ledger_path: None,
-        });
+        .unwrap_or_default();
 
     let response = StrategyResponse {
         id: strategy.id.clone(),
@@ -265,6 +248,119 @@ pub async fn update_strategy(
     Ok(Json(response))
 }
 
+/// Apply a parsed `OptimizeResultFile` (or agent envelope) to a running strategy executor without running `backtest-optimize`.
+///
+/// Request JSON: either a full [`OptimizeResultFile`](clmm_lp_domain::optimize_result::OptimizeResultFile), or
+/// `{ "decision": { ... }, "baseline_optimize_result": ... }` with [`AgentDecision`](clmm_lp_domain::agent_decision::AgentDecision).
+#[utoipa::path(
+    post,
+    path = "/strategies/{id}/apply-optimize-result",
+    tag = "Strategies",
+    params(
+        ("id" = String, Path, description = "Strategy ID")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Applied or no-op", body = MessageResponse),
+        (status = 404, description = "Strategy not found"),
+        (status = 409, description = "Strategy not running, optimize_apply_policy blocks HTTP apply, or busy")
+    )
+)]
+pub async fn apply_optimize_result(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<MessageResponse>> {
+    let body: ApplyOptimizeResultRequest = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid apply-optimize-result JSON: {e}")))?;
+
+    let (params, max_delta) = {
+        let strategies = state.strategies.read().await;
+        let strategy = strategies
+            .get(&id)
+            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+        if !strategy.running {
+            return Err(ApiError::Conflict(
+                "Strategy is not running; apply-optimize-result requires an active executor"
+                    .to_string(),
+            ));
+        }
+        let params: StrategyParameters = strategy
+            .config
+            .get("parameters")
+            .and_then(|p| serde_json::from_value(p.clone()).ok())
+            .unwrap_or_default();
+        let max_delta = params.agent_max_width_pct_delta;
+        (params, max_delta)
+    };
+
+    let executor = {
+        let executors = state.executors.read().await;
+        executors
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("Strategy executor not found"))?
+    };
+
+    match &body {
+        ApplyOptimizeResultRequest::Agent(env) => {
+            validate_agent_decision(
+                &env.decision,
+                env.baseline_optimize_result.as_ref(),
+                max_delta,
+            )?;
+            if !env.decision.approved {
+                return Ok(Json(MessageResponse::new(
+                    "Agent decision: not approved; executor unchanged",
+                )));
+            }
+        }
+        ApplyOptimizeResultRequest::Direct(_) => {}
+    }
+
+    if params.optimize_apply_policy == OptimizeApplyPolicy::PeriodicSubprocess {
+        return Err(ApiError::Conflict(
+            "parameters.optimize_apply_policy is periodic_subprocess; HTTP apply is disabled"
+                .to_string(),
+        ));
+    }
+
+    let busy = {
+        let mut m = state.optimization_busy.write().await;
+        m.entry(id.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    };
+
+    if !try_begin_optimize_busy(&busy) {
+        return Err(ApiError::Conflict(
+            "Another optimization or apply-optimize-result is in progress for this strategy"
+                .to_string(),
+        ));
+    }
+
+    let apply_result = async {
+        match &body {
+            ApplyOptimizeResultRequest::Direct(file) => {
+                apply_optimize_result_parsed(file, executor.as_ref()).await
+            }
+            ApplyOptimizeResultRequest::Agent(env) => {
+                let file = env.decision.optimize_result.as_ref().ok_or_else(|| {
+                    ApiError::bad_request("approved agent decision missing optimize_result")
+                })?;
+                apply_optimize_result_parsed(file, executor.as_ref()).await
+            }
+        }
+    }
+    .await;
+
+    end_optimize_busy(&busy);
+    apply_result?;
+
+    info!(strategy_id = %id, "apply-optimize-result applied");
+    Ok(Json(MessageResponse::new("Optimize result applied")))
+}
+
 /// Delete a strategy.
 #[utoipa::path(
     delete,
@@ -286,6 +382,11 @@ pub async fn delete_strategy(
 
     if strategies.remove(&id).is_none() {
         return Err(ApiError::not_found("Strategy not found"));
+    }
+
+    {
+        let mut busy = state.optimization_busy.write().await;
+        busy.remove(&id);
     }
 
     info!(id = %id, "Strategy deleted");
@@ -355,7 +456,7 @@ pub async fn start_strategy(
     };
 
     // Create strategy executor
-    let mut executor = StrategyExecutor::new(
+    let executor = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
         state.tx_manager.clone(),
@@ -418,12 +519,14 @@ pub async fn start_strategy(
     });
 
     // Broadcast alert
-    state.broadcast_alert(AlertUpdate {
+    state
+        .broadcast_alert(AlertUpdate {
         level: "info".to_string(),
         message: format!("Strategy {} started", id),
         timestamp: chrono::Utc::now(),
         position_address: None,
-    });
+        })
+        .await;
 
     info!(id = %id, dry_run = dry_run, auto_execute = auto_execute, "Strategy started");
 
@@ -481,13 +584,20 @@ pub async fn stop_strategy(
         executors.remove(&id);
     }
 
+    {
+        let mut busy = state.optimization_busy.write().await;
+        busy.remove(&id);
+    }
+
     // Broadcast alert
-    state.broadcast_alert(AlertUpdate {
+    state
+        .broadcast_alert(AlertUpdate {
         level: "info".to_string(),
         message: format!("Strategy {} stopped", id),
         timestamp: chrono::Utc::now(),
         position_address: None,
-    });
+        })
+        .await;
 
     info!(id = %id, "Strategy stopped");
 

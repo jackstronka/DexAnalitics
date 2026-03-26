@@ -34,7 +34,10 @@ const DISCS: [[u8; 8]; 1] = [METEORA_SWAP_EVENT_DISCRIMINATOR];
 
 /// Decode the first swap event in logs whose `lb_pair` matches `pool_address` (LB pair pubkey).
 #[must_use]
-pub fn parse_meteora_swap_event_for_pool(logs: &[String], pool_address: &str) -> Option<MeteoraDlmmSwapEvent> {
+pub fn parse_meteora_swap_event_for_pool(
+    logs: &[String],
+    pool_address: &str,
+) -> Option<MeteoraDlmmSwapEvent> {
     for line in logs {
         let rest = line
             .strip_prefix("Program data: ")
@@ -60,7 +63,9 @@ pub fn parse_meteora_swap_event_for_pool(logs: &[String], pool_address: &str) ->
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s.trim()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .ok()
 }
 
 #[cfg(test)]
@@ -88,9 +93,7 @@ mod tests {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
         let line = format!("Program data: {b64}");
-        let parsed =
-            parse_meteora_swap_event_for_pool(&[line], &pair.to_string()).expect("parse");
+        let parsed = parse_meteora_swap_event_for_pool(&[line], &pair.to_string()).expect("parse");
         assert_eq!(parsed, ev);
     }
-
 }

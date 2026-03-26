@@ -135,22 +135,24 @@ pub struct WhirlpoolMinimal {
 }
 
 fn read_u16_le(data: &[u8], off: usize) -> Option<u16> {
-    data.get(off..off + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    data.get(off..off + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 fn read_i32_le(data: &[u8], off: usize) -> Option<i32> {
     data.get(off..off + 4)
         .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 fn read_u64_le(data: &[u8], off: usize) -> Option<u64> {
-    data.get(off..off + 8).map(|b| u64::from_le_bytes([
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-    ]))
+    data.get(off..off + 8)
+        .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
 }
 fn read_u128_le(data: &[u8], off: usize) -> Option<u128> {
-    data.get(off..off + 16).map(|b| u128::from_le_bytes([
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
-    ]))
+    data.get(off..off + 16).map(|b| {
+        u128::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+            b[14], b[15],
+        ])
+    })
 }
 fn read_pubkey(data: &[u8], off: usize) -> Option<Pubkey> {
     let bytes = data.get(off..off + 32)?;

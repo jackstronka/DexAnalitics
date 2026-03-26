@@ -31,6 +31,28 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25e
 /// System program ID.
 pub const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 
+/// Derives the Whirlpool **position** PDA for `(pool, tick_lower, tick_upper)` (NFT metadata address).
+#[must_use]
+pub fn derive_whirlpool_position_address(
+    pool: &Pubkey,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> Pubkey {
+    let program_id = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID).expect("valid whirlpool program id");
+    let (position_mint, _) = Pubkey::find_program_address(
+        &[
+            b"position_mint",
+            pool.as_ref(),
+            &tick_lower.to_le_bytes(),
+            &tick_upper.to_le_bytes(),
+        ],
+        &program_id,
+    );
+    let (position, _) =
+        Pubkey::find_program_address(&[b"position", position_mint.as_ref()], &program_id);
+    position
+}
+
 /// Parameters for opening a new position.
 #[derive(Debug, Clone)]
 pub struct OpenPositionParams {

@@ -4,17 +4,21 @@
 //! from CLMM protocol transactions.
 
 mod fetcher;
-mod parser;
-mod types;
 pub mod meteora_swap_event;
+mod parser;
 pub mod raydium_swap_event;
+mod types;
 pub mod whirlpool_traded;
 
 pub use fetcher::*;
-pub use parser::*;
-pub use types::*;
 pub use meteora_swap_event::{
-    parse_meteora_swap_event_for_pool, MeteoraDlmmSwapEvent, METEORA_SWAP_EVENT_DISCRIMINATOR,
+    METEORA_SWAP_EVENT_DISCRIMINATOR, MeteoraDlmmSwapEvent, parse_meteora_swap_event_for_pool,
 };
-pub use raydium_swap_event::{parse_raydium_swap_event_for_pool, SWAP_EVENT_DISCRIMINATOR as RAYDIUM_SWAP_EVENT_DISCRIMINATOR};
-pub use whirlpool_traded::{parse_traded_event_for_pool, WhirlpoolTradedEvent, TRADED_EVENT_DISCRIMINATOR};
+pub use parser::*;
+pub use raydium_swap_event::{
+    SWAP_EVENT_DISCRIMINATOR as RAYDIUM_SWAP_EVENT_DISCRIMINATOR, parse_raydium_swap_event_for_pool,
+};
+pub use types::*;
+pub use whirlpool_traded::{
+    TRADED_EVENT_DISCRIMINATOR, WhirlpoolTradedEvent, parse_traded_event_for_pool,
+};

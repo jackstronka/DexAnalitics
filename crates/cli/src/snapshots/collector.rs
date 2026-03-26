@@ -138,7 +138,9 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
     let mut pool_addrs: Vec<String> = Vec::new();
 
     for line in content.lines() {
-        if line.contains("**Orca (Whirlpool)**") || line.trim_start().starts_with("**Orca (Whirlpool)**") {
+        if line.contains("**Orca (Whirlpool)**")
+            || line.trim_start().starts_with("**Orca (Whirlpool)**")
+        {
             in_orca_section = true;
             continue;
         }
@@ -159,7 +161,8 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
                 if s.contains('-') {
                     return false;
                 }
-                s.chars().all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
+                s.chars()
+                    .all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
             };
 
             let mut i = 0usize;
@@ -184,7 +187,9 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
     }
 
     if pool_addrs.is_empty() {
-        return Err(anyhow::anyhow!("No Orca pools found in STARTUP.md Orca section"));
+        return Err(anyhow::anyhow!(
+            "No Orca pools found in STARTUP.md Orca section"
+        ));
     }
 
     let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
@@ -299,7 +304,7 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
 }
 
 pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
-    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use spl_token::solana_program::program_pack::Pack;
     use spl_token::state::Account as SplTokenAccount;
 
@@ -323,7 +328,8 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
         if s.contains('-') {
             return false;
         }
-        s.chars().all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
+        s.chars()
+            .all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
     };
 
     for line in content.lines() {
@@ -361,7 +367,9 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
     }
 
     if pool_addrs.is_empty() {
-        return Err(anyhow::anyhow!("No Raydium pools found in STARTUP.md Raydium section"));
+        return Err(anyhow::anyhow!(
+            "No Raydium pools found in STARTUP.md Raydium section"
+        ));
     }
 
     println!(
@@ -435,10 +443,11 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
     for pool_address in pool_addrs.into_iter() {
         println!("RaydiumSnapshotCurated: fetching account {}", pool_address);
         let acct = rpc.get_account_by_address(&pool_address).await?;
-        let (parsed, parse_ok, parse_error) = match clmm_lp_protocols::raydium::pool_reader::parse_pool_state(&acct.data) {
-            Ok(p) => (Some(p), true, None),
-            Err(e) => (None, false, Some(e.to_string())),
-        };
+        let (parsed, parse_ok, parse_error) =
+            match clmm_lp_protocols::raydium::pool_reader::parse_pool_state(&acct.data) {
+                Ok(p) => (Some(p), true, None),
+                Err(e) => (None, false, Some(e.to_string())),
+            };
 
         let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
             use std::str::FromStr;
@@ -499,8 +508,12 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
                 ]
             }),
             sqrt_price_x64: parsed.as_ref().map(|p| p.sqrt_price_x64.to_string()),
-            fee_growth_global_a_x64: parsed.as_ref().map(|p| p.fee_growth_global0_x64.to_string()),
-            fee_growth_global_b_x64: parsed.as_ref().map(|p| p.fee_growth_global1_x64.to_string()),
+            fee_growth_global_a_x64: parsed
+                .as_ref()
+                .map(|p| p.fee_growth_global0_x64.to_string()),
+            fee_growth_global_b_x64: parsed
+                .as_ref()
+                .map(|p| p.fee_growth_global1_x64.to_string()),
             protocol_fees_token_a: parsed.as_ref().map(|p| p.protocol_fees_token0),
             protocol_fees_token_b: parsed.as_ref().map(|p| p.protocol_fees_token1),
         };
@@ -530,7 +543,7 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
 }
 
 pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
-    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use spl_token::solana_program::program_pack::Pack;
     use spl_token::state::Account as SplTokenAccount;
 
@@ -554,7 +567,8 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
         if s.contains('-') {
             return false;
         }
-        s.chars().all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
+        s.chars()
+            .all(|c| matches!(c, '1'..='9' | 'A'..='Z' | 'a'..='z'))
     };
 
     for line in content.lines() {
@@ -592,7 +606,9 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
     }
 
     if pool_addrs.is_empty() {
-        return Err(anyhow::anyhow!("No Meteora pools found in STARTUP.md Meteora section"));
+        return Err(anyhow::anyhow!(
+            "No Meteora pools found in STARTUP.md Meteora section"
+        ));
     }
 
     let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
@@ -651,10 +667,11 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
 
     for pool_address in pool_addrs.into_iter() {
         let acct = rpc.get_account_by_address(&pool_address).await?;
-        let (parsed, parse_ok, parse_error) = match clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data) {
-            Ok(p) => (Some(p), true, None),
-            Err(e) => (None, false, Some(e.to_string())),
-        };
+        let (parsed, parse_ok, parse_error) =
+            match clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data) {
+                Ok(p) => (Some(p), true, None),
+                Err(e) => (None, false, Some(e.to_string())),
+            };
 
         let (vault_amount_a, token_vault_owner_a, vault_amount_b, token_vault_owner_b) =
             if let Some(ref p) = parsed {
@@ -762,4 +779,3 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
 
     Ok(())
 }
-

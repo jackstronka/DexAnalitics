@@ -56,7 +56,7 @@ impl Default for DecisionConfig {
             il_close_threshold: Decimal::new(15, 2),    // 15%
             min_rebalance_interval_hours: 24,
             periodic_interval_hours: 24,
-            threshold_pct: Decimal::new(5, 3), // 0.5% by default
+            threshold_pct: Decimal::new(5, 3),    // 0.5% by default
             range_width_pct: Decimal::new(10, 2), // 10%
             auto_collect_fees: true,
             min_fees_to_collect: Decimal::new(10, 0), // $10
@@ -106,14 +106,10 @@ impl DecisionEngine {
             "Evaluating position"
         );
 
-        // Fee collection can be useful independent of the rebalance semantics.
-        if cfg.auto_collect_fees && position.pnl.fees_usd > cfg.min_fees_to_collect
-        {
-            debug!("Fees exceed threshold, recommending collection");
-            return Decision::CollectFees;
-        }
-
-        match cfg.strategy_mode {
+        // Strategy-specific decision first. `CollectFees` is applied only when the strategy
+        // would otherwise `Hold`, so Periodic / OorRecenter / Threshold / RetouchShift / IlLimit
+        // are not starved by fee collection.
+        let strategy_decision = match cfg.strategy_mode {
             StrategyMode::StaticRange => Decision::Hold,
 
             StrategyMode::Periodic => {
@@ -163,8 +159,10 @@ impl DecisionEngine {
                 }
 
                 // In-range: rebalance only if we are far enough from midpoint.
-                let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_lower);
-                let upper_price = clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_upper);
+                let lower_price =
+                    clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_lower);
+                let upper_price =
+                    clmm_lp_protocols::prelude::tick_to_price(position.on_chain.tick_upper);
                 let mid = (lower_price + upper_price) / Decimal::from(2u32);
                 if mid.is_zero() {
                     return Decision::Hold;
@@ -249,6 +247,18 @@ impl DecisionEngine {
 
                 Decision::Hold
             }
+        };
+
+        match strategy_decision {
+            Decision::Hold => {
+                if cfg.auto_collect_fees && position.pnl.fees_usd > cfg.min_fees_to_collect {
+                    debug!("Fees exceed threshold, recommending collection");
+                    Decision::CollectFees
+                } else {
+                    Decision::Hold
+                }
+            }
+            d => d,
         }
     }
 
@@ -290,10 +300,8 @@ impl DecisionEngine {
 
         // Round to nearest allowed tick spacing.
         if spacing > 0 {
-            new_lower_tick =
-                ((new_lower_tick as f64) / (spacing as f64)).round() as i32 * spacing;
-            new_upper_tick =
-                ((new_upper_tick as f64) / (spacing as f64)).round() as i32 * spacing;
+            new_lower_tick = ((new_lower_tick as f64) / (spacing as f64)).round() as i32 * spacing;
+            new_upper_tick = ((new_upper_tick as f64) / (spacing as f64)).round() as i32 * spacing;
         }
 
         // Ensure sane ordering after rounding.

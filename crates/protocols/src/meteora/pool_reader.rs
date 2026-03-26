@@ -35,8 +35,8 @@ pub fn parse_lb_pair(data: &[u8]) -> Result<MeteoraLbPairMinimal> {
     // Some accounts contain trailing bytes beyond the minimal lb_pair layout,
     // so we parse via a reader and allow leftover bytes.
     let mut cursor = std::io::Cursor::new(data);
-    let pair = LbPair::deserialize_reader(&mut cursor)
-        .context("Meteora LbPair deserialization failed")?;
+    let pair =
+        LbPair::deserialize_reader(&mut cursor).context("Meteora LbPair deserialization failed")?;
 
     Ok(MeteoraLbPairMinimal {
         active_id: pair.active_id,
@@ -49,4 +49,3 @@ pub fn parse_lb_pair(data: &[u8]) -> Result<MeteoraLbPairMinimal> {
         protocol_fee_amount_y: pair.protocol_fee.amount_y,
     })
 }
-

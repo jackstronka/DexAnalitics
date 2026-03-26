@@ -1,15 +1,31 @@
 ---
-description: After substantial code edits, append a searchable note to doc/ENGINEERING_NOTES.md
+description: >-
+  Cursor Agent / Composer — po większych zmianach w kodzie dopisz wpis do
+  doc/ENGINEERING_NOTES.md (keywords). Obowiązkowe przed uznaniem zadania za
+  zakończone, gdy zmieniasz zachowanie, API, CLI lub formaty.
 alwaysApply: true
 ---
 
-# Engineering notes (mandatory for non-trivial code work)
+# Engineering notes (obowiązkowe przy istotnych zmianach w kodzie)
 
-When a task **materially changes behavior, APIs, CLI, data formats, or cross-crate contracts**, append a new section to [`doc/ENGINEERING_NOTES.md`](doc/ENGINEERING_NOTES.md):
+Dotyczy **Cursor Agent**, **Composer** i każdej sesji AI pracującej nad tym repozytorium.
 
-1. **Placement:** newest entry **at the top** (below the preamble / horizontal rule).
-2. **Include a `keywords:` line** with comma-separated tokens: crate names (`clmm-lp-cli`), domains (`backtest`, `rpc`), protocols (`orca`), subsystems (`swap-decode`). This makes ripgrep and IDE search effective.
-3. **Keep it short:** what changed, why it matters, optional `**paths:**` for main files.
-4. If **`PROJECT_OVERVIEW.md`** or user-facing CLI workflows are now wrong, update those **or** add a one-line pointer from the note.
+## Kiedy dopisać wpis
 
-Do **not** duplicate long design docs here—link to `doc/*.md` if a full write-up exists.
+Gdy zadanie **materialnie zmienia** zachowanie, API, CLI, formaty danych lub kontrakty między crate’ami — dopisz nową sekcję do [`doc/ENGINEERING_NOTES.md`](doc/ENGINEERING_NOTES.md):
+
+1. **Miejsce:** najnowszy wpis **na górze** (pod preambułą / pierwszą linią oddzielającą).
+2. **Linia `keywords:`** — tokeny po przecinku: nazwy crate’ów (`clmm-lp-cli`), domeny (`backtest`, `rpc`), protokoły (`orca`), podsystemy (`swap-decode`).
+3. **Zwięźle:** co się zmieniło, po co, opcjonalnie `**paths:**` do głównych plików.
+4. Jeśli **`PROJECT_OVERVIEW.md`** lub user-facing CLI są nieaktualne — zaktualizuj je **albo** jednozdaniowy wskaźnik we wpisie.
+
+Długich opisów nie duplikuj — linkuj do `doc/*.md`, jeśli istnieje pełniejszy dokument.
+
+## Checklist przed „gotowe” (Agent)
+
+Zanim uznasz zadanie za zakończone:
+
+- [ ] Jeśli powyższe kryteria **nie** dotyczą (np. literówka w komentarzu, wyłącznie formatowanie) — wpis do `ENGINEERING_NOTES` **nie** jest wymagany.
+- [ ] Jeśli kryteria **dotyczą** — jest **nowy wpis** w `ENGINEERING_NOTES.md` (z `keywords:`) **lub** jawnie napiszesz użytkownikowi, że celowo pomijasz wpis i z jakiego powodu (np. użytkownik o to poprosił).
+
+Nie kończ sesji wyłącznie zmianami w kodzie, jeśli według powyższego należy zostawić ślad w `ENGINEERING_NOTES.md`.

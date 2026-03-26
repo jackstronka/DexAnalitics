@@ -8,7 +8,10 @@ enum ProtocolArg {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "snapshot-readiness", about = "Audit snapshot sufficiency (tier 1/2/3)")]
+#[command(
+    name = "snapshot-readiness",
+    about = "Audit snapshot sufficiency (tier 1/2/3)"
+)]
 struct Args {
     /// Protocol of the snapshot file
     #[arg(long, value_enum)]
@@ -108,12 +111,10 @@ fn main_inner() -> anyhow::Result<()> {
                 v.get("protocol_fee_owed_a").is_some() && v.get("protocol_fee_owed_b").is_some()
             }
             ProtocolArg::Raydium => {
-                v.get("protocol_fees_token_a").is_some()
-                    && v.get("protocol_fees_token_b").is_some()
+                v.get("protocol_fees_token_a").is_some() && v.get("protocol_fees_token_b").is_some()
             }
             ProtocolArg::Meteora => {
-                v.get("protocol_fee_amount_a").is_some()
-                    && v.get("protocol_fee_amount_b").is_some()
+                v.get("protocol_fee_amount_a").is_some() && v.get("protocol_fee_amount_b").is_some()
             }
         };
         if has_protocol_fee_counter {
@@ -173,14 +174,22 @@ fn main_inner() -> anyhow::Result<()> {
     );
     println!(
         "  3) Position-truth fee model: {}",
-        if position_truth_ready { "READY" } else { "NOT READY" }
+        if position_truth_ready {
+            "READY"
+        } else {
+            "NOT READY"
+        }
     );
 
     if args.protocol == ProtocolArg::Meteora && !snapshot_fee_heuristic_ready {
-        println!("     Missing: protocol_fee_amount_a/b coverage (tier 2 requires it at >=2 rows).");
+        println!(
+            "     Missing: protocol_fee_amount_a/b coverage (tier 2 requires it at >=2 rows)."
+        );
     }
     if args.protocol == ProtocolArg::Raydium && !snapshot_fee_heuristic_ready {
-        println!("     Missing: fee-growth and/or protocol-fees coverage (tier 2 requires >=2 rows with required fields).");
+        println!(
+            "     Missing: fee-growth and/or protocol-fees coverage (tier 2 requires >=2 rows with required fields)."
+        );
     }
 
     Ok(())
@@ -189,4 +198,3 @@ fn main_inner() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     main_inner()
 }
-

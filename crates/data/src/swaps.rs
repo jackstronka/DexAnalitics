@@ -45,4 +45,3 @@ impl SwapEvent {
             .map(|dt| dt.with_timezone(&Utc))
     }
 }
-

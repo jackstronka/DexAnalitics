@@ -45,6 +45,12 @@ pub enum ApiError {
     ServiceUnavailable(String),
 }
 
+impl From<clmm_lp_execution::agent_decision::AgentDecisionValidationError> for ApiError {
+    fn from(e: clmm_lp_execution::agent_decision::AgentDecisionValidationError) -> Self {
+        Self::Validation(e.to_string())
+    }
+}
+
 impl ApiError {
     /// Creates a bad request error.
     pub fn bad_request(msg: impl Into<String>) -> Self {

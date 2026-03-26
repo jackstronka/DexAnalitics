@@ -11,7 +11,10 @@ pub const SWAP_EVENT_DISCRIMINATOR: [u8; 8] = [64, 198, 205, 232, 38, 8, 113, 22
 
 /// Decode the first `SwapEvent` in logs whose `pool_state` matches `pool_address`.
 #[must_use]
-pub fn parse_raydium_swap_event_for_pool(logs: &[String], pool_address: &str) -> Option<RaydiumSwapEvent> {
+pub fn parse_raydium_swap_event_for_pool(
+    logs: &[String],
+    pool_address: &str,
+) -> Option<RaydiumSwapEvent> {
     for line in logs {
         let rest = line
             .strip_prefix("Program data: ")
@@ -35,7 +38,9 @@ pub fn parse_raydium_swap_event_for_pool(logs: &[String], pool_address: &str) ->
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s.trim()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .ok()
 }
 
 #[cfg(test)]

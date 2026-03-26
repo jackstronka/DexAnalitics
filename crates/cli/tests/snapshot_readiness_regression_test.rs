@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn readiness_stdout(protocol: &str, pool_address: &str) -> String {
     let exe = env!("CARGO_BIN_EXE_snapshot_readiness");
@@ -21,10 +21,7 @@ fn readiness_stdout(protocol: &str, pool_address: &str) -> String {
 
 #[test]
 fn raydium_tier2_is_ready_for_fixture() {
-    let stdout = readiness_stdout(
-        "raydium",
-        "3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF",
-    );
+    let stdout = readiness_stdout("raydium", "3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF");
     assert!(
         stdout.contains("2) Snapshot fee heuristic (experimental): READY"),
         "unexpected output:\n{stdout}"
@@ -33,13 +30,9 @@ fn raydium_tier2_is_ready_for_fixture() {
 
 #[test]
 fn meteora_tier2_is_ready_for_fixture() {
-    let stdout = readiness_stdout(
-        "meteora",
-        "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
-    );
+    let stdout = readiness_stdout("meteora", "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6");
     assert!(
         stdout.contains("2) Snapshot fee heuristic (experimental): READY"),
         "unexpected output:\n{stdout}"
     );
 }
-

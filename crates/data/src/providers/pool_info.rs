@@ -30,4 +30,3 @@ pub struct PoolInfo {
 pub trait PoolInfoProvider: Send + Sync {
     fn get_pool_info(&self, address: &str) -> Result<PoolInfo>;
 }
-

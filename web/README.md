@@ -1,6 +1,6 @@
-# CLMM LP Dashboard
+# Bociarz LP Strategy Lab Dashboard
 
-A modern web dashboard for the CLMM Liquidity Provider Strategy Optimizer.
+A modern web dashboard for **Bociarz LP Strategy Lab**.
 
 ## Features
 

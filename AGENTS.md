@@ -1,6 +1,8 @@
 # Agent / AI assistant map
 
-Rust **workspace** (edition **2024**). Root: [`Cargo.toml`](Cargo.toml). Human-oriented README: [`README.md`](README.md). Documentation index: [`doc/README.md`](doc/README.md). **Architecture and pipelines:** [`doc/PROJECT_OVERVIEW.md`](doc/PROJECT_OVERVIEW.md) (single high-level source of truth).
+Project: **Bociarz LP Strategy Lab** (derived from upstream CLMM Liquidity Provider, MIT).
+
+Rust **workspace** (edition **2024**). Root: [`Cargo.toml`](Cargo.toml). Human-oriented README: [`README.md`](README.md). Documentation index: [`doc/README.md`](doc/README.md). **Architecture and pipelines:** [`doc/PROJECT_OVERVIEW.md`](doc/PROJECT_OVERVIEW.md) (single high-level source of truth). **Prioritized backlog (fees/RPC/snapshots):** [`doc/TODO_ONCHAIN_NEXT_STEPS.md`](doc/TODO_ONCHAIN_NEXT_STEPS.md) (*Od czego zacząć*, fazy A–F + M).
 
 ## Crates (one line each)
 

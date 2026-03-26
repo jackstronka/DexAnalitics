@@ -170,7 +170,9 @@ impl DuneClient {
     /// Fetch daily TVL for all pools, caller filters by `pool_address`.
     pub async fn fetch_tvl(&self, pool_address: &str) -> Result<Vec<TvlPoint>> {
         if self.tvl_query_id.is_empty() {
-            return Err(anyhow::anyhow!("DuneClient: TVL query ID not set (use from_env() for TVL/volume)"));
+            return Err(anyhow::anyhow!(
+                "DuneClient: TVL query ID not set (use from_env() for TVL/volume)"
+            ));
         }
         #[derive(Deserialize)]
         struct Row {
@@ -185,7 +187,12 @@ impl DuneClient {
         for r in rows {
             if r.pool_address == pool_address {
                 // Normalize date to YYYY-MM-DD so we can safely join
-                let date = r.date.split_whitespace().next().unwrap_or(&r.date).to_string();
+                let date = r
+                    .date
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(&r.date)
+                    .to_string();
 
                 out.push(TvlPoint {
                     date,
@@ -201,7 +208,9 @@ impl DuneClient {
     /// Fetch daily volume and fees for all pools, caller filters by `pool_address`.
     pub async fn fetch_volume_fees(&self, pool_address: &str) -> Result<Vec<VolumePoint>> {
         if self.volume_query_id.is_empty() {
-            return Err(anyhow::anyhow!("DuneClient: volume query ID not set (use from_env() for TVL/volume)"));
+            return Err(anyhow::anyhow!(
+                "DuneClient: volume query ID not set (use from_env() for TVL/volume)"
+            ));
         }
         #[derive(Deserialize)]
         struct Row {
@@ -217,7 +226,12 @@ impl DuneClient {
         for r in rows {
             if r.whirlpool_address == pool_address {
                 // Normalize date to YYYY-MM-DD so joins with TVL work
-                let date = r.trade_date.split_whitespace().next().unwrap_or(&r.trade_date).to_string();
+                let date = r
+                    .trade_date
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(&r.trade_date)
+                    .to_string();
 
                 out.push(VolumePoint {
                     date,
@@ -239,9 +253,14 @@ impl DuneClient {
     ) -> Result<(HashMap<String, Decimal>, HashMap<String, Decimal>)> {
         let tvl_series = self.fetch_tvl(pool_address).await?;
         let vol_series = self.fetch_volume_fees(pool_address).await?;
-        let tvl_map: HashMap<String, Decimal> = tvl_series.into_iter().map(|p| (p.date, p.tvl_usd)).collect();
-        let vol_map: HashMap<String, Decimal> = vol_series.into_iter().map(|v| (v.date, v.volume_usd)).collect();
+        let tvl_map: HashMap<String, Decimal> = tvl_series
+            .into_iter()
+            .map(|p| (p.date, p.tvl_usd))
+            .collect();
+        let vol_map: HashMap<String, Decimal> = vol_series
+            .into_iter()
+            .map(|v| (v.date, v.volume_usd))
+            .collect();
         Ok((tvl_map, vol_map))
     }
 }
-

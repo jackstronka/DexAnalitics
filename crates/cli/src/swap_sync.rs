@@ -1,12 +1,19 @@
 use anyhow::Result;
 use chrono::Utc;
 use clmm_lp_protocols::events::{
-    parse_meteora_swap_event_for_pool, parse_raydium_swap_event_for_pool, parse_traded_event_for_pool,
+    parse_meteora_swap_event_for_pool, parse_raydium_swap_event_for_pool,
+    parse_traded_event_for_pool,
 };
 use clmm_lp_protocols::rpc::{RpcConfig, RpcProvider};
+use futures::stream::{self, StreamExt};
 use serde::Serialize;
+use solana_client::pubsub_client::PubsubClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_client::rpc_config::RpcTransactionConfig;
+use solana_client::rpc_config::{
+    RpcTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
+};
+use solana_client::rpc_response::Response as RpcResponse;
+use solana_client::rpc_response::RpcLogsResponse;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status_client_types::UiTransactionEncoding;
@@ -15,8 +22,10 @@ use spl_token::state::Account as SplTokenAccount;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep, timeout};
 
 #[derive(Debug, Clone, Copy)]
 enum Proto {
@@ -31,6 +40,15 @@ impl Proto {
             Proto::Orca => "orca",
             Proto::Raydium => "raydium",
             Proto::Meteora => "meteora",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "orca" => Some(Proto::Orca),
+            "raydium" => Some(Proto::Raydium),
+            "meteora" => Some(Proto::Meteora),
+            _ => None,
         }
     }
 }
@@ -49,7 +67,7 @@ struct RawChainTx {
     schema_version: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PoolMeta {
     token_vault_a: String,
     token_vault_b: String,
@@ -120,9 +138,9 @@ fn parse_curated_pool_addrs(protocol: Proto) -> Result<Vec<String>> {
         Proto::Raydium => "**Raydium",
         Proto::Meteora => "**Meteora",
     };
-    let start = content
-        .find(section_marker)
-        .ok_or_else(|| anyhow::anyhow!("Could not find {} section in STARTUP.md", section_marker))?;
+    let start = content.find(section_marker).ok_or_else(|| {
+        anyhow::anyhow!("Could not find {} section in STARTUP.md", section_marker)
+    })?;
     let rest = &content[start..];
     let mut addrs: Vec<String> = Vec::new();
     for line in rest.lines().skip(1) {
@@ -178,8 +196,14 @@ fn latest_pool_meta(protocol: Proto, pool: &str) -> Option<PoolMeta> {
         token_vault_b: v.get("token_vault_b")?.as_str()?.to_string(),
         token_mint_a: v.get("token_mint_a")?.as_str()?.to_string(),
         token_mint_b: v.get("token_mint_b")?.as_str()?.to_string(),
-        token_vault_owner_a: v.get("token_vault_owner_a").and_then(|x| x.as_str()).map(|s| s.to_string()),
-        token_vault_owner_b: v.get("token_vault_owner_b").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        token_vault_owner_a: v
+            .get("token_vault_owner_a")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        token_vault_owner_b: v
+            .get("token_vault_owner_b")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
     })
 }
 
@@ -196,9 +220,7 @@ async fn fill_meteora_token_vault_owners(
 
     if meta.token_vault_owner_a.is_none() {
         let pk = Pubkey::from_str(&meta.token_vault_a)?;
-        if let Ok(Ok(acct)) =
-            timeout(Duration::from_secs(4), rpc_provider.get_account(&pk)).await
-        {
+        if let Ok(Ok(acct)) = timeout(Duration::from_secs(4), rpc_provider.get_account(&pk)).await {
             if let Ok(spl) = SplTokenAccount::unpack(&acct.data) {
                 meta.token_vault_owner_a = Some(spl.owner.to_string());
                 if is_debug_meteora_pool(pool) {
@@ -217,9 +239,7 @@ async fn fill_meteora_token_vault_owners(
     }
     if meta.token_vault_owner_b.is_none() {
         let pk = Pubkey::from_str(&meta.token_vault_b)?;
-        if let Ok(Ok(acct)) =
-            timeout(Duration::from_secs(4), rpc_provider.get_account(&pk)).await
-        {
+        if let Ok(Ok(acct)) = timeout(Duration::from_secs(4), rpc_provider.get_account(&pk)).await {
             if let Ok(spl) = SplTokenAccount::unpack(&acct.data) {
                 meta.token_vault_owner_b = Some(spl.owner.to_string());
                 if is_debug_meteora_pool(pool) {
@@ -381,9 +401,13 @@ fn largest_mint_deltas(meta: &serde_json::Value) -> Vec<(String, i128)> {
 
     let mut post_by_key: BTreeMap<(u64, String), u128> = BTreeMap::new();
     for b in post_arr {
-        let Some(post_mint) = parse_mint(&b) else { continue };
+        let Some(post_mint) = parse_mint(&b) else {
+            continue;
+        };
         let Some(idx) = parse_idx(&b) else { continue };
-        let Some(post_amt) = parse_amt(&b) else { continue };
+        let Some(post_amt) = parse_amt(&b) else {
+            continue;
+        };
         post_by_key.insert((idx, post_mint.to_string()), post_amt);
     }
 
@@ -513,7 +537,9 @@ fn infer_vault_deltas_from_inner_instructions(
             if ix_type != "transfer" && ix_type != "transferChecked" {
                 continue;
             }
-            let Some(info) = parsed.get("info") else { continue };
+            let Some(info) = parsed.get("info") else {
+                continue;
+            };
             let source = info.get("source").and_then(|x| x.as_str());
             let destination = info.get("destination").and_then(|x| x.as_str());
             let Some(amount) = parse_amount_from_transfer_info(info) else {
@@ -576,7 +602,8 @@ fn meta_from_tx_root(j: &serde_json::Value) -> Option<&serde_json::Value> {
 
 /// Parsed tx body: usually `{ "signatures": [...], "message": { ... } }`.
 fn message_from_tx_body(tx: &serde_json::Value) -> Option<&serde_json::Value> {
-    tx.get("message").or_else(|| tx.get("transaction").and_then(|t| t.get("message")))
+    tx.get("message")
+        .or_else(|| tx.get("transaction").and_then(|t| t.get("message")))
 }
 
 /// Static account keys from `message` (parsed = objects with `pubkey`, raw = strings).
@@ -681,7 +708,9 @@ fn extract_from_logs(logs: &[String]) -> (Option<u128>, Option<i32>, Option<u128
         }
         if fee_amount_raw.is_none() {
             for m in ["fee_amount", "fee amount", "fee:"] {
-                if let Some(v) = parse_first_integer_after(line, m).and_then(|x| u128::try_from(x).ok()) {
+                if let Some(v) =
+                    parse_first_integer_after(line, m).and_then(|x| u128::try_from(x).ok())
+                {
                     fee_amount_raw = Some(v);
                     break;
                 }
@@ -689,7 +718,9 @@ fn extract_from_logs(logs: &[String]) -> (Option<u128>, Option<i32>, Option<u128
         }
         if tick_after.is_none() {
             for m in ["tick_after", "tick after", "tick:"] {
-                if let Some(v) = parse_first_integer_after(line, m).and_then(|x| i32::try_from(x).ok()) {
+                if let Some(v) =
+                    parse_first_integer_after(line, m).and_then(|x| i32::try_from(x).ok())
+                {
                     tick_after = Some(v);
                     break;
                 }
@@ -697,14 +728,21 @@ fn extract_from_logs(logs: &[String]) -> (Option<u128>, Option<i32>, Option<u128
         }
         if sqrt_price_x64_after.is_none() {
             for m in ["sqrt_price_x64_after", "sqrt_price_x64", "sqrt price"] {
-                if let Some(v) = parse_first_integer_after(line, m).and_then(|x| u128::try_from(x).ok()) {
+                if let Some(v) =
+                    parse_first_integer_after(line, m).and_then(|x| u128::try_from(x).ok())
+                {
                     sqrt_price_x64_after = Some(v);
                     break;
                 }
             }
         }
     }
-    (fee_amount_raw, tick_after, sqrt_price_x64_after, swap_mentions)
+    (
+        fee_amount_raw,
+        tick_after,
+        sqrt_price_x64_after,
+        swap_mentions,
+    )
 }
 
 async fn decode_one_signature(
@@ -715,16 +753,18 @@ async fn decode_one_signature(
     sig: &str,
 ) -> Result<DecodedSwapTx> {
     let sig = Signature::from_str(sig)?;
-    let tx = rpc.get_transaction_with_config(
-        &sig,
-        RpcTransactionConfig {
-            // `JsonParsed` is significantly heavier and can time out on public RPC endpoints.
-            // We only need meta (token balances/logs) + account keys, so `Json` is sufficient.
-            encoding: Some(UiTransactionEncoding::Json),
-            commitment: None,
-            max_supported_transaction_version: Some(0),
-        },
-    ).await?;
+    let tx = rpc
+        .get_transaction_with_config(
+            &sig,
+            RpcTransactionConfig {
+                // `JsonParsed` is significantly heavier and can time out on public RPC endpoints.
+                // We only need meta (token balances/logs) + account keys, so `Json` is sufficient.
+                encoding: Some(UiTransactionEncoding::Json),
+                commitment: None,
+                max_supported_transaction_version: Some(0),
+            },
+        )
+        .await?;
     let j = serde_json::to_value(&tx)?;
     let slot = j.get("slot").and_then(|x| x.as_u64()).unwrap_or(0);
     let block_time = j.get("blockTime").and_then(|x| x.as_i64());
@@ -924,8 +964,7 @@ async fn decode_one_signature(
                         "postTokenBalances",
                     );
 
-                    if let (Some(pa), Some(qa), Some(pb), Some(qb)) =
-                        (pre_a, post_a, pre_b, post_b)
+                    if let (Some(pa), Some(qa), Some(pb), Some(qb)) = (pre_a, post_a, pre_b, post_b)
                     {
                         let da = qa as i128 - pa as i128;
                         let db = qb as i128 - pb as i128;
@@ -1101,19 +1140,14 @@ async fn decode_one_signature(
             };
             amount_in_raw = Some(ain as u128);
             amount_out_raw = Some(aout as u128);
-            direction = Some(
-                if ev.zero_for_one {
-                    "a_to_b".to_string()
-                } else {
-                    "b_to_a".to_string()
-                },
-            );
+            direction = Some(if ev.zero_for_one {
+                "a_to_b".to_string()
+            } else {
+                "b_to_a".to_string()
+            });
         }
         if fee_amount_raw.is_none() {
-            fee_amount_raw = Some(
-                ev.transfer_fee0
-                    .saturating_add(ev.transfer_fee1) as u128,
-            );
+            fee_amount_raw = Some(ev.transfer_fee0.saturating_add(ev.transfer_fee1) as u128);
         }
         match decode_status.as_str() {
             "ok" => {}
@@ -1131,13 +1165,11 @@ async fn decode_one_signature(
         if amount_in_raw.is_none() {
             amount_in_raw = Some(ev.amount_in as u128);
             amount_out_raw = Some(ev.amount_out as u128);
-            direction = Some(
-                if ev.swap_for_y {
-                    "a_to_b".to_string()
-                } else {
-                    "b_to_a".to_string()
-                },
-            );
+            direction = Some(if ev.swap_for_y {
+                "a_to_b".to_string()
+            } else {
+                "b_to_a".to_string()
+            });
         }
         if fee_amount_raw.is_none() {
             fee_amount_raw = Some(ev.fee.saturating_add(ev.protocol_fee) as u128);
@@ -1187,8 +1219,16 @@ async fn decode_one_signature_with_retry(
     sig: &str,
     decode_timeout_secs: u64,
     decode_retries: usize,
+    decode_jitter_ms: u64,
 ) -> Result<DecodedSwapTx> {
     const RETRY_BACKOFF_MS: u64 = 700;
+
+    if decode_jitter_ms > 0 {
+        let ms = rand::random::<u64>() % decode_jitter_ms;
+        if ms > 0 {
+            sleep(Duration::from_millis(ms)).await;
+        }
+    }
 
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..=decode_retries {
@@ -1207,7 +1247,10 @@ async fn decode_one_signature_with_retry(
             }
         }
         if attempt < decode_retries {
-            sleep(Duration::from_millis(RETRY_BACKOFF_MS * (attempt as u64 + 1))).await;
+            sleep(Duration::from_millis(
+                RETRY_BACKOFF_MS * (attempt as u64 + 1),
+            ))
+            .await;
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown decode error")))
@@ -1218,15 +1261,68 @@ async fn sync_one_pool(
     protocol: Proto,
     pool: &str,
     max_signatures: usize,
+    max_pages: usize,
 ) -> Result<(usize, usize)> {
     let pubkey = Pubkey::from_str(pool)?;
-    let cfg = GetConfirmedSignaturesForAddress2Config {
-        before: None,
-        until: None,
-        limit: Some(max_signatures),
-        commitment: None,
-    };
-    let rows = rpc.get_signatures_for_address_with_config(&pubkey, cfg).await?;
+    const PAGE_RETRIES: usize = 3;
+    const PAGE_BACKOFF_MS: u64 = 600;
+    let mut before: Option<Signature> = None;
+    let mut rows = Vec::new();
+
+    for page in 0..max_pages.max(1) {
+        if rows.len() >= max_signatures {
+            break;
+        }
+        let remaining = max_signatures.saturating_sub(rows.len());
+        let page_limit = remaining.min(1_000);
+        let mut page_rows = None;
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..=PAGE_RETRIES {
+            let cfg = GetConfirmedSignaturesForAddress2Config {
+                before,
+                until: None,
+                limit: Some(page_limit),
+                commitment: None,
+            };
+            match rpc
+                .get_signatures_for_address_with_config(&pubkey, cfg)
+                .await
+            {
+                Ok(v) => {
+                    page_rows = Some(v);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.into());
+                    if attempt < PAGE_RETRIES {
+                        sleep(Duration::from_millis(
+                            PAGE_BACKOFF_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+
+        let Some(mut batch) = page_rows else {
+            return Err(last_err.unwrap_or_else(|| {
+                anyhow::anyhow!("failed to fetch signatures page for {}", pool)
+            }));
+        };
+        if batch.is_empty() {
+            break;
+        }
+        before = batch
+            .last()
+            .and_then(|r| Signature::from_str(&r.signature).ok());
+        rows.append(&mut batch);
+        if before.is_none() {
+            break;
+        }
+        if page + 1 >= max_pages.max(1) {
+            break;
+        }
+    }
 
     let mut dir = PathBuf::from("data");
     dir.push("swaps");
@@ -1272,7 +1368,138 @@ async fn sync_one_pool(
     Ok((seen, appended))
 }
 
-pub async fn sync_curated_all(limit: Option<usize>, max_signatures: usize) -> Result<()> {
+fn ws_url_from_rpc_url(rpc_url: &str) -> String {
+    if let Some(rest) = rpc_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = rpc_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        rpc_url.to_string()
+    }
+}
+
+pub fn subscribe_mentions_to_raw(
+    protocol: &str,
+    pool_address: &str,
+    mentions: &Option<String>,
+    mentions_preset: &Option<String>,
+    max_events: usize,
+    idle_timeout_secs: u64,
+) -> Result<()> {
+    let proto = Proto::parse(protocol).ok_or_else(|| {
+        anyhow::anyhow!("invalid protocol '{protocol}', expected: orca|raydium|meteora")
+    })?;
+    let _pool_pubkey = Pubkey::from_str(pool_address)
+        .map_err(|e| anyhow::anyhow!("invalid --pool-address '{}': {e}", pool_address))?;
+    let resolved_mentions = if let Some(v) = mentions.as_ref() {
+        v.clone()
+    } else if let Some(preset) = mentions_preset.as_ref() {
+        match preset.trim().to_ascii_lowercase().as_str() {
+            "orca" => "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc".to_string(),
+            "raydium" => "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK".to_string(),
+            "meteora" => "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo".to_string(),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "invalid --mentions-preset '{}', expected: orca|raydium|meteora",
+                    preset
+                ));
+            }
+        }
+    } else {
+        return Err(anyhow::anyhow!(
+            "missing mentions filter: provide --mentions <PUBKEY> or --mentions-preset <orca|raydium|meteora>"
+        ));
+    };
+    let mention_pubkey = Pubkey::from_str(&resolved_mentions)
+        .map_err(|e| anyhow::anyhow!("invalid mentions pubkey '{}': {e}", resolved_mentions))?;
+
+    let rpc_cfg = RpcConfig::default();
+    let ws_url = ws_url_from_rpc_url(&rpc_cfg.primary_url);
+    let logs_cfg = RpcTransactionLogsConfig { commitment: None };
+    let filter = RpcTransactionLogsFilter::Mentions(vec![mention_pubkey.to_string()]);
+    let (mut client, receiver) = PubsubClient::logs_subscribe(&ws_url, filter, logs_cfg)?;
+
+    let mut dir = PathBuf::from("data");
+    dir.push("swaps");
+    dir.push(proto.dir());
+    dir.push(pool_address);
+    std::fs::create_dir_all(&dir)?;
+    let mut path = dir;
+    path.push("swaps.jsonl");
+    let mut known = existing_sigs(&path);
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+
+    let mut seen = 0usize;
+    let mut appended = 0usize;
+    println!(
+        "🔌 logs subscribe: protocol={} pool={} mentions={} ws={} max_events={} idle_timeout={}s",
+        proto.dir(),
+        pool_address,
+        resolved_mentions,
+        ws_url,
+        max_events,
+        idle_timeout_secs
+    );
+    println!("ℹ️ streaming raw signatures into {}", path.display());
+
+    while seen < max_events {
+        let msg: RpcResponse<RpcLogsResponse> =
+            match receiver.recv_timeout(Duration::from_secs(idle_timeout_secs.max(1))) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Pubsub uses crossbeam receiver; timeout error type is not from std::sync::mpsc.
+                    // Keep matching by semantic message to avoid version-specific type imports.
+                    if e.to_string().to_ascii_lowercase().contains("timed out") {
+                        println!(
+                            "⏹️ stop subscribe after {}s idle (seen={} appended={})",
+                            idle_timeout_secs, seen, appended
+                        );
+                        break;
+                    }
+                    return Err(anyhow::anyhow!("logs subscribe recv failed: {e}"));
+                }
+            };
+
+        seen += 1;
+        let sig = msg.value.signature.clone();
+        if known.contains(&sig) {
+            continue;
+        }
+        let obj = RawChainTx {
+            ts_utc: Utc::now().to_rfc3339(),
+            protocol: proto.dir().to_string(),
+            pool_address: pool_address.to_string(),
+            signature: sig.clone(),
+            slot: msg.context.slot,
+            block_time: None,
+            confirmation_status: None,
+            err: msg.value.err.map(|e| format!("{e:?}")),
+            source: "rpc:logsSubscribe(mentions)".to_string(),
+            schema_version: 1,
+        };
+        let line = serde_json::to_string(&obj)? + "\n";
+        use std::io::Write;
+        out.write_all(line.as_bytes())?;
+        known.insert(sig);
+        appended += 1;
+    }
+
+    let _ = client.shutdown();
+    println!(
+        "📌 logs subscribe summary: seen={} appended={} source=logsSubscribe(mentions)",
+        seen, appended
+    );
+    Ok(())
+}
+
+pub async fn sync_curated_all_robust(
+    limit: Option<usize>,
+    max_signatures: usize,
+    max_pages: usize,
+) -> Result<()> {
     let rpc = RpcProvider::mainnet();
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),
@@ -1287,21 +1514,23 @@ pub async fn sync_curated_all(limit: Option<usize>, max_signatures: usize) -> Re
             pools.truncate(l);
         }
         for pool in pools {
-            let (seen, new_rows) = sync_one_pool(&rpc, proto, &pool, max_signatures).await?;
+            let (seen, new_rows) =
+                sync_one_pool(&rpc, proto, &pool, max_signatures, max_pages).await?;
             total_seen += seen;
             total_new += new_rows;
             println!(
-                "✅ swaps sync {} {}: seen={} appended={}",
+                "✅ swaps sync {} {}: seen={} appended={} (pages<={})",
                 proto.dir(),
                 pool,
                 seen,
-                new_rows
+                new_rows,
+                max_pages.max(1)
             );
         }
     }
 
     println!(
-        "📌 swaps sync summary: seen={} appended={} (source=getSignaturesForAddress)",
+        "📌 swaps sync summary: seen={} appended={} (source=getSignaturesForAddress paged)",
         total_seen, total_new
     );
     Ok(())
@@ -1312,8 +1541,21 @@ pub async fn enrich_curated_all(
     max_decode: usize,
     decode_timeout_secs: u64,
     decode_retries: usize,
+    decode_concurrency: usize,
+    decode_jitter_ms: u64,
     refresh_decoded: bool,
 ) -> Result<()> {
+    // Env overrides CLI when set (e.g. CI / shared runners). Bounded to avoid unbounded fan-out.
+    let decode_inflight = std::env::var("CLMM_ENRICH_DECODE_INFLIGHT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.clamp(1, 32))
+        .unwrap_or_else(|| decode_concurrency.max(1).min(32));
+    let decode_jitter_ms = std::env::var("CLMM_ENRICH_DECODE_JITTER_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(decode_jitter_ms);
+
     // Use a tighter RPC timeout for swap decoding so the command remains responsive.
     // The outer `decode_timeout_secs` still guards the full decode path; this mainly
     // prevents individual RPC endpoints from hanging too long before failover.
@@ -1323,6 +1565,7 @@ pub async fn enrich_curated_all(
             .with_timeout(rpc_timeout)
             .with_max_retries(decode_retries.min(3) as u32),
     );
+    let rpc = Arc::new(rpc_provider);
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),
         (Proto::Raydium, parse_curated_pool_addrs(Proto::Raydium)?),
@@ -1337,7 +1580,11 @@ pub async fn enrich_curated_all(
         }
         for pool in pools {
             let Some(mut meta) = latest_pool_meta(proto, &pool) else {
-                println!("⚠️ skip enrich {} {}: missing snapshot meta", proto.dir(), pool);
+                println!(
+                    "⚠️ skip enrich {} {}: missing snapshot meta",
+                    proto.dir(),
+                    pool
+                );
                 continue;
             };
 
@@ -1345,7 +1592,7 @@ pub async fn enrich_curated_all(
             // couldn't fetch SPL token accounts (transient RPC issues), fill owners
             // once per pool here.
             if matches!(proto, Proto::Meteora) {
-                let _ = fill_meteora_token_vault_owners(&rpc_provider, &pool, &mut meta).await;
+                let _ = fill_meteora_token_vault_owners(rpc.as_ref(), &pool, &mut meta).await;
             }
             let mut raw_path = PathBuf::from("data");
             raw_path.push("swaps");
@@ -1353,7 +1600,11 @@ pub async fn enrich_curated_all(
             raw_path.push(&pool);
             raw_path.push("swaps.jsonl");
             if !raw_path.exists() {
-                println!("⚠️ skip enrich {} {}: missing raw swaps file", proto.dir(), pool);
+                println!(
+                    "⚠️ skip enrich {} {}: missing raw swaps file",
+                    proto.dir(),
+                    pool
+                );
                 continue;
             }
             let mut out_path = raw_path.clone();
@@ -1391,7 +1642,7 @@ pub async fn enrich_curated_all(
                 }
             }
 
-            let mut out = std::fs::OpenOptions::new()
+            let out = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&out_path)?;
@@ -1399,29 +1650,49 @@ pub async fn enrich_curated_all(
             let mut skipped = 0usize;
             let mut retried = 0usize;
             println!(
-                "🔎 swaps enrich {} {}: decoding {} newest signatures (timeout={}s retries={})",
+                "🔎 swaps enrich {} {}: decoding {} newest signatures (timeout={}s retries={} inflight={} jitter_ms={})",
                 proto.dir(),
                 pool,
                 to_decode.len(),
                 decode_timeout_secs,
-                decode_retries
+                decode_retries,
+                decode_inflight,
+                decode_jitter_ms
             );
-            for sig in to_decode {
-                match decode_one_signature_with_retry(
-                    &rpc_provider,
-                    proto,
-                    &pool,
-                    &meta,
-                    &sig,
-                    decode_timeout_secs,
-                    decode_retries,
-                )
-                .await
-                {
+
+            let meta_arc = Arc::new(meta);
+            let pool_owned = pool.clone();
+            let out = Arc::new(Mutex::new(out));
+            let mut stream = stream::iter(to_decode.into_iter().map(|sig| {
+                let rpc = rpc.clone();
+                let meta_arc = meta_arc.clone();
+                let pool_owned = pool_owned.clone();
+                async move {
+                    let res = decode_one_signature_with_retry(
+                        rpc.as_ref(),
+                        proto,
+                        &pool_owned,
+                        meta_arc.as_ref(),
+                        &sig,
+                        decode_timeout_secs,
+                        decode_retries,
+                        decode_jitter_ms,
+                    )
+                    .await;
+                    (sig, res)
+                }
+            }))
+            .buffer_unordered(decode_inflight);
+
+            let mut processed = 0usize;
+            while let Some((sig, decode_res)) = stream.next().await {
+                processed += 1;
+                match decode_res {
                     Ok(row) => {
                         let line = serde_json::to_string(&row)? + "\n";
                         use std::io::Write;
-                        out.write_all(line.as_bytes())?;
+                        let mut g = out.lock().await;
+                        g.write_all(line.as_bytes())?;
                         ok += 1;
                     }
                     Err(e) => {
@@ -1440,7 +1711,7 @@ pub async fn enrich_curated_all(
                         }
                     }
                 }
-                if (ok + skipped) % 10 == 0 {
+                if processed % 10 == 0 {
                     println!(
                         "… progress {} {}: decoded_ok={} skipped={}",
                         proto.dir(),
@@ -1548,11 +1819,22 @@ pub fn decode_audit_curated_all(limit: Option<usize>, save_report: bool) -> Resu
             });
         }
     }
-    rows.sort_by(|a, b| a.ok_pct.partial_cmp(&b.ok_pct).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        a.ok_pct
+            .partial_cmp(&b.ok_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for r in &rows {
         println!(
             "📈 decode audit {} {} raw={} decoded={} ok={} ({:.1}%) latest_block_time={:?} statuses={:?}",
-            r.protocol, r.pool_address, r.raw_rows, r.decoded_rows, r.ok_rows, r.ok_pct, r.latest_block_time, r.status_counts
+            r.protocol,
+            r.pool_address,
+            r.raw_rows,
+            r.decoded_rows,
+            r.ok_rows,
+            r.ok_pct,
+            r.latest_block_time,
+            r.status_counts
         );
     }
     let total_ok_pct = if total_decoded == 0 {
@@ -1568,7 +1850,11 @@ pub fn decode_audit_curated_all(limit: Option<usize>, save_report: bool) -> Resu
     }
     println!(
         "📌 decode audit summary: pools={} raw={} decoded={} ok={} ({:.1}%)",
-        rows.len(), total_raw, total_decoded, total_ok, total_ok_pct
+        rows.len(),
+        total_raw,
+        total_decoded,
+        total_ok,
+        total_ok_pct
     );
     if !global_status.is_empty() && total_decoded > 0 {
         print!("📌 decode_status global: ");
@@ -1634,7 +1920,10 @@ pub fn health_check_curated_all(
     let mut alerts: Vec<String> = Vec::new();
     for (proto, pools) in plans {
         for pool in pools {
-            let base = std::path::Path::new("data").join("swaps").join(proto.dir()).join(&pool);
+            let base = std::path::Path::new("data")
+                .join("swaps")
+                .join(proto.dir())
+                .join(&pool);
             let raw = base.join("swaps.jsonl");
             let dec = base.join("decoded_swaps.jsonl");
             let snap = std::path::Path::new("data")
@@ -1667,7 +1956,12 @@ pub fn health_check_curated_all(
             if row_alerts.is_empty() {
                 println!(
                     "✅ health {} {} raw_age={:?}m decoded_age={:?}m snapshot_age={:?}m ok_pct={:.1}%",
-                    proto.dir(), pool, raw_age, dec_age, snap_age, ok_pct
+                    proto.dir(),
+                    pool,
+                    raw_age,
+                    dec_age,
+                    snap_age,
+                    ok_pct
                 );
             } else {
                 let msg = format!("{} {} => {}", proto.dir(), pool, row_alerts.join(", "));
@@ -1691,7 +1985,10 @@ pub fn health_check_curated_all(
         std::fs::write(&out, serde_json::to_string_pretty(&body)?)?;
         println!("📝 health report saved: {}", out.display());
         if fail_on_alert {
-            anyhow::bail!("health check failed with {} alerts", body["alerts"].as_array().map(|a| a.len()).unwrap_or(0));
+            anyhow::bail!(
+                "health check failed with {} alerts",
+                body["alerts"].as_array().map(|a| a.len()).unwrap_or(0)
+            );
         }
     }
     Ok(())

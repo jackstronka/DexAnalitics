@@ -1,4 +1,4 @@
-//! CLMM Liquidity Provider API Server.
+//! Bociarz LP Strategy Lab API Server.
 //!
 //! This binary starts the REST API server with WebSocket support.
 
@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    info!("Starting CLMM Liquidity Provider API Server");
+    info!("Starting Bociarz LP Strategy Lab API Server");
 
     // Load configuration from environment
     let config = load_config_from_env();
@@ -49,6 +49,16 @@ fn load_config_from_env() -> ServerConfig {
     };
 
     let api_config = ApiConfig {
+        orca_public_api_base_url: env::var("ORCA_PUBLIC_API_BASE_URL").ok(),
+        event_bus_mode: env::var("EVENT_BUS_MODE").unwrap_or_else(|_| "inprocess".to_string()),
+        event_bus_backend: env::var("EVENT_BUS_BACKEND").unwrap_or_else(|_| "nats".to_string()),
+        event_bus_shadow_mode: env::var("EVENT_BUS_SHADOW_MODE")
+            .map(|v| v == "true")
+            .unwrap_or(true),
+        event_bus_max_retries: env::var("EVENT_BUS_MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3),
         enable_cors: env::var("API_CORS_ALLOW_ALL")
             .map(|v| v == "true")
             .unwrap_or(true),

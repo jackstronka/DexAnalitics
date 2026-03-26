@@ -1,8 +1,8 @@
 //! Position monitor for real-time tracking.
 
 use crate::alerts::{Alert, AlertRule};
-use clmm_lp_protocols::prelude::*;
 use clmm_lp_domain::metrics::impermanent_loss::calculate_il_concentrated;
+use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
@@ -123,7 +123,10 @@ impl PositionMonitor {
     pub async fn add_position(&self, position_address: &str) -> anyhow::Result<()> {
         let position = self.position_reader.get_position(position_address).await?;
 
-        let pool_state = self.pool_reader.get_pool_state(&position.pool.to_string()).await?;
+        let pool_state = self
+            .pool_reader
+            .get_pool_state(&position.pool.to_string())
+            .await?;
         let in_range = pool_state.is_tick_in_range(position.tick_lower, position.tick_upper);
         let entry_price = pool_state.price;
         let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
@@ -234,12 +237,15 @@ impl PositionMonitor {
 
             // Update IL percentage if we have an entry price.
             if let Some(entry_price) = monitored.pnl.entry_price {
-                let lower_price =
-                    clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
-                let upper_price =
-                    clmm_lp_protocols::prelude::tick_to_price(position.tick_upper);
-                let il = calculate_il_concentrated(entry_price, pool_state.price, lower_price, upper_price)
-                    .unwrap_or(Decimal::ZERO);
+                let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
+                let upper_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_upper);
+                let il = calculate_il_concentrated(
+                    entry_price,
+                    pool_state.price,
+                    lower_price,
+                    upper_price,
+                )
+                .unwrap_or(Decimal::ZERO);
                 monitored.pnl.il_pct = il;
             } else {
                 // If entry price wasn't set, treat current price as entry to avoid NaNs.
@@ -323,6 +329,15 @@ impl PositionMonitor {
         }
 
         metrics
+    }
+}
+
+#[cfg(test)]
+impl PositionMonitor {
+    /// Inserts a monitored position without RPC (for unit tests).
+    pub async fn insert_test_monitored_position(&self, pos: MonitoredPosition) {
+        let mut positions = self.positions.write().await;
+        positions.insert(pos.address, pos);
     }
 }
 

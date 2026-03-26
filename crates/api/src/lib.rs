@@ -15,6 +15,8 @@ pub mod prelude;
 pub mod auth;
 /// Error types.
 pub mod error;
+/// Event bus and async communication primitives.
+pub mod events;
 /// Request handlers.
 pub mod handlers;
 /// Middleware components.

@@ -4,10 +4,10 @@
 //! otherwise `tick_current`. Quote-token USD (for cross-pairs) is approximated via
 //! Dexscreener (free HTTP, optional cache) — not on-chain.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use clmm_lp_data::providers::{DexChain, DexscreenerClient};
 use clmm_lp_domain::entities::token::Token;
 use clmm_lp_domain::prelude::Price;
-use clmm_lp_data::providers::{DexChain, DexscreenerClient};
 use clmm_lp_protocols::orca::pool_reader::tick_to_price;
 use primitive_types::U256;
 use rust_decimal::Decimal;
@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 use crate::backtest_engine::StepDataPoint;
 
@@ -60,20 +60,11 @@ fn scale_decimal_pow10(d: Decimal, exp: i32) -> Decimal {
         return d;
     }
     let p = Decimal::from(10u64.pow(e.min(18)));
-    if exp >= 0 {
-        d * p
-    } else {
-        d / p
-    }
+    if exp >= 0 { d * p } else { d / p }
 }
 
 /// Raw B/A from sqrt Q64.64, then human token B per token A (pool orientation).
-fn pool_b_per_a_human(
-    sqrt: Option<u128>,
-    tick: i32,
-    dec_pool_a: u32,
-    dec_pool_b: u32,
-) -> Decimal {
+fn pool_b_per_a_human(sqrt: Option<u128>, tick: i32, dec_pool_a: u32, dec_pool_b: u32) -> Decimal {
     let raw = if let Some(s) = sqrt.filter(|&x| x > 0) {
         let sqrt_f = s as f64 / (1u128 << 64) as f64;
         Decimal::from_f64(sqrt_f * sqrt_f).unwrap_or(Decimal::ZERO)
@@ -204,17 +195,24 @@ fn parse_rows_raydium(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Ray
             continue;
         }
 
-        let vault_a = v.get("vault_amount_a").and_then(|x| x.as_u64()).unwrap_or(0);
-        let vault_b = v.get("vault_amount_b").and_then(|x| x.as_u64()).unwrap_or(0);
+        let vault_a = v
+            .get("vault_amount_a")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let vault_b = v
+            .get("vault_amount_b")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
 
-        let tick = v
-            .get("tick_current")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0) as i32;
+        let tick = v.get("tick_current").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
 
         let sqrt_price = v.get("sqrt_price_x64").and_then(|x| json_opt_u128(Some(x)));
-        let fee_growth_a = v.get("fee_growth_global_a_x64").and_then(|x| json_opt_u128(Some(x)));
-        let fee_growth_b = v.get("fee_growth_global_b_x64").and_then(|x| json_opt_u128(Some(x)));
+        let fee_growth_a = v
+            .get("fee_growth_global_a_x64")
+            .and_then(|x| json_opt_u128(Some(x)));
+        let fee_growth_b = v
+            .get("fee_growth_global_b_x64")
+            .and_then(|x| json_opt_u128(Some(x)));
 
         let liq = v
             .get("liquidity_active")
@@ -251,16 +249,17 @@ fn parse_rows_raydium(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Ray
 
 fn fee_delta_tokens_raydium(p0: &RaydiumSnapRow, p1: &RaydiumSnapRow) -> (u128, u128) {
     let q64: U256 = U256::from(1u128) << 64;
-    let delta_from_growth = |g0: Option<u128>, g1: Option<u128>, liq: Option<u128>| -> Option<u128> {
-        let (g0, g1, liq) = (g0?, g1?, liq?);
-        if g1 <= g0 || liq == 0 {
-            return Some(0);
-        }
-        let dg = g1 - g0;
-        let prod = U256::from(dg).saturating_mul(U256::from(liq));
-        let raw = prod / q64;
-        Some(raw.low_u128())
-    };
+    let delta_from_growth =
+        |g0: Option<u128>, g1: Option<u128>, liq: Option<u128>| -> Option<u128> {
+            let (g0, g1, liq) = (g0?, g1?, liq?);
+            if g1 <= g0 || liq == 0 {
+                return Some(0);
+            }
+            let dg = g1 - g0;
+            let prod = U256::from(dg).saturating_mul(U256::from(liq));
+            let raw = prod / q64;
+            Some(raw.low_u128())
+        };
 
     let dv_a = delta_from_growth(p0.fee_growth_a, p1.fee_growth_a, p1.liq.or(p0.liq))
         .unwrap_or_else(|| p1.protocol_fee_a.saturating_sub(p0.protocol_fee_a).into());
@@ -286,10 +285,18 @@ pub async fn build_from_raydium_snapshots(
         .join("snapshots.jsonl");
 
     let repaired_jsonl = snapshots_jsonl.with_file_name("snapshots.jsonl.repaired");
-    let path = if repaired_jsonl.exists() { repaired_jsonl } else { snapshots_jsonl };
+    let path = if repaired_jsonl.exists() {
+        repaired_jsonl
+    } else {
+        snapshots_jsonl
+    };
 
     if !path.exists() {
-        bail!("Snapshot file not found (tried {}): {}", "snapshots.jsonl[.repaired]", path.display());
+        bail!(
+            "Snapshot file not found (tried {}): {}",
+            "snapshots.jsonl[.repaired]",
+            path.display()
+        );
     }
 
     let rows = parse_rows_raydium(&path, start_ts, end_ts)?;
@@ -305,13 +312,17 @@ pub async fn build_from_raydium_snapshots(
         use crate::engine::token_meta::fetch_mint_decimals;
         use clmm_lp_protocols::rpc::RpcProvider;
         let rpc = RpcProvider::mainnet();
-        fetch_mint_decimals(&rpc, &rows[0].pool_mint_a).await.unwrap_or(9)
+        fetch_mint_decimals(&rpc, &rows[0].pool_mint_a)
+            .await
+            .unwrap_or(9)
     };
     let dec_pool_b: u8 = {
         use crate::engine::token_meta::fetch_mint_decimals;
         use clmm_lp_protocols::rpc::RpcProvider;
         let rpc = RpcProvider::mainnet();
-        fetch_mint_decimals(&rpc, &rows[0].pool_mint_b).await.unwrap_or(9)
+        fetch_mint_decimals(&rpc, &rows[0].pool_mint_b)
+            .await
+            .unwrap_or(9)
     };
 
     let quote_usd = mint_usd_dexscreener(&token_b.mint_address)
@@ -328,7 +339,8 @@ pub async fn build_from_raydium_snapshots(
 
     let mut step_data: Vec<StepDataPoint> = Vec::with_capacity(rows.len());
     for r in &rows {
-        let pool_bpa = pool_b_per_a_human(r.sqrt_price, r.tick, dec_pool_a as u32, dec_pool_b as u32);
+        let pool_bpa =
+            pool_b_per_a_human(r.sqrt_price, r.tick, dec_pool_a as u32, dec_pool_b as u32);
         let price_ab = Price::new(user_price_ab(
             pool_bpa,
             &token_a.mint_address,
@@ -432,10 +444,9 @@ pub async fn build_from_raydium_snapshots(
 /// We decode the on-chain `lb_pair` from `data_b64` for every snapshot row and extract:
 /// `active_id`, `bin_step`, token mints (token_x/token_y) and `protocol_fee_amount_*`.
 ///
-/// We do not currently have bin-array neighborhood price/fee-growth in the snapshot file,
-/// so price and fees are approximated:
-/// - price: DLMM bin price formula using `(1 + bin_step/10000)^active_id`
-/// - fees: delta of `protocol_fee_amount_{x,y}` between consecutive snapshots
+/// When `vault_amount_a` / `vault_amount_b` are present in JSON (written by
+/// `meteora-snapshot-curated`), we can estimate TVL and `lp_share` like Raydium.
+/// Otherwise `--lp-share` is required for snapshot-only Meteora.
 #[derive(Clone, Debug)]
 struct MeteoraSnapRow {
     ts: i64,
@@ -446,6 +457,10 @@ struct MeteoraSnapRow {
     bin_step: u16,
     protocol_fee_a: u64,
     protocol_fee_b: u64,
+    /// SPL reserve balance for pool token X (same as snapshot `vault_amount_a`).
+    vault_x: Option<u64>,
+    /// SPL reserve balance for pool token Y (`vault_amount_b`).
+    vault_y: Option<u64>,
 }
 
 fn parse_rows_meteora(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<MeteoraSnapRow>> {
@@ -492,6 +507,8 @@ fn parse_rows_meteora(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Met
         let bin_step = parsed.bin_step;
         let protocol_fee_a = parsed.protocol_fee_amount_x;
         let protocol_fee_b = parsed.protocol_fee_amount_y;
+        let vault_x = v.get("vault_amount_a").and_then(|x| x.as_u64());
+        let vault_y = v.get("vault_amount_b").and_then(|x| x.as_u64());
 
         rows.push(MeteoraSnapRow {
             ts,
@@ -502,6 +519,8 @@ fn parse_rows_meteora(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Met
             bin_step,
             protocol_fee_a,
             protocol_fee_b,
+            vault_x,
+            vault_y,
         });
     }
 
@@ -512,12 +531,20 @@ fn parse_rows_meteora(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Met
 /// DLMM price approximation: `price = (1 + bin_step/BASIS_POINT_MAX)^active_id`.
 ///
 /// We assume the "pool price" is token Y per token X (i.e. `B per A` for `token_mint_x/token_mint_y`).
-fn pool_bpa_meteora(active_id: i32, bin_step: u16, dec_pool_a: u32, dec_pool_b: u32) -> Result<Decimal> {
+fn pool_bpa_meteora(
+    active_id: i32,
+    bin_step: u16,
+    dec_pool_a: u32,
+    dec_pool_b: u32,
+) -> Result<Decimal> {
     const BASIS_POINT_MAX: u32 = 10_000;
     let base = Decimal::ONE + (Decimal::from(bin_step) / Decimal::from(BASIS_POINT_MAX));
     let price_raw = base.powi(active_id as i64);
     // Align to UI units (similar to Orca/Raydium decimals scaling).
-    Ok(scale_decimal_pow10(price_raw, dec_pool_a as i32 - dec_pool_b as i32))
+    Ok(scale_decimal_pow10(
+        price_raw,
+        dec_pool_a as i32 - dec_pool_b as i32,
+    ))
 }
 
 /// Build [`StepDataPoint`] grid + optional per-step fee map from Meteora JSONL only.
@@ -537,10 +564,18 @@ pub async fn build_from_meteora_snapshots(
         .join("snapshots.jsonl");
     // Prefer repaired JSONL if it exists.
     let repaired_jsonl = snapshots_jsonl.with_file_name("snapshots.jsonl.repaired");
-    let path = if repaired_jsonl.exists() { repaired_jsonl } else { snapshots_jsonl };
+    let path = if repaired_jsonl.exists() {
+        repaired_jsonl
+    } else {
+        snapshots_jsonl
+    };
 
     if !path.exists() {
-        bail!("Snapshot file not found (tried {}): {}", "snapshots.jsonl[.repaired]", path.display());
+        bail!(
+            "Snapshot file not found (tried {}): {}",
+            "snapshots.jsonl[.repaired]",
+            path.display()
+        );
     }
 
     let rows = parse_rows_meteora(&path, start_ts, end_ts)?;
@@ -587,17 +622,36 @@ pub async fn build_from_meteora_snapshots(
         bail!("Could not resolve quote token USD price via snapshots/stable mapping");
     }
 
-    // For meteora we currently don't have vault amounts / active liquidity in snapshot file,
-    // so the only safe snapshot-only choice is to provide lp_share explicitly.
-    let lp_override: Decimal = lp_share_cli
+    let capital_dec = Decimal::from_f64(capital).unwrap_or(Decimal::ZERO);
+    let lp_override = lp_share_cli
         .and_then(Decimal::from_f64)
-        .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE)
-        .ok_or_else(|| anyhow::anyhow!("--lp-share is required for --snapshot-protocol meteora when using --price-path-source snapshots"))?;
+        .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
 
-    let _capital_dec = Decimal::from_f64(capital).unwrap_or(Decimal::ZERO);
+    let all_vaults = rows
+        .iter()
+        .all(|r| r.vault_x.is_some() && r.vault_y.is_some());
+    if lp_override.is_none() && !all_vaults {
+        bail!(
+            "Meteora snapshot-only: set --lp-share, or re-run `meteora-snapshot-curated` so snapshots include vault_amount_a/vault_amount_b (needed for TVL → lp_share)."
+        );
+    }
+
+    let pow10 = |d: u32| -> Decimal {
+        let mut v = Decimal::ONE;
+        for _ in 0..d {
+            v *= Decimal::from(10u32);
+        }
+        v
+    };
+
     let mut step_data: Vec<StepDataPoint> = Vec::with_capacity(rows.len());
     for r in &rows {
-        let pool_bpa = pool_bpa_meteora(r.active_id, r.bin_step, dec_pool_a as u32, dec_pool_b as u32)?;
+        let pool_bpa = pool_bpa_meteora(
+            r.active_id,
+            r.bin_step,
+            dec_pool_a as u32,
+            dec_pool_b as u32,
+        )?;
         // Convert from pool-orientation (token_y/token_x) to user-orientation (token_b/token_a).
         let price_ab = match map {
             MeteoraMintMap::Direct | MeteoraMintMap::Assumed => Price::new(pool_bpa),
@@ -610,12 +664,32 @@ pub async fn build_from_meteora_snapshots(
         };
         let price_usd = Price::new(price_ab.value * quote_usd);
 
+        let lp_share = if let Some(s) = lp_override {
+            s
+        } else if let (Some(vx), Some(vy)) = (r.vault_x, r.vault_y) {
+            let hum_x = Decimal::from(vx) / pow10(dec_pool_a as u32);
+            let hum_y = Decimal::from(vy) / pow10(dec_pool_b as u32);
+            let tvl_usd = match map {
+                MeteoraMintMap::Direct | MeteoraMintMap::Assumed => {
+                    hum_x * price_usd.value + hum_y * quote_usd
+                }
+                MeteoraMintMap::Swapped => hum_x * quote_usd + hum_y * price_usd.value,
+            };
+            if tvl_usd > Decimal::ZERO {
+                (capital_dec / tvl_usd).min(Decimal::ONE).max(Decimal::ZERO)
+            } else {
+                Decimal::from_f64(0.01).unwrap()
+            }
+        } else {
+            Decimal::from_f64(0.01).unwrap()
+        };
+
         step_data.push(StepDataPoint {
             price_usd,
             price_ab,
             step_volume_usd: Decimal::ZERO,
             quote_usd,
-            lp_share: lp_override,
+            lp_share,
             pool_liquidity_active: None,
             start_timestamp: r.ts_u64,
         });
@@ -668,7 +742,11 @@ pub async fn build_from_meteora_snapshots(
         }
     }
 
-    let per_step_fees_usd = if fee_map.is_empty() { None } else { Some(fee_map) };
+    let per_step_fees_usd = if fee_map.is_empty() {
+        None
+    } else {
+        Some(fee_map)
+    };
 
     Ok(SnapshotPricePathResult {
         step_data,
@@ -677,8 +755,7 @@ pub async fn build_from_meteora_snapshots(
 }
 
 fn parse_rows(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<OrcaSnapRow>> {
-    let txt = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let txt = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut rows = Vec::new();
     for line in txt.lines() {
         let line = line.trim();
@@ -711,12 +788,15 @@ fn parse_rows(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<OrcaSnapRow
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        let vault_a = v.get("vault_amount_a").and_then(|x| x.as_u64()).unwrap_or(0);
-        let vault_b = v.get("vault_amount_b").and_then(|x| x.as_u64()).unwrap_or(0);
-        let tick = v
-            .get("tick_current")
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0) as i32;
+        let vault_a = v
+            .get("vault_amount_a")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let vault_b = v
+            .get("vault_amount_b")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let tick = v.get("tick_current").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
         let sqrt_price = v.get("sqrt_price_x64").and_then(|x| json_u128(Some(x)));
         let fee_growth_a = json_u128(v.get("fee_growth_global_a"));
         let fee_growth_b = json_u128(v.get("fee_growth_global_b"));
@@ -753,10 +833,7 @@ fn parse_rows(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<OrcaSnapRow
     Ok(rows)
 }
 
-fn fee_delta_tokens(
-    p0: &OrcaSnapRow,
-    p1: &OrcaSnapRow,
-) -> (u128, u128) {
+fn fee_delta_tokens(p0: &OrcaSnapRow, p1: &OrcaSnapRow) -> (u128, u128) {
     let q64: U256 = U256::from(1u128) << 64;
     let delta_from_growth =
         |g0: Option<u128>, g1: Option<u128>, liq: Option<u128>| -> Option<u128> {
@@ -794,10 +871,18 @@ pub async fn build_from_orca_snapshots(
     // Some snapshot collectors may leave behind partially written/dirty JSONL lines
     // near the end of the file; a `.repaired` sibling is produced to make parsing deterministic.
     let repaired_jsonl = snapshots_jsonl.with_file_name("snapshots.jsonl.repaired");
-    let path = if repaired_jsonl.exists() { repaired_jsonl } else { snapshots_jsonl };
+    let path = if repaired_jsonl.exists() {
+        repaired_jsonl
+    } else {
+        snapshots_jsonl
+    };
 
     if !path.exists() {
-        bail!("Snapshot file not found (tried {}): {}", "snapshots.jsonl[.repaired]", path.display());
+        bail!(
+            "Snapshot file not found (tried {}): {}",
+            "snapshots.jsonl[.repaired]",
+            path.display()
+        );
     }
 
     let rows = parse_rows(&path, start_ts, end_ts)?;
@@ -839,7 +924,8 @@ pub async fn build_from_orca_snapshots(
 
     let mut step_data: Vec<StepDataPoint> = Vec::with_capacity(rows.len());
     for r in &rows {
-        let pool_bpa = pool_b_per_a_human(r.sqrt_price, r.tick, dec_pool_a as u32, dec_pool_b as u32);
+        let pool_bpa =
+            pool_b_per_a_human(r.sqrt_price, r.tick, dec_pool_a as u32, dec_pool_b as u32);
         let price_ab = Price::new(user_price_ab(
             pool_bpa,
             &token_a.mint_address,

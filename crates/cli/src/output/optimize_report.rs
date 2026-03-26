@@ -33,7 +33,11 @@ fn price_low_high_ab(step_data: &[StepData]) -> Option<(Decimal, Decimal)> {
     }
 }
 
-fn bounds_in_quote_units(lower_usd: f64, upper_usd: f64, quote_usd: Decimal) -> (Option<Decimal>, Option<Decimal>) {
+fn bounds_in_quote_units(
+    lower_usd: f64,
+    upper_usd: f64,
+    quote_usd: Decimal,
+) -> (Option<Decimal>, Option<Decimal>) {
     if quote_usd <= Decimal::ZERO {
         return (None, None);
     }
@@ -72,7 +76,12 @@ pub fn print_best_block(
     );
     println!(
         "   Objective: {}   Range: {:.1}%-{:.1}%   Strategies: {}   Filters: TIR>={:?}%  DD<={:?}%",
-        objective_label, min_range_pct, max_range_pct, strategies_len, min_time_in_range, max_drawdown
+        objective_label,
+        min_range_pct,
+        max_range_pct,
+        strategies_len,
+        min_time_in_range,
+        max_drawdown
     );
     println!();
     println!(
@@ -134,15 +143,10 @@ pub fn print_best_block(
             token_b_decimals,
         );
 
-        let lower_ab_raw =
-            price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
-        let upper_ab_raw =
-            price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
-        let entry_ab_raw = price_ab_human_to_raw(
-            first.price_ab.value,
-            token_a_decimals,
-            token_b_decimals,
-        );
+        let lower_ab_raw = price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
+        let upper_ab_raw = price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
+        let entry_ab_raw =
+            price_ab_human_to_raw(first.price_ab.value, token_a_decimals, token_b_decimals);
 
         let sqrt_l = price_to_sqrt_q64(lower_ab_raw);
         let sqrt_u = price_to_sqrt_q64(upper_ab_raw);
@@ -183,9 +187,20 @@ pub fn print_best_block(
         // IMPORTANT: "in range" is defined in quote units (A/B), not USD.
         let lo_usd = Decimal::from_f64(best.1).unwrap();
         let up_usd = Decimal::from_f64(best.2).unwrap();
-        let q0 = step_data.first().map(|p| p.quote_usd).unwrap_or(Decimal::ZERO);
-        let lo_ab = if q0 > Decimal::ZERO { lo_usd / q0 } else { Decimal::ZERO };
-        let up_ab = if q0 > Decimal::ZERO { up_usd / q0 } else { Decimal::ZERO };
+        let q0 = step_data
+            .first()
+            .map(|p| p.quote_usd)
+            .unwrap_or(Decimal::ZERO);
+        let lo_ab = if q0 > Decimal::ZERO {
+            lo_usd / q0
+        } else {
+            Decimal::ZERO
+        };
+        let up_ab = if q0 > Decimal::ZERO {
+            up_usd / q0
+        } else {
+            Decimal::ZERO
+        };
         let mut in_range_vol = Decimal::ZERO;
         let mut in_range_steps: u64 = 0;
         let mut sum_lp_share = Decimal::ZERO;
@@ -323,13 +338,29 @@ pub fn print_candidate_sets(
 
     // Helper: pick top-K by a key
     let mut by_fees = results.to_vec();
-    by_fees.sort_by(|a, b| b.4.total_fees.partial_cmp(&a.4.total_fees).unwrap_or(std::cmp::Ordering::Equal));
+    by_fees.sort_by(|a, b| {
+        b.4.total_fees
+            .partial_cmp(&a.4.total_fees)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut by_vs = results.to_vec();
-    by_vs.sort_by(|a, b| b.4.vs_hodl.partial_cmp(&a.4.vs_hodl).unwrap_or(std::cmp::Ordering::Equal));
+    by_vs.sort_by(|a, b| {
+        b.4.vs_hodl
+            .partial_cmp(&a.4.vs_hodl)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut by_dd = results.to_vec();
-    by_dd.sort_by(|a, b| a.4.max_drawdown.partial_cmp(&b.4.max_drawdown).unwrap_or(std::cmp::Ordering::Equal));
+    by_dd.sort_by(|a, b| {
+        a.4.max_drawdown
+            .partial_cmp(&b.4.max_drawdown)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut by_tir = results.to_vec();
-    by_tir.sort_by(|a, b| b.4.time_in_range_pct.partial_cmp(&a.4.time_in_range_pct).unwrap_or(std::cmp::Ordering::Equal));
+    by_tir.sort_by(|a, b| {
+        b.4.time_in_range_pct
+            .partial_cmp(&a.4.time_in_range_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     fn print_section(
         title: &str,
@@ -344,17 +375,8 @@ pub fn print_candidate_sets(
         println!("== {} ==", title);
         let mut t = Table::new();
         t.add_row(row![
-            "Rank",
-            "Lower(B)",
-            "Upper(B)",
-            "ΔLow%",
-            "ΔHigh%",
-            "Fees",
-            "PnL",
-            "vsHODL",
-            "TIR%",
-            "DD%",
-            "Rebals"
+            "Rank", "Lower(B)", "Upper(B)", "ΔLow%", "ΔHigh%", "Fees", "PnL", "vsHODL", "TIR%",
+            "DD%", "Rebals"
         ]);
         for (i, (_wp, lo_usd, up_usd, name, s, _sc)) in rows.iter().take(top_n).enumerate() {
             let (lo_b, up_b) = if use_cross_pair {
@@ -368,8 +390,16 @@ pub fn print_candidate_sets(
                 (Decimal::ZERO, Decimal::ZERO)
             };
             let (dlow, dhigh) = if let (Some((low, high)), true) = (low_high, use_cross_pair) {
-                let dlow = if low > Decimal::ZERO { (lo_b - low) / low } else { Decimal::ZERO };
-                let dhigh = if high > Decimal::ZERO { (high - up_b) / high } else { Decimal::ZERO };
+                let dlow = if low > Decimal::ZERO {
+                    (lo_b - low) / low
+                } else {
+                    Decimal::ZERO
+                };
+                let dhigh = if high > Decimal::ZERO {
+                    (high - up_b) / high
+                } else {
+                    Decimal::ZERO
+                };
                 (dlow, dhigh)
             } else {
                 (Decimal::ZERO, Decimal::ZERO)
@@ -393,9 +423,40 @@ pub fn print_candidate_sets(
         t.printstd();
     }
 
-    print_section("Max Fees", &by_fees, top_n.min(5), use_cross_pair, q, low_high, capital_dec);
-    print_section("Max vs HODL", &by_vs, top_n.min(5), use_cross_pair, q, low_high, capital_dec);
-    print_section("Conservative (min drawdown)", &by_dd, top_n.min(5), use_cross_pair, q, low_high, capital_dec);
-    print_section("Max Time-in-Range", &by_tir, top_n.min(5), use_cross_pair, q, low_high, capital_dec);
+    print_section(
+        "Max Fees",
+        &by_fees,
+        top_n.min(5),
+        use_cross_pair,
+        q,
+        low_high,
+        capital_dec,
+    );
+    print_section(
+        "Max vs HODL",
+        &by_vs,
+        top_n.min(5),
+        use_cross_pair,
+        q,
+        low_high,
+        capital_dec,
+    );
+    print_section(
+        "Conservative (min drawdown)",
+        &by_dd,
+        top_n.min(5),
+        use_cross_pair,
+        q,
+        low_high,
+        capital_dec,
+    );
+    print_section(
+        "Max Time-in-Range",
+        &by_tir,
+        top_n.min(5),
+        use_cross_pair,
+        q,
+        low_high,
+        capital_dec,
+    );
 }
-

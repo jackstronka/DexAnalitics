@@ -1,4 +1,4 @@
-# CLMM Liquidity Provider - Startup Guide
+# Bociarz LP Strategy Lab — Startup Guide
 
 This guide explains how to start all services in the correct order to have the complete solution running.
 

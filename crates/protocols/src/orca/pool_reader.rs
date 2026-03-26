@@ -269,6 +269,16 @@ pub fn calculate_tick_range(
     (lower, upper)
 }
 
+/// Liquidity amount to remove for `pct` percent of `liquidity` (floor, clamped to `liquidity`).
+#[must_use]
+pub fn liquidity_amount_from_pct(liquidity: u128, pct: f64) -> u128 {
+    if !(0.0..=100.0).contains(&pct) || liquidity == 0 {
+        return 0;
+    }
+    let scaled = (liquidity as f64) * (pct / 100.0);
+    scaled.floor().clamp(0.0, liquidity as f64) as u128
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +318,12 @@ mod tests {
         // Should be aligned to tick spacing
         assert_eq!(lower % 64, 0);
         assert_eq!(upper % 64, 0);
+    }
+
+    #[test]
+    fn test_liquidity_amount_from_pct() {
+        assert_eq!(liquidity_amount_from_pct(1000, 50.0), 500);
+        assert_eq!(liquidity_amount_from_pct(1000, 100.0), 1000);
+        assert_eq!(liquidity_amount_from_pct(1000, 0.0), 0);
     }
 }

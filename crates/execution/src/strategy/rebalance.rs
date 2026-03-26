@@ -4,11 +4,9 @@ use crate::lifecycle::{FeesCollectedData, LifecycleTracker, RebalanceData, Rebal
 use crate::transaction::TransactionManager;
 use crate::wallet::Wallet;
 use clmm_lp_protocols::prelude::*;
-use clmm_lp_protocols::orca::executor::WHIRLPOOL_PROGRAM_ID;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
-use std::str::FromStr;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for rebalancing.
@@ -288,35 +286,35 @@ impl RebalanceExecutor {
         let (fa, fb) = result.fees_collected.unwrap_or((0, 0));
 
         // IL ledger: compute token split "after" rebalance using the new on-chain state.
-        let (amount_a_after, amount_b_after, price_ab_after) = if let Some(new_pos) = result.new_position
-        {
-            let pool_reader = WhirlpoolReader::new(self.provider.clone());
-            let pool_state = pool_reader.get_pool_state(&params.pool.to_string()).await.ok();
-            if let Some(pool_state) = pool_state {
-                let pos_reader = PositionReader::new(self.provider.clone());
-                if let Ok(on_chain_pos) = pos_reader
-                    .get_position(&new_pos.to_string())
+        let (amount_a_after, amount_b_after, price_ab_after) =
+            if let Some(new_pos) = result.new_position {
+                let pool_reader = WhirlpoolReader::new(self.provider.clone());
+                let pool_state = pool_reader
+                    .get_pool_state(&params.pool.to_string())
                     .await
-                {
-                    let (a, b) = pos_reader.calculate_token_amounts(
-                        &on_chain_pos,
-                        pool_state.tick_current,
-                        pool_state.sqrt_price,
-                    );
-                    (
-                        Some(a),
-                        Some(b),
-                        Some(pool_state.price),
-                    )
+                    .ok();
+                if let Some(pool_state) = pool_state {
+                    let pos_reader = PositionReader::new(self.provider.clone());
+                    if let Ok(on_chain_pos) = pos_reader.get_position(&new_pos.to_string()).await {
+                        let (a, b) = pos_reader.calculate_token_amounts(
+                            &on_chain_pos,
+                            pool_state.tick_current,
+                            pool_state.sqrt_price,
+                        );
+                        (Some(a), Some(b), Some(pool_state.price))
+                    } else {
+                        (None, None, None)
+                    }
                 } else {
                     (None, None, None)
                 }
             } else {
-                (None, None, None)
-            }
-        } else {
-            (params.amount_a_after, params.amount_b_after, params.price_ab_after)
-        };
+                (
+                    params.amount_a_after,
+                    params.amount_b_after,
+                    params.price_ab_after,
+                )
+            };
 
         // Record rebalance in lifecycle
         self.lifecycle
@@ -357,12 +355,58 @@ impl RebalanceExecutor {
         result
     }
 
-    /// Collects fees from a position.
-    async fn collect_fees(
+    /// Collect fees only (no rebalance). Used by `Decision::CollectFees` / strategy loop.
+    pub async fn execute_collect_fees_only(
         &self,
         position: &Pubkey,
         pool: &Pubkey,
-    ) -> anyhow::Result<(u64, u64)> {
+    ) -> anyhow::Result<()> {
+        if self.dry_run {
+            info!("Dry run: would collect fees");
+            return Ok(());
+        }
+        self.collect_fees(position, pool).await?;
+        Ok(())
+    }
+
+    /// Full on-chain close (decrease all + collect + close NFT). Used by `Decision::Close`.
+    pub async fn execute_full_close_only(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+    ) -> anyhow::Result<()> {
+        if self.dry_run {
+            info!("Dry run: would close position");
+            return Ok(());
+        }
+        self.close_position(position, pool).await
+    }
+
+    /// Remove `liquidity_amount` from an existing position (partial exit). `token_min_*` = 0 (max slippage).
+    pub async fn execute_partial_decrease(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        liquidity_amount: u128,
+    ) -> anyhow::Result<()> {
+        if liquidity_amount == 0 {
+            anyhow::bail!("liquidity_amount must be > 0");
+        }
+        if self.dry_run {
+            info!(
+                position = %position,
+                liquidity = liquidity_amount,
+                "Dry run: would decrease liquidity"
+            );
+            return Ok(());
+        }
+        self.decrease_liquidity(position, pool, liquidity_amount)
+            .await?;
+        Ok(())
+    }
+
+    /// Collects fees from a position.
+    async fn collect_fees(&self, position: &Pubkey, pool: &Pubkey) -> anyhow::Result<(u64, u64)> {
         let wallet = self.wallet.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot collect fees")
         })?;
@@ -378,16 +422,34 @@ impl RebalanceExecutor {
         Ok((0, 0))
     }
 
-    /// Decreases liquidity from a position.
-    #[allow(dead_code)]
+    /// Decreases liquidity on-chain (`token_min_*` = 0 — set stricter mins when wiring slippage).
     async fn decrease_liquidity(
         &self,
-        _position: &Pubkey,
-        liquidity: u128,
-    ) -> anyhow::Result<u128> {
-        // TODO: Implement actual liquidity decrease via Whirlpool instruction
-        debug!(liquidity = liquidity, "Would decrease liquidity");
-        Ok(liquidity)
+        position: &Pubkey,
+        pool: &Pubkey,
+        liquidity_amount: u128,
+    ) -> anyhow::Result<()> {
+        let wallet = self.wallet.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot decrease liquidity")
+        })?;
+        let orca = WhirlpoolExecutor::new(self.provider.clone());
+        let payer = wallet.keypair();
+        let params = DecreaseLiquidityParams {
+            position: *position,
+            pool: *pool,
+            liquidity_amount,
+            token_min_a: 0,
+            token_min_b: 0,
+        };
+        let res = orca.decrease_liquidity(&params, payer).await?;
+        self.ensure_execution_success("decrease_liquidity", &res)
+            .await?;
+        debug!(
+            position = %position,
+            liquidity = liquidity_amount,
+            "Decrease liquidity submitted"
+        );
+        Ok(())
     }
 
     /// Closes a position.
@@ -399,7 +461,8 @@ impl RebalanceExecutor {
 
         let payer = wallet.keypair();
         let res = orca.close_position(position, pool, payer).await?;
-        self.ensure_execution_success("close_position", &res).await?;
+        self.ensure_execution_success("close_position", &res)
+            .await?;
         debug!(position = %position, "Close position submitted");
         Ok(())
     }
@@ -411,6 +474,54 @@ impl RebalanceExecutor {
         tick_lower: i32,
         tick_upper: i32,
     ) -> anyhow::Result<Pubkey> {
+        self.open_position_with_caps(
+            _pool,
+            tick_lower,
+            tick_upper,
+            u64::MAX,
+            u64::MAX,
+            self.config.max_slippage_bps,
+        )
+        .await
+    }
+
+    /// Opens a new position with explicit token caps and slippage.
+    ///
+    /// In dry-run mode returns the derived Whirlpool position PDA without requiring wallet.
+    pub async fn execute_open_position(
+        &self,
+        pool: &Pubkey,
+        tick_lower: i32,
+        tick_upper: i32,
+        amount_a: u64,
+        amount_b: u64,
+        slippage_bps: u16,
+    ) -> anyhow::Result<Pubkey> {
+        if self.dry_run {
+            return Ok(derive_whirlpool_position_address(
+                pool, tick_lower, tick_upper,
+            ));
+        }
+        self.open_position_with_caps(
+            pool,
+            tick_lower,
+            tick_upper,
+            amount_a,
+            amount_b,
+            slippage_bps,
+        )
+        .await
+    }
+
+    async fn open_position_with_caps(
+        &self,
+        pool: &Pubkey,
+        tick_lower: i32,
+        tick_upper: i32,
+        amount_a: u64,
+        amount_b: u64,
+        slippage_bps: u16,
+    ) -> anyhow::Result<Pubkey> {
         let wallet = self.wallet.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot open position")
         })?;
@@ -418,18 +529,16 @@ impl RebalanceExecutor {
 
         let payer = wallet.keypair();
 
-        let pool = _pool;
-        let new_position = derive_orca_position_pda(pool, tick_lower, tick_upper);
+        let new_position = derive_whirlpool_position_address(pool, tick_lower, tick_upper);
 
         // Send maximal token caps so the program uses the required amounts from wallet balances.
-        // This is a practical first-pass to get end-to-end flow working.
         let params = OpenPositionParams {
             pool: pool.clone(),
             tick_lower,
             tick_upper,
-            amount_a: u64::MAX,
-            amount_b: u64::MAX,
-            slippage_bps: self.config.max_slippage_bps,
+            amount_a,
+            amount_b,
+            slippage_bps,
         };
 
         let res = orca.open_position(&params, payer).await?;
@@ -464,7 +573,11 @@ impl RebalanceExecutor {
 
         // Best-effort post-check through the common transaction manager path.
         // Some providers may not return status immediately for very fresh signatures.
-        if let Err(e) = self.tx_manager.wait_for_confirmation(&result.signature).await {
+        if let Err(e) = self
+            .tx_manager
+            .wait_for_confirmation(&result.signature)
+            .await
+        {
             warn!(
                 operation = op_name,
                 signature = %result.signature,
@@ -489,29 +602,6 @@ fn validate_execution_result(
         return Err(anyhow::anyhow!("{} failed: {}", op_name, msg));
     }
     Ok(())
-}
-
-fn derive_orca_position_pda(pool: &Pubkey, tick_lower: i32, tick_upper: i32) -> Pubkey {
-    // Mirrors the address derivation used in `crates/protocols/src/orca/executor.rs`.
-    let whirlpool_program_id =
-        Pubkey::from_str(WHIRLPOOL_PROGRAM_ID).expect("Valid ORCA Whirlpool program id");
-
-    let (position_mint, _mint_bump) = Pubkey::find_program_address(
-        &[
-            b"position_mint",
-            pool.as_ref(),
-            &tick_lower.to_le_bytes(),
-            &tick_upper.to_le_bytes(),
-        ],
-        &whirlpool_program_id,
-    );
-
-    let (position_pda, _pda_bump) = Pubkey::find_program_address(
-        &[b"position", position_mint.as_ref()],
-        &whirlpool_program_id,
-    );
-
-    position_pda
 }
 
 /// Result of profitability check.
@@ -551,5 +641,42 @@ mod tests {
         let res = ExecutionResult::failure(Signature::default(), "boom".to_string());
         let err = validate_execution_result("open_position", &res).expect_err("must fail");
         assert!(err.to_string().contains("open_position failed: boom"));
+    }
+
+    #[tokio::test]
+    async fn execute_partial_decrease_rejects_zero() {
+        let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+        let tx_manager = Arc::new(TransactionManager::new(
+            provider.clone(),
+            crate::transaction::TransactionConfig::default(),
+        ));
+        let lifecycle = Arc::new(LifecycleTracker::new());
+        let exec =
+            RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
+        let pos = Pubkey::new_unique();
+        let pool = Pubkey::new_unique();
+        let err = exec
+            .execute_partial_decrease(&pos, &pool, 0)
+            .await
+            .expect_err("zero liquidity");
+        assert!(err.to_string().contains("must be > 0"));
+    }
+
+    #[tokio::test]
+    async fn execute_partial_decrease_dry_run_ok_without_wallet() {
+        let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+        let tx_manager = Arc::new(TransactionManager::new(
+            provider.clone(),
+            crate::transaction::TransactionConfig::default(),
+        ));
+        let lifecycle = Arc::new(LifecycleTracker::new());
+        let mut exec =
+            RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
+        exec.set_dry_run(true);
+        let pos = Pubkey::new_unique();
+        let pool = Pubkey::new_unique();
+        exec.execute_partial_decrease(&pos, &pool, 123)
+            .await
+            .expect("dry run should not need wallet");
     }
 }

@@ -10,6 +10,10 @@
 
 // Error types
 pub use crate::error::{ApiError, ApiResult, ErrorResponse};
+pub use crate::events::{
+    BrokerEventBus, EVENT_ALERT_RAISED, EVENT_POSITION_UPDATED, EventBus, EventBusStats,
+    EventEnvelope, InProcessEventBus, publish_with_retry,
+};
 
 // Models
 pub use crate::models::{
@@ -34,7 +38,7 @@ pub use crate::middleware::RateLimiter;
 pub use crate::routes::{create_router, create_versioned_router};
 
 // Services
-pub use crate::services::{PositionService, StrategyService};
+pub use crate::services::{OrcaReadService, OrcaTxService, PositionService, StrategyService};
 
 // Authentication
 pub use crate::auth::{AuthConfig, AuthError, AuthState, Claims, Role};

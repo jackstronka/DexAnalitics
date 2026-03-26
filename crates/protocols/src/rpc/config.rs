@@ -28,7 +28,9 @@ impl Default for RpcConfig {
         // Allow overriding RPC endpoints via environment variables.
         // This is critical for `getTransaction`-heavy workflows (swap decoding) where public
         // endpoints may rate-limit, time out, or disable transaction history.
-        let env_primary = std::env::var("SOLANA_RPC_URL").ok().filter(|s| !s.trim().is_empty());
+        let env_primary = std::env::var("SOLANA_RPC_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         let env_fallbacks = std::env::var("SOLANA_RPC_FALLBACK_URLS")
             .ok()
             .unwrap_or_default();
@@ -45,7 +47,8 @@ impl Default for RpcConfig {
         ]);
 
         Self {
-            primary_url: env_primary.unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string()),
+            primary_url: env_primary
+                .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string()),
             fallback_urls,
             timeout: Duration::from_secs(30),
             max_retries: 3,

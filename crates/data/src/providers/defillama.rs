@@ -89,7 +89,11 @@ impl DefiLlamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("DefiLlama pools error: {} - {}", status, text));
+            return Err(anyhow::anyhow!(
+                "DefiLlama pools error: {} - {}",
+                status,
+                text
+            ));
         }
         let parsed: PoolsResponse = resp.json().await?;
         Ok(parsed.data)
@@ -114,14 +118,21 @@ impl DefiLlamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("DefiLlama chart error: {} - {}", status, text));
+            return Err(anyhow::anyhow!(
+                "DefiLlama chart error: {} - {}",
+                status,
+                text
+            ));
         }
         let parsed: ChartResponse = resp.json().await?;
         let points: Vec<DefiLlamaChartPoint> = parsed.data;
 
         if !disable_cache {
             let _ = fs::create_dir_all(Self::cache_dir());
-            let _ = fs::write(&path, serde_json::to_vec_pretty(&points).unwrap_or_default());
+            let _ = fs::write(
+                &path,
+                serde_json::to_vec_pretty(&points).unwrap_or_default(),
+            );
         }
 
         Ok(points)
@@ -174,4 +185,3 @@ impl DefiLlamaClient {
         Ok(daily)
     }
 }
-

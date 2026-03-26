@@ -87,7 +87,10 @@ impl TransactionManager {
                 let sim_err = sim
                     .error
                     .unwrap_or_else(|| "simulation failed without error details".to_string());
-                return Err(anyhow::anyhow!("Transaction simulation failed: {}", sim_err));
+                return Err(anyhow::anyhow!(
+                    "Transaction simulation failed: {}",
+                    sim_err
+                ));
             }
         }
 
@@ -144,7 +147,10 @@ impl TransactionManager {
                 let sim_err = sim
                     .error
                     .unwrap_or_else(|| "simulation failed without error details".to_string());
-                return Err(anyhow::anyhow!("Transaction simulation failed: {}", sim_err));
+                return Err(anyhow::anyhow!(
+                    "Transaction simulation failed: {}",
+                    sim_err
+                ));
             }
         }
 

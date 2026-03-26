@@ -2,17 +2,17 @@
 //!
 //! Used by both `backtest` (single run) and `backtest-optimize` (grid + rolling windows).
 
+use crate::engine::pricing::{from_base_units, price_ab_human_to_raw, price_to_sqrt_q64};
+use crate::engine::{fees as fee_engine, liquidity};
+use clmm_lp_data::swaps::SwapEvent;
 use clmm_lp_domain::prelude::{Amount, Price, PriceCandle};
 use clmm_lp_simulation::prelude::*;
-use clmm_lp_data::swaps::SwapEvent;
 use primitive_types::U256;
 use rayon::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use crate::engine::{fees as fee_engine, liquidity};
-use crate::engine::pricing::{from_base_units, price_ab_human_to_raw, price_to_sqrt_q64};
 
 /// Per-step data used by simulations.
 #[derive(Clone, Copy, Debug)]
@@ -183,7 +183,8 @@ pub fn build_step_data(
     lp_share_override: Option<Decimal>,
     steps_per_day: Decimal,
 ) -> (Vec<StepData>, Price, f64) {
-    let mut vol_model = ConstantVolume::from_amount(Amount::new(U256::from(1_000_000_000_000u64), 6));
+    let mut vol_model =
+        ConstantVolume::from_amount(Amount::new(U256::from(1_000_000_000_000u64), 6));
     // Determine entry price in USD (for cross-pairs multiply by quote USD).
     let entry_ab = candle_slice
         .first()
@@ -235,9 +236,14 @@ pub fn build_step_data(
                     )
                 } else {
                     let share = lp_share_override.unwrap_or_else(|| {
-                        (capital_dec / daily_tvl).min(Decimal::ONE).max(Decimal::ZERO)
+                        (capital_dec / daily_tvl)
+                            .min(Decimal::ONE)
+                            .max(Decimal::ZERO)
                     });
-                    let day_total = birdeye_day_total.get(&date_key).copied().unwrap_or(Decimal::ZERO);
+                    let day_total = birdeye_day_total
+                        .get(&date_key)
+                        .copied()
+                        .unwrap_or(Decimal::ZERO);
                     let step_vol = if day_total > Decimal::ZERO && *candle_vol_usd > Decimal::ZERO {
                         daily_vol * (*candle_vol_usd / day_total)
                     } else {
@@ -276,10 +282,11 @@ pub fn build_step_data(
 /// Fee realism: total period volume (USD) and expected fees if 100% TIR (volume × share × fee_tier).
 /// Use with simulated fees to check: simulated / expected_100_tir ≈ fee-weighted time-in-range.
 pub fn fee_realism(step_data: &[StepData], fee_rate: Decimal) -> (Decimal, Decimal) {
-    let (total_vol, weighted_vol) = step_data.iter().fold(
-        (Decimal::ZERO, Decimal::ZERO),
-        |(tv, wv), p| (tv + p.step_volume_usd, wv + p.step_volume_usd * p.lp_share),
-    );
+    let (total_vol, weighted_vol) = step_data
+        .iter()
+        .fold((Decimal::ZERO, Decimal::ZERO), |(tv, wv), p| {
+            (tv + p.step_volume_usd, wv + p.step_volume_usd * p.lp_share)
+        });
     let expected_fees_100_tir = weighted_vol * fee_rate;
     (total_vol, expected_fees_100_tir)
 }
@@ -409,10 +416,8 @@ pub fn run_single(
     //
     // This fixes cases where the real token split (value-weighted) is not 50/50 USD.
     let initial_liquidity_l = liquidity_l;
-    let lower_ab_raw_for_hodl =
-        price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
-    let upper_ab_raw_for_hodl =
-        price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
+    let lower_ab_raw_for_hodl = price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
+    let upper_ab_raw_for_hodl = price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
     let entry_ab_raw_for_hodl =
         price_ab_human_to_raw(first.price_ab.value, token_a_decimals, token_b_decimals);
     let sqrt_l_hodl = price_to_sqrt_q64(lower_ab_raw_for_hodl);
@@ -543,8 +548,10 @@ pub fn run_single(
         total_fees += step_fees;
 
         // Current position valuation (excluding fees)
-        let lower_ab_raw = price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
-        let upper_ab_raw = price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
+        let lower_ab_raw =
+            price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
+        let upper_ab_raw =
+            price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
         let price_ab_raw = price_ab_human_to_raw(price_ab, token_a_decimals, token_b_decimals);
 
         let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(lower_ab_raw);
@@ -615,8 +622,7 @@ pub fn run_single(
                 } else if !in_range {
                     true
                 } else {
-                    il_like_step.abs()
-                        >= Decimal::from_f64(max_il).unwrap_or(Decimal::ZERO).abs()
+                    il_like_step.abs() >= Decimal::from_f64(max_il).unwrap_or(Decimal::ZERO).abs()
                 }
             }
             StratConfig::OorRecenter => !in_range,
@@ -684,8 +690,8 @@ pub fn run_single(
             // Benchmark (HODL) is updated at rebalance time as well:
             // we "rebalance" the benchmark holdings to match the LP token composition
             // for the new range, without paying tx costs.
-            let benchmark_capital_now_usd =
-                (hodl_a_entry * p.price_usd.value) + (hodl_b_entry * p.quote_usd.max(Decimal::ZERO));
+            let benchmark_capital_now_usd = (hodl_a_entry * p.price_usd.value)
+                + (hodl_b_entry * p.quote_usd.max(Decimal::ZERO));
 
             // Estimate slippage not from whole position value,
             // but from the delta in token amounts implied by relocating the range.
@@ -817,12 +823,13 @@ pub fn run_single(
                 let sqrt_u_for_bench = price_to_sqrt_q64(upper_ab_raw_for_bench);
                 let sqrt_p_for_bench = price_to_sqrt_q64(price_ab_raw_for_bench);
 
-                let (amt_a_base_bench, amt_b_base_bench) = liquidity::amounts_from_liquidity_at_price(
-                    liquidity_l,
-                    sqrt_l_for_bench,
-                    sqrt_p_for_bench,
-                    sqrt_u_for_bench,
-                );
+                let (amt_a_base_bench, amt_b_base_bench) =
+                    liquidity::amounts_from_liquidity_at_price(
+                        liquidity_l,
+                        sqrt_l_for_bench,
+                        sqrt_p_for_bench,
+                        sqrt_u_for_bench,
+                    );
                 let lp_a = from_base_units(amt_a_base_bench, token_a_decimals);
                 let lp_b = from_base_units(amt_b_base_bench, token_b_decimals);
 
@@ -857,9 +864,12 @@ pub fn run_single(
     let position_value_usd = if position_closed {
         closed_cash_value_usd
     } else {
-        let lower_ab_raw = price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
-        let upper_ab_raw = price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
-        let last_ab_raw = price_ab_human_to_raw(last.price_ab.value, token_a_decimals, token_b_decimals);
+        let lower_ab_raw =
+            price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
+        let upper_ab_raw =
+            price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
+        let last_ab_raw =
+            price_ab_human_to_raw(last.price_ab.value, token_a_decimals, token_b_decimals);
 
         let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(lower_ab_raw);
         let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(upper_ab_raw);
@@ -957,10 +967,7 @@ pub fn run_grid(
 }
 
 fn pct_token_to_ratio(s: &str) -> Option<f64> {
-    s.strip_suffix('%')?
-        .parse::<f64>()
-        .ok()
-        .map(|x| x / 100.0)
+    s.strip_suffix('%')?.parse::<f64>().ok().map(|x| x / 100.0)
 }
 
 fn parse_il_limit_label(label: &str) -> Option<StratConfig> {
@@ -1016,7 +1023,7 @@ pub fn parse_strategy_label(label: &str) -> Option<StratConfig> {
 
 #[cfg(test)]
 mod strat_label_tests {
-    use super::{parse_strategy_label, StratConfig};
+    use super::{StratConfig, parse_strategy_label};
 
     #[test]
     fn parse_periodic_threshold_il() {

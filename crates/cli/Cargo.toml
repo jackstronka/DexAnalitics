@@ -15,6 +15,7 @@ clmm-lp-data = { workspace = true }
 clmm-lp-simulation = { workspace = true }
 clmm-lp-optimization = { workspace = true }
 clmm-lp-protocols = { workspace = true }
+clmm-lp-execution = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 dotenv =  { workspace = true }
@@ -29,6 +30,7 @@ prettytable-rs = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 rand = { workspace = true }
+futures = { workspace = true }
 dirs = "5.0"
 rayon = "1.10"
 spl-token = { workspace = true }

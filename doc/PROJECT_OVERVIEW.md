@@ -1,4 +1,4 @@
-# Project Overview
+# Bociarz LP Strategy Lab — Project Overview
 
 ## Decision and Worklog Docs
 
@@ -11,6 +11,8 @@ For bot direction and historical context of recent work, see:
 ## What this project is
 
 CLMM Liquidity Provider is a Solana strategy optimizer and execution engine for liquidity providers (LPs) operating on Concentrated Liquidity Market Makers (CLMMs).
+
+Async communication layer v2 (event-bus contract, decision matrix NATS/Redis/Kafka, rollout modes) is documented in `doc/ASYNC_COMMUNICATION_LAYER.md`.
 
 It supports multiple venues:
 - Orca Whirlpool
@@ -34,6 +36,30 @@ The workspace is separated by responsibility:
 - `clmm-lp-data`: external data providers and local repositories (Birdeye/Jupiter/Dune/swap events)
 - `clmm-lp-execution`: live monitoring, strategy execution, scheduler scaffolding
 - `clmm-lp-api` and `clmm-lp-cli`: user interfaces (REST/Web + CLI commands)
+
+## Periodic `backtest-optimize`, artifacts, and AI agent layer
+
+Two complementary ways to refresh grid results and push them into a running bot:
+
+1. **In-process (`StrategyService` in `clmm-lp-api`)** — If your integration calls `StrategyService::start_strategy` (not the minimal HTTP handler path), strategy `parameters` may include `optimize_interval_secs`, `optimize_command`, and `optimize_result_json_path`. That spawns `clmm-lp-cli backtest-optimize` on a timer and applies `--optimize-result-json` via `apply_optimize_result_json` (same code path as periodic optimize in `crates/api/src/services/strategy_service.rs`).
+
+2. **External scheduler + HTTP** — Run `backtest-optimize` on a cron/Task Scheduler with `--optimize-result-json` (and optionally `--optimize-result-json-copy-dir` for timestamped `latest.json` + history). Then call **`POST /api/v1/strategies/{id}/apply-optimize-result`** with either a raw [`OptimizeResultFile`](crates/domain/src/optimize_result.rs) JSON or an agent envelope `{ "decision": AgentDecision, "baseline_optimize_result": ... }`. Optional risk cap: `parameters.agent_max_width_pct_delta` enforces `|Δ winner.width_pct|` vs baseline when using the envelope. Types: [`AgentDecision`](crates/domain/src/agent_decision.rs), validation in `clmm-lp-execution::agent_decision`.
+
+The HTTP `start_strategy` handler in `crates/api/src/handlers/strategies.rs` is a lighter path; use `StrategyService` or the apply endpoint above when you need the full optimize/apply pipeline.
+
+### Who may apply grid results (`optimize_apply_policy`)
+
+Pick one policy per strategy so operators and agents do not fight over the executor:
+
+| Policy (`parameters.optimize_apply_policy`) | Periodic subprocess (`optimize_interval_secs`) | `POST .../apply-optimize-result` |
+| --- | --- | --- |
+| `periodic_subprocess` | Yes (only this path applies) | **409** — use for subprocess-only deployments |
+| `external_http` | Must be **0** when using [`StrategyService`](crates/api/src/services/strategy_service.rs) (validated at start) | Yes (cron/agent applies) |
+| `combined` (default) | Optional | Yes — shares per-strategy `optimization_busy` with the subprocess so only one apply runs at a time |
+
+**Recommendation-only agent output:** send `AgentDecision` with `approved: false`; the API returns 200 and leaves the executor unchanged (no busy lock).
+
+**Locks:** `AppState.optimization_busy` serializes HTTP apply with the periodic subprocess cycle for the same strategy ID when using `combined`.
 
 ## Data flow for fees (CRON -> snapshot-fees -> optimizer)
 
@@ -70,10 +96,12 @@ Key commands live in `crates/cli/src/main.rs`:
   - `SnapshotRunCuratedAll`
   - `SnapshotReadiness` (audits if snapshot data covers fee tiers)
 - Swap stream collection (P1):
-  - `SwapsSyncCuratedAll` (raw signatures)
+  - `SwapsSyncCuratedAll` (raw signatures; optional paged pull via `--max-pages`)
+  - `SwapsSubscribeMentions` (WebSocket `logsSubscribe` by `mentions`; supports `--mentions-preset orca|raydium|meteora`; near-real-time raw signatures)
   - `SwapsEnrichCuratedAll` → `decoded_swaps.jsonl` (vault deltas + direction)
   - `SwapsDecodeAudit` (quality report)
   - `DataHealthCheck` (staleness + decode OK%)
+  - `OpsIngestCycle` (automation wrapper: snapshots → sync → enrich → audit → health-check; saves JSON report in `data/reports/`)
 - Backtesting/optimization:
   - `Backtest`
   - `BacktestOptimize` (grid search over ranges + default strategy set; opcjonalnie lokalne `data/swaps` gdy brak Dune)
@@ -101,6 +129,8 @@ Swap-level cache:
 - `data/swaps/meteora/<pool_address>/swaps.jsonl` + `decoded_swaps.jsonl`
 - `data/dune-cache/*`
 - `data/dune-swaps/*` (if/when ETL output is used)
+
+Conceptual background on **how Solana indexing works** (why a fungible token is not a “network-wide sniffer”, and how HTTP RPC relates to streams such as Geyser) lives in [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md).
 
 ## Terminology
 

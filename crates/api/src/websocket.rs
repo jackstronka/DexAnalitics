@@ -1,5 +1,6 @@
 //! WebSocket handlers for real-time updates.
 
+use crate::events::{EVENT_ALERT_RAISED, EVENT_POSITION_UPDATED};
 use crate::state::AppState;
 use axum::{
     extract::{
@@ -20,15 +21,15 @@ pub async fn positions_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -
 async fn handle_positions_ws(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Subscribe to position updates
-    let mut rx = state.subscribe_positions();
+    // Subscribe to position updates via async event bus.
+    let mut rx = state.event_bus.subscribe(EVENT_POSITION_UPDATED);
 
     info!("Position WebSocket client connected");
 
     // Spawn task to forward updates to client
     let send_task = tokio::spawn(async move {
-        while let Ok(update) = rx.recv().await {
-            let msg = serde_json::to_string(&update).unwrap_or_default();
+        while let Ok(event) = rx.recv().await {
+            let msg = serde_json::to_string(&event.payload).unwrap_or_default();
             if sender.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
@@ -74,15 +75,15 @@ pub async fn alerts_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> R
 async fn handle_alerts_ws(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Subscribe to alert updates
-    let mut rx = state.subscribe_alerts();
+    // Subscribe to alert updates via async event bus.
+    let mut rx = state.event_bus.subscribe(EVENT_ALERT_RAISED);
 
     info!("Alerts WebSocket client connected");
 
     // Spawn task to forward alerts to client
     let send_task = tokio::spawn(async move {
-        while let Ok(alert) = rx.recv().await {
-            let msg = serde_json::to_string(&alert).unwrap_or_default();
+        while let Ok(event) = rx.recv().await {
+            let msg = serde_json::to_string(&event.payload).unwrap_or_default();
             if sender.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }

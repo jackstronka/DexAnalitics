@@ -205,7 +205,11 @@ impl DexscreenerClient {
             chain.as_str(),
             mint
         );
-        let cache_key = format!("token_pairs_{}_{}", chain.as_str(), sanitize_cache_key(mint));
+        let cache_key = format!(
+            "token_pairs_{}_{}",
+            chain.as_str(),
+            sanitize_cache_key(mint)
+        );
         self.get_json_cached(&cache_key, &url).await
     }
 
@@ -228,4 +232,3 @@ fn sanitize_cache_key(s: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
 }
-

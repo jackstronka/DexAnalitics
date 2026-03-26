@@ -1,0 +1,207 @@
+NOTATKA (2026-03-26)
+Temat: AI prowadzący / goście (realistyczny vs animowany) + 24/7 live na YouTube (sam głos)
+Status: pomysł / research narzędzi i kosztów, niezwiązane z repo (plik pomocniczy)
+
+====================================================================
+1) Cel i “co jest możliwe”
+====================================================================
+Da się zbudować:
+- osobny kanał z realistyczną “pełną postacią” (host + goście AI) w stylu studia TV
+- osobny kanał z animowaną “pełną postacią” (host + goście AI) w stylu VTuber/animacja
+- osobny tryb: 24/7 “radio-bot” (sam głos): czyta/omawia newsy, posty, komentuje na bieżąco,
+  z ciszą i muzyką pomiędzy wejściami
+
+W praktyce to zawsze jest zestaw klocków:
+(A) postać / wygląd (realistyczna lub stylizowana)
+(B) animacja (twarz + full-body) i/lub tracking
+(C) głos (TTS)
+(D) “agent” (LLM) jako scenarzysta/moderator/komentator
+(E) realizka live (OBS/vMix) + automatyzacja przełączania scen/overlay
+
+====================================================================
+1.1) Ważne doprecyzowanie: “pakiet” vs “minuty” (dlaczego koszty mogą wyglądać myląco)
+====================================================================
+W tej notatce są dwa typy kosztów:
+
+1) Narzędzia “postać/animacja/render” (zwykle abonament lub jednorazowo):
+   - Animaze / VTube Studio / Live2D / Reallusion / Unreal Engine
+   Te narzędzia:
+   - robią avatar, tracking i lip-sync (ruszanie ust) z PODANEGO audio
+   - ale zazwyczaj NIE sprzedają “minut mówienia” jako usługi
+   - czyli nie generują Ci głosu “z niczego” — audio musisz dostarczyć (TTS albo mikrofon).
+
+2) Usługa “głos” (TTS) sprzedawana w minutach/kredytach:
+   - ElevenLabs (i podobne)
+   Tu koszt rośnie prawie liniowo z tym, ile minut agent faktycznie mówi.
+
+Dlatego poprawny wzór na koszt “mówiącej postaci” jest prawie zawsze:
+  koszt_mies = koszt_postaci/animacji + koszt_TTS(minuty) + (opcjonalnie) koszt_LLM
+
+Wniosek:
+- “Sam głos 24/7” może wyjść DROŻEJ tylko dlatego, że policzony scenariusz ma bardzo dużo minut mowy.
+- “Animowana/realistyczna postać mówiąca” przy tych samych minutach mowy kosztuje prawie tyle samo co “sam głos”,
+  tylko z małym narzutem na software postaci (np. +$3.99 Animaze albo +$129 Reallusion).
+
+====================================================================
+2) Live na YouTube: jak agent może “obsługiwać” stream
+====================================================================
+Najprostszy stabilny wariant:
+- OBS Studio jako mikser (sceny, audio, overlay, playout muzyki/jingli)
+- agent jako “reżyser”:
+  - generuje tekst wejść i komentarzy
+  - decyduje kiedy wejść (harmonogram + warunek “jest nowy temat”)
+  - steruje OBS (np. zmiana sceny, pokazanie paska z tytułem tematu) przez OBS WebSocket
+
+Warianty źródeł treści:
+- stabilne: RSS + oficjalne API (najmniej awarii)
+- “browser-agent”: wchodzi na WWW i wyciąga tytuły/lead (ryzyko captcha/paywall/ban)
+- X/Twitter: najlepiej przez oficjalne integracje/API; scraping jest kruchy i bywa problematyczny
+
+Ważne praktyki (ryzyko prawne/ToS):
+- na streamie bezpieczniej: tytuł + krótkie cytaty + streszczenie własnymi słowami + link do źródła
+- unikać czytania całych artykułów “word for word”
+
+====================================================================
+3) Stack: ANIMOWANY prowadzący (pełna postać) – live
+====================================================================
+Opcja 3D (najprostsza na start, tania w utrzymaniu):
+- VRoid Studio (postać 3D): $0
+- Animaze Plus (avatar runtime + tracking, watermark off itp.): $3.99 / miesiąc
+- ElevenLabs (TTS, głos postaci): patrz sekcja “koszty TTS”
+- OBS Studio (stream): $0
+
+Koszt “software” bez TTS (miesięcznie): ~$3.99
+
+Opcja 2D Live2D (mocna ekspresja, popularne VTuber):
+- Live2D Cubism PRO (Indie, monthly): $13.04 / miesiąc
+- VTube Studio (runtime/tracking): app $0
+  - “Remove Watermark” DLC (Steam): $14.99 jednorazowo (typowo kupowane)
+- ElevenLabs (TTS): patrz sekcja “koszty TTS”
+- OBS Studio: $0
+
+Koszt “software” bez TTS (miesięcznie): ~$13.04
+Koszt jednorazowy: $14.99
+
+====================================================================
+4) Stack: REALISTYCZNY prowadzący (pełna postać) – live
+====================================================================
+Wariant “virtual production” (studio TV w 3D, kamery, światło):
+- Unreal Engine + MetaHuman (scena + realistyczna postać)
+  - koszt UE zależy od licencji i progu przychodów (patrz sekcja kosztów UE)
+- Reallusion 3D Suite 365 (Character Creator + iClone, pipeline postaci/animacji): $129 / miesiąc
+- ElevenLabs (TTS): patrz sekcja “koszty TTS”
+- OBS Studio: $0
+- (opcjonalnie) After Effects: do postprodukcji/overlay/kompozycji (jeśli potrzebne)
+
+Koszt “software” bez TTS i bez UE (miesięcznie): $129
+
+Uwagi praktyczne:
+- realistyczny full-body wygląda najlepiej, gdy masz spójny pipeline: postać + rig + animacja + render.
+- do rozmów “host + wielu gości” dochodzi zarządzanie wieloma postaciami, ujęciami i głosami.
+
+====================================================================
+5) Stack: SAM GŁOS 24/7 (czytanie/omawianie newsów) – live
+====================================================================
+Minimalny, stabilny wariant:
+- Collector: RSS/API + deduplikacja + scoring tematów + blacklist źródeł
+- LLM: streszczenie + komentarz + skrypt prowadzącego
+- TTS: ElevenLabs (1 głos na start; później wiele postaci)
+- OBS: plansza + muzyka + audio z TTS
+- Watchdog: restart i alerty (24/7)
+
+Kluczowe ustawienie budżetu:
+- stream może być 24/7, ale agent NIE musi mówić 24/7.
+  Najczęściej robi się wejścia co X minut + cisza/muzyka pomiędzy.
+
+====================================================================
+6) Koszty – PODSUMOWANIE STACKÓW (miesięcznie)
+====================================================================
+Poniżej koszty narzędzi (bez podatków/VAT, dla 1 osoby/stanowiska, ceny mogą zależeć od regionu).
+Największy koszt w modelu “mówienie na żywo” to TTS (minuty).
+
+6.1 Animowany (3D: VRoid + Animaze + OBS) – bez TTS
+- $3.99 / mies.
+
+6.2 Animowany (2D: Live2D + VTube Studio + OBS) – bez TTS
+- $13.04 / mies. + $14.99 jednorazowo
+
+6.3 Realistyczny (Reallusion + OBS) – bez TTS, bez UE
+- $129 / mies.
+
+6.4 TTS (ElevenLabs) – “wąskie gardło”
+Z cennika publicznego (orientacyjnie ilość minut w planach):
+- Creator: $22 / mies. ~ 100 min
+- Pro:     $99 / mies. ~ 500 min
+- Scale:   $330 / mies. ~ 2,000 min
+- Business:$1,320 / mies. ~ 11,000 min
+Uwaga: przy przekroczeniu limitów dochodzą dopłaty za dodatkowe minuty (zależnie od planu).
+
+6.5 Unreal Engine / MetaHuman – koszt warunkowy
+- jeśli < $1M rocznego przychodu: zwykle $0 / mies. (UE/MetaHuman)
+- jeśli > $1M i zastosowanie podpada pod seat-fee: $1,850 / seat / rok ~= $154.17 / mies. / osoba
+
+====================================================================
+7) Tryby 24/7 (sam głos) – minuty mowy i “jaki plan TTS”
+====================================================================
+Definicja: agent mówi przez N minut co K minut; reszta to muzyka/cisza.
+Miesiąc = 30 dni.
+Wzór:
+  min/mies = (1440/K) * N * 30
+
+Tryby przykładowe:
+
+1) 1 min co 60 min:
+  24 wejścia/dzień -> 720 min/mies
+  TTS: co najmniej Scale ($330), bo Pro (500) nie starcza.
+
+2) 1 min co 30 min:
+  48 wejść/dzień -> 1,440 min/mies
+  TTS: Scale ($330)
+
+3) 2 min co 30 min (albo 1 min co 15 min):
+  96 wejść/dzień -> 2,880 min/mies
+  TTS: Business ($1,320) (Scale 2,000 nie starcza)
+
+4) 2 min co 15 min:
+  192 wejść/dzień -> 5,760 min/mies
+  TTS: Business ($1,320)
+
+5) 3 min co 15 min (albo 2 min co 10 min):
+  288 wejść/dzień -> 8,640 min/mies
+  TTS: Business ($1,320)
+
+6) 3 min co 10 min:
+  432 wejścia/dzień -> 12,960 min/mies
+  TTS: Business + dopłaty / wyższy próg (jeśli chcesz “twardo” w limicie).
+
+Wniosek budżetowy:
+- jeśli chcesz “często gadać”, koszty TTS rosną bardzo szybko.
+- najbardziej ekonomiczne jest 1–2 min wejścia co 30–60 min na start.
+
+====================================================================
+8) Rekomendacje startowe (żeby działało i nie zjadało budżetu)
+====================================================================
+Start 24/7 (sam głos):
+- wejścia 1–2 min co 30–60 min
+- RSS/API jako główne źródła, WWW/X jako dodatki (fallback)
+- tytuł + streszczenie + komentarz, nie “pełny odczyt” artykułu
+- watchdog + budżet limitów + blacklist źródeł
+
+Start kanału animowanego:
+- 3D (VRoid + Animaze) jest najtańszy w utrzymaniu i szybki do odpalenia.
+
+Start kanału realistycznego:
+- przygotuj pipeline postaci/animacji (Reallusion + UE) i dopiero potem rozbudowuj o wielu gości.
+
+====================================================================
+9) Linki referencyjne do cen użytych w notatce (publiczne)
+====================================================================
+- HeyGen pricing: https://www.heygen.com/pricing
+- Synthesia pricing: https://synthesia.io/pricing
+- ElevenLabs pricing: https://elevenlabs.io/pricing
+- Live2D Store (Cubism monthly): https://store.live2d.com/en/
+- Animaze subscriptions: https://www.animaze.us/manual/appmanual/subs
+- VTube Studio DLC (Remove Watermark): https://store.steampowered.com/app/1520620/VTube_Studio__Remove_Watermark/
+- MetaHuman license: https://metahuman.com/en-US/license
+- Reallusion pricing (subscription): https://www.reallusion.com/plan-and-pricing/individual/subscription
+

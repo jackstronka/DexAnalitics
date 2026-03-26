@@ -25,4 +25,3 @@ pub fn hodl_value_50_50_usd(step_data: &[StepData], capital_usd: Decimal) -> Dec
     let (amt_a, amt_b) = hodl_amounts_50_50_usd(step_data, capital_usd);
     (amt_a * last.price_usd.value) + (amt_b * last.quote_usd.max(Decimal::ZERO))
 }
-

@@ -140,7 +140,8 @@ impl PositionTracker {
         let fees_since_segment = self.cumulative_fees - self.segment_cumulative_fees;
         let costs_since_segment = self.total_rebalance_cost - self.segment_rebalance_cost;
         let il_amount = self.segment_capital * il_pct;
-        let position_value = self.segment_capital + il_amount + fees_since_segment - costs_since_segment;
+        let position_value =
+            self.segment_capital + il_amount + fees_since_segment - costs_since_segment;
         let net_pnl = position_value - self.initial_capital;
 
         // Check if in range
@@ -193,7 +194,12 @@ impl PositionTracker {
     }
 
     /// Executes a rebalance to a new range and starts a new segment for IL.
-    fn execute_rebalance(&mut self, new_range: PriceRange, rebalance_price: Price, position_value_before_cost: Decimal) {
+    fn execute_rebalance(
+        &mut self,
+        new_range: PriceRange,
+        rebalance_price: Price,
+        position_value_before_cost: Decimal,
+    ) {
         let capital_after_cost = position_value_before_cost - self.rebalance_cost;
         self.segment_entry_price = rebalance_price;
         self.segment_capital = capital_after_cost;
@@ -245,7 +251,8 @@ impl PositionTracker {
         // 50/50 USD split across both legs (A and B) using their USD prices.
         let hodl_value = self.initial_capital;
         let vs_hodl = final_value - hodl_value;
-        let position_value_before_fees = final_value - self.cumulative_fees + self.total_rebalance_cost;
+        let position_value_before_fees =
+            final_value - self.cumulative_fees + self.total_rebalance_cost;
         let il_vs_hodl_ex_fees_pct = if self.initial_capital > Decimal::ZERO {
             (position_value_before_fees - hodl_value) / self.initial_capital
         } else {

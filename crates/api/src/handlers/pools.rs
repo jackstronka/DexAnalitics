@@ -7,7 +7,10 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaRestClient};
 use clmm_lp_protocols::prelude::WhirlpoolReader;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
@@ -21,11 +24,43 @@ use std::str::FromStr;
     )
 )]
 pub async fn list_pools(State(_state): State<AppState>) -> ApiResult<Json<ListPoolsResponse>> {
-    // TODO: Implement pool discovery/listing
-    // For now, return empty list
+    let base_url = std::env::var("ORCA_PUBLIC_API_BASE_URL")
+        .unwrap_or_else(|_| "https://api.orca.so/v2/solana".to_string());
+    let client = OrcaRestClient::new(base_url);
+
+    let q = OrcaListPoolsQuery {
+        size: Some(50),
+        stats: Some("24h".to_string()),
+        ..Default::default()
+    };
+    let paged = client.list_pools(q).await.map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let pools = paged
+        .data
+        .into_iter()
+        .map(|p| PoolResponse {
+            address: p.address,
+            protocol: "orca_whirlpool".to_string(),
+            token_mint_a: p.token_mint_a,
+            token_mint_b: p.token_mint_b,
+            current_tick: p.tick_current_index,
+            tick_spacing: p.tick_spacing as i32,
+            price: Decimal::from_str_exact(&p.price).unwrap_or(Decimal::ZERO),
+            liquidity: p.liquidity,
+            fee_rate_bps: p.fee_rate,
+            volume_24h_usd: None,
+            tvl_usd: p
+                .tvl_usdc
+                .parse::<f64>()
+                .ok()
+                .and_then(Decimal::from_f64),
+            apy_estimate: None,
+        })
+        .collect::<Vec<_>>();
+
     Ok(Json(ListPoolsResponse {
-        pools: vec![],
-        total: 0,
+        total: pools.len(),
+        pools,
     }))
 }
 

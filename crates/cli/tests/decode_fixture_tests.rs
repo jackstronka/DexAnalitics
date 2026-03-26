@@ -43,4 +43,3 @@ fn meteora_fixture_decodes_lb_pair() -> anyhow::Result<()> {
     clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&data)?;
     Ok(())
 }
-

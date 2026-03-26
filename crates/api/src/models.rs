@@ -1,5 +1,7 @@
 //! API request and response models.
 
+use clmm_lp_domain::agent_decision::AgentDecision;
+use clmm_lp_domain::optimize_result::OptimizeResultFile;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -40,6 +42,13 @@ pub struct RebalanceRequest {
     /// Slippage tolerance in basis points.
     #[serde(default = "default_slippage")]
     pub slippage_tolerance_bps: u16,
+}
+
+/// Request to decrease liquidity in a position.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DecreaseLiquidityRequest {
+    /// Liquidity amount to remove.
+    pub liquidity_amount: u128,
 }
 
 /// Position response.
@@ -122,8 +131,121 @@ pub struct ListPositionsResponse {
 }
 
 // ============================================================================
+// Auth (Phantom) Models
+// ============================================================================
+
+/// Request a Phantom signMessage challenge.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PhantomChallengeRequest {
+    /// Wallet public key (base58).
+    pub wallet_pubkey: String,
+}
+
+/// Challenge response to be signed by Phantom (`signMessage`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PhantomChallengeResponse {
+    /// Random nonce (base58/uuid).
+    pub nonce: String,
+    /// Message bytes (UTF-8) to sign.
+    pub message: String,
+    /// Expiration time (Unix timestamp).
+    pub expires_at: u64,
+}
+
+/// Verify Phantom signature and create a short-lived session token.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PhantomVerifyRequest {
+    /// Wallet public key (base58).
+    pub wallet_pubkey: String,
+    /// Nonce previously issued by challenge.
+    pub nonce: String,
+    /// Signature over the challenge message (base58).
+    pub signature: String,
+}
+
+/// JWT session response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PhantomSessionResponse {
+    /// Bearer token.
+    pub token: String,
+    /// Seconds until expiry.
+    pub expires_in_secs: u64,
+}
+
+/// Build unsigned tx request for position operations.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BuildUnsignedTxRequest {
+    /// Wallet public key that will sign and pay fees.
+    pub wallet_pubkey: String,
+    /// Position address if operation requires one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_address: Option<String>,
+    /// Pool address if operation requires one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
+    /// Optional amount A.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_a: Option<u64>,
+    /// Optional amount B.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_b: Option<u64>,
+    /// Optional liquidity amount.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquidity_amount: Option<u128>,
+    /// Optional slippage tolerance in bps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u16>,
+
+    /// Optional Whirlpool tick lower bound (required for `open` build).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_lower: Option<i32>,
+
+    /// Optional Whirlpool tick upper bound (required for `open` build).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_upper: Option<i32>,
+}
+
+/// Unsigned tx response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BuildUnsignedTxResponse {
+    /// Base64 serialized transaction.
+    pub unsigned_tx_base64: String,
+    /// Correlation identifier for audit.
+    pub correlation_id: String,
+    /// Programs expected in message.
+    pub expected_program_ids: Vec<String>,
+}
+
+/// Submit signed tx request.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SubmitSignedTxRequest {
+    /// Base64 serialized signed transaction.
+    pub signed_tx_base64: String,
+}
+
+/// Submit signed tx response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SubmitSignedTxResponse {
+    /// Signature returned by RPC.
+    pub signature: String,
+}
+
+// ============================================================================
 // Strategy Models
 // ============================================================================
+
+/// Who may apply `OptimizeResultFile` updates from grid search (periodic subprocess vs HTTP vs both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OptimizeApplyPolicy {
+    /// Only the in-process periodic `backtest-optimize` subprocess may apply; `POST /apply-optimize-result` returns 409.
+    PeriodicSubprocess,
+    /// Only `POST /apply-optimize-result` applies; set `optimize_interval_secs` to 0 when using [`crate::services::StrategyService`].
+    ExternalHttp,
+    /// Subprocess and HTTP may both apply; shared per-strategy lock serializes with the subprocess busy flag.
+    #[default]
+    Combined,
+}
 
 /// Request to create a strategy.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -163,7 +285,7 @@ pub enum StrategyType {
 }
 
 /// Strategy parameters.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct StrategyParameters {
     /// Tick range width.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +325,33 @@ pub struct StrategyParameters {
     /// Append IL / rebalance ledger lines (JSONL) to this file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub il_ledger_path: Option<String>,
+    /// When using `POST .../apply-optimize-result` with an agent envelope, cap `|Δ winner.width_pct|` vs `baseline_optimize_result` (same units as backtest: fraction, e.g. `0.02` = 2 percentage points).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_max_width_pct_delta: Option<f64>,
+    /// Whether periodic subprocess, external HTTP apply, or both may update the executor from grid results (see `OptimizeApplyPolicy`).
+    #[serde(default)]
+    pub optimize_apply_policy: OptimizeApplyPolicy,
+}
+
+/// Agent envelope for [`ApplyOptimizeResultRequest::Agent`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentApplyEnvelope {
+    /// Approval + optional full `OptimizeResultFile` to apply.
+    pub decision: AgentDecision,
+    /// Baseline grid result for optional `agent_max_width_pct_delta` checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_optimize_result: Option<OptimizeResultFile>,
+}
+
+/// Body for `POST /strategies/{id}/apply-optimize-result`: raw optimize JSON or agent envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ApplyOptimizeResultRequest {
+    /// Structured agent decision (try this variant first in JSON; see `AgentDecision`).
+    Agent(AgentApplyEnvelope),
+    /// Direct `OptimizeResultFile` from `backtest-optimize --optimize-result-json`.
+    Direct(OptimizeResultFile),
 }
 
 /// Strategy response.
@@ -312,6 +461,50 @@ pub struct ListPoolsResponse {
     pub pools: Vec<PoolResponse>,
     /// Total count.
     pub total: usize,
+}
+
+/// Orca lock info (proxy of Orca Public REST `/lock/{address}`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaLockInfoResponse {
+    pub name: String,
+    pub locked_percentage: String,
+}
+
+/// Orca lock info response wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaLockResponse {
+    pub address: String,
+    pub locks: Vec<OrcaLockInfoResponse>,
+}
+
+/// Orca token response (proxy of Orca Public REST `/tokens*`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaTokenResponse {
+    pub mint: String,
+    pub symbol: Option<String>,
+    pub name: Option<String>,
+    pub decimals: Option<u8>,
+    pub verified: Option<bool>,
+    #[schema(value_type = Option<String>)]
+    pub price_usdc: Option<Decimal>,
+}
+
+/// Orca token list response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaTokenListResponse {
+    pub tokens: Vec<OrcaTokenResponse>,
+    pub total: usize,
+}
+
+/// Orca protocol stats response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaProtocolResponse {
+    #[schema(value_type = Option<String>)]
+    pub tvl_usdc: Option<Decimal>,
+    #[schema(value_type = Option<String>)]
+    pub volume_24h_usdc: Option<Decimal>,
+    #[schema(value_type = Option<String>)]
+    pub volume_7d_usdc: Option<Decimal>,
 }
 
 /// Pool state response.
@@ -497,6 +690,19 @@ pub struct MetricsResponse {
     pub positions_monitored: u32,
     /// Strategies running.
     pub strategies_running: u32,
+    /// Event bus metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_bus: Option<EventBusMetricsResponse>,
+}
+
+/// Event bus operational metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EventBusMetricsResponse {
+    pub published: u64,
+    pub retries: u64,
+    pub duplicates: u64,
+    pub failed: u64,
+    pub dlq_size: usize,
 }
 
 // ============================================================================
@@ -535,5 +741,16 @@ impl MessageResponse {
         Self {
             message: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentApplyEnvelope;
+
+    #[test]
+    fn agent_apply_envelope_rejects_unknown_fields() {
+        let j = r#"{"decision":{"schema_version":1,"approved":false},"unknown_extra":1}"#;
+        assert!(serde_json::from_str::<AgentApplyEnvelope>(j).is_err());
     }
 }

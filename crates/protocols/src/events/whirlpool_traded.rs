@@ -28,7 +28,10 @@ pub struct WhirlpoolTradedEvent {
 
 /// Decode the first `Traded` event in logs whose `whirlpool` matches `pool_address`.
 #[must_use]
-pub fn parse_traded_event_for_pool(logs: &[String], pool_address: &str) -> Option<WhirlpoolTradedEvent> {
+pub fn parse_traded_event_for_pool(
+    logs: &[String],
+    pool_address: &str,
+) -> Option<WhirlpoolTradedEvent> {
     let pool = Pubkey::from_str(pool_address).ok()?;
     for line in logs {
         let rest = line
@@ -53,7 +56,9 @@ pub fn parse_traded_event_for_pool(logs: &[String], pool_address: &str) -> Optio
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s.trim()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .ok()
 }
 
 #[cfg(test)]

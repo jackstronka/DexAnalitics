@@ -10,14 +10,14 @@ pub mod prelude;
 
 /// Event fetching and parsing.
 pub mod events;
+/// Meteora DLMM protocol adapter (bin-based).
+pub mod meteora;
 /// Orca protocol adapter.
 pub mod orca;
 /// Data parsers.
 pub mod parsers;
 /// Raydium protocol adapter.
 pub mod raydium;
-/// Meteora DLMM protocol adapter (bin-based).
-pub mod meteora;
 /// RPC provider with health checks and fallback.
 pub mod rpc;
 /// Solana client wrapper.

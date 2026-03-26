@@ -1,4 +1,7 @@
-# CLMM Liquidity Provider (aktualny stan projektu)
+# Bociarz LP Strategy Lab (aktualny stan projektu)
+
+Ten projekt bazuje na `joaquinbejar/CLMM-Liquidity-Provider` i jest udostępniany na licencji MIT (z zachowaniem `LICENSE`).
+Rozwijany i utrzymywany przez **Bociarz** jako niezależny fork/derywat.
 
 Repozytorium ewoluowało: obecnie to przede wszystkim **workspace Rust** do analizy i backtestów LP na Solanie, z naciskiem na:
 

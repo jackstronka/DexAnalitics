@@ -26,7 +26,10 @@ pub fn dune_swaps_query_id(name: &str) -> &str {
 /// Fetch Dune TVL and volume maps for a pool. Returns (None, None) if empty or missing.
 pub async fn fetch_dune_tvl_volume(
     pool: &str,
-) -> Result<(Option<HashMap<String, Decimal>>, Option<HashMap<String, Decimal>>)> {
+) -> Result<(
+    Option<HashMap<String, Decimal>>,
+    Option<HashMap<String, Decimal>>,
+)> {
     let dune = DuneClient::from_env()?;
     let (tvl_map, vol_map) = dune.fetch_tvl_volume_maps(pool).await?;
     Ok(if tvl_map.is_empty() || vol_map.is_empty() {
@@ -42,7 +45,14 @@ pub async fn fetch_pool_state(
     _token_a_decimals_guess: u8,
     _token_b_decimals_guess: u8,
     use_cross_pair: bool,
-) -> Result<(Option<u128>, Option<Decimal>, u8, u8, Option<String>, Option<String>)> {
+) -> Result<(
+    Option<u128>,
+    Option<Decimal>,
+    u8,
+    u8,
+    Option<String>,
+    Option<String>,
+)> {
     let rpc = Arc::new(RpcProvider::mainnet());
     let reader = WhirlpoolReader::new(rpc.clone());
     let state = reader.get_pool_state(pool).await?;
@@ -71,7 +81,10 @@ pub fn filter_swaps_for_pool(
 ) -> Vec<SwapEvent> {
     let va = token_vault_a.unwrap_or_default();
     let vb = token_vault_b.unwrap_or_default();
-    let use_vaults = !va.is_empty() && !vb.is_empty() && va != "11111111111111111111111111111111" && vb != "11111111111111111111111111111111";
+    let use_vaults = !va.is_empty()
+        && !vb.is_empty()
+        && va != "11111111111111111111111111111111"
+        && vb != "11111111111111111111111111111111";
 
     swaps
         .into_iter()
@@ -80,8 +93,10 @@ pub fn filter_swaps_for_pool(
                 (s.token_sold_vault == va && s.token_bought_vault == vb)
                     || (s.token_sold_vault == vb && s.token_bought_vault == va)
             } else {
-                (s.token_sold_mint_address == token_mint_a && s.token_bought_mint_address == token_mint_b)
-                    || (s.token_sold_mint_address == token_mint_b && s.token_bought_mint_address == token_mint_a)
+                (s.token_sold_mint_address == token_mint_a
+                    && s.token_bought_mint_address == token_mint_b)
+                    || (s.token_sold_mint_address == token_mint_b
+                        && s.token_bought_mint_address == token_mint_a)
             }
         })
         .collect()
@@ -91,7 +106,10 @@ pub fn filter_swaps_for_pool(
 pub async fn fetch_swaps_for_optimize(query_arg: &str) -> Result<Option<Vec<SwapEvent>>> {
     let query_id = dune_swaps_query_id(query_arg);
     let dune = DuneClient::from_env_swaps_only()?;
-    println!("📡 Fetching Dune swaps (query {}) for fee calculation...", query_id);
+    println!(
+        "📡 Fetching Dune swaps (query {}) for fee calculation...",
+        query_id
+    );
     Ok(Some(dune.fetch_swaps(query_id).await?))
 }
 

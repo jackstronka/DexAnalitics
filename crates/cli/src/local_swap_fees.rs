@@ -79,10 +79,7 @@ pub fn distribute_pool_fees_by_tx_counts(
     if total_count == 0 {
         return None;
     }
-    let total_pool_fees: Decimal = step_data
-        .iter()
-        .map(|p| p.step_volume_usd * fee_rate)
-        .sum();
+    let total_pool_fees: Decimal = step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
     if total_pool_fees <= Decimal::ZERO {
         return None;
     }
@@ -98,11 +95,7 @@ pub fn distribute_pool_fees_by_tx_counts(
             map.insert(*idx, v);
         }
     }
-    if map.is_empty() {
-        None
-    } else {
-        Some(map)
-    }
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// Decoded vault-delta fees (pool-level USD) per step from `decoded_swaps.jsonl`.
@@ -144,7 +137,10 @@ pub fn decoded_swap_fees_usd_by_step(
         };
         if require_decode_ok {
             let st = v.get("decode_status").and_then(|x| x.as_str());
-            if !matches!(st, Some("ok") | Some("ok_traded_event") | Some("ok_swap_event")) {
+            if !matches!(
+                st,
+                Some("ok") | Some("ok_traded_event") | Some("ok_swap_event")
+            ) {
                 continue;
             }
         }
@@ -188,11 +184,7 @@ pub fn decoded_swap_fees_usd_by_step(
             *map.entry(idx).or_insert(Decimal::ZERO) += fee_usd;
         }
     }
-    if map.is_empty() {
-        None
-    } else {
-        Some(map)
-    }
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// Prefer decoded swap fees; if missing/empty, use raw-swap tx-count timing proxy.
@@ -234,21 +226,23 @@ pub fn build_local_pool_fees_usd(
             for (idx, v) in decoded {
                 timing.insert(idx, v);
             }
-            if timing.is_empty() { None } else { Some(timing) }
+            if timing.is_empty() {
+                None
+            } else {
+                Some(timing)
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod regression_tests {
-    //! C3: one fixed pool + step grid → expect non-empty local fee map from decoded rows (`decode_status` ok / ok_traded_event / ok_swap_event).
+    //! C3: synthetic decoded fixture + step grid -> expect non-empty local fee map from strict decoded rows.
 
     use super::*;
     use crate::backtest_engine::StepData;
     use clmm_lp_domain::prelude::Price;
 
-    const ORCA_POOL_FIXTURE: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE";
-    /// Align with `decoded_swaps.jsonl` rows that have `decode_status` ok / ok_traded_event (see block_time ~1773957198).
     const STEP_BASE_TS: u64 = 1_773_957_000;
 
     fn synthetic_steps(n: usize) -> Vec<StepData> {
@@ -266,21 +260,59 @@ mod regression_tests {
             .collect()
     }
 
+    fn write_synthetic_decoded_fixture(protocol: &str, pool: &str) {
+        let dir = repo_data_dir().join("swaps").join(protocol).join(pool);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("decoded_swaps.jsonl");
+
+        // Two valid decoded rows in separate buckets + one invalid row that strict mode must ignore.
+        let rows = vec![
+            serde_json::json!({
+                "block_time": STEP_BASE_TS as i64 + 60,
+                "success": true,
+                "decode_status": "ok_traded_event",
+                "amount_in_raw": "1000000000",
+                "direction": "a_to_b"
+            }),
+            serde_json::json!({
+                "block_time": STEP_BASE_TS as i64 + 3700,
+                "success": true,
+                "decode_status": "ok",
+                "amount_in_raw": "2500000",
+                "direction": "b_to_a"
+            }),
+            serde_json::json!({
+                "block_time": STEP_BASE_TS as i64 + 120,
+                "success": true,
+                "decode_status": "no_vault_change",
+                "amount_in_raw": "1000000000",
+                "direction": "a_to_b"
+            }),
+        ];
+        let body = rows
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{body}\n")).expect("write synthetic decoded_swaps fixture");
+    }
+
     #[test]
     fn build_local_pool_fees_uses_decoded_swaps_when_strict_ok() {
+        let pool = format!(
+            "test_pool_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        );
+        write_synthetic_decoded_fixture("orca", &pool);
+
         let steps = synthetic_steps(48);
         let fee_rate = Decimal::new(3, 3);
-        let m = build_local_pool_fees_usd(
-            "orca",
-            ORCA_POOL_FIXTURE,
-            &steps,
-            3600,
-            9,
-            6,
-            fee_rate,
-            true,
-        )
-        .expect("expected non-empty local pool fees from fixture decoded_swaps.jsonl");
+        let m = build_local_pool_fees_usd("orca", &pool, &steps, 3600, 9, 6, fee_rate, true)
+            .expect("expected non-empty local pool fees from fixture decoded_swaps.jsonl");
 
         let sum: Decimal = m.values().copied().sum();
         assert!(
@@ -289,5 +321,4 @@ mod regression_tests {
             m
         );
     }
-
 }

@@ -12,13 +12,13 @@ members = [
 
 [workspace.package]
 version = "0.1.1-alpha.3"
-authors = ["Joaquín Béjar García <jb@taunais.com>"]
+authors = ["Bociarz"]
 edition = "2024"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/joaquinbejar/CLMM-Liquidity-Provider"
-homepage = "https://github.com/joaquinbejar/CLMM-Liquidity-Provider"
-documentation = "https://docs.rs/clmm-liquidity-provider"
-description = "Liquidity Provider Strategy Optimizer for Solana CLMMs"
+license = "MIT"
+repository = "TBD"
+homepage = "TBD"
+documentation = "TBD"
+description = "Bociarz LP Strategy Lab — strategy backtesting, optimization, and execution for Solana CLMMs"
 
 [workspace.dependencies]
 # Internal crates

@@ -42,8 +42,9 @@ pub fn decision_config_from_optimize_result(
     let w = &file.winner;
     let mut cfg = DecisionConfig::default();
 
-    let width = Decimal::from_f64_retain(w.width_pct)
-        .ok_or_else(|| OptimizeProfileError::InvalidDecimal("width_pct", w.width_pct.to_string()))?;
+    let width = Decimal::from_f64_retain(w.width_pct).ok_or_else(|| {
+        OptimizeProfileError::InvalidDecimal("width_pct", w.width_pct.to_string())
+    })?;
     cfg.range_width_pct = width;
 
     match w.strategy_kind.as_str() {
@@ -52,9 +53,9 @@ pub fn decision_config_from_optimize_result(
         }
         "periodic" => {
             cfg.strategy_mode = StrategyMode::Periodic;
-            cfg.periodic_interval_hours = w.periodic_interval_hours.ok_or(
-                OptimizeProfileError::PeriodicMissingHours,
-            )?;
+            cfg.periodic_interval_hours = w
+                .periodic_interval_hours
+                .ok_or(OptimizeProfileError::PeriodicMissingHours)?;
         }
         "threshold" => {
             cfg.strategy_mode = StrategyMode::Threshold;

@@ -1,7 +1,19 @@
 # TODO: on-chain fees pipeline — co zostało i kolejność prac
 
-**Ostatnia aktualizacja:** 2026-03-22 (T1/T2/C3)  
-**Powiązane:** `doc/ONCHAIN_FEES_TRUTH_PLAN.md`, `doc/ONCHAIN_FEES_PROGRESS.md`
+**Ostatnia aktualizacja:** 2026-03-26 (M1/M2/B4 domknięte w repo; kolejka = operacja A)  
+**Powiązane:** `doc/ONCHAIN_FEES_TRUTH_PLAN.md`, `doc/ONCHAIN_FEES_PROGRESS.md`, `doc/ORCA_RUNBOOK.md`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+## Od czego zacząć (kolejność sensowna)
+
+1. **RPC (bez tego reszta stoi)** — ustaw własny endpoint: `SOLANA_RPC_URL`, opcjonalnie `SOLANA_RPC_FALLBACK_URLS` (comma-separated). Publiczne RPC często timeoutują na `getTransaction`; limity równoległości w enrich są już w kodzie (**B4 / M2**), ale **jakość danych** nadal zależy od endpointu.
+2. **Operacyjnie: odtwórz decode i zmierz jakość** — **[A1] + [A2]** (to jest teraz główny „następny krok”): `swaps-enrich-curated-all` z sensownym `--max-decode` / `--decode-concurrency` / opcjonalnie `CLMM_ENRICH_DECODE_INFLIGHT`, potem `swaps-decode-audit --save-report`. Komendy: `doc/ORCA_RUNBOOK.md` (Krok 2–3); to samo dla Raydium/Meteora, inny folder pod `data/swaps/<protocol>/`.
+3. ~~**Kod: kolejka RPC w enrich [M2]**~~ — **zrobione:** `swaps-enrich-curated-all` ogranicza równoległość (`--decode-concurrency`, override env `CLMM_ENRICH_DECODE_INFLIGHT`), jitter w `decode_one_signature_with_retry` + `CLMM_ENRICH_DECODE_JITTER_MS`; szczegóły: `doc/ORCA_RUNBOOK.md`, `crates/cli/src/swap_sync.rs`.
+4. ~~**Kod: Meteora TVL / mniej `--lp-share` [M1]**~~ — **zrobione:** snapshot zapisuje `vault_amount_a` / `vault_amount_b`; `build_from_meteora_snapshots` liczy `lp_share` z TVL jak Raydium, gdy w oknie są oba pola (stary JSONL bez vaultów → nadal `--lp-share` lub ponowny snapshot).
+5. Dalsze cele research (P2/P3): fazy **D** / **E2** — dopiero gdy P1 (decode + snapshot cadence) jest stabilne.
+
+### Semantyka backtestu (nie on-chain, ale ważne przy interpretacji wyników)
+
+- Benchmark **HODL** i cel **`risk_adj`** (`PnL/(1+DD)`, nie Sharpe): `doc/BACKTEST_OPTIMIZE_STRATEGIES.md` (sekcje *Benchmark HODL* i *risk_adj vs Sharpe*).
 
 ## Czy musisz być obecny?
 
@@ -21,6 +33,13 @@
 - [ ] **A2** `swaps-decode-audit --save-report` — sprawdzić `% ok` per pool.
 - [ ] **A3** Harmonogram: snapshot + swaps sync + enrich (częstotliwość pod RPC).
 - [ ] **A4** `data-health-check` w harmonogramie; ewentualnie `--fail-on-alert`.
+- [ ] **A5** Stabilne uruchamianie 24/7 bez Task Scheduler: `ops-ingest-loop` jako proces długowieczny + Windows Service (np. NSSM) z auto-restart i logowaniem. Zalecany minimalny setup w NSSM:
+  - rekomenduj uruchamiać gotowego bika (np. `target\\release\\clmm-lp-cli.exe` lub `target\\debug\\clmm-lp-cli.exe`), nie `cargo run` (żeby uniknąć problemów z working dir i parserem/PTY),
+  - ustaw `Startup directory` = katalog repo (`F:\\CLMM-Liquidity-Provider\\CLMM-Liquidity-Provider`), żeby względne ścieżki do `data/` działały,
+  - w `Application parameters` ustaw np. `ops-ingest-loop --interval-secs 900 --jitter-secs 60 --swaps-max-pages 2 --swaps-max-signatures 600 --enrich-max-decode 160 --health-max-age-minutes 30 --health-min-decode-ok-pct 65.0 --fail-on-alert true`,
+  - ustaw env: `SOLANA_RPC_URL` oraz opcjonalnie `SOLANA_RPC_FALLBACK_URLS` (comma-separated), aby service używał tych samych endpointów co ręczne uruchomienia,
+  - włącz auto-restart na exit code w NSSM (typowo zakładka „Details” / „Shutdown” + „Restart” zależnie od wersji),
+  - loguj stdout/stderr do plików (np. `data\\logs\\ops-ingest-loop-stdout.log` i `data\\logs\\ops-ingest-loop-stderr.log`), bo to jest najczęściej brakujący element w „Task Scheduler zawiódł” przypadkach.
 
 ## Faza B — jakość P1.1 (kod + walidacja)
 
@@ -29,19 +48,26 @@
 - [x] **B2 (Orca)** Anchor event `Traded` z `Program data:` (Borsh): `lp_fee`, `post_sqrt_price`, `input/output_amount`, `a_to_b`; `decode_status` może być `ok_traded_event`.
 - [x] **B2 (Raydium)** — Anchor `SwapEvent` z `Program data:` → `decode_status = ok_swap_event`; filtry `ok` / `local_swap_fees` jak Orca.
 - [x] **B2 (Meteora)** — DLMM `MeteoraDlmmSwapEvent` (Borsh jak carbon decoder); dyskryminatory `event:SwapEvent` i `event:Swap`; `lb_pair` == pool; `decode_status = ok_swap_event`.
-- [ ] **B4** Rate limiting / kolejka RPC w enrich (opcjonalnie).
-  - **Problem (symptomy):** `swaps-enrich-curated-all` ma dużo `decode_status=partial` (czasem też "timeout"), przez co nie da sie uzyskac sensownego pokrycia do wyliczenia wolumenu na bazie `decoded_swaps.jsonl`.
-  - **Najczęstsza przyczyna:** publiczne RPC rate-limitują lub nie utrzymują wystarczająco długiej historii dla `getTransaction` (czasem `getAccount` działa, ale `getTransaction` zwraca timeout / brak danych typu "history not available").
-  - **Stan kodu (zrobione w repo):** `swap_sync` korzysta z `RpcProvider` (retry + rotacja endpointów), dekoduje najnowsze sygnatury jako pierwsze i filtruje do okna ~72h; jest też env-override endpointów:
+- [x] **B4** Rate limiting / kolejka RPC w enrich — **zamknięte razem z [M2]** (implementacja w `crates/cli/src/swap_sync.rs`: limit równoległych dekodów przez `buffer_unordered(decode_inflight)`; `decode_inflight` z `--decode-concurrency` lub `CLMM_ENRICH_DECODE_INFLIGHT`; jitter przed próbą + opcjonalnie `CLMM_ENRICH_DECODE_JITTER_MS`).
+  - **Problem (symptomy), jeśli nadal występuje:** dużo `decode_status=partial` / timeout mimo limitów — wtedy to **nie** jest już „brak kolejki w kodzie”, tylko **jakość endpointu** lub historia transakcji.
+  - **Najczęstsza przyczyna:** publiczne RPC rate-limitują lub nie utrzymują wystarczająco długiej historii dla `getTransaction`.
+  - **Stan kodu (zrobione w repo):** `swap_sync` korzysta z `RpcProvider` (retry + rotacja endpointów), dekoduje najnowsze sygnatury jako pierwsze i filtruje do okna ~72h; env endpointów:
     - `SOLANA_RPC_URL`
     - `SOLANA_RPC_FALLBACK_URLS` (comma-separated)
-  - **Co jeszcze dopiąć (TODO, zalezne od RPC):** potwierdzić, że na Twoim RPC `getTransaction` odpowiada szybko dla sygnatur z okna 24h/48h i rośnie pokrycie `decode_status=ok`; jeśli nadal dominują timeouty, przejść na RPC typu archival/dedykowany (albo paid plan) oraz ewentualnie podnieść `--decode-timeout-secs` / dostosować limity równoległości w enrich.
+  - **Co jeszcze dopiąć (operacyjnie / RPC):** potwierdzić na własnym RPC, że `getTransaction` odpowiada sensownie dla sygnatur z okna 24h/48h i rośnie `% decode_status=ok`; przy dominacji timeoutów: archival/dedykowany endpoint, wyższe `--decode-timeout-secs`, niższa równoległość jeśli endpoint jest ciasny.
   - **Kierunki z internetu (kontekst):**
     - `getTransaction` (parametry/encoding): https://solana.com/docs/rpc/http/gettransaction
     - czasem pomagają drobiazgi typu poprawny endpoint URL (bez portu `:8899` w adresie, jeśli używasz standardowych hostów)
     - strategie retry/backoff: https://solana.com/docs/advanced/retry
     - ograniczenia historycznych danych na standardowych RPC (archival): https://docs.solanalabs.com/implemented-proposals/rpc-transaction-history
     - archival/historical data provider (np. Helius): https://www.helius.dev/docs/rpc/historical-data
+
+## Faza M — krótki sprint (kod; dopina P1.1)
+
+Powiązanie z checklistą „od czego zacząć” u góry. Po ukończeniu wpisz krótką notatkę w **Log wykonania**.
+
+- [x] **M1 (Meteora TVL / `lp_share`)** — snapshot zapisuje rezerwy vaultów (`vault_amount_a` / `vault_amount_b`); `build_from_meteora_snapshots` wylicza `lp_share` z `capital/TVL` w oknie, gdy oba pola są w JSONL (jak Raydium). Stare pliki bez vaultów: `--lp-share` lub ponowny snapshot.
+- [x] **M2 (kolejka RPC w enrich)** — `swaps-enrich-curated-all` ogranicza równoległość (`decode_inflight` z CLI/env), jitter przed próbą decode; `RpcProvider` bez zmian wymaganych do samego limitu (retry/failover jak wcześniej).
 
 ## Faza C — spójność `backtest` vs `backtest-optimize`
 
@@ -113,3 +139,5 @@ Cel: wyeliminować mieszanie różnych definicji IL pod jedną etykietą w rapor
 | 2026-03-22 | C1b | `backtest-optimize`: `--price-path-source snapshots`, `--start-date`/`--end-date`; grid na `snapshot_price_path::build_from_orca_snapshots`. |
 | 2026-03-22 | B2 (Raydium) | `parse_raydium_swap_event_for_pool` + `ok_swap_event` w enrich / audit / `--fee-swap-decode-status ok`. |
 | 2026-03-22 | B2 (Meteora) | `parse_meteora_swap_event_for_pool` (`events/meteora_swap_event.rs`); swap_sync + ten sam `ok_swap_event`. |
+| 2026-03-25 | Docs | Sekcja „Od czego zacząć”, faza **M** (M1/M2), powiązanie B4↔M2; data aktualizacji nagłówka. |
+| 2026-03-26 | M1 + M2 + B4 | Meteora: TVL z vaultów → `lp_share` w snapshot path; enrich: limit równoległości + jitter (`swap_sync`); TODO: checklist B4/M1/M2 [x], start operacyjny = A1/A2. |

@@ -143,9 +143,7 @@ pub mod q64_64 {
         if delta == 0 {
             return 0;
         }
-        let num = U256::from(amount0)
-            * U256::from(sl)
-            * U256::from(su);
+        let num = U256::from(amount0) * U256::from(sl) * U256::from(su);
         let liq = num / U256::from(delta);
         liq.min(U256::from(u128::MAX)).as_u128()
     }
@@ -183,7 +181,11 @@ pub mod q64_64 {
         if amount0 == 0 || sqrt_p == 0 || sqrt_upper == 0 {
             return 0;
         }
-        let (sp, su) = if sqrt_p < sqrt_upper { (sqrt_p, sqrt_upper) } else { (sqrt_upper, sqrt_p) };
+        let (sp, su) = if sqrt_p < sqrt_upper {
+            (sqrt_p, sqrt_upper)
+        } else {
+            (sqrt_upper, sqrt_p)
+        };
         let delta = su.saturating_sub(sp);
         if delta == 0 {
             return 0;
@@ -202,7 +204,11 @@ pub mod q64_64 {
         if amount1 == 0 {
             return 0;
         }
-        let (sl, sp) = if sqrt_lower < sqrt_p { (sqrt_lower, sqrt_p) } else { (sqrt_p, sqrt_lower) };
+        let (sl, sp) = if sqrt_lower < sqrt_p {
+            (sqrt_lower, sqrt_p)
+        } else {
+            (sqrt_p, sqrt_lower)
+        };
         let delta = sp.saturating_sub(sl);
         if delta == 0 {
             return 0;

@@ -2,7 +2,8 @@
 
 use crate::error::ApiResult;
 use crate::models::{
-    CircuitBreakerStatus, ComponentHealth, HealthResponse, MetricsResponse, ServiceStatus,
+    CircuitBreakerStatus, ComponentHealth, EventBusMetricsResponse, HealthResponse,
+    MetricsResponse, ServiceStatus,
 };
 use crate::state::AppState;
 use axum::{Json, extract::State};
@@ -137,6 +138,16 @@ pub async fn metrics(State(state): State<AppState>) -> ApiResult<Json<MetricsRes
         active_ws_connections: 0,  // Placeholder
         positions_monitored: positions.len() as u32,
         strategies_running: strategies.values().filter(|s| s.running).count() as u32,
+        event_bus: Some({
+            let stats = state.event_bus.stats();
+            EventBusMetricsResponse {
+                published: stats.published,
+                retries: stats.retries,
+                duplicates: stats.duplicates,
+                failed: stats.failed,
+                dlq_size: stats.dlq_size,
+            }
+        }),
     };
 
     Ok(Json(response))

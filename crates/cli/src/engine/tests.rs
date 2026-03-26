@@ -1,12 +1,12 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
+    use crate::backtest_engine::StepDataPoint;
     use crate::backtest_engine::{
-        run_single, GridRunParams, PeriodicTimeBasis, RetouchRepeatConfig, StratConfig,
+        GridRunParams, PeriodicTimeBasis, RetouchRepeatConfig, StratConfig, run_single,
     };
     use crate::engine::liquidity;
     use crate::engine::pricing::{from_base_units, price_ab_human_to_raw, price_to_sqrt_q64};
-    use crate::backtest_engine::StepDataPoint;
     use clmm_lp_domain::prelude::Price;
     use rust_decimal::Decimal;
     use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
@@ -94,8 +94,8 @@ mod tests {
         let hodl_a = from_base_units(hodl_a_base, token_a_decimals);
         let hodl_b = from_base_units(hodl_b_base, token_b_decimals);
 
-        let expected_hodl_value = (hodl_a * last.price_usd.value)
-            + (hodl_b * last.quote_usd.max(Decimal::ZERO));
+        let expected_hodl_value =
+            (hodl_a * last.price_usd.value) + (hodl_b * last.quote_usd.max(Decimal::ZERO));
 
         assert!((summary.hodl_value - expected_hodl_value).abs() < dec!(0.0001));
     }
@@ -107,8 +107,10 @@ mod tests {
         let capital = dec!(7000);
 
         // Narrower USD bounds correspond to narrower A/B bounds at entry.
-        let l_wide = liquidity::estimate_position_liquidity(&steps, dec!(1500), dec!(2500), capital, 9, 9);
-        let l_narrow = liquidity::estimate_position_liquidity(&steps, dec!(1800), dec!(2200), capital, 9, 9);
+        let l_wide =
+            liquidity::estimate_position_liquidity(&steps, dec!(1500), dec!(2500), capital, 9, 9);
+        let l_narrow =
+            liquidity::estimate_position_liquidity(&steps, dec!(1800), dec!(2200), capital, 9, 9);
         assert!(l_narrow >= l_wide);
     }
 
@@ -144,8 +146,8 @@ mod tests {
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
             Price::new(dec!(2000)), // entry A/USD (unused)
-            2000.0,                 // center (USD) (only for fallback; bounds returned for reporting)
-            0.20,                   // 20% width
+            2000.0, // center (USD) (only for fallback; bounds returned for reporting)
+            0.20,   // 20% width
             StratConfig::Periodic(1),
             &params,
             None::<&[_]>,
@@ -157,7 +159,9 @@ mod tests {
         assert_eq!(summary.total_rebalance_cost, tx_cost * Decimal::from(4u32));
 
         // Capital should be reduced exactly by total_rebalance_cost (not double-counted).
-        assert!((summary.final_value - (capital - summary.total_rebalance_cost)).abs() < dec!(0.0001));
+        assert!(
+            (summary.final_value - (capital - summary.total_rebalance_cost)).abs() < dec!(0.0001)
+        );
     }
 
     #[test]
@@ -190,9 +194,9 @@ mod tests {
 
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
-            Price::new(dec!(2000)), // unused for bounds computation
-            2000.0,                 // center (USD) (only for fallback; bounds returned for reporting)
-            0.20,                   // 20% width
+            Price::new(dec!(2000)),   // unused for bounds computation
+            2000.0, // center (USD) (only for fallback; bounds returned for reporting)
+            0.20,   // 20% width
             StratConfig::Periodic(1), // rebalance each wall-clock hour after entry
             &params,
             None::<&[_]>,
@@ -244,7 +248,10 @@ mod tests {
             params.token_a_decimals,
             params.token_b_decimals,
         );
-        assert!(l0 > 0, "expected non-zero liquidity_l for retouch test, got {l0}");
+        assert!(
+            l0 > 0,
+            "expected non-zero liquidity_l for retouch test, got {l0}"
+        );
 
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
@@ -352,7 +359,10 @@ mod tests {
             params.token_a_decimals,
             params.token_b_decimals,
         );
-        assert!(l0 > 0, "expected non-zero liquidity_l for retouch test, got {l0}");
+        assert!(
+            l0 > 0,
+            "expected non-zero liquidity_l for retouch test, got {l0}"
+        );
 
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
@@ -476,9 +486,16 @@ mod tests {
     fn il_metrics_are_consistent_across_static_and_threshold_paths() {
         // Same market path for both strategies.
         let mut steps = Vec::new();
-        for (i, p) in [dec!(20), dec!(20.5), dec!(21.2), dec!(20.1), dec!(19.7), dec!(20.0)]
-            .iter()
-            .enumerate()
+        for (i, p) in [
+            dec!(20),
+            dec!(20.5),
+            dec!(21.2),
+            dec!(20.1),
+            dec!(19.7),
+            dec!(20.0),
+        ]
+        .iter()
+        .enumerate()
         {
             let mut s = step(*p, dec!(100));
             s.step_volume_usd = Decimal::ZERO;
@@ -664,4 +681,3 @@ mod tests {
         assert!(summary.total_rebalance_cost >= dec!(1));
     }
 }
-

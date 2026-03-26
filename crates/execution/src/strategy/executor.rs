@@ -5,19 +5,22 @@ use super::{
     RebalanceParams, StrategyMode,
 };
 use crate::emergency::CircuitBreaker;
-use crate::lifecycle::{LifecycleTracker, RebalanceReason};
+use crate::lifecycle::{
+    CloseReason, FeesCollectedData, LifecycleTracker, PositionClosedData, RebalanceReason,
+};
 use crate::monitor::PositionMonitor;
 use crate::transaction::TransactionManager;
 use crate::wallet::Wallet;
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::interval;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
 use std::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::time::interval;
+use tracing::{debug, error, info, warn};
 
 /// Configuration for strategy execution.
 #[derive(Debug, Clone)]
@@ -125,7 +128,10 @@ impl StrategyExecutor {
 
     /// Sets the current optimization run id used to stamp lifecycle/ledger rows.
     pub fn set_optimization_run_id(&self, run_id: Option<String>) {
-        let mut g = self.optimization_run_id.lock().expect("optimization_run_id lock");
+        let mut g = self
+            .optimization_run_id
+            .lock()
+            .expect("optimization_run_id lock");
         *g = run_id;
     }
 
@@ -148,6 +154,64 @@ impl StrategyExecutor {
     /// Optional JSONL path for IL / rebalance ledger (see `LifecycleTracker::set_il_ledger_path`).
     pub fn set_il_ledger_path(&self, path: Option<std::path::PathBuf>) {
         self.lifecycle.set_il_ledger_path(path);
+    }
+
+    /// Partially decrease liquidity on-chain (delegates to [`RebalanceExecutor`]).
+    pub async fn execute_partial_decrease_liquidity(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &solana_sdk::pubkey::Pubkey,
+        liquidity_amount: u128,
+    ) -> anyhow::Result<()> {
+        self.rebalance_executor
+            .execute_partial_decrease(position, pool, liquidity_amount)
+            .await
+    }
+
+    /// Opens a new Whirlpool position using explicit token caps.
+    ///
+    /// In dry-run mode this returns the derived position PDA without requiring wallet.
+    pub async fn execute_open_position(
+        &self,
+        pool: &solana_sdk::pubkey::Pubkey,
+        tick_lower: i32,
+        tick_upper: i32,
+        amount_a: u64,
+        amount_b: u64,
+        slippage_bps: u16,
+    ) -> anyhow::Result<solana_sdk::pubkey::Pubkey> {
+        self.rebalance_executor
+            .execute_open_position(
+                pool,
+                tick_lower,
+                tick_upper,
+                amount_a,
+                amount_b,
+                slippage_bps,
+            )
+            .await
+    }
+
+    /// Collects Whirlpool fees for a given position.
+    pub async fn execute_collect_fees_only(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &solana_sdk::pubkey::Pubkey,
+    ) -> anyhow::Result<()> {
+        self.rebalance_executor
+            .execute_collect_fees_only(position, pool)
+            .await
+    }
+
+    /// Closes Whirlpool position by decreasing all liquidity, collecting, and closing NFT.
+    pub async fn execute_full_close_only(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &solana_sdk::pubkey::Pubkey,
+    ) -> anyhow::Result<()> {
+        self.rebalance_executor
+            .execute_full_close_only(position, pool)
+            .await
     }
 
     /// Starts the strategy execution loop.
@@ -244,16 +308,17 @@ impl StrategyExecutor {
             .calculate_hours_since_rebalance(&position.address)
             .await;
 
-        let retouch_armed = if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
-            let mut map = self.retouch_armed.write().await;
-            let entry = map.entry(position.address).or_insert(true);
-            if position.in_range {
-                *entry = true;
-            }
-            Some(*entry)
-        } else {
-            None
-        };
+        let retouch_armed =
+            if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
+                let mut map = self.retouch_armed.write().await;
+                let entry = map.entry(position.address).or_insert(true);
+                if position.in_range {
+                    *entry = true;
+                }
+                Some(*entry)
+            } else {
+                None
+            };
 
         let context = DecisionContext {
             position: position.clone(),
@@ -390,11 +455,7 @@ impl StrategyExecutor {
                     self.monitor.remove_position(&old_addr).await;
 
                     if let Some(new_pos) = result.new_position {
-                        if let Err(e) = self
-                            .monitor
-                            .add_position(&new_pos.to_string())
-                            .await
-                        {
+                        if let Err(e) = self.monitor.add_position(&new_pos.to_string()).await {
                             warn!(
                                 error = %e,
                                 old_position = %old_addr,
@@ -412,20 +473,125 @@ impl StrategyExecutor {
                 }
             }
             Decision::Close => {
-                info!("Would execute close");
-                // TODO: Implement close via emergency exit manager
+                let addr = position.address;
+                let pool_pk = position.pool;
+                let duration_hours = self
+                    .lifecycle
+                    .get_summary(&addr)
+                    .await
+                    .map(|s| (chrono::Utc::now() - s.opened_at).num_hours().max(0) as u64)
+                    .unwrap_or(0);
+
+                match self
+                    .rebalance_executor
+                    .execute_full_close_only(&addr, &pool_pk)
+                    .await
+                {
+                    Ok(()) => {
+                        self.monitor.remove_position(&addr).await;
+                        self.lifecycle
+                            .record_position_closed(
+                                addr,
+                                pool_pk,
+                                PositionClosedData {
+                                    liquidity_removed: position.on_chain.liquidity,
+                                    amount_a: 0,
+                                    amount_b: 0,
+                                    price_ab: Some(pool.price),
+                                    total_fees_a: position.on_chain.fees_owed_a,
+                                    total_fees_b: position.on_chain.fees_owed_b,
+                                    final_pnl_usd: position.pnl.net_pnl_usd,
+                                    final_pnl_pct: position.pnl.net_pnl_pct,
+                                    total_il_pct: position.pnl.il_pct,
+                                    duration_hours,
+                                    reason: CloseReason::ILThreshold,
+                                },
+                            )
+                            .await;
+                    }
+                    Err(e) => error!(error = %e, "Close position failed"),
+                }
             }
             Decision::IncreaseLiquidity { amount } => {
-                info!(amount = %amount, "Would execute increase liquidity");
+                warn!(
+                    amount = %amount,
+                    "IncreaseLiquidity is not emitted by current strategy modes; no-op"
+                );
             }
             Decision::DecreaseLiquidity { amount } => {
-                info!(amount = %amount, "Would execute decrease liquidity");
+                let Some(to_remove) =
+                    clamp_decimal_liquidity_to_u128(&amount, position.on_chain.liquidity)
+                else {
+                    warn!(
+                        amount = %amount,
+                        "DecreaseLiquidity: invalid or non-positive amount, skipping"
+                    );
+                    return Ok(());
+                };
+                if to_remove == 0 {
+                    return Ok(());
+                }
+                if let Err(e) = self
+                    .rebalance_executor
+                    .execute_partial_decrease(&position.address, &position.pool, to_remove)
+                    .await
+                {
+                    error!(error = %e, "Decrease liquidity failed");
+                }
             }
             Decision::CollectFees => {
-                info!("Would execute collect fees");
+                if let Err(e) = self
+                    .rebalance_executor
+                    .execute_collect_fees_only(&position.address, &position.pool)
+                    .await
+                {
+                    error!(error = %e, "Collect fees failed");
+                } else {
+                    self.lifecycle
+                        .record_fees_collected(
+                            position.address,
+                            position.pool,
+                            FeesCollectedData {
+                                fees_a: position.on_chain.fees_owed_a,
+                                fees_b: position.on_chain.fees_owed_b,
+                                fees_usd: position.pnl.fees_usd,
+                            },
+                        )
+                        .await;
+                }
             }
         }
 
         Ok(())
+    }
+}
+
+/// Converts a strategy `Decimal` liquidity delta to `u128`, truncated and capped by on-chain liquidity.
+fn clamp_decimal_liquidity_to_u128(amount: &Decimal, max_liquidity: u128) -> Option<u128> {
+    let t = amount.trunc();
+    if t <= Decimal::ZERO {
+        return None;
+    }
+    let u = t.to_u128()?;
+    Some(u.min(max_liquidity))
+}
+
+#[cfg(test)]
+mod clamp_tests {
+    use super::*;
+
+    #[test]
+    fn clamps_to_max() {
+        let d = Decimal::from(500u64);
+        assert_eq!(clamp_decimal_liquidity_to_u128(&d, 100), Some(100));
+    }
+
+    #[test]
+    fn rejects_non_positive() {
+        assert_eq!(clamp_decimal_liquidity_to_u128(&Decimal::ZERO, 100), None);
+        assert_eq!(
+            clamp_decimal_liquidity_to_u128(&Decimal::new(-1, 0), 100),
+            None
+        );
     }
 }

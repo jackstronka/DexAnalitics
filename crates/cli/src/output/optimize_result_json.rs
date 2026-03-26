@@ -1,6 +1,6 @@
 //! Build `clmm_lp_domain::optimize_result::OptimizeResultFile` after a grid run.
 
-use crate::backtest_engine::{parse_strategy_label, RetouchRepeatConfig, StratConfig};
+use crate::backtest_engine::{RetouchRepeatConfig, StratConfig, parse_strategy_label};
 use clmm_lp_domain::optimize_result::{
     OptimizeResultFile, OptimizeRetouchRepeat, OptimizeTrackerSummary, OptimizeWinner,
 };
@@ -135,5 +135,19 @@ pub fn write_optimize_result_json(path: &Path, file: &OptimizeResultFile) -> any
     }
     let json = serde_json::to_string_pretty(file)?;
     std::fs::write(path, json)?;
+    Ok(())
+}
+
+/// Write the same document under `copy_dir` as `<UTC timestamp>.json` and `latest.json` (for agent / audit history).
+pub fn write_optimize_result_copy_dir(
+    copy_dir: &Path,
+    file: &OptimizeResultFile,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(copy_dir)?;
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let stamped = copy_dir.join(format!("{ts}.json"));
+    write_optimize_result_json(&stamped, file)?;
+    let latest = copy_dir.join("latest.json");
+    write_optimize_result_json(&latest, file)?;
     Ok(())
 }

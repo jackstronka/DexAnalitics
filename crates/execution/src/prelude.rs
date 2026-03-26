@@ -36,8 +36,10 @@ pub use crate::monitor::{
 // Scheduler
 pub use crate::scheduler::{Schedule, ScheduleBuilder, ScheduledTask, Scheduler, TaskEvent};
 
+pub use crate::agent_decision::AgentDecisionValidationError;
+pub use crate::agent_decision::validate_agent_decision;
 pub use crate::optimize_profile::{
-    decision_config_from_optimize_result, parse_optimize_result_json, OptimizeProfileError,
+    OptimizeProfileError, decision_config_from_optimize_result, parse_optimize_result_json,
 };
 
 // Strategy

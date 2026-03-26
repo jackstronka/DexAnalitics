@@ -4,11 +4,15 @@
 
 use crate::handlers;
 use crate::models::{
-    CreateStrategyRequest, HealthResponse, ListPoolsResponse, ListPositionsResponse,
-    ListStrategiesResponse, MessageResponse, MetricsResponse, OpenPositionRequest, PnLResponse,
-    PoolResponse, PoolStateResponse, PortfolioAnalyticsResponse, PositionResponse,
-    RebalanceRequest, SimulationRequest, SimulationResponse, StrategyPerformanceResponse,
-    StrategyResponse,
+    BuildUnsignedTxRequest, BuildUnsignedTxResponse, CreateStrategyRequest,
+    DecreaseLiquidityRequest, EventBusMetricsResponse, HealthResponse, ListPoolsResponse,
+    ListPositionsResponse, ListStrategiesResponse, MessageResponse, MetricsResponse,
+    OpenPositionRequest, OrcaLockResponse, OrcaProtocolResponse, OrcaTokenListResponse,
+    OrcaTokenResponse, PhantomChallengeRequest, PhantomChallengeResponse,
+    PhantomSessionResponse, PhantomVerifyRequest, PnLResponse, PoolResponse, PoolStateResponse,
+    PortfolioAnalyticsResponse, PositionResponse, RebalanceRequest, SimulationRequest,
+    SimulationResponse, StrategyPerformanceResponse, StrategyResponse, SubmitSignedTxRequest,
+    SubmitSignedTxResponse,
 };
 use utoipa::OpenApi;
 
@@ -17,27 +21,27 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "CLMM LP Strategy Optimizer API",
-        version = "0.1.1-alpha.2",
-        description = "REST API for the CLMM Liquidity Provider Strategy Optimizer. \
+        version = "0.1.1-alpha.3",
+        description = "REST API for Bociarz LP Strategy Lab (derived from CLMM Liquidity Provider). \
                        Provides endpoints for position management, strategy automation, \
                        pool analysis, and portfolio analytics.",
         license(
-            name = "MIT OR Apache-2.0",
+            name = "MIT",
             url = "https://github.com/joaquinbejar/CLMM-Liquidity-Provider"
         ),
-        contact(
-            name = "Joaquín Béjar García",
-            email = "jb@taunais.com"
-        )
+        contact(name = "Bociarz")
     ),
     servers(
         (url = "/api/v1", description = "API v1")
     ),
     tags(
         (name = "Health", description = "Health check and metrics endpoints"),
+        (name = "Auth", description = "Authentication endpoints"),
         (name = "Positions", description = "LP position management"),
         (name = "Strategies", description = "Automated strategy management"),
         (name = "Pools", description = "Pool information and state"),
+        (name = "Orca", description = "Orca Public REST proxy endpoints"),
+        (name = "Transactions", description = "Unsigned tx build + submit endpoints"),
         (name = "Analytics", description = "Portfolio analytics and simulations")
     ),
     paths(
@@ -46,12 +50,16 @@ use utoipa::OpenApi;
         handlers::liveness,
         handlers::readiness,
         handlers::metrics,
+        // Auth endpoints
+        handlers::phantom_challenge,
+        handlers::phantom_verify,
         // Position endpoints
         handlers::list_positions,
         handlers::get_position,
         handlers::open_position,
         handlers::close_position,
         handlers::collect_fees,
+        handlers::decrease_liquidity,
         handlers::rebalance_position,
         handlers::get_position_pnl,
         // Strategy endpoints
@@ -62,11 +70,27 @@ use utoipa::OpenApi;
         handlers::delete_strategy,
         handlers::start_strategy,
         handlers::stop_strategy,
+        handlers::apply_optimize_result,
         handlers::get_strategy_performance,
         // Pool endpoints
         handlers::list_pools,
         handlers::get_pool,
         handlers::get_pool_state,
+        // Orca REST proxy endpoints
+        handlers::orca_list_pools,
+        handlers::orca_search_pools,
+        handlers::orca_get_pool,
+        handlers::orca_get_lock_info,
+        handlers::orca_list_tokens,
+        handlers::orca_search_tokens,
+        handlers::orca_get_token,
+        handlers::orca_get_protocol,
+        // Unsigned tx flow endpoints
+        handlers::tx_open_build,
+        handlers::tx_decrease_build,
+        handlers::tx_collect_build,
+        handlers::tx_close_build,
+        handlers::tx_submit_signed,
         // Analytics endpoints
         handlers::get_portfolio_analytics,
         handlers::run_simulation,
@@ -76,11 +100,18 @@ use utoipa::OpenApi;
             // Health
             HealthResponse,
             MetricsResponse,
+            EventBusMetricsResponse,
+            // Auth
+            PhantomChallengeRequest,
+            PhantomChallengeResponse,
+            PhantomVerifyRequest,
+            PhantomSessionResponse,
             // Positions
             ListPositionsResponse,
             PositionResponse,
             PnLResponse,
             OpenPositionRequest,
+            DecreaseLiquidityRequest,
             RebalanceRequest,
             MessageResponse,
             // Strategies
@@ -92,6 +123,16 @@ use utoipa::OpenApi;
             ListPoolsResponse,
             PoolResponse,
             PoolStateResponse,
+            // Orca REST proxy
+            OrcaLockResponse,
+            OrcaTokenResponse,
+            OrcaTokenListResponse,
+            OrcaProtocolResponse,
+            // Transactions
+            BuildUnsignedTxRequest,
+            BuildUnsignedTxResponse,
+            SubmitSignedTxRequest,
+            SubmitSignedTxResponse,
             // Analytics
             PortfolioAnalyticsResponse,
             SimulationRequest,

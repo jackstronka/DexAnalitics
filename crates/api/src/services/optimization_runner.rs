@@ -1,12 +1,13 @@
 //! Run `clmm-lp-cli backtest-optimize` as a subprocess and apply `--optimize-result-json` to the executor.
 
 use crate::error::ApiError;
+use clmm_lp_domain::optimize_result::OptimizeResultFile;
 use clmm_lp_execution::prelude::{
-    decision_config_from_optimize_result, parse_optimize_result_json, StrategyExecutor,
+    StrategyExecutor, decision_config_from_optimize_result, parse_optimize_result_json,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -51,17 +52,12 @@ pub async fn run_optimize_subprocess(argv: &[String]) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Read JSON result and apply to the running executor's decision config.
-pub async fn apply_optimize_result_json(
-    path: &Path,
+/// Apply a parsed `OptimizeResultFile` to the running executor (no subprocess).
+pub async fn apply_optimize_result_parsed(
+    file: &OptimizeResultFile,
     executor: &RwLock<StrategyExecutor>,
 ) -> Result<(), ApiError> {
-    let text = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| ApiError::internal(format!("read optimize result: {e}")))?;
-    let file = parse_optimize_result_json(&text)
-        .map_err(|e| ApiError::internal(format!("parse optimize JSON: {e}")))?;
-    let cfg = decision_config_from_optimize_result(&file)
+    let cfg = decision_config_from_optimize_result(file)
         .map_err(|e| ApiError::internal(format!("optimize profile → DecisionConfig: {e}")))?;
 
     // Important: the executor start loop holds only a read lock.
@@ -80,6 +76,19 @@ pub async fn apply_optimize_result_json(
         "Applied optimize-result JSON to StrategyExecutor"
     );
     Ok(())
+}
+
+/// Read JSON result from disk and apply to the running executor's decision config.
+pub async fn apply_optimize_result_json(
+    path: &Path,
+    executor: &RwLock<StrategyExecutor>,
+) -> Result<(), ApiError> {
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| ApiError::internal(format!("read optimize result: {e}")))?;
+    let file = parse_optimize_result_json(&text)
+        .map_err(|e| ApiError::internal(format!("parse optimize JSON: {e}")))?;
+    apply_optimize_result_parsed(&file, executor).await
 }
 
 /// Try to start an optimize cycle. Returns `false` if another cycle still holds the lock.
@@ -115,9 +124,7 @@ pub async fn run_optimize_cycle(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        end_optimize_busy, merge_optimize_result_json_arg, try_begin_optimize_busy,
-    };
+    use super::{end_optimize_busy, merge_optimize_result_json_arg, try_begin_optimize_busy};
     use std::sync::atomic::AtomicBool;
 
     #[test]

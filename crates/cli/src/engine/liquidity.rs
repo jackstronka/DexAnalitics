@@ -1,6 +1,7 @@
 use crate::backtest_engine::StepData;
 use crate::engine::pricing::{
-    clamp_quote_usd, from_base_units, price_ab_human_to_raw, price_to_q64, price_to_sqrt_q64, to_base_units,
+    clamp_quote_usd, from_base_units, price_ab_human_to_raw, price_to_q64, price_to_sqrt_q64,
+    to_base_units,
 };
 use clmm_lp_domain::math::concentrated_liquidity::q64_64;
 use primitive_types::U256;
@@ -38,7 +39,11 @@ pub fn amounts_from_liquidity_at_price(
     if sqrt_p <= sqrt_l {
         let num = liq * U256::from(sqrt_u.saturating_sub(sqrt_l)) * U256::from(Q64);
         let den = U256::from(sqrt_u) * U256::from(sqrt_l);
-        let a0 = if den.is_zero() { U256::zero() } else { num / den };
+        let a0 = if den.is_zero() {
+            U256::zero()
+        } else {
+            num / den
+        };
         (a0.min(U256::from(u64::MAX)).as_u64(), 0u64)
     } else if sqrt_p >= sqrt_u {
         let num = liq * U256::from(sqrt_u.saturating_sub(sqrt_l));
@@ -47,7 +52,11 @@ pub fn amounts_from_liquidity_at_price(
     } else {
         let num0 = liq * U256::from(sqrt_u.saturating_sub(sqrt_p)) * U256::from(Q64);
         let den0 = U256::from(sqrt_u) * U256::from(sqrt_p);
-        let a0 = if den0.is_zero() { U256::zero() } else { num0 / den0 };
+        let a0 = if den0.is_zero() {
+            U256::zero()
+        } else {
+            num0 / den0
+        };
         let num1 = liq * U256::from(sqrt_p.saturating_sub(sqrt_l));
         let a1 = num1 / U256::from(Q64);
         (
@@ -166,9 +175,7 @@ pub fn estimate_position_liquidity_with_overrides(
     let (l_raw, _, _) =
         q64_64::max_liquidity_for_value_in_range(value_b_base, p_q64, sqrt_l, sqrt_p_fit, sqrt_u);
 
-    let price_a_usd = overrides
-        .price_a_usd
-        .unwrap_or(first.price_usd.value);
+    let price_a_usd = overrides.price_a_usd.unwrap_or(first.price_usd.value);
 
     // Anti-odlot: verify that liquidity corresponds to the intended USD capital at entry,
     // and scale if necessary.
@@ -202,14 +209,22 @@ pub fn estimate_lp_end_amounts(
     let quote_usd = clamp_quote_usd(first.quote_usd);
     let lower_ab = lower_usd / quote_usd;
     let upper_ab = upper_usd / quote_usd;
-    let l_pos = estimate_position_liquidity(step_data, lower_usd, upper_usd, capital_usd, token_a_decimals, token_b_decimals);
+    let l_pos = estimate_position_liquidity(
+        step_data,
+        lower_usd,
+        upper_usd,
+        capital_usd,
+        token_a_decimals,
+        token_b_decimals,
+    );
     if l_pos == 0 {
         return (Decimal::ZERO, Decimal::ZERO, 0);
     }
 
     let lower_ab_raw = price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
     let upper_ab_raw = price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
-    let last_ab_raw = price_ab_human_to_raw(last.price_ab.value, token_a_decimals, token_b_decimals);
+    let last_ab_raw =
+        price_ab_human_to_raw(last.price_ab.value, token_a_decimals, token_b_decimals);
 
     let sqrt_l = price_to_sqrt_q64(lower_ab_raw);
     let sqrt_u = price_to_sqrt_q64(upper_ab_raw);
@@ -223,4 +238,3 @@ pub fn estimate_lp_end_amounts(
         l_pos,
     )
 }
-

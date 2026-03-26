@@ -7,7 +7,10 @@ pub enum FeeShareModel {
     /// Legacy model: constant share proxy per step (capital/TVL or override).
     LegacyLpShare,
     /// Concentrated liquidity model: constant position liquidity share vs pool active liquidity.
-    LiquidityShare { position_liquidity: u128, pool_active_liquidity: u128 },
+    LiquidityShare {
+        position_liquidity: u128,
+        pool_active_liquidity: u128,
+    },
 }
 
 impl FeeShareModel {
@@ -34,4 +37,3 @@ impl FeeShareModel {
         }
     }
 }
-

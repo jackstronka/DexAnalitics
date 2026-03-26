@@ -57,6 +57,7 @@ pub use crate::value_objects::{
     FeeEarnings, ImpermanentLossResult, PoolMetrics, RiskMetrics, VolatilityEstimate,
 };
 
+pub use crate::agent_decision::AgentDecision;
 pub use crate::optimize_result::{
     OptimizeResultFile, OptimizeRetouchRepeat, OptimizeTrackerSummary, OptimizeWinner,
 };

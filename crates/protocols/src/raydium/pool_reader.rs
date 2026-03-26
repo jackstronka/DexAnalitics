@@ -40,8 +40,8 @@ pub fn parse_pool_state(data: &[u8]) -> Result<RaydiumClmmPoolStateMinimal> {
     // Some accounts may contain trailing bytes beyond the minimal pool-state layout,
     // so parse via a reader to tolerate leftover bytes.
     let mut cursor = std::io::Cursor::new(data);
-    let state =
-        PoolState::deserialize_reader(&mut cursor).context("Raydium PoolState deserialization failed")?;
+    let state = PoolState::deserialize_reader(&mut cursor)
+        .context("Raydium PoolState deserialization failed")?;
 
     Ok(RaydiumClmmPoolStateMinimal {
         token_mint0: state.token_mint0.to_string(),
@@ -59,4 +59,3 @@ pub fn parse_pool_state(data: &[u8]) -> Result<RaydiumClmmPoolStateMinimal> {
         protocol_fees_token1: state.protocol_fees_token1,
     })
 }
-

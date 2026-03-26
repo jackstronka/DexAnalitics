@@ -1,0 +1,29 @@
+---
+description: >-
+  Priorytet: maksymalnie wycisnąć sygnał z darmowych źródeł (łańcuch + lokalne
+  artefakty), bez opłacanych zewnętrznych API/danych; świadomy kompromis jakości.
+alwaysApply: true
+---
+
+# Dane: tylko to, co „za darmo” (on-chain + lokalnie)
+
+## Założenie produktowe
+
+- **Unikaj zależności od płatnych zewnętrznych dostawców danych i RPC** jako domyślnej ścieżki projektowej (Birdeye, Dune, płatne endpointy itd.), o ile użytkownik **jawnie** nie wybierze inaczej.
+- **Źródło prawdy:** publiczny Solana RPC (z limitami), konta on-chain, lokalne pliki (`snapshots.jsonl`, `swaps.jsonl`, `decoded_swaps.jsonl`), własny kod dekodowania i symulacji.
+
+## Co z tego wynika przy projektowaniu i kodzie
+
+- Traktuj **gorszą kompletność i wyższy szum** jako normalny koszt — nie udawaj jakości „jak z płatnego archival RPC”, tylko **dokumentuj niepewność** (np. `decode_status`, filtry `ok` vs `loose`, braki w oknie czasu).
+- Przy kolejnych funkcjach najpierw szukaj **jak wycisnąć więcej z tych samych danych**: lepsze heurystyki dekodu, kalibracja proxy fee/share, spójność snapshot ↔ swap, raporty jakości danych — zamiast „dokupić feed”.
+- Gdy płatna ścieżka jest **opcjonalna** w kodzie (env, flagi), domyślnie projektuj i testuj **ścieżkę bez niej**, żeby główny produkt nie wymagał abonamentu.
+
+## Wyzwanie (cel jakościowy)
+
+- **Lepiej niż „typowy” stack przy darmowych danych** = lepsza inżynieria na tym samym wejściu: jawna metryka jakości, mniej mylących metryk biznesowych, czytelne fallbacki — nie magiczna dokładność z płatnego API.
+
+## Fee (proxy) a decyzje agenta / bota
+
+- Szacunki fee (snapshot / dekodowane swapy / share) **nie muszą pokrywać się z księgowością on-chain co do dolara** — np. rzeczywistość **10 USD** a backtest **11 USD** to **przykład** drobnej rozbieżności, która **nie dyskwalifikuje** modelu do decyzji (ważniejszy jest kierunek i porównania względne, nie identyczna kwota).
+- Dla **agenta i bota** (rebalance, progi, harmonogram, priorytety) liczy się przede wszystkim **spójny trend w czasie** (wzrost/spadek, ranking wariantów, „czy sensownie więcej niż koszt tx”), a nie dopasowanie absolutnej kwoty fee.
+- Nie blokuj decyzji agenta na **perfekcyjnym** fee; w kodzie i logach rozróżniaj **„trend / sygnał sterujący”** od **„raport dokładności absolutnej”** (ten drugi może zostać na później lub na opcjonalnej ścieżce).

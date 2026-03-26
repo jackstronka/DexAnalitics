@@ -11,6 +11,11 @@ Powtarzalnie przygotować dane dla Orca Whirlpool tak, aby:
 - Interesują Cię jedynie wyniki w `data/pool-snapshots/orca/...` oraz `data/swaps/orca/...` (pozostałe protokoły ignorujemy interpretacyjnie, choć komendy potrafią je też przejść).
 - Komendy odpalasz w PowerShell z katalogu repo: `F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider`.
 
+## RPC przed dekodowaniem (wszystkie protokoły w curated)
+
+- Ustaw **`SOLANA_RPC_URL`** (własny / płatny / archival jeśli potrzeba historii). Opcjonalnie **`SOLANA_RPC_FALLBACK_URLS`** (lista po przecinku).
+- Bez sensownego `getTransaction` enrich nadal zwróci głównie `partial` / timeout — wtedy najpierw endpoint; równoległość jest ograniczona przez `--decode-concurrency` / `CLMM_ENRICH_DECODE_INFLIGHT` (patrz krok 3).
+
 ## Parametry “bezpieczne” dla Orca (polecane do stabilizacji RPC)
 Używaj poniższych domyślnych wartości:
 - `--max-decode 40`
@@ -21,6 +26,33 @@ Używaj poniższych domyślnych wartości:
 ## Krok 0: wybór puli do weryfikacji (opcjonalne, ale zalecane)
 1. Wybierz 1–2 adresy `orca` poola (Whirlpool address) do “smoke test”.
 2. Dla każdego wybranego poola przygotuj nazwę/ID tak, by łatwo znaleźć folder: `data/pool-snapshots/orca/<pool>/snapshots.jsonl` oraz `data/swaps/orca/<pool>/decoded_swaps.jsonl`.
+
+## Devnet E2E: lifecycle + unsigned tx flow (bot simulation)
+
+Cel: uruchomić testy `#[ignore]` pokrywające:
+- lifecycle keypair: `open -> decrease -> collect -> close`,
+- flow client-signing: `build unsigned -> sign -> submit`.
+
+Wymagane ENV:
+- `SOLANA_RPC_URL` (np. `https://api.devnet.solana.com`)
+- `KEYPAIR_PATH` (lub `SOLANA_KEYPAIR_PATH`) z funded devnet wallet
+- `DEVNET_POOL_ADDRESS` (domyślnie: `3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt`)
+- opcjonalnie: `DEVNET_TICK_LOWER`, `DEVNET_TICK_UPPER`, `DEVNET_OPEN_AMOUNT_A`, `DEVNET_OPEN_AMOUNT_B`
+
+Uruchomienie:
+```powershell
+cargo test -p clmm-lp-api devnet_ -- --ignored
+```
+
+Minimalna checklista GO/NO-GO:
+- GO, gdy:
+  - `devnet_pool_state_smoke` przechodzi,
+  - `devnet_unsigned_tx_sign_submit_smoke` nie zwraca błędów walidacji wejścia i przechodzi preflight path,
+  - `devnet_bot_lifecycle_keypair_smoke` wykonuje co najmniej open + cleanup (`close`) bez panic.
+- NO-GO, gdy:
+  - brak środków na wallet,
+  - symulacja tx consistently zwraca błąd policy gate / simulate,
+  - open działa, ale close stale nie domyka pozycji.
 
 ## Krok 1: Snapshoty Orca (Tier 2 przygotowanie)
 1. Dodaj świeży snapshot dla Orca (np. pierwsze `N` puli):
@@ -37,7 +69,8 @@ Używaj poniższych domyślnych wartości:
 
 ## Krok 3: Dekodowanie swapów (Orca decode quality)
 1. Zdekoduj z re-wyliczeniem (zalecane po zmianach w dekoderze / fallbackach):
-   - `cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --limit <N> --max-decode 40 --refresh-decoded --decode-timeout-secs 25 --decode-retries 2`
+   - `cargo run --bin clmm-lp-cli -- swaps-enrich-curated-all --limit <N> --max-decode 40 --refresh-decoded --decode-timeout-secs 25 --decode-retries 2 --decode-concurrency 4 --decode-jitter-ms 0`
+   - Równoległość: domyślnie `--decode-concurrency 4` (max 32); `CLMM_ENRICH_DECODE_INFLIGHT` nadpisuje, gdy ustawione. Opcjonalnie `--decode-jitter-ms` (losowe 0..N ms przed próbą) lub `CLMM_ENRICH_DECODE_JITTER_MS`.
 2. Audit jakości dekodowania:
    - `cargo run --bin clmm-lp-cli -- swaps-decode-audit --limit <N> --save-report`
 3. Sukces (minimalny, operacyjny):
@@ -150,7 +183,7 @@ Cel: porównać wyniki backtest-optimize pomiędzy protokołami bez `Dune` i bez
 - `backtest-optimize --price-path-source snapshots` i `--fee-source snapshots` działa również dla **Meteory** jako snapshot-only proxy:
   - cena: z formuły DLMM dla `active_id` i `bin_step` (proxy “spot”),
   - opłaty: z delty `protocol_fee_amount_{x,y}` między snapshotami (proxy fee-accrual na poziomie pary).
-  - Uwaga: dla porównywalności w snapshot-only trybie Meteora wymaga podania `--lp-share` (brak `tvl/liquidity_active` w `lb_pair`).
+  - `lp_share`: jeśli snapshot ma **`vault_amount_a` / `vault_amount_b`** (standardowy zapis z `meteora-snapshot-curated`), wyliczamy udział jak Raydium z TVL (`capital / tvl_usd`). **`--lp-share`** jest nadal opcjonalnym override; wymagane tylko gdy w pliku brak sald rezerw (stare snapshoty).
 
 ### Czego brakuje (do implementacji)
 1. Ceny z snapshotów dla pozostałych protokołów
@@ -283,4 +316,41 @@ Zakres:
 - [ ] Niespójność między decyzją a wykonaniem (ghost success/failure).
 - [ ] Powtarzalne błędy tx bez jasnego root cause.
 - [ ] Brak potwierdzonej procedury emergency stop.
+
+## Devnet MVP Functional Tests (obowiazkowe przed mainnet)
+
+To jest twarde minimum akceptacyjne: przed jakimkolwiek wdrozeniem na mainnet trzeba zaliczyc funkcjonalne testy E2E na devnecie dla sciezek Orca.
+
+Dlaczego:
+- implementacja `WhirlpoolExecutor` moze miec niepelne account metas dla niektorych instrukcji,
+- `decrease_liquidity` jest aktualnie wysylane z `token_min_a=0` i `token_min_b=0` (wysoka tolerancja slippage),
+- tylko realny przebieg tx na devnecie potwierdza komplet kont i poprawna kolejnosc instrukcji.
+
+### Minimalny scope MVP (devnet)
+- [ ] `orca-position-open` dry-run i execute dla poprawnego zakresu tickow.
+- [ ] `orca-position-open` odrzuca niepoprawny zakres (`tick_lower >= tick_upper`, zly tick spacing).
+- [ ] `orca-position-decrease --liquidity-pct` i `--liquidity` dziala end-to-end (tx + odczyt nowej liquidity).
+- [ ] Sciezka API (jesli uzywana operacyjnie): endpoint decrease/open przechodzi walidacje i zwraca czytelne bledy.
+- [ ] Co najmniej jeden test negatywny tx (celowo bledne parametry) zwraca blad, a nie cichy sukces.
+
+### Zasada GO/NO-GO
+- **GO do mainnet tylko gdy** wszystkie testy MVP na devnecie sa zielone i zarchiwizowane w worklogu.
+- **NO-GO** gdy jakikolwiek test E2E na devnecie jest niestabilny, flaky lub nieprzechodzacy.
+
+## CLI: `orca-bot-run` (monitor + strategia bez API)
+
+Ta sama pętla co `clmm-lp-api` (`PositionMonitor` + `StrategyExecutor`), uruchamiana z linii poleceń.
+
+- **Domyślnie dry-run:** tylko logi decyzji (bez podpisywania). Użyj `--execute`, żeby wysyłać transakcje — wtedy potrzebny jest **`--keypair <plik.json>`** albo zmienna **`SOLANA_KEYPAIR`**.
+- **RPC:** `SOLANA_RPC_URL` / `SOLANA_RPC_FALLBACK_URLS` (jak w reszcie repo).
+- **`--position`:** adres **pozycji** Whirlpool (NFT), nie adres poola.
+- **Opcjonalnie `--optimize-result-json`:** plik wyniku `backtest-optimize` → `DecisionConfig` (jak `POST /apply-optimize-result` w API).
+
+Przykład (tylko obserwacja):
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-bot-run --position <POSITION_PUBKEY> --eval-interval-secs 300 --poll-interval-secs 30
+```
+
+Semantyka strategii i benchmarku HODL: `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`.
 

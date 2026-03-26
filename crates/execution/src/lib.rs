@@ -13,6 +13,8 @@
 /// Prelude module for convenient imports.
 pub mod prelude;
 
+/// Agent decision validation (risk limits).
+pub mod agent_decision;
 /// Alert system.
 pub mod alerts;
 /// Emergency controls and circuit breaker.
@@ -21,6 +23,8 @@ pub mod emergency;
 pub mod lifecycle;
 /// Position monitoring.
 pub mod monitor;
+/// CLI optimize-result JSON → `DecisionConfig`.
+pub mod optimize_profile;
 /// Scheduler for strategy timing.
 pub mod scheduler;
 /// Strategy execution.
@@ -31,5 +35,3 @@ pub mod sync;
 pub mod transaction;
 /// Wallet management.
 pub mod wallet;
-/// CLI optimize-result JSON → `DecisionConfig`.
-pub mod optimize_profile;

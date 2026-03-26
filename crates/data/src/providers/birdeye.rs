@@ -182,7 +182,9 @@ impl BirdeyeProvider {
             // Conservative chunk size to stay below any server-side item cap.
             // (e.g. 5m: 900 candles ~= 3.1 days; 1m: 900 candles ~= 15h)
             let max_candles_per_call: u64 = 900;
-            let chunk_span = resolution.saturating_mul(max_candles_per_call).max(resolution);
+            let chunk_span = resolution
+                .saturating_mul(max_candles_per_call)
+                .max(resolution);
 
             let mut cur = from;
             let mut all: Vec<BirdeyeCandle> = Vec::new();
@@ -196,11 +198,12 @@ impl BirdeyeProvider {
             Ok::<Vec<BirdeyeCandle>, anyhow::Error>(all)
         };
 
-        let (mut cached_start, mut cached_end, mut items): (u64, u64, Vec<BirdeyeCandle>) = if let Some(c) = cache {
-            (c.start_time, c.end_time, c.items)
-        } else {
-            (u64::MAX, 0, Vec::new())
-        };
+        let (mut cached_start, mut cached_end, mut items): (u64, u64, Vec<BirdeyeCandle>) =
+            if let Some(c) = cache {
+                (c.start_time, c.end_time, c.items)
+            } else {
+                (u64::MAX, 0, Vec::new())
+            };
 
         let mut fetched_any = false;
         if items.is_empty() {
@@ -248,7 +251,8 @@ impl BirdeyeProvider {
 
         // De-duplicate by unix_time and sort.
         if fetched_any {
-            let mut by_time: std::collections::BTreeMap<u64, BirdeyeCandle> = std::collections::BTreeMap::new();
+            let mut by_time: std::collections::BTreeMap<u64, BirdeyeCandle> =
+                std::collections::BTreeMap::new();
             for c in items.into_iter() {
                 by_time.insert(c.unix_time, c);
             }
@@ -294,7 +298,10 @@ impl BirdeyeProvider {
                     end_time: cached_end,
                     items: items.clone(),
                 };
-                let _ = fs::write(&path, serde_json::to_vec_pretty(&wrapper).unwrap_or_default());
+                let _ = fs::write(
+                    &path,
+                    serde_json::to_vec_pretty(&wrapper).unwrap_or_default(),
+                );
                 tracing::info!(
                     "Birdeye OHLCV cache updated: {} -> {} ({}..{}, {} items)",
                     token.mint_address,

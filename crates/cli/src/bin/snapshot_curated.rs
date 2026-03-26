@@ -6,7 +6,10 @@ use clap::{Parser, Subcommand};
 mod collector;
 
 #[derive(Parser, Debug)]
-#[command(name = "snapshot-curated", about = "Curated snapshot collectors (isolated CLI)")]
+#[command(
+    name = "snapshot-curated",
+    about = "Curated snapshot collectors (isolated CLI)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,8 +33,11 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::RaydiumSnapshotCurated { limit } => collector::raydium_snapshot_curated(limit).await,
-        Commands::MeteoraSnapshotCurated { limit } => collector::meteora_snapshot_curated(limit).await,
+        Commands::RaydiumSnapshotCurated { limit } => {
+            collector::raydium_snapshot_curated(limit).await
+        }
+        Commands::MeteoraSnapshotCurated { limit } => {
+            collector::meteora_snapshot_curated(limit).await
+        }
     }
 }
-
