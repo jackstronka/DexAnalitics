@@ -446,6 +446,27 @@ pub async fn start_strategy(
         .and_then(|v| v.as_u64())
         .unwrap_or(300);
 
+    // Seed monitor positions (so strategy has something to evaluate).
+    if let Some(addrs) = strategy_config
+        .get("parameters")
+        .and_then(|p| p.get("position_addresses"))
+        .and_then(|v| v.as_array())
+    {
+        for a in addrs {
+            if let Some(s) = a.as_str() {
+                if let Err(e) = state.monitor.add_position(s).await {
+                    return Err(ApiError::bad_request(format!(
+                        "Failed to add position to monitor ({s}): {e}"
+                    )));
+                }
+            } else {
+                return Err(ApiError::bad_request(
+                    "parameters.position_addresses must be array of strings",
+                ));
+            }
+        }
+    }
+
     // Create executor configuration
     let executor_config = ExecutorConfig {
         eval_interval_secs,
@@ -456,12 +477,30 @@ pub async fn start_strategy(
     };
 
     // Create strategy executor
-    let executor = StrategyExecutor::new(
+    let mut executor = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
         state.tx_manager.clone(),
         executor_config,
     );
+
+    // If auto_execute is enabled, we need a signing wallet (unless dry_run).
+    if auto_execute && !dry_run {
+        let keypair_path = std::env::var("KEYPAIR_PATH")
+            .ok()
+            .or_else(|| std::env::var("SOLANA_KEYPAIR_PATH").ok())
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "auto_execute=true requires KEYPAIR_PATH or SOLANA_KEYPAIR_PATH",
+                )
+            })?;
+
+        let wallet = Arc::new(
+            clmm_lp_execution::prelude::Wallet::from_file(keypair_path, "api-strategy")
+                .map_err(|e| ApiError::internal(format!("Failed to load wallet: {e}")))?,
+        );
+        executor.set_wallet(wallet);
+    }
 
     // Configure decision engine if parameters provided
     if let Some(params) = strategy_config.get("parameters") {

@@ -262,6 +262,19 @@ Okres historyczny (czas dla backtestu) jest podawany przez użytkownika i jest t
 2. Jeśli używasz schedulerów:
    - dodaj `--fail-on-alert`, żeby pipeline zwracał kod błędu.
 
+## Skrót: jeden komendowy “ops cycle” (A1→A4)
+
+Jeśli chcesz wykonać **snapshoty → sync swapów → enrich (decode) → audit → health-check** jednym uruchomieniem,
+użyj w repo gotowego skryptu PowerShell:
+
+```powershell
+.\scripts\run_ops_ingest_cycle.ps1 -Limit 2 -RefreshDecoded -SolanaRpcUrl "https://api.mainnet-beta.solana.com"
+```
+
+Zalecane:
+- ustaw `SOLANA_RPC_FALLBACK_URLS` (comma-separated), jeśli masz więcej endpointów,
+- zacznij od małego `-Limit` i dopiero potem zwiększaj.
+
 ## Procedura eskalacji (gdy Orca decode coverage spada)
 1. Zwiększ stabilność dekodowania:
    - podnieś `--decode-timeout-secs` do 30–40,

@@ -24,6 +24,15 @@ W `POST /tx/*/build` unsigned flow wdrożono realne instrukcje z `orca_whirlpool
 
 ---
 
+## 2026-03-26 — Strategy-driven bot: wallet + monitor seeding on start
+
+**keywords:** bot, strategy-executor, auto_execute, wallet, KEYPAIR_PATH, position-monitor, devnet-e2e, clmm-lp-api
+**paths:** `crates/api/src/handlers/strategies.rs`, `crates/api/src/handlers/devnet_e2e_tests.rs`
+
+`POST /strategies/{id}/start` może teraz zasilić `PositionMonitor` listą pozycji z `parameters.position_addresses`. Dodatkowo, gdy `auto_execute=true` i `dry_run=false`, API wymusza i ładuje signing wallet z `KEYPAIR_PATH`/`SOLANA_KEYPAIR_PATH` oraz podpina go do `StrategyExecutor`, dzięki czemu strategie realnie sterują rebalance na devnecie (patrz `devnet_strategy_driven_rebalance_smoke`).
+
+---
+
 ## 2026-03-26 — Devnet production-readiness checklist (3 phases)
 
 **keywords:** devnet, bot, production-readiness, checklist, go-no-go, operations, tx-safety

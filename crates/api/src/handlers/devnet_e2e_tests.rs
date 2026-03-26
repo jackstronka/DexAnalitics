@@ -9,6 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaListTokensQuery};
 use clmm_lp_execution::prelude::Wallet;
+use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
 use clmm_lp_protocols::prelude::{RpcConfig, derive_whirlpool_position_address};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
@@ -18,6 +19,7 @@ use solana_sdk::transaction::Transaction;
 use std::str::FromStr;
 use std::sync::Arc;
 use base64::Engine as _;
+use tokio::time::{sleep, Duration};
 
 fn devnet_state() -> AppState {
     let rpc = std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
@@ -180,6 +182,118 @@ async fn devnet_bot_lifecycle_keypair_smoke() {
         })
         .await;
     assert!(close.is_ok(), "close_position failed: {close:?}");
+}
+
+/// Strategy-driven bot smoke on devnet:
+/// - open a position
+/// - add it to monitor
+/// - start StrategyExecutor with Periodic mode (interval=0h) + auto_execute
+/// - wait for Rebalanced lifecycle event
+///
+/// Run with: `cargo test -p clmm-lp-api devnet_strategy_driven_rebalance_smoke -- --ignored`
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_driven_rebalance_smoke() {
+    let wallet = devnet_wallet_from_env();
+    let rpc = std::env::var("SOLANA_RPC_URL")
+        .unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
+
+    let state = devnet_state();
+
+    // 1) Open an initial position via on-chain tx service.
+    let provider = Arc::new(clmm_lp_protocols::prelude::RpcProvider::new(RpcConfig {
+        primary_url: rpc,
+        ..Default::default()
+    }));
+    let mut tx = OrcaTxService::new(provider);
+    tx.set_wallet(wallet.clone());
+
+    let pool = std::env::var("DEVNET_POOL_ADDRESS")
+        .unwrap_or_else(|_| "3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt".to_string());
+    let amount_a: u64 = std::env::var("DEVNET_OPEN_AMOUNT_A")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000);
+    let amount_b: u64 = std::env::var("DEVNET_OPEN_AMOUNT_B")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000);
+    let tick_lower: i32 = std::env::var("DEVNET_TICK_LOWER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(-128);
+    let tick_upper: i32 = std::env::var("DEVNET_TICK_UPPER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+
+    let open = tx
+        .open_position(OpenPositionTxRequest {
+            pool_address: pool.clone(),
+            tick_lower,
+            tick_upper,
+            amount_a,
+            amount_b,
+            slippage_bps: 100,
+        })
+        .await;
+    assert!(open.is_ok(), "open_position failed: {open:?}");
+
+    let pool_pk = Pubkey::from_str(&pool).expect("pool pubkey");
+    let position = derive_whirlpool_position_address(&pool_pk, tick_lower, tick_upper);
+
+    // 2) Seed monitor with this position so executor has something to evaluate.
+    state
+        .monitor
+        .add_position(&position.to_string())
+        .await
+        .expect("add_position");
+
+    // 3) Start StrategyExecutor with auto_execute and strategy mode that always rebalances.
+    let mut exec = StrategyExecutor::new(
+        state.provider.clone(),
+        state.monitor.clone(),
+        state.tx_manager.clone(),
+        ExecutorConfig {
+            eval_interval_secs: 2,
+            auto_execute: true,
+            require_confirmation: false,
+            max_slippage_pct: rust_decimal::Decimal::new(5, 3),
+            dry_run: false,
+        },
+    );
+    exec.set_wallet(wallet.clone());
+
+    let mut cfg = DecisionConfig::default();
+    cfg.strategy_mode = StrategyMode::Periodic;
+    cfg.periodic_interval_hours = 0; // always eligible
+    exec.set_decision_config(cfg);
+
+    let lifecycle = exec.lifecycle().clone();
+    let exec = Arc::new(exec);
+    let exec_task = {
+        let exec = exec.clone();
+        tokio::spawn(async move { exec.start().await })
+    };
+
+    // 4) Wait until we observe Rebalanced event for the old position.
+    let mut ok = false;
+    for _ in 0..60 {
+        let events = lifecycle.get_events(&position).await;
+        if events
+            .iter()
+            .any(|e| e.event_type == clmm_lp_execution::lifecycle::LifecycleEventType::Rebalanced)
+        {
+            ok = true;
+            break;
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    exec.stop();
+    let _ = exec_task.await;
+
+    assert!(ok, "did not observe Rebalanced event within timeout");
 }
 
 /// Unsigned tx flow smoke (Phantom emulation by keypair): build -> sign -> submit.
