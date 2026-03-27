@@ -10,6 +10,7 @@ pub mod data;
 pub mod optimize;
 pub mod orca_bot;
 pub mod orca_position;
+pub mod orca_swap;
 pub mod orca_wallet;
 pub mod snapshot_price_path;
 pub mod studio;

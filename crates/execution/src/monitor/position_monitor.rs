@@ -201,6 +201,11 @@ impl PositionMonitor {
         Ok(())
     }
 
+    /// Refreshes a single monitored position once (useful for tests and one-off flows).
+    pub async fn refresh_position(&self, address: &Pubkey) -> anyhow::Result<()> {
+        self.update_position(address).await
+    }
+
     /// Updates a single position.
     async fn update_position(&self, address: &Pubkey) -> anyhow::Result<()> {
         let position = self

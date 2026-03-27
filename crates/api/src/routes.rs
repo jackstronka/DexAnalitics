@@ -65,6 +65,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/orca/protocol", get(handlers::orca_get_protocol))
         // Unsiged tx flow routes
         .route("/tx/open/build", post(handlers::tx_open_build))
+        .route("/tx/increase/build", post(handlers::tx_increase_build))
         .route("/tx/decrease/build", post(handlers::tx_decrease_build))
         .route("/tx/collect/build", post(handlers::tx_collect_build))
         .route("/tx/close/build", post(handlers::tx_close_build))

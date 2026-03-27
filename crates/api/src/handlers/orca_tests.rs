@@ -73,9 +73,9 @@ async fn orca_search_pools_proxies_rest() {
             ..Default::default()
         }),
     )
-        .await
-        .unwrap()
-        .0;
+    .await
+    .unwrap()
+    .0;
     assert_eq!(res.total, 1);
     assert_eq!(res.pools[0].address, "POOL2");
 }
@@ -236,4 +236,3 @@ async fn orca_get_protocol_proxies_rest() {
     let res = orca_get_protocol(State(state)).await.unwrap().0;
     assert!(res.tvl_usdc.is_some());
 }
-

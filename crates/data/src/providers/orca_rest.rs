@@ -352,7 +352,13 @@ mod tests {
         });
 
         let c = OrcaRestClient::new(server.base_url() + "/v2/solana");
-        let res = c.list_pools(ListPoolsQuery { size: Some(1), ..Default::default() }).await.unwrap();
+        let res = c
+            .list_pools(ListPoolsQuery {
+                size: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(res.data.len(), 1);
         assert_eq!(res.data[0].address, "POOL1");
         assert_eq!(res.data[0].tick_spacing, 64);
@@ -526,4 +532,3 @@ mod tests {
         assert_eq!(v.data.tvl_usdc.as_deref(), Some("123456.7"));
     }
 }
-

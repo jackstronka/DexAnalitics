@@ -14,6 +14,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{
     DecisionConfig, ExecutorConfig, StrategyExecutor, validate_agent_decision,
 };
@@ -474,6 +475,7 @@ pub async fn start_strategy(
         require_confirmation: !auto_execute,
         max_slippage_pct: Decimal::new(5, 3), // 0.5%
         dry_run,
+        fee_mode: PositionTruthMode::Heuristic,
     };
 
     // Create strategy executor
@@ -560,10 +562,10 @@ pub async fn start_strategy(
     // Broadcast alert
     state
         .broadcast_alert(AlertUpdate {
-        level: "info".to_string(),
-        message: format!("Strategy {} started", id),
-        timestamp: chrono::Utc::now(),
-        position_address: None,
+            level: "info".to_string(),
+            message: format!("Strategy {} started", id),
+            timestamp: chrono::Utc::now(),
+            position_address: None,
         })
         .await;
 
@@ -631,10 +633,10 @@ pub async fn stop_strategy(
     // Broadcast alert
     state
         .broadcast_alert(AlertUpdate {
-        level: "info".to_string(),
-        message: format!("Strategy {} stopped", id),
-        timestamp: chrono::Utc::now(),
-        position_address: None,
+            level: "info".to_string(),
+            message: format!("Strategy {} stopped", id),
+            timestamp: chrono::Utc::now(),
+            position_address: None,
         })
         .await;
 

@@ -33,7 +33,10 @@ pub async fn list_pools(State(_state): State<AppState>) -> ApiResult<Json<ListPo
         stats: Some("24h".to_string()),
         ..Default::default()
     };
-    let paged = client.list_pools(q).await.map_err(|e| ApiError::internal(e.to_string()))?;
+    let paged = client
+        .list_pools(q)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let pools = paged
         .data
@@ -49,11 +52,7 @@ pub async fn list_pools(State(_state): State<AppState>) -> ApiResult<Json<ListPo
             liquidity: p.liquidity,
             fee_rate_bps: p.fee_rate,
             volume_24h_usd: None,
-            tvl_usd: p
-                .tvl_usdc
-                .parse::<f64>()
-                .ok()
-                .and_then(Decimal::from_f64),
+            tvl_usd: p.tvl_usdc.parse::<f64>().ok().and_then(Decimal::from_f64),
             apy_estimate: None,
         })
         .collect::<Vec<_>>();

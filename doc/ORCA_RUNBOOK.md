@@ -54,6 +54,12 @@ Minimalna checklista GO/NO-GO:
   - symulacja tx consistently zwraca błąd policy gate / simulate,
   - open działa, ale close stale nie domyka pozycji.
 
+### Ważne: `position_address` z API open
+
+- Nie wyliczaj pozycji z `(pool, tick_lower, tick_upper)` po stronie skryptów/bota.
+- Dla automatyzacji używaj `position_address` zwróconego przez `/tx/open/build` (to adres pozycji powiązany z realnym `position_mint` wygenerowanym przez SDK).
+- Skrypty `tools/bot_run_devnet.ps1` i `tools/bot_session_devnet.ps1` obsługują teraz `-OpenBuildResponseJson`, żeby przekazać ten adres bez ręcznego przepisywania.
+
 ## Krok 1: Snapshoty Orca (Tier 2 przygotowanie)
 1. Dodaj świeży snapshot dla Orca (np. pierwsze `N` puli):
    - `cargo run --bin clmm-lp-cli -- orca-snapshot-curated --limit <N>`
@@ -275,6 +281,22 @@ Zalecane:
 - ustaw `SOLANA_RPC_FALLBACK_URLS` (comma-separated), jeśli masz więcej endpointów,
 - zacznij od małego `-Limit` i dopiero potem zwiększaj.
 
+## Szybki verifier GO/NO-GO (snapshot + decode + health)
+
+Jedna komenda do szybkiego sprawdzenia:
+- readiness tier 1/2 dla curated pooli,
+- health alerts (`data-health-check`),
+- globalny `% ok` dekodowania (`swaps-decode-audit`).
+
+```powershell
+.\tools\quick_verify_data.ps1 -LimitPerProtocol 1 -MinDecodeOkPct 65 -HealthMaxAgeMinutes 180
+```
+
+Wynik:
+- zapisuje raport JSON: `data/reports/quick_verify_*.json`,
+- zwraca `OVERALL GO: True/False`,
+- kończy kodem `2` jeśli GO=FALSE (pod scheduler/CI).
+
 ## Procedura eskalacji (gdy Orca decode coverage spada)
 1. Zwiększ stabilność dekodowania:
    - podnieś `--decode-timeout-secs` do 30–40,
@@ -358,11 +380,134 @@ Ta sama pętla co `clmm-lp-api` (`PositionMonitor` + `StrategyExecutor`), urucha
 - **RPC:** `SOLANA_RPC_URL` / `SOLANA_RPC_FALLBACK_URLS` (jak w reszcie repo).
 - **`--position`:** adres **pozycji** Whirlpool (NFT), nie adres poola.
 - **Opcjonalnie `--optimize-result-json`:** plik wyniku `backtest-optimize` → `DecisionConfig` (jak `POST /apply-optimize-result` w API).
+- **Historia pod backtest:** `--il-ledger-path` (JSONL: open / rebalance / close) oraz `--position-fee-ledger-path` (JSONL: checkpointy fee). CLI tworzy katalog nadrzędny pliku, jeśli nie istnieje. Konwencja i join z symulacją: `doc/BOT_OPERATIONS_MODEL_2026-03-23.md`.
 
 Przykład (tylko obserwacja):
 
 ```powershell
 cargo run --bin clmm-lp-cli -- orca-bot-run --position <POSITION_PUBKEY> --eval-interval-secs 300 --poll-interval-secs 30
+```
+
+Przykład z ledgerami (np. pod późniejsze porównanie z backtestem):
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-bot-run `
+  --position <POSITION_PUBKEY> `
+  --eval-interval-secs 300 `
+  --poll-interval-secs 30 `
+  --il-ledger-path data/bot-runs/devnet/run-il.jsonl `
+  --position-fee-ledger-path data/bot-runs/devnet/run-fee.jsonl
+```
+
+Skrypt `tools/bot_run_devnet.ps1` domyślnie zakłada katalog `data/bot-runs/devnet/<timestamp>/` i dopisuje oba pliki (`il_ledger.jsonl`, `position_fee_ledger.jsonl`), chyba że podasz `-BotRunDir`, `-IlLedgerPath`, `-PositionFeeLedgerPath` albo wyłączysz zapis: `-SkipLedger`.
+
+## CLI: `orca-bot-open-and-run` (open + monitor + strategia)
+
+Jedna komenda do flow devnet: otwórz pozycję on-chain i od razu uruchom pętlę bota na nowym `position_address` (bez ręcznego przepisywania adresu).
+
+Przykład (otwarcie po szerokości + bot dry-run):
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-bot-open-and-run `
+  --pool <POOL_PUBKEY> `
+  --range-width-pct 10 `
+  --keypair "C:\secure\devnet-bot\wallet.json" `
+  --eval-interval-secs 300 `
+  --poll-interval-secs 30
+```
+
+Przykład (open + bot limited-live):
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-bot-open-and-run `
+  --pool <POOL_PUBKEY> `
+  --tick-lower <TICK_LOWER> `
+  --tick-upper <TICK_UPPER> `
+  --keypair "C:\secure\devnet-bot\wallet.json" `
+  --execute
+```
+
+## CLI: Zamykanie pozycji / pobieranie fee
+
+Collect fees:
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-position-collect-fees `
+  --position <POSITION_PUBKEY> `
+  --keypair "C:\secure\devnet-bot\wallet.json"
+```
+
+Harvest (alias, Orca naming):
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-position-harvest `
+  --position <POSITION_PUBKEY> `
+  --keypair "C:\secure\devnet-bot\wallet.json"
+```
+
+Close position (full close):
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-position-close `
+  --position <POSITION_PUBKEY> `
+  --keypair "C:\secure\devnet-bot\wallet.json"
+```
+
+### Devnet convenience: open -> wait -> close
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-position-open-and-close `
+  --pool 3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt `
+  --range-width-pct 10 `
+  --sleep-secs 10 `
+  --keypair "C:\secure\devnet-bot\wallet.json"
+```
+
+## Devnet: swap SOL -> (dev)USDC w CLI (do zasilenia tokenów pod open/rebalance)
+
+Jeśli masz SOL, ale brakuje Ci (dev)USDC do otwarcia pozycji SOL/USDC, możesz zrobić swap na tej samej puli Whirlpool.
+
+Przykład (ExactIn): zamień 0.01 SOL (\(0.01 * 1e9 = 10_000_000\) lamports) na devUSDC, ze slippage 1%.
+
+```powershell
+cargo run --bin clmm-lp-cli -- orca-swap `
+  --pool 3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt `
+  --specified-mint So11111111111111111111111111111111111111112 `
+  --swap-type exact-in `
+  --amount 10000000 `
+  --slippage-bps 100 `
+  --keypair "C:\secure\devnet-bot\wallet.json"
+```
+
+## Devnet: automatyczne wyrównanie portfela do ~50/50 (SOL vs devUSDC)
+
+Skrypt policzy ile SOL doswapować do devUSDC na podstawie quote z puli i aktualnych sald, a potem wykona swap jednym strzałem.
+
+```powershell
+.\tools\devnet_rebalance_wallet_half.ps1 -KeypairWinPath "C:\secure\devnet-bot\wallet.json"
+```
+
+Dry-run (bez wysyłania transakcji):
+
+```powershell
+.\tools\devnet_rebalance_wallet_half.ps1 -KeypairWinPath "C:\secure\devnet-bot\wallet.json" -DryRun
+```
+
+### Tryb “pozycja”: close -> 50/50 -> open
+
+Jeśli chcesz zrebalansować **tylko środki z konkretnej pozycji**, skrypt może:
+1) zamknąć pozycję,
+2) wyrównać portfel do ~50/50,
+3) otworzyć nową pozycję na wskazanym poolu (minimalne capy pod testy).
+
+```powershell
+.\tools\devnet_rebalance_wallet_half.ps1 `
+  -KeypairWinPath "C:\secure\devnet-bot\wallet.json" `
+  -Position <POSITION_PUBKEY> `
+  -ReopenPool 3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt `
+  -ReopenRangeWidthPct 10 `
+  -OpenAmountA 1000000 `
+  -OpenAmountB 1000
 ```
 
 Semantyka strategii i benchmarku HODL: `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`.

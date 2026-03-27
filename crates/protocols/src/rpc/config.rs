@@ -40,11 +40,28 @@ impl Default for RpcConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        // Default public fallbacks (still useful even when SOLANA_RPC_URL is set).
-        fallback_urls.extend(vec![
-            "https://solana-api.projectserum.com".to_string(),
-            "https://rpc.ankr.com/solana".to_string(),
-        ]);
+        // Default public fallbacks.
+        //
+        // Important: if primary is devnet, do NOT add mainnet fallbacks by default.
+        // Mixing clusters makes `send+confirm` and `getAccount` appear flaky (tx sent on one
+        // cluster, confirmed/polled on another), and some public endpoints are paid/limited.
+        let primary_is_devnet = env_primary.as_deref().unwrap_or("").contains("devnet")
+            || env_primary
+                .as_deref()
+                .unwrap_or("")
+                .contains("api.devnet.solana.com");
+
+        if primary_is_devnet {
+            // Minimal free devnet fallback(s). Keep list short to reduce flakiness.
+            // Note: avoid adding third-party endpoints by default because many have started
+            // requiring API keys (leading to "Unauthorized" failures during rotation).
+            // If you want fallbacks, provide them explicitly via `SOLANA_RPC_FALLBACK_URLS`.
+        } else {
+            fallback_urls.extend(vec![
+                "https://solana-api.projectserum.com".to_string(),
+                "https://rpc.ankr.com/solana".to_string(),
+            ]);
+        }
 
         Self {
             primary_url: env_primary

@@ -544,8 +544,26 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
 
 pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use solana_sdk::pubkey::Pubkey;
     use spl_token::solana_program::program_pack::Pack;
     use spl_token::state::Account as SplTokenAccount;
+
+    fn decode_any_token_account(data: &[u8]) -> Option<(u64, String)> {
+        if let Ok(a) = SplTokenAccount::unpack(data) {
+            return Some((a.amount, a.owner.to_string()));
+        }
+
+        // Fallback for token accounts with extensions (e.g. Token-2022):
+        // base Account layout keeps owner at [32..64] and amount at [64..72].
+        if data.len() >= 72 {
+            let owner = Pubkey::try_from(&data[32..64]).ok()?;
+            let amount_bytes: [u8; 8] = data[64..72].try_into().ok()?;
+            let amount = u64::from_le_bytes(amount_bytes);
+            return Some((amount, owner.to_string()));
+        }
+
+        None
+    }
 
     let startup_path = std::path::Path::new("STARTUP.md");
     let content = std::fs::read_to_string(startup_path).map_err(|e| {
@@ -654,10 +672,9 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
         #[serde(skip_serializing_if = "Option::is_none")]
         token_vault_owner_b: Option<String>,
 
-        #[serde(skip_serializing_if = "Option::is_none")]
-        vault_amount_a: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        vault_amount_b: Option<u64>,
+        vault_amount_a: u64,
+        vault_amount_b: u64,
+        vault_amount_source: String,
 
         #[serde(skip_serializing_if = "Option::is_none")]
         protocol_fee_amount_a: Option<u64>,
@@ -686,13 +703,13 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
                     accounts
                         .get(0)
                         .and_then(|a| a.as_ref())
-                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                        .and_then(|a| decode_any_token_account(&a.data))
                 });
                 let unpack_b = accounts_bulk.as_ref().and_then(|accounts| {
                     accounts
                         .get(1)
                         .and_then(|a| a.as_ref())
-                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                        .and_then(|a| decode_any_token_account(&a.data))
                 });
 
                 let a = if unpack_a.is_some() {
@@ -701,7 +718,7 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
                     rpc.get_account_by_address(&p.reserve_x.to_string())
                         .await
                         .ok()
-                        .and_then(|acc| SplTokenAccount::unpack(&acc.data).ok())
+                        .and_then(|acc| decode_any_token_account(&acc.data))
                 };
                 let b = if unpack_b.is_some() {
                     unpack_b
@@ -709,17 +726,23 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
                     rpc.get_account_by_address(&p.reserve_y.to_string())
                         .await
                         .ok()
-                        .and_then(|acc| SplTokenAccount::unpack(&acc.data).ok())
+                        .and_then(|acc| decode_any_token_account(&acc.data))
                 };
 
                 (
-                    a.as_ref().map(|a| a.amount),
-                    a.as_ref().map(|a| a.owner.to_string()),
-                    b.as_ref().map(|b| b.amount),
-                    b.as_ref().map(|b| b.owner.to_string()),
+                    a.as_ref().map(|(amount, _)| *amount),
+                    a.as_ref().map(|(_, owner)| owner.clone()),
+                    b.as_ref().map(|(amount, _)| *amount),
+                    b.as_ref().map(|(_, owner)| owner.clone()),
                 )
             } else {
                 (None, None, None, None)
+            };
+
+        let (vault_amount_a_value, vault_amount_b_value, vault_amount_source) =
+            match (vault_amount_a, vault_amount_b) {
+                (Some(a), Some(b)) => (a, b, "rpc_token_account".to_string()),
+                _ => (0, 0, "missing_fallback_zero".to_string()),
             };
 
         let snap = MeteoraLbPairSnapshot {
@@ -750,8 +773,9 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
             token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
             token_vault_owner_a,
             token_vault_owner_b,
-            vault_amount_a,
-            vault_amount_b,
+            vault_amount_a: vault_amount_a_value,
+            vault_amount_b: vault_amount_b_value,
+            vault_amount_source,
             protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),
             protocol_fee_amount_b: parsed.as_ref().map(|p| p.protocol_fee_amount_y),
         };

@@ -784,8 +784,12 @@ enum Commands {
     /// Default: dry-run (log only). Use `--execute` to sign transactions (`--keypair` or `SOLANA_KEYPAIR`).
     OrcaBotRun {
         /// Whirlpool **position** (NFT) address to monitor.
+        /// Optional if `--open-build-response-json` is provided.
         #[arg(long)]
-        position: String,
+        position: Option<String>,
+        /// JSON file with `position_address` returned by API `/tx/open/build`.
+        #[arg(long)]
+        open_build_response_json: Option<std::path::PathBuf>,
         /// Path to Solana keypair JSON. Not required in dry-run; for `--execute` use `--keypair`, `KEYPAIR_PATH`, or `SOLANA_KEYPAIR`.
         #[arg(long)]
         keypair: Option<std::path::PathBuf>,
@@ -801,6 +805,57 @@ enum Commands {
         /// Optional `backtest-optimize` winner JSON → live `DecisionConfig` (same as API `apply-optimize-result`).
         #[arg(long)]
         optimize_result_json: Option<std::path::PathBuf>,
+        /// Append IL / rebalance lifecycle rows (JSONL) — porównania z backtestem (`doc/BOT_OPERATIONS_MODEL_2026-03-23.md`).
+        #[arg(long)]
+        il_ledger_path: Option<std::path::PathBuf>,
+        /// Append position-fee checkpoint rows (JSONL).
+        #[arg(long)]
+        position_fee_ledger_path: Option<std::path::PathBuf>,
+    },
+    /// Open a new Orca position on-chain and immediately run bot on that created position.
+    OrcaBotOpenAndRun {
+        /// Whirlpool pool address.
+        #[arg(long)]
+        pool: String,
+        /// Path to Solana keypair JSON (required for open tx).
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+        /// Lower tick (must align to pool `tick_spacing`; use with `--tick-upper`).
+        #[arg(long)]
+        tick_lower: Option<i32>,
+        /// Upper tick.
+        #[arg(long)]
+        tick_upper: Option<i32>,
+        /// Alternative: symmetric range width in percent of price (e.g. `10`).
+        #[arg(long)]
+        range_width_pct: Option<f64>,
+        /// Max token A for open+increase on position creation.
+        #[arg(long, default_value_t = 1_000)]
+        amount_a: u64,
+        /// Max token B for open+increase on position creation.
+        #[arg(long, default_value_t = 1_000)]
+        amount_b: u64,
+        /// Max slippage in basis points for open tx.
+        #[arg(long, default_value_t = 50)]
+        slippage_bps: u16,
+        /// Submit on-chain txs during bot loop (rebalance/close). Without this flag, bot runs in dry-run mode.
+        #[arg(long, default_value_t = false)]
+        execute: bool,
+        /// Strategy evaluation period (seconds).
+        #[arg(long, default_value_t = 300)]
+        eval_interval_secs: u64,
+        /// On-chain position poll period (seconds).
+        #[arg(long, default_value_t = 30)]
+        poll_interval_secs: u64,
+        /// Optional `backtest-optimize` winner JSON -> live `DecisionConfig`.
+        #[arg(long)]
+        optimize_result_json: Option<std::path::PathBuf>,
+        /// Append IL / rebalance lifecycle rows (JSONL).
+        #[arg(long)]
+        il_ledger_path: Option<std::path::PathBuf>,
+        /// Append position-fee checkpoint rows (JSONL).
+        #[arg(long)]
+        position_fee_ledger_path: Option<std::path::PathBuf>,
     },
     /// Open a new Orca Whirlpool LP position (on-chain). Without `--dry-run` requires a signing key.
     OrcaPositionOpen {
@@ -821,6 +876,12 @@ enum Commands {
         /// Alternative: symmetric range width in percent of price (e.g. `10` = 10%% total band, like backtest width).
         #[arg(long)]
         range_width_pct: Option<f64>,
+        /// Max token A for open+increase on position creation.
+        #[arg(long, default_value_t = 1_000)]
+        amount_a: u64,
+        /// Max token B for open+increase on position creation.
+        #[arg(long, default_value_t = 1_000)]
+        amount_b: u64,
         /// Max slippage in basis points for open + increase.
         #[arg(long, default_value_t = 50)]
         slippage_bps: u16,
@@ -840,6 +901,88 @@ enum Commands {
         /// Remove exactly this liquidity amount in pool units (mutually exclusive with `--liquidity-pct`).
         #[arg(long)]
         liquidity: Option<u128>,
+    },
+    /// Collect fees from an existing Whirlpool position.
+    OrcaPositionCollectFees {
+        /// Position (NFT) address.
+        #[arg(long)]
+        position: String,
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Harvest (Orca wording): alias for `orca-position-collect-fees`.
+    OrcaPositionHarvest {
+        /// Position (NFT) address.
+        #[arg(long)]
+        position: String,
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Fully close an existing Whirlpool position.
+    OrcaPositionClose {
+        /// Position (NFT) address.
+        #[arg(long)]
+        position: String,
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// Devnet convenience: open a position, wait N seconds, then close it.
+    OrcaPositionOpenAndClose {
+        /// Whirlpool pool address.
+        #[arg(long)]
+        pool: String,
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+        /// Seconds to wait between open and close.
+        #[arg(long, default_value_t = 10)]
+        sleep_secs: u64,
+        /// Lower tick (must align to pool `tick_spacing`; use with `--tick-upper`).
+        #[arg(long)]
+        tick_lower: Option<i32>,
+        /// Upper tick.
+        #[arg(long)]
+        tick_upper: Option<i32>,
+        /// Alternative: symmetric range width in percent of price (e.g. `10`).
+        #[arg(long)]
+        range_width_pct: Option<f64>,
+        /// Max token A for open+increase on position creation.
+        #[arg(long, default_value_t = 1_000)]
+        amount_a: u64,
+        /// Max token B for open+increase on position creation.
+        #[arg(long, default_value_t = 1_000)]
+        amount_b: u64,
+        /// Max slippage in basis points for open tx.
+        #[arg(long, default_value_t = 50)]
+        slippage_bps: u16,
+    },
+    /// Swap tokens on an Orca Whirlpool (ExactIn/ExactOut). Useful on devnet to obtain dev tokens.
+    OrcaSwap {
+        /// Whirlpool pool address.
+        #[arg(long)]
+        pool: String,
+        /// Mint of the specified token.
+        /// For swapping SOL, use native mint (wSOL): `So11111111111111111111111111111111111111112`.
+        #[arg(long)]
+        specified_mint: String,
+        /// Swap type: `exact-in` or `exact-out`.
+        #[arg(long, default_value = "exact-in")]
+        swap_type: String,
+        /// Amount in base units (according to mint decimals).
+        #[arg(long)]
+        amount: u64,
+        /// Slippage tolerance in basis points.
+        #[arg(long, default_value_t = 100)]
+        slippage_bps: u16,
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
     /// Show last snapshot-run-curated-all status from local JSONL log
     SnapshotStatusLast,
@@ -4954,19 +5097,59 @@ async fn main() -> Result<()> {
         }
         Commands::OrcaBotRun {
             position,
+            open_build_response_json,
             keypair,
             execute,
             eval_interval_secs,
             poll_interval_secs,
             optimize_result_json,
+            il_ledger_path,
+            position_fee_ledger_path,
         } => {
             crate::commands::orca_bot::run_orca_bot(
                 position.clone(),
+                open_build_response_json.clone(),
                 keypair.clone(),
                 *execute,
                 *eval_interval_secs,
                 *poll_interval_secs,
                 optimize_result_json.clone(),
+                il_ledger_path.clone(),
+                position_fee_ledger_path.clone(),
+            )
+            .await?;
+        }
+        Commands::OrcaBotOpenAndRun {
+            pool,
+            keypair,
+            tick_lower,
+            tick_upper,
+            range_width_pct,
+            amount_a,
+            amount_b,
+            slippage_bps,
+            execute,
+            eval_interval_secs,
+            poll_interval_secs,
+            optimize_result_json,
+            il_ledger_path,
+            position_fee_ledger_path,
+        } => {
+            crate::commands::orca_bot::run_orca_bot_open_and_run(
+                pool.clone(),
+                keypair.clone(),
+                *tick_lower,
+                *tick_upper,
+                *range_width_pct,
+                *amount_a,
+                *amount_b,
+                *slippage_bps,
+                *execute,
+                *eval_interval_secs,
+                *poll_interval_secs,
+                optimize_result_json.clone(),
+                il_ledger_path.clone(),
+                position_fee_ledger_path.clone(),
             )
             .await?;
         }
@@ -4977,6 +5160,8 @@ async fn main() -> Result<()> {
             tick_lower,
             tick_upper,
             range_width_pct,
+            amount_a,
+            amount_b,
             slippage_bps,
         } => {
             if !*dry_run {
@@ -4990,6 +5175,8 @@ async fn main() -> Result<()> {
                 *tick_lower,
                 *tick_upper,
                 *range_width_pct,
+                *amount_a,
+                *amount_b,
                 *slippage_bps,
             )
             .await?;
@@ -5011,6 +5198,109 @@ async fn main() -> Result<()> {
                 *dry_run,
                 *liquidity_pct,
                 *liquidity,
+            )
+            .await?;
+        }
+        Commands::OrcaPositionCollectFees {
+            position,
+            keypair,
+            dry_run,
+        } => {
+            if !*dry_run {
+                let _ = crate::commands::orca_wallet::load_signing_wallet(keypair.clone())
+                    .context("signing key: --keypair, KEYPAIR_PATH, or SOLANA_KEYPAIR")?;
+            }
+            crate::commands::orca_position::run_position_collect_fees(
+                position.clone(),
+                keypair.clone(),
+                *dry_run,
+            )
+            .await?;
+        }
+        Commands::OrcaPositionHarvest {
+            position,
+            keypair,
+            dry_run,
+        } => {
+            if !*dry_run {
+                let _ = crate::commands::orca_wallet::load_signing_wallet(keypair.clone())
+                    .context("signing key: --keypair, KEYPAIR_PATH, or SOLANA_KEYPAIR")?;
+            }
+            crate::commands::orca_position::run_position_harvest(
+                position.clone(),
+                keypair.clone(),
+                *dry_run,
+            )
+            .await?;
+        }
+        Commands::OrcaPositionClose {
+            position,
+            keypair,
+            dry_run,
+        } => {
+            if !*dry_run {
+                let _ = crate::commands::orca_wallet::load_signing_wallet(keypair.clone())
+                    .context("signing key: --keypair, KEYPAIR_PATH, or SOLANA_KEYPAIR")?;
+            }
+            crate::commands::orca_position::run_position_close(
+                position.clone(),
+                keypair.clone(),
+                *dry_run,
+            )
+            .await?;
+        }
+        Commands::OrcaPositionOpenAndClose {
+            pool,
+            keypair,
+            sleep_secs,
+            tick_lower,
+            tick_upper,
+            range_width_pct,
+            amount_a,
+            amount_b,
+            slippage_bps,
+        } => {
+            let _ = crate::commands::orca_wallet::load_signing_wallet(keypair.clone())
+                .context("signing key: --keypair, KEYPAIR_PATH, or SOLANA_KEYPAIR")?;
+            crate::commands::orca_position::run_position_open_and_close(
+                pool.clone(),
+                keypair.clone(),
+                *sleep_secs,
+                *tick_lower,
+                *tick_upper,
+                *range_width_pct,
+                *amount_a,
+                *amount_b,
+                *slippage_bps,
+            )
+            .await?;
+        }
+        Commands::OrcaSwap {
+            pool,
+            specified_mint,
+            swap_type,
+            amount,
+            slippage_bps,
+            keypair,
+            dry_run,
+        } => {
+            if !*dry_run {
+                let _ = crate::commands::orca_wallet::load_signing_wallet(keypair.clone())
+                    .context("signing key: --keypair, KEYPAIR_PATH, or SOLANA_KEYPAIR")?;
+            }
+            let st = match swap_type.as_str() {
+                "exact-in" => crate::commands::orca_swap::CliSwapType::ExactIn,
+                "exact-out" => crate::commands::orca_swap::CliSwapType::ExactOut,
+                other => anyhow::bail!("invalid --swap-type {other} (use exact-in or exact-out)"),
+            };
+            crate::commands::orca_swap::run_orca_swap(
+                pool.clone(),
+                specified_mint.clone(),
+                st,
+                *amount,
+                *slippage_bps,
+                keypair.clone(),
+                *dry_run,
             )
             .await?;
         }

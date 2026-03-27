@@ -1,8 +1,8 @@
 use super::*;
 use crate::models::{BuildUnsignedTxRequest, SubmitSignedTxRequest};
 use crate::state::{ApiConfig, AppState};
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use clmm_lp_protocols::prelude::RpcConfig;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
@@ -93,3 +93,25 @@ async fn tx_decrease_build_requires_position_pool_and_liquidity() {
     assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn tx_increase_build_requires_position_pool_and_amounts() {
+    let s = state();
+    let kp = Keypair::new();
+    let err = tx_increase_build(
+        State(s),
+        Json(BuildUnsignedTxRequest {
+            wallet_pubkey: kp.pubkey().to_string(),
+            position_address: None,
+            pool_address: None,
+            amount_a: None,
+            amount_b: None,
+            liquidity_amount: None,
+            slippage_bps: None,
+            tick_lower: None,
+            tick_upper: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+}

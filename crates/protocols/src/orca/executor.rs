@@ -8,12 +8,17 @@
 
 use crate::rpc::RpcProvider;
 use anyhow::{Context, Result};
+use borsh::BorshDeserialize;
+use orca_whirlpools::{
+    DecreaseLiquidityParam, IncreaseLiquidityParam, WhirlpoolsConfigInput,
+    close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
+    increase_liquidity_instructions, open_position_instructions_with_tick_bounds,
+    set_whirlpools_config_address,
+};
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
-    pubkey::Pubkey,
-    signature::Signature,
-    signer::Signer,
-    transaction::Transaction,
+    instruction::Instruction, pubkey::Pubkey, signature::Keypair, signature::Signature,
+    signer::Signer, transaction::Transaction,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -111,6 +116,8 @@ pub struct ExecutionResult {
     pub slot: Option<u64>,
     /// Error message if failed.
     pub error: Option<String>,
+    /// Position PDA created by open-position flow (if applicable).
+    pub created_position: Option<Pubkey>,
 }
 
 impl ExecutionResult {
@@ -122,6 +129,7 @@ impl ExecutionResult {
             success: true,
             slot: Some(slot),
             error: None,
+            created_position: None,
         }
     }
 
@@ -133,6 +141,7 @@ impl ExecutionResult {
             success: false,
             slot: None,
             error: Some(error),
+            created_position: None,
         }
     }
 }
@@ -141,27 +150,12 @@ impl ExecutionResult {
 pub struct WhirlpoolExecutor {
     /// RPC provider for blockchain interaction.
     provider: Arc<RpcProvider>,
-    /// Whirlpool program ID.
-    program_id: Pubkey,
-    /// Token program ID.
-    token_program: Pubkey,
-    /// Associated token program ID.
-    ata_program: Pubkey,
-    /// System program ID.
-    system_program: Pubkey,
 }
 
 impl WhirlpoolExecutor {
     /// Creates a new WhirlpoolExecutor.
     pub fn new(provider: Arc<RpcProvider>) -> Self {
-        Self {
-            provider,
-            program_id: Pubkey::from_str(WHIRLPOOL_PROGRAM_ID).expect("Invalid program ID"),
-            token_program: Pubkey::from_str(TOKEN_PROGRAM_ID).expect("Invalid token program ID"),
-            ata_program: Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID)
-                .expect("Invalid ATA program ID"),
-            system_program: Pubkey::from_str(SYSTEM_PROGRAM_ID).expect("Invalid system program ID"),
-        }
+        Self { provider }
     }
 
     /// Opens a new position in a Whirlpool.
@@ -172,136 +166,225 @@ impl WhirlpoolExecutor {
     ///
     /// # Returns
     /// Execution result with transaction signature.
-    pub async fn open_position<S: Signer>(
+    pub async fn open_position(
         &self,
         params: &OpenPositionParams,
-        payer: &S,
+        payer: &Keypair,
     ) -> Result<ExecutionResult> {
         info!(
             pool = %params.pool,
             tick_lower = params.tick_lower,
             tick_upper = params.tick_upper,
-            "Opening new position"
+            "Opening new position (orca_whirlpools SDK)"
         );
 
-        // Derive position mint PDA
-        let position_mint =
-            self.derive_position_mint(&params.pool, params.tick_lower, params.tick_upper)?;
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
 
-        // Derive position PDA
-        let (position_pda, _bump) =
-            Pubkey::find_program_address(&[b"position", position_mint.as_ref()], &self.program_id);
+        let opened = open_position_instructions_with_tick_bounds(
+            &rpc,
+            params.pool,
+            params.tick_lower,
+            params.tick_upper,
+            IncreaseLiquidityParam {
+                token_max_a: params.amount_a,
+                token_max_b: params.amount_b,
+            },
+            Some(params.slippage_bps),
+            Some(payer.pubkey()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("orca open_position_instructions failed: {e}"))?;
 
-        // Build open position instruction
-        let open_ix = self.build_open_position_instruction(
-            params,
-            &payer.pubkey(),
-            &position_mint,
-            &position_pda,
-        )?;
+        let whirlpool_program = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID)
+            .map_err(|e| anyhow::anyhow!("invalid whirlpool program id: {e}"))?;
+        let (position_pda, _) = Pubkey::find_program_address(
+            &[b"position", opened.position_mint.as_ref()],
+            &whirlpool_program,
+        );
 
-        // Build increase liquidity instruction
-        let increase_ix = self.build_increase_liquidity_instruction(
-            &position_pda,
-            &params.pool,
-            &payer.pubkey(),
-            params.amount_a,
-            params.amount_b,
-        )?;
-
-        // Create and send transaction
-        let instructions = vec![open_ix, increase_ix];
-        self.send_transaction(&instructions, payer).await
+        let mut res = self
+            .send_transaction_with_signers(&opened.instructions, payer, &opened.additional_signers)
+            .await?;
+        if res.success {
+            res.created_position = Some(position_pda);
+        }
+        Ok(res)
     }
 
     /// Increases liquidity in an existing position.
-    pub async fn increase_liquidity<S: Signer>(
+    pub async fn increase_liquidity(
         &self,
         params: &IncreaseLiquidityParams,
-        payer: &S,
+        payer: &Keypair,
     ) -> Result<ExecutionResult> {
         info!(
             position = %params.position,
             liquidity = params.liquidity_amount,
             "Increasing liquidity"
         );
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
 
-        let ix = self.build_increase_liquidity_instruction(
-            &params.position,
-            &params.pool,
-            &payer.pubkey(),
-            params.token_max_a,
-            params.token_max_b,
-        )?;
+        // SDK requires position mint; fetch & deserialize position account to get it.
+        let acct = self
+            .provider
+            .get_account(&params.position)
+            .await
+            .context("fetch position account")?;
+        let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
+            .context("parse WhirlpoolPosition (borsh)")?;
 
-        self.send_transaction(&[ix], payer).await
+        let inc = increase_liquidity_instructions(
+            &rpc,
+            parsed.position_mint,
+            IncreaseLiquidityParam {
+                token_max_a: params.token_max_a,
+                token_max_b: params.token_max_b,
+            },
+            Some(100),
+            Some(payer.pubkey()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("orca increase_liquidity_instructions failed: {e}"))?;
+
+        self.send_transaction_with_signers(&inc.instructions, payer, &inc.additional_signers)
+            .await
     }
 
     /// Decreases liquidity from an existing position.
-    pub async fn decrease_liquidity<S: Signer>(
+    pub async fn decrease_liquidity(
         &self,
         params: &DecreaseLiquidityParams,
-        payer: &S,
+        payer: &Keypair,
     ) -> Result<ExecutionResult> {
         info!(
             position = %params.position,
             liquidity = params.liquidity_amount,
             "Decreasing liquidity"
         );
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
 
-        let ix = self.build_decrease_liquidity_instruction(
-            &params.position,
-            &params.pool,
-            &payer.pubkey(),
-            params.liquidity_amount,
-            params.token_min_a,
-            params.token_min_b,
-        )?;
+        let acct = self
+            .provider
+            .get_account(&params.position)
+            .await
+            .context("fetch position account")?;
+        let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
+            .context("parse WhirlpoolPosition (borsh)")?;
 
-        self.send_transaction(&[ix], payer).await
+        let dec = decrease_liquidity_instructions(
+            &rpc,
+            parsed.position_mint,
+            DecreaseLiquidityParam::Liquidity(params.liquidity_amount),
+            Some(100),
+            Some(payer.pubkey()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("orca decrease_liquidity_instructions failed: {e}"))?;
+
+        self.send_transaction_with_signers(&dec.instructions, payer, &dec.additional_signers)
+            .await
     }
 
     /// Collects fees from a position.
-    pub async fn collect_fees<S: Signer>(
+    pub async fn collect_fees(
         &self,
         position: &Pubkey,
-        pool: &Pubkey,
-        payer: &S,
+        _pool: &Pubkey,
+        payer: &Keypair,
     ) -> Result<ExecutionResult> {
         info!(position = %position, "Collecting fees");
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
 
-        let ix = self.build_collect_fees_instruction(position, pool, &payer.pubkey())?;
+        let acct = self
+            .provider
+            .get_account(position)
+            .await
+            .context("fetch position account")?;
+        let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
+            .context("parse WhirlpoolPosition (borsh)")?;
 
-        self.send_transaction(&[ix], payer).await
+        let harvested =
+            harvest_position_instructions(&rpc, parsed.position_mint, Some(payer.pubkey()))
+                .await
+                .map_err(|e| anyhow::anyhow!("orca harvest_position_instructions failed: {e}"))?;
+
+        self.send_transaction_with_signers(
+            &harvested.instructions,
+            payer,
+            &harvested.additional_signers,
+        )
+        .await
     }
 
     /// Closes a position.
-    pub async fn close_position<S: Signer>(
+    pub async fn close_position(
         &self,
         position: &Pubkey,
-        pool: &Pubkey,
-        payer: &S,
+        _pool: &Pubkey,
+        payer: &Keypair,
     ) -> Result<ExecutionResult> {
         info!(position = %position, "Closing position");
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
 
-        // First decrease all liquidity
-        let decrease_ix = self.build_decrease_liquidity_instruction(
-            position,
-            pool,
-            &payer.pubkey(),
-            u128::MAX, // All liquidity
-            0,         // Min token A
-            0,         // Min token B
-        )?;
+        let acct = self
+            .provider
+            .get_account(position)
+            .await
+            .context("fetch position account")?;
+        let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
+            .context("parse WhirlpoolPosition (borsh)")?;
 
-        // Collect any remaining fees
-        let collect_ix = self.build_collect_fees_instruction(position, pool, &payer.pubkey())?;
+        let closed = close_position_instructions(
+            &rpc,
+            parsed.position_mint,
+            Some(100),
+            Some(payer.pubkey()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
 
-        // Close the position
-        let close_ix = self.build_close_position_instruction(position, &payer.pubkey())?;
-
-        let instructions = vec![decrease_ix, collect_ix, close_ix];
-        self.send_transaction(&instructions, payer).await
+        self.send_transaction_with_signers(&closed.instructions, payer, &closed.additional_signers)
+            .await
     }
 
     /// Simulates a transaction without broadcasting.
@@ -343,192 +426,13 @@ impl WhirlpoolExecutor {
         Ok(true)
     }
 
-    // Private helper methods
+    // NOTE: Instruction building is delegated to `orca_whirlpools` SDK.
 
-    fn derive_position_mint(
-        &self,
-        pool: &Pubkey,
-        tick_lower: i32,
-        tick_upper: i32,
-    ) -> Result<Pubkey> {
-        let (mint, _bump) = Pubkey::find_program_address(
-            &[
-                b"position_mint",
-                pool.as_ref(),
-                &tick_lower.to_le_bytes(),
-                &tick_upper.to_le_bytes(),
-            ],
-            &self.program_id,
-        );
-        Ok(mint)
-    }
-
-    fn build_open_position_instruction(
-        &self,
-        params: &OpenPositionParams,
-        owner: &Pubkey,
-        position_mint: &Pubkey,
-        position: &Pubkey,
-    ) -> Result<Instruction> {
-        // Whirlpool OpenPosition instruction discriminator
-        let discriminator: [u8; 8] = [0x87, 0x80, 0x2f, 0x4d, 0x0f, 0x98, 0xf0, 0x31];
-
-        let mut data = Vec::with_capacity(24);
-        data.extend_from_slice(&discriminator);
-        data.extend_from_slice(&params.tick_lower.to_le_bytes());
-        data.extend_from_slice(&params.tick_upper.to_le_bytes());
-
-        // Derive position token account
-        let position_token_account = self.derive_ata(owner, position_mint)?;
-
-        let accounts = vec![
-            AccountMeta::new(*owner, true),                        // funder
-            AccountMeta::new_readonly(*owner, false),              // owner
-            AccountMeta::new(*position, false),                    // position
-            AccountMeta::new(*position_mint, true),                // position_mint
-            AccountMeta::new(position_token_account, false),       // position_token_account
-            AccountMeta::new_readonly(params.pool, false),         // whirlpool
-            AccountMeta::new_readonly(self.token_program, false),  // token_program
-            AccountMeta::new_readonly(self.system_program, false), // system_program
-            AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false), // rent
-            AccountMeta::new_readonly(self.ata_program, false),    // associated_token_program
-        ];
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data,
-        })
-    }
-
-    fn build_increase_liquidity_instruction(
-        &self,
-        position: &Pubkey,
-        pool: &Pubkey,
-        owner: &Pubkey,
-        token_max_a: u64,
-        token_max_b: u64,
-    ) -> Result<Instruction> {
-        // Whirlpool IncreaseLiquidity instruction discriminator
-        let discriminator: [u8; 8] = [0x2e, 0x9c, 0xf3, 0x76, 0x0d, 0xc6, 0x1e, 0x84];
-
-        let mut data = Vec::with_capacity(40);
-        data.extend_from_slice(&discriminator);
-        data.extend_from_slice(&0u128.to_le_bytes()); // liquidity_amount (calculated by program)
-        data.extend_from_slice(&token_max_a.to_le_bytes());
-        data.extend_from_slice(&token_max_b.to_le_bytes());
-
-        let accounts = vec![
-            AccountMeta::new(*pool, false),                       // whirlpool
-            AccountMeta::new_readonly(self.token_program, false), // token_program
-            AccountMeta::new_readonly(*owner, true),              // position_authority
-            AccountMeta::new(*position, false),                   // position
-                                                                  // Additional accounts would be derived from pool state
-                                                                  // token_owner_account_a, token_owner_account_b, token_vault_a, token_vault_b, tick_array_lower, tick_array_upper
-        ];
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data,
-        })
-    }
-
-    fn build_decrease_liquidity_instruction(
-        &self,
-        position: &Pubkey,
-        pool: &Pubkey,
-        owner: &Pubkey,
-        liquidity_amount: u128,
-        token_min_a: u64,
-        token_min_b: u64,
-    ) -> Result<Instruction> {
-        // Whirlpool DecreaseLiquidity instruction discriminator
-        let discriminator: [u8; 8] = [0xa0, 0x26, 0xd0, 0x6f, 0x68, 0x5b, 0x2c, 0x01];
-
-        let mut data = Vec::with_capacity(40);
-        data.extend_from_slice(&discriminator);
-        data.extend_from_slice(&liquidity_amount.to_le_bytes());
-        data.extend_from_slice(&token_min_a.to_le_bytes());
-        data.extend_from_slice(&token_min_b.to_le_bytes());
-
-        let accounts = vec![
-            AccountMeta::new(*pool, false),                       // whirlpool
-            AccountMeta::new_readonly(self.token_program, false), // token_program
-            AccountMeta::new_readonly(*owner, true),              // position_authority
-            AccountMeta::new(*position, false),                   // position
-                                                                  // Additional accounts derived from pool state
-        ];
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data,
-        })
-    }
-
-    fn build_collect_fees_instruction(
-        &self,
-        position: &Pubkey,
-        pool: &Pubkey,
-        owner: &Pubkey,
-    ) -> Result<Instruction> {
-        // Whirlpool CollectFees instruction discriminator
-        let discriminator: [u8; 8] = [0xa4, 0x98, 0xcf, 0x63, 0x1e, 0xba, 0x13, 0x7a];
-
-        let data = discriminator.to_vec();
-
-        let accounts = vec![
-            AccountMeta::new(*pool, false),          // whirlpool
-            AccountMeta::new_readonly(*owner, true), // position_authority
-            AccountMeta::new(*position, false),      // position
-            AccountMeta::new_readonly(self.token_program, false), // token_program
-                                                     // Additional accounts: token_owner_account_a, token_owner_account_b, token_vault_a, token_vault_b
-        ];
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data,
-        })
-    }
-
-    fn build_close_position_instruction(
-        &self,
-        position: &Pubkey,
-        owner: &Pubkey,
-    ) -> Result<Instruction> {
-        // Whirlpool ClosePosition instruction discriminator
-        let discriminator: [u8; 8] = [0x7b, 0x86, 0x51, 0x0c, 0x31, 0x5b, 0xfc, 0x00];
-
-        let data = discriminator.to_vec();
-
-        let accounts = vec![
-            AccountMeta::new_readonly(*owner, true), // position_authority
-            AccountMeta::new(*owner, false),         // receiver
-            AccountMeta::new(*position, false),      // position
-                                                     // position_mint, position_token_account, token_program
-        ];
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data,
-        })
-    }
-
-    fn derive_ata(&self, owner: &Pubkey, mint: &Pubkey) -> Result<Pubkey> {
-        let (ata, _bump) = Pubkey::find_program_address(
-            &[owner.as_ref(), self.token_program.as_ref(), mint.as_ref()],
-            &self.ata_program,
-        );
-        Ok(ata)
-    }
-
-    async fn send_transaction<S: Signer>(
+    async fn send_transaction_with_signers(
         &self,
         instructions: &[Instruction],
-        payer: &S,
+        payer: &Keypair,
+        additional_signers: &[Keypair],
     ) -> Result<ExecutionResult> {
         let recent_blockhash = self
             .provider
@@ -536,12 +440,13 @@ impl WhirlpoolExecutor {
             .await
             .context("Failed to get recent blockhash")?;
 
-        let transaction = Transaction::new_signed_with_payer(
-            instructions,
-            Some(&payer.pubkey()),
-            &[payer],
-            recent_blockhash,
-        );
+        let mut transaction = Transaction::new_with_payer(instructions, Some(&payer.pubkey()));
+        let mut signers: Vec<&Keypair> = Vec::with_capacity(1 + additional_signers.len());
+        signers.push(payer);
+        for kp in additional_signers {
+            signers.push(kp);
+        }
+        transaction.sign(&signers, recent_blockhash);
 
         debug!("Sending transaction...");
 
@@ -583,10 +488,12 @@ mod tests {
         assert!(success.success);
         assert_eq!(success.slot, Some(12345));
         assert!(success.error.is_none());
+        assert!(success.created_position.is_none());
 
         let failure = ExecutionResult::failure(sig, "test error".to_string());
         assert!(!failure.success);
         assert!(failure.slot.is_none());
         assert_eq!(failure.error, Some("test error".to_string()));
+        assert!(failure.created_position.is_none());
     }
 }

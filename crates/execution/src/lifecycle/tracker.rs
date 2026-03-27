@@ -4,6 +4,7 @@ use super::{
     EventData, FeesCollectedData, LifecycleEvent, LifecycleEventType, LiquidityChangeData,
     PositionClosedData, PositionOpenedData, RebalanceData,
 };
+use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint};
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
@@ -52,6 +53,8 @@ pub struct LifecycleTracker {
     summaries: Arc<RwLock<HashMap<Pubkey, PositionSummary>>>,
     /// Optional JSONL path for IL / rebalance ledger lines.
     il_ledger_path: Arc<Mutex<Option<PathBuf>>>,
+    /// Optional JSONL path for position-level fee checkpoints (Tier3 mode).
+    position_fee_ledger_path: Arc<Mutex<Option<PathBuf>>>,
     /// Monotonic id for optimize applications (optional stamping on events).
     optimization_seq: Arc<AtomicU64>,
 }
@@ -64,6 +67,7 @@ impl LifecycleTracker {
             events: Arc::new(RwLock::new(HashMap::new())),
             summaries: Arc::new(RwLock::new(HashMap::new())),
             il_ledger_path: Arc::new(Mutex::new(None)),
+            position_fee_ledger_path: Arc::new(Mutex::new(None)),
             optimization_seq: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -71,6 +75,13 @@ impl LifecycleTracker {
     /// Sets optional JSONL path for IL-oriented lifecycle rows (rebalance, etc.).
     pub fn set_il_ledger_path(&self, path: Option<PathBuf>) {
         if let Ok(mut g) = self.il_ledger_path.lock() {
+            *g = path;
+        }
+    }
+
+    /// Sets optional JSONL path for position-fee checkpoints (Tier3 data plane).
+    pub fn set_position_fee_ledger_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut g) = self.position_fee_ledger_path.lock() {
             *g = path;
         }
     }
@@ -106,6 +117,61 @@ impl LifecycleTracker {
         if let Err(e) = res {
             warn!(error = %e, "il ledger task failed");
         }
+    }
+
+    async fn append_position_fee_ledger_jsonl(&self, row: serde_json::Value) {
+        let path_opt = self
+            .position_fee_ledger_path
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+        let Some(path) = path_opt else {
+            return;
+        };
+        let line = match serde_json::to_string(&row) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "position-fee ledger serialize failed");
+                return;
+            }
+        };
+        let res = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            writeln!(f, "{line}")?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await;
+        if let Err(e) = res {
+            warn!(error = %e, "position-fee ledger task failed");
+        }
+    }
+
+    /// Records a Tier3 position-fee checkpoint row into dedicated JSONL ledger.
+    pub async fn record_fee_checkpoint(&self, checkpoint: PositionFeeCheckpoint) {
+        let row = serde_json::json!({
+            "schema_version": 1,
+            "ts_utc": checkpoint.ts_utc,
+            "position": checkpoint.position,
+            "pool": checkpoint.pool,
+            "event_type": checkpoint.event_type,
+            "tick_lower": checkpoint.tick_lower,
+            "tick_upper": checkpoint.tick_upper,
+            "liquidity": checkpoint.liquidity,
+            "fees_owed_a": checkpoint.fees_owed_a,
+            "fees_owed_b": checkpoint.fees_owed_b,
+            "collected_a": checkpoint.collected_a,
+            "collected_b": checkpoint.collected_b,
+            "source": match checkpoint.source {
+                CheckpointSource::Onchain => "onchain",
+                CheckpointSource::Derived => "derived",
+                CheckpointSource::Missing => "missing",
+            }
+        });
+        self.append_position_fee_ledger_jsonl(row).await;
     }
 
     /// Records a position opened event.
@@ -427,6 +493,7 @@ pub struct AggregateStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint};
 
     #[tokio::test]
     async fn test_lifecycle_tracker() {
@@ -458,5 +525,37 @@ mod tests {
         let summary = tracker.get_summary(&position).await;
         assert!(summary.is_some());
         assert!(summary.unwrap().is_open);
+    }
+
+    #[tokio::test]
+    async fn test_position_fee_checkpoint_jsonl_written() {
+        let tracker = LifecycleTracker::new();
+        let path = std::env::temp_dir().join(format!(
+            "clmm_lp_position_fee_{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        tracker.set_position_fee_ledger_path(Some(path.clone()));
+
+        tracker
+            .record_fee_checkpoint(PositionFeeCheckpoint {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                position: Pubkey::new_unique().to_string(),
+                pool: Pubkey::new_unique().to_string(),
+                event_type: "test_checkpoint".to_string(),
+                tick_lower: -10,
+                tick_upper: 10,
+                liquidity: "123".to_string(),
+                fees_owed_a: 1,
+                fees_owed_b: 2,
+                collected_a: 3,
+                collected_b: 4,
+                source: CheckpointSource::Derived,
+            })
+            .await;
+
+        let txt = std::fs::read_to_string(&path).expect("checkpoint file exists");
+        assert!(txt.contains("\"event_type\":\"test_checkpoint\""));
+        assert!(txt.contains("\"source\":\"derived\""));
+        let _ = std::fs::remove_file(&path);
     }
 }

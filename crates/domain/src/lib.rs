@@ -20,6 +20,8 @@ pub mod optimize_result;
 pub mod pool;
 /// Position entities and logic.
 pub mod position;
+/// Position-level fee checkpoints for Tier3 mode.
+pub mod position_fee_checkpoint;
 /// Token entities and logic.
 pub mod token;
 pub mod value_objects;

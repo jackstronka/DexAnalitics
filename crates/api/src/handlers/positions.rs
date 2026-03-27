@@ -219,13 +219,13 @@ pub async fn close_position(
         // Broadcast simulated update
         state
             .broadcast_position_update(PositionUpdate {
-            update_type: "close_simulated".to_string(),
-            position_address: address.clone(),
-            timestamp: chrono::Utc::now(),
-            data: serde_json::json!({
-                "liquidity": position.on_chain.liquidity.to_string(),
-                "dry_run": true
-            }),
+                update_type: "close_simulated".to_string(),
+                position_address: address.clone(),
+                timestamp: chrono::Utc::now(),
+                data: serde_json::json!({
+                    "liquidity": position.on_chain.liquidity.to_string(),
+                    "dry_run": true
+                }),
             })
             .await;
 
@@ -289,14 +289,14 @@ pub async fn collect_fees(
         // Broadcast simulated update
         state
             .broadcast_position_update(PositionUpdate {
-            update_type: "fees_collected_simulated".to_string(),
-            position_address: address.clone(),
-            timestamp: chrono::Utc::now(),
-            data: serde_json::json!({
-                "fees_a": position.pnl.fees_earned_a,
-                "fees_b": position.pnl.fees_earned_b,
-                "dry_run": true
-            }),
+                update_type: "fees_collected_simulated".to_string(),
+                position_address: address.clone(),
+                timestamp: chrono::Utc::now(),
+                data: serde_json::json!({
+                    "fees_a": position.pnl.fees_earned_a,
+                    "fees_b": position.pnl.fees_earned_b,
+                    "dry_run": true
+                }),
             })
             .await;
 

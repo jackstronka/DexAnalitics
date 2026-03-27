@@ -38,6 +38,7 @@ solana-sdk = { workspace = true }
 solana-client = { workspace = true }
 solana-transaction-status-client-types = "3.1"
 base64 = "0.22.1"
+orca_whirlpools = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }

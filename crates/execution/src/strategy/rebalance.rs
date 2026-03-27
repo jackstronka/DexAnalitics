@@ -529,8 +529,6 @@ impl RebalanceExecutor {
 
         let payer = wallet.keypair();
 
-        let new_position = derive_whirlpool_position_address(pool, tick_lower, tick_upper);
-
         // Send maximal token caps so the program uses the required amounts from wallet balances.
         let params = OpenPositionParams {
             pool: pool.clone(),
@@ -543,6 +541,11 @@ impl RebalanceExecutor {
 
         let res = orca.open_position(&params, payer).await?;
         self.ensure_execution_success("open_position", &res).await?;
+        let new_position = res.created_position.ok_or_else(|| {
+            anyhow::anyhow!(
+                "open_position succeeded but did not return created_position; cannot continue safely"
+            )
+        })?;
         debug!(
             new_position = %new_position,
             tick_lower = tick_lower,

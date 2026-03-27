@@ -11,6 +11,7 @@ use crate::lifecycle::{
 use crate::monitor::PositionMonitor;
 use crate::transaction::TransactionManager;
 use crate::wallet::Wallet;
+use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint, PositionTruthMode};
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -35,6 +36,8 @@ pub struct ExecutorConfig {
     pub max_slippage_pct: Decimal,
     /// Dry run mode - simulate but don't execute.
     pub dry_run: bool,
+    /// Fee accounting mode: existing heuristic or Tier3 position-truth.
+    pub fee_mode: PositionTruthMode,
 }
 
 impl Default for ExecutorConfig {
@@ -45,6 +48,7 @@ impl Default for ExecutorConfig {
             require_confirmation: true,
             max_slippage_pct: Decimal::new(5, 3), // 0.5%
             dry_run: false,
+            fee_mode: PositionTruthMode::Heuristic,
         }
     }
 }
@@ -156,6 +160,11 @@ impl StrategyExecutor {
         self.lifecycle.set_il_ledger_path(path);
     }
 
+    /// Optional JSONL path for Tier3 position-fee checkpoints.
+    pub fn set_position_fee_ledger_path(&self, path: Option<std::path::PathBuf>) {
+        self.lifecycle.set_position_fee_ledger_path(path);
+    }
+
     /// Partially decrease liquidity on-chain (delegates to [`RebalanceExecutor`]).
     pub async fn execute_partial_decrease_liquidity(
         &self,
@@ -165,7 +174,25 @@ impl StrategyExecutor {
     ) -> anyhow::Result<()> {
         self.rebalance_executor
             .execute_partial_decrease(position, pool, liquidity_amount)
-            .await
+            .await?;
+
+        self.lifecycle
+            .record_fee_checkpoint(PositionFeeCheckpoint {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                position: position.to_string(),
+                pool: pool.to_string(),
+                event_type: "decrease_liquidity".to_string(),
+                tick_lower: 0,
+                tick_upper: 0,
+                liquidity: liquidity_amount.to_string(),
+                fees_owed_a: 0,
+                fees_owed_b: 0,
+                collected_a: 0,
+                collected_b: 0,
+                source: CheckpointSource::Derived,
+            })
+            .await;
+        Ok(())
     }
 
     /// Opens a new Whirlpool position using explicit token caps.
@@ -180,7 +207,8 @@ impl StrategyExecutor {
         amount_b: u64,
         slippage_bps: u16,
     ) -> anyhow::Result<solana_sdk::pubkey::Pubkey> {
-        self.rebalance_executor
+        let position = self
+            .rebalance_executor
             .execute_open_position(
                 pool,
                 tick_lower,
@@ -189,7 +217,25 @@ impl StrategyExecutor {
                 amount_b,
                 slippage_bps,
             )
-            .await
+            .await?;
+
+        self.lifecycle
+            .record_fee_checkpoint(PositionFeeCheckpoint {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                position: position.to_string(),
+                pool: pool.to_string(),
+                event_type: "open_position".to_string(),
+                tick_lower,
+                tick_upper,
+                liquidity: "0".to_string(),
+                fees_owed_a: 0,
+                fees_owed_b: 0,
+                collected_a: 0,
+                collected_b: 0,
+                source: CheckpointSource::Derived,
+            })
+            .await;
+        Ok(position)
     }
 
     /// Collects Whirlpool fees for a given position.
@@ -200,7 +246,24 @@ impl StrategyExecutor {
     ) -> anyhow::Result<()> {
         self.rebalance_executor
             .execute_collect_fees_only(position, pool)
-            .await
+            .await?;
+        self.lifecycle
+            .record_fee_checkpoint(PositionFeeCheckpoint {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                position: position.to_string(),
+                pool: pool.to_string(),
+                event_type: "collect_fees".to_string(),
+                tick_lower: 0,
+                tick_upper: 0,
+                liquidity: "0".to_string(),
+                fees_owed_a: 0,
+                fees_owed_b: 0,
+                collected_a: 0,
+                collected_b: 0,
+                source: CheckpointSource::Missing,
+            })
+            .await;
+        Ok(())
     }
 
     /// Closes Whirlpool position by decreasing all liquidity, collecting, and closing NFT.
@@ -211,7 +274,24 @@ impl StrategyExecutor {
     ) -> anyhow::Result<()> {
         self.rebalance_executor
             .execute_full_close_only(position, pool)
-            .await
+            .await?;
+        self.lifecycle
+            .record_fee_checkpoint(PositionFeeCheckpoint {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                position: position.to_string(),
+                pool: pool.to_string(),
+                event_type: "close_position".to_string(),
+                tick_lower: 0,
+                tick_upper: 0,
+                liquidity: "0".to_string(),
+                fees_owed_a: 0,
+                fees_owed_b: 0,
+                collected_a: 0,
+                collected_b: 0,
+                source: CheckpointSource::Derived,
+            })
+            .await;
+        Ok(())
     }
 
     /// Starts the strategy execution loop.
@@ -226,6 +306,7 @@ impl StrategyExecutor {
             interval_secs = self.config.eval_interval_secs,
             auto_execute = self.config.auto_execute,
             dry_run = self.config.dry_run,
+            fee_mode = ?self.config.fee_mode,
             "Starting strategy executor"
         );
 
@@ -452,9 +533,42 @@ impl StrategyExecutor {
                 // - new position is opened
                 if result.success {
                     let old_addr = position.address;
+                    self.lifecycle
+                        .record_fee_checkpoint(PositionFeeCheckpoint {
+                            ts_utc: chrono::Utc::now().to_rfc3339(),
+                            position: old_addr.to_string(),
+                            pool: position.pool.to_string(),
+                            event_type: "rebalance_out".to_string(),
+                            tick_lower: position.on_chain.tick_lower,
+                            tick_upper: position.on_chain.tick_upper,
+                            liquidity: position.on_chain.liquidity.to_string(),
+                            fees_owed_a: position.on_chain.fees_owed_a,
+                            fees_owed_b: position.on_chain.fees_owed_b,
+                            collected_a: result.fees_collected.map(|x| x.0).unwrap_or(0),
+                            collected_b: result.fees_collected.map(|x| x.1).unwrap_or(0),
+                            source: CheckpointSource::Onchain,
+                        })
+                        .await;
+
                     self.monitor.remove_position(&old_addr).await;
 
                     if let Some(new_pos) = result.new_position {
+                        self.lifecycle
+                            .record_fee_checkpoint(PositionFeeCheckpoint {
+                                ts_utc: chrono::Utc::now().to_rfc3339(),
+                                position: new_pos.to_string(),
+                                pool: position.pool.to_string(),
+                                event_type: "rebalance_in".to_string(),
+                                tick_lower: *new_tick_lower,
+                                tick_upper: *new_tick_upper,
+                                liquidity: result.liquidity_added.to_string(),
+                                fees_owed_a: 0,
+                                fees_owed_b: 0,
+                                collected_a: 0,
+                                collected_b: 0,
+                                source: CheckpointSource::Derived,
+                            })
+                            .await;
                         if let Err(e) = self.monitor.add_position(&new_pos.to_string()).await {
                             warn!(
                                 error = %e,

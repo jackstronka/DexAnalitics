@@ -1,7 +1,7 @@
 use super::*;
 use crate::state::{ApiConfig, AppState};
-use clmm_lp_protocols::prelude::RpcConfig;
 use axum::extract::State;
+use clmm_lp_protocols::prelude::RpcConfig;
 use httpmock::Method::GET;
 use httpmock::MockServer;
 
@@ -41,4 +41,3 @@ async fn list_pools_uses_orca_rest_base_url_env() {
         None => unsafe { std::env::remove_var("ORCA_PUBLIC_API_BASE_URL") },
     }
 }
-

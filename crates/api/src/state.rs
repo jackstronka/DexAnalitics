@@ -1,11 +1,11 @@
 //! Application state shared across handlers.
 
+#[cfg(feature = "broker-event-bus")]
+use crate::events::BrokerEventBus;
 use crate::events::{
     EVENT_ALERT_RAISED, EVENT_POSITION_UPDATED, EventBus, EventEnvelope, InProcessEventBus,
     publish_with_retry,
 };
-#[cfg(feature = "broker-event-bus")]
-use crate::events::BrokerEventBus;
 use clmm_lp_execution::prelude::{
     CircuitBreaker, LifecycleTracker, PositionMonitor, StrategyExecutor, TransactionManager,
 };

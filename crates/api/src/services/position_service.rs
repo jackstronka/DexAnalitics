@@ -4,7 +4,7 @@ use crate::error::ApiError;
 use crate::models::{OpenPositionRequest, RebalanceRequest};
 use crate::state::{AlertUpdate, AppState, PositionUpdate};
 use clmm_lp_execution::prelude::{RebalanceParams, RebalanceReason, StrategyExecutor};
-use clmm_lp_protocols::prelude::{WhirlpoolReader, derive_whirlpool_position_address};
+use clmm_lp_protocols::prelude::WhirlpoolReader;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -165,7 +165,7 @@ impl PositionService {
         }
 
         let guard = executor.read().await;
-        let _ = guard
+        let opened_position = guard
             .execute_open_position(
                 &pool_pubkey,
                 request.tick_lower,
@@ -175,11 +175,8 @@ impl PositionService {
                 request.slippage_tolerance_bps,
             )
             .await?;
-
-        let pos_pda =
-            derive_whirlpool_position_address(&pool_pubkey, request.tick_lower, request.tick_upper);
         Ok(OperationResult::success_with_data(
-            serde_json::json!({ "position_pda": pos_pda.to_string() }),
+            serde_json::json!({ "position_pda": opened_position.to_string() }),
         ))
     }
 
@@ -310,14 +307,14 @@ impl PositionService {
             // Broadcast update
             self.state
                 .broadcast_position_update(PositionUpdate {
-                update_type: "rebalance_simulated".to_string(),
-                position_address: address.to_string(),
-                timestamp: chrono::Utc::now(),
-                data: serde_json::json!({
-                    "old_range": [position.on_chain.tick_lower, position.on_chain.tick_upper],
-                    "new_range": [request.new_tick_lower, request.new_tick_upper],
-                    "dry_run": true
-                }),
+                    update_type: "rebalance_simulated".to_string(),
+                    position_address: address.to_string(),
+                    timestamp: chrono::Utc::now(),
+                    data: serde_json::json!({
+                        "old_range": [position.on_chain.tick_lower, position.on_chain.tick_upper],
+                        "new_range": [request.new_tick_lower, request.new_tick_upper],
+                        "dry_run": true
+                    }),
                 })
                 .await;
 
@@ -392,23 +389,23 @@ impl PositionService {
             // Broadcast update
             self.state
                 .broadcast_position_update(PositionUpdate {
-                update_type: "rebalance_initiated".to_string(),
-                position_address: address.to_string(),
-                timestamp: chrono::Utc::now(),
-                data: serde_json::json!({
-                    "old_range": [position.on_chain.tick_lower, position.on_chain.tick_upper],
-                    "new_range": [request.new_tick_lower, request.new_tick_upper]
-                }),
+                    update_type: "rebalance_initiated".to_string(),
+                    position_address: address.to_string(),
+                    timestamp: chrono::Utc::now(),
+                    data: serde_json::json!({
+                        "old_range": [position.on_chain.tick_lower, position.on_chain.tick_upper],
+                        "new_range": [request.new_tick_lower, request.new_tick_upper]
+                    }),
                 })
                 .await;
 
             // Broadcast alert
             self.state
                 .broadcast_alert(AlertUpdate {
-                level: "info".to_string(),
-                message: format!("Rebalance initiated for position {}", address),
-                timestamp: chrono::Utc::now(),
-                position_address: Some(address.to_string()),
+                    level: "info".to_string(),
+                    message: format!("Rebalance initiated for position {}", address),
+                    timestamp: chrono::Utc::now(),
+                    position_address: Some(address.to_string()),
                 })
                 .await;
 

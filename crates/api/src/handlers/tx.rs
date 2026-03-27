@@ -5,39 +5,44 @@ use crate::models::{
     BuildUnsignedTxRequest, BuildUnsignedTxResponse, SubmitSignedTxRequest, SubmitSignedTxResponse,
 };
 use crate::state::AppState;
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use borsh::BorshDeserialize;
 use clmm_lp_protocols::prelude::WhirlpoolPosition as ApiWhirlpoolPosition;
+use orca_whirlpools::{
+    DecreaseLiquidityParam, IncreaseLiquidityParam, WhirlpoolsConfigInput,
+    close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
+    increase_liquidity_instructions, open_position_instructions_with_tick_bounds,
+    set_whirlpools_config_address,
+};
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::message::Message;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature;
 use solana_sdk::signature::Keypair;
+use solana_sdk::signature::Signature;
 use solana_sdk::transaction::Transaction;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use std::str::FromStr;
-use orca_whirlpools::{
-    close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
-    open_position_instructions_with_tick_bounds, IncreaseLiquidityParam, DecreaseLiquidityParam,
-    set_whirlpools_config_address, WhirlpoolsConfigInput,
-};
 
 const ALLOWED_PROGRAMS: &[&str] = &[
-    "11111111111111111111111111111111", // System
+    "11111111111111111111111111111111",            // System
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // SPL Token
     "ATokenGPvbdGVxr1h4fVnQJQYZ6h8QqKaQqM8y3A5f7", // ATA
+    // ATA program id variant used by the Orca Whirlpool SDK.
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", // Whirlpool
-    "ComputeBudget111111111111111111111111111", // Compute budget
+    "ComputeBudget111111111111111111111111111",    // Compute budget
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", // Token-2022
 ];
 const MAX_SLIPPAGE_BPS: u16 = 2_000;
+const WHIRLPOOL_PROGRAM_ID: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
 
 #[derive(Debug, Clone, Copy)]
 enum TxOp {
     Open,
+    Increase,
     Decrease,
     Collect,
     Close,
@@ -62,8 +67,14 @@ async fn build_unsigned(
 
     let instructions: Vec<Instruction>;
     let additional_signers: Vec<Keypair>;
+    let mut position_mint_out: Option<Pubkey> = None;
+    let mut position_address_out: Option<Pubkey> = None;
 
-    let pool = req.pool_address.as_ref().map(|s| parse_pubkey("pool_address", s)).transpose()?;
+    let pool = req
+        .pool_address
+        .as_ref()
+        .map(|s| parse_pubkey("pool_address", s))
+        .transpose()?;
     let position = req
         .position_address
         .as_ref()
@@ -116,21 +127,69 @@ async fn build_unsigned(
                 Some(wallet),
             )
             .await
-            .map_err(|e| ApiError::internal(format!("orca open_position_instructions failed: {e}")))?;
+            .map_err(|e| {
+                ApiError::internal(format!("orca open_position_instructions failed: {e}"))
+            })?;
 
             instructions = opened.instructions;
             additional_signers = opened.additional_signers;
+            position_mint_out = Some(opened.position_mint);
+            let whirlpool_program = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID)
+                .map_err(|e| ApiError::internal(format!("Invalid whirlpool program id: {e}")))?;
+            let (position_pda, _) = Pubkey::find_program_address(
+                &[b"position", opened.position_mint.as_ref()],
+                &whirlpool_program,
+            );
+            position_address_out = Some(position_pda);
+        }
+        TxOp::Increase => {
+            let _pool = pool.expect("pool parsed by validate_build_request");
+            let position = position.expect("position parsed by validate_build_request");
+
+            let pos_account = state.provider.get_account(&position).await.map_err(|e| {
+                ApiError::internal(format!("Failed to fetch position account: {e}"))
+            })?;
+
+            let parsed = ApiWhirlpoolPosition::try_from_slice(&pos_account.data).map_err(|e| {
+                ApiError::internal(format!(
+                    "Failed to parse WhirlpoolPosition (Borsh) for {position}: {e}"
+                ))
+            })?;
+
+            let amount_a = req
+                .amount_a
+                .expect("amount_a parsed by validate_build_request");
+            let amount_b = req
+                .amount_b
+                .expect("amount_b parsed by validate_build_request");
+            let slippage = req.slippage_bps;
+
+            let increased = increase_liquidity_instructions(
+                &rpc,
+                parsed.position_mint,
+                IncreaseLiquidityParam {
+                    token_max_a: amount_a,
+                    token_max_b: amount_b,
+                },
+                slippage,
+                Some(wallet),
+            )
+            .await
+            .map_err(|e| {
+                ApiError::internal(format!("orca increase_liquidity_instructions failed: {e}"))
+            })?;
+
+            instructions = increased.instructions;
+            additional_signers = increased.additional_signers;
         }
         TxOp::Decrease => {
             let _pool = pool.expect("pool parsed by validate_build_request");
             let position = position.expect("position parsed by validate_build_request");
 
             // Orca SDK needs the position NFT mint; our API passes the position PDA.
-            let pos_account = state
-                .provider
-                .get_account(&position)
-                .await
-                .map_err(|e| ApiError::internal(format!("Failed to fetch position account: {e}")))?;
+            let pos_account = state.provider.get_account(&position).await.map_err(|e| {
+                ApiError::internal(format!("Failed to fetch position account: {e}"))
+            })?;
 
             let parsed = ApiWhirlpoolPosition::try_from_slice(&pos_account.data).map_err(|e| {
                 ApiError::internal(format!(
@@ -154,9 +213,7 @@ async fn build_unsigned(
             )
             .await
             .map_err(|e| {
-                ApiError::internal(format!(
-                    "orca decrease_liquidity_instructions failed: {e}"
-                ))
+                ApiError::internal(format!("orca decrease_liquidity_instructions failed: {e}"))
             })?;
 
             instructions = decreased.instructions;
@@ -167,11 +224,9 @@ async fn build_unsigned(
             let position = position.expect("position parsed by validate_build_request");
 
             // Orca SDK needs the position NFT mint; our API passes the position PDA.
-            let pos_account = state
-                .provider
-                .get_account(&position)
-                .await
-                .map_err(|e| ApiError::internal(format!("Failed to fetch position account: {e}")))?;
+            let pos_account = state.provider.get_account(&position).await.map_err(|e| {
+                ApiError::internal(format!("Failed to fetch position account: {e}"))
+            })?;
 
             let parsed = ApiWhirlpoolPosition::try_from_slice(&pos_account.data).map_err(|e| {
                 ApiError::internal(format!(
@@ -179,14 +234,11 @@ async fn build_unsigned(
                 ))
             })?;
 
-            let harvested =
-                harvest_position_instructions(&rpc, parsed.position_mint, Some(wallet))
-                    .await
-                    .map_err(|e| {
-                        ApiError::internal(format!(
-                            "orca harvest_position_instructions failed: {e}"
-                        ))
-                    })?;
+            let harvested = harvest_position_instructions(&rpc, parsed.position_mint, Some(wallet))
+                .await
+                .map_err(|e| {
+                    ApiError::internal(format!("orca harvest_position_instructions failed: {e}"))
+                })?;
 
             instructions = harvested.instructions;
             additional_signers = harvested.additional_signers;
@@ -196,11 +248,9 @@ async fn build_unsigned(
             let position = position.expect("position parsed by validate_build_request");
 
             // Orca SDK needs the position NFT mint; our API passes the position PDA.
-            let pos_account = state
-                .provider
-                .get_account(&position)
-                .await
-                .map_err(|e| ApiError::internal(format!("Failed to fetch position account: {e}")))?;
+            let pos_account = state.provider.get_account(&position).await.map_err(|e| {
+                ApiError::internal(format!("Failed to fetch position account: {e}"))
+            })?;
 
             let parsed = ApiWhirlpoolPosition::try_from_slice(&pos_account.data).map_err(|e| {
                 ApiError::internal(format!(
@@ -210,18 +260,12 @@ async fn build_unsigned(
 
             let slippage = req.slippage_bps;
 
-            let closed = close_position_instructions(
-                &rpc,
-                parsed.position_mint,
-                slippage,
-                Some(wallet),
-            )
-            .await
-            .map_err(|e| {
-                ApiError::internal(format!(
-                    "orca close_position_instructions failed: {e}"
-                ))
-            })?;
+            let closed =
+                close_position_instructions(&rpc, parsed.position_mint, slippage, Some(wallet))
+                    .await
+                    .map_err(|e| {
+                        ApiError::internal(format!("orca close_position_instructions failed: {e}"))
+                    })?;
 
             instructions = closed.instructions;
             additional_signers = closed.additional_signers;
@@ -246,6 +290,8 @@ async fn build_unsigned(
         unsigned_tx_base64: BASE64.encode(bytes),
         correlation_id: uuid::Uuid::new_v4().to_string(),
         expected_program_ids: ALLOWED_PROGRAMS.iter().map(|p| p.to_string()).collect(),
+        position_mint: position_mint_out.map(|p| p.to_string()),
+        position_address: position_address_out.map(|p| p.to_string()),
     })
 }
 
@@ -278,9 +324,7 @@ fn validate_build_request(req: &BuildUnsignedTxRequest, op: TxOp) -> Result<(), 
                 .tick_upper
                 .ok_or_else(|| ApiError::bad_request("Missing required field: tick_upper"))?;
             if tick_lower >= tick_upper {
-                return Err(ApiError::bad_request(
-                    "tick_lower must be < tick_upper",
-                ));
+                return Err(ApiError::bad_request("tick_lower must be < tick_upper"));
             }
 
             // Currently encoded into unsigned tx as Whirlpool `open_position` data.
@@ -293,6 +337,26 @@ fn validate_build_request(req: &BuildUnsignedTxRequest, op: TxOp) -> Result<(), 
                 return Err(ApiError::Validation(format!(
                     "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
                 )));
+            }
+        }
+        TxOp::Increase => {
+            require_pubkey_field("pool_address", &req.pool_address)?;
+            require_pubkey_field("position_address", &req.position_address)?;
+            let amount_a = req
+                .amount_a
+                .ok_or_else(|| ApiError::bad_request("Missing required field: amount_a"))?;
+            let amount_b = req
+                .amount_b
+                .ok_or_else(|| ApiError::bad_request("Missing required field: amount_b"))?;
+            if amount_a == 0 || amount_b == 0 {
+                return Err(ApiError::bad_request("amount_a and amount_b must be > 0"));
+            }
+            if let Some(slippage) = req.slippage_bps {
+                if slippage > MAX_SLIPPAGE_BPS {
+                    return Err(ApiError::Validation(format!(
+                        "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
+                    )));
+                }
             }
         }
         TxOp::Decrease => {
@@ -367,6 +431,15 @@ pub async fn tx_decrease_build(
     Ok(Json(build_unsigned(&state, &req, TxOp::Decrease).await?))
 }
 
+/// Build unsigned tx for increasing liquidity.
+#[utoipa::path(post, path = "/tx/increase/build", tag = "Transactions", request_body = BuildUnsignedTxRequest, responses((status=200, body=BuildUnsignedTxResponse)))]
+pub async fn tx_increase_build(
+    State(state): State<AppState>,
+    Json(req): Json<BuildUnsignedTxRequest>,
+) -> ApiResult<Json<BuildUnsignedTxResponse>> {
+    Ok(Json(build_unsigned(&state, &req, TxOp::Increase).await?))
+}
+
 /// Build unsigned tx for collecting fees.
 #[utoipa::path(post, path = "/tx/collect/build", tag = "Transactions", request_body = BuildUnsignedTxRequest, responses((status=200, body=BuildUnsignedTxResponse)))]
 pub async fn tx_collect_build(
@@ -420,4 +493,3 @@ pub async fn tx_submit_signed(
         signature: sig.to_string(),
     }))
 }
-

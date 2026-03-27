@@ -13,6 +13,15 @@ use tracing::{debug, info};
 
 /// Whirlpool position account structure.
 #[derive(BorshDeserialize, Debug, Clone)]
+pub struct PositionRewardInfo {
+    /// Reward growth checkpoint inside the position range.
+    pub growth_inside_checkpoint: u128,
+    /// Reward amount owed to the position.
+    pub amount_owed: u64,
+}
+
+/// Whirlpool position account structure.
+#[derive(BorshDeserialize, Debug, Clone)]
 pub struct WhirlpoolPosition {
     /// Account discriminator.
     pub discriminator: [u8; 8],
@@ -34,7 +43,9 @@ pub struct WhirlpoolPosition {
     pub fee_growth_checkpoint_b: u128,
     /// Fee owed for token B.
     pub fee_owed_b: u64,
-    // Reward fields omitted for simplicity
+    /// Reward infos for each configured reward.
+    /// Orca Whirlpool uses NUM_REWARDS=3 in `orca_whirlpools_core`.
+    pub reward_infos: [PositionRewardInfo; 3],
 }
 
 /// Reads Orca Whirlpool positions from on-chain.

@@ -214,6 +214,12 @@ pub struct BuildUnsignedTxResponse {
     pub correlation_id: String,
     /// Programs expected in message.
     pub expected_program_ids: Vec<String>,
+    /// Position mint created for open-position flow (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_mint: Option<String>,
+    /// Position PDA derived from position mint (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_address: Option<String>,
 }
 
 /// Submit signed tx request.

@@ -6,8 +6,8 @@ use crate::models::{
     PhantomChallengeRequest, PhantomChallengeResponse, PhantomSessionResponse, PhantomVerifyRequest,
 };
 use crate::state::{AppState, PhantomNonceEntry};
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use std::str::FromStr;
@@ -108,10 +108,10 @@ pub async fn phantom_verify(
     State(state): State<AppState>,
     Json(req): Json<PhantomVerifyRequest>,
 ) -> ApiResult<Json<PhantomSessionResponse>> {
-    let pubkey =
-        Pubkey::from_str(&req.wallet_pubkey).map_err(|_| ApiError::bad_request("Invalid wallet_pubkey"))?;
-    let signature =
-        Signature::from_str(&req.signature).map_err(|_| ApiError::bad_request("Invalid signature"))?;
+    let pubkey = Pubkey::from_str(&req.wallet_pubkey)
+        .map_err(|_| ApiError::bad_request("Invalid wallet_pubkey"))?;
+    let signature = Signature::from_str(&req.signature)
+        .map_err(|_| ApiError::bad_request("Invalid signature"))?;
 
     let entry = {
         let mut guard = state.phantom_nonces.write().await;
@@ -141,4 +141,3 @@ pub async fn phantom_verify(
         expires_in_secs: auth_expiry_secs_from_env(),
     }))
 }
-

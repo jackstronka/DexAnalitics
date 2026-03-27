@@ -1,7 +1,7 @@
 use crate::models::{CreateStrategyRequest, SimulationRequest, StrategyParameters, StrategyType};
 use crate::routes::create_versioned_router;
 use crate::state::{ApiConfig, AppState, StrategyState};
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use clmm_lp_protocols::prelude::RpcConfig;
 use httpmock::Method::GET;
@@ -36,12 +36,19 @@ async fn seed_strategy(state: &AppState, id: &str) {
     state.strategies.write().await.insert(id.to_string(), s);
 }
 
-async fn request(router: axum::Router, method: Method, path: &str, body: Option<serde_json::Value>) -> StatusCode {
+async fn request(
+    router: axum::Router,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> StatusCode {
     let mut req = Request::builder().method(method).uri(path);
     if body.is_some() {
         req = req.header("content-type", "application/json");
     }
-    let body = body.map(|v| Body::from(v.to_string())).unwrap_or_else(Body::empty);
+    let body = body
+        .map(|v| Body::from(v.to_string()))
+        .unwrap_or_else(Body::empty);
     let resp = router.oneshot(req.body(body).unwrap()).await.unwrap();
     resp.status()
 }
@@ -50,28 +57,58 @@ async fn request(router: axum::Router, method: Method, path: &str, body: Option<
 async fn all_health_endpoints_are_reachable() {
     let state = test_state();
     let router = create_versioned_router(state.clone());
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/health/live", None).await, StatusCode::OK);
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/health/live", None).await,
+        StatusCode::OK
+    );
     let ready = request(router.clone(), Method::GET, "/api/v1/health/ready", None).await;
     assert!(ready == StatusCode::OK || ready == StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/health", None).await, StatusCode::OK);
-    assert_eq!(request(router, Method::GET, "/api/v1/metrics", None).await, StatusCode::OK);
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/health", None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(router, Method::GET, "/api/v1/metrics", None).await,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
 async fn all_position_endpoints_are_reachable() {
     let state = test_state();
     let router = create_versioned_router(state);
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/positions", None).await, StatusCode::OK);
     assert_eq!(
-        request(router.clone(), Method::GET, "/api/v1/positions/invalid", None).await,
+        request(router.clone(), Method::GET, "/api/v1/positions", None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/positions/invalid",
+            None
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        request(router.clone(), Method::DELETE, "/api/v1/positions/invalid", None).await,
+        request(
+            router.clone(),
+            Method::DELETE,
+            "/api/v1/positions/invalid",
+            None
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        request(router.clone(), Method::POST, "/api/v1/positions/invalid/collect", None).await,
+        request(
+            router.clone(),
+            Method::POST,
+            "/api/v1/positions/invalid/collect",
+            None
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
@@ -105,8 +142,14 @@ async fn all_strategy_endpoints_are_reachable() {
     let state = test_state();
     seed_strategy(&state, "s1").await;
     let router = create_versioned_router(state);
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/strategies", None).await, StatusCode::OK);
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/strategies/s1", None).await, StatusCode::OK);
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/strategies", None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/strategies/s1", None).await,
+        StatusCode::OK
+    );
     assert_eq!(
         request(
             router.clone(),
@@ -142,15 +185,33 @@ async fn all_strategy_endpoints_are_reachable() {
         StatusCode::OK
     );
     assert_eq!(
-        request(router.clone(), Method::POST, "/api/v1/strategies/s1/start", None).await,
+        request(
+            router.clone(),
+            Method::POST,
+            "/api/v1/strategies/s1/start",
+            None
+        )
+        .await,
         StatusCode::OK
     );
     assert_eq!(
-        request(router.clone(), Method::POST, "/api/v1/strategies/s1/stop", None).await,
+        request(
+            router.clone(),
+            Method::POST,
+            "/api/v1/strategies/s1/stop",
+            None
+        )
+        .await,
         StatusCode::OK
     );
     assert_eq!(
-        request(router.clone(), Method::GET, "/api/v1/strategies/s1/performance", None).await,
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/strategies/s1/performance",
+            None
+        )
+        .await,
         StatusCode::OK
     );
     assert_eq!(
@@ -180,11 +241,23 @@ async fn all_pool_and_analytics_endpoints_are_reachable() {
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        request(router.clone(), Method::GET, "/api/v1/pools/invalid/state", None).await,
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/pools/invalid/state",
+            None
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        request(router.clone(), Method::GET, "/api/v1/analytics/portfolio", None).await,
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/analytics/portfolio",
+            None
+        )
+        .await,
         StatusCode::OK
     );
     let sim = SimulationRequest {
@@ -213,11 +286,13 @@ async fn all_orca_proxy_endpoints_are_reachable() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(GET).path("/pools");
-        then.status(200).json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
+        then.status(200)
+            .json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
     });
     server.mock(|when, then| {
         when.method(GET).path("/pools/search");
-        then.status(200).json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
+        then.status(200)
+            .json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
     });
     server.mock(|when, then| {
         when.method(GET).path("/pools/POOL1");
@@ -229,19 +304,25 @@ async fn all_orca_proxy_endpoints_are_reachable() {
     });
     server.mock(|when, then| {
         when.method(GET).path("/tokens");
-        then.status(200).json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
+        then.status(200)
+            .json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
     });
     server.mock(|when, then| {
         when.method(GET).path("/tokens/search");
-        then.status(200).json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
+        then.status(200)
+            .json_body(serde_json::json!({"data":[],"meta":{"next":null,"previous":null}}));
     });
     server.mock(|when, then| {
         when.method(GET).path("/tokens/MINT1");
-        then.status(200).json_body(serde_json::json!({"data":{"mint":"MINT1"},"meta":{"next":null,"previous":null}}));
+        then.status(200).json_body(
+            serde_json::json!({"data":{"mint":"MINT1"},"meta":{"next":null,"previous":null}}),
+        );
     });
     server.mock(|when, then| {
         when.method(GET).path("/protocol");
-        then.status(200).json_body(serde_json::json!({"data":{"tvlUsdc":"1.0"},"meta":{"next":null,"previous":null}}));
+        then.status(200).json_body(
+            serde_json::json!({"data":{"tvlUsdc":"1.0"},"meta":{"next":null,"previous":null}}),
+        );
     });
     let mut cfg = ApiConfig::default();
     cfg.orca_public_api_base_url = Some(server.base_url());
@@ -252,18 +333,57 @@ async fn all_orca_proxy_endpoints_are_reachable() {
         StatusCode::OK
     );
     assert_eq!(
-        request(router.clone(), Method::GET, "/api/v1/orca/pools/search?q=SOL", None).await,
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/orca/pools/search?q=SOL",
+            None
+        )
+        .await,
         StatusCode::OK
     );
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/orca/pools/POOL1", None).await, StatusCode::OK);
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/orca/lock/POOL1", None).await, StatusCode::OK);
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/orca/tokens", None).await, StatusCode::OK);
     assert_eq!(
-        request(router.clone(), Method::GET, "/api/v1/orca/tokens/search?q=ORCA", None).await,
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/orca/pools/POOL1",
+            None
+        )
+        .await,
         StatusCode::OK
     );
-    assert_eq!(request(router.clone(), Method::GET, "/api/v1/orca/tokens/MINT1", None).await, StatusCode::OK);
-    assert_eq!(request(router, Method::GET, "/api/v1/orca/protocol", None).await, StatusCode::OK);
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/orca/lock/POOL1", None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/orca/tokens", None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/orca/tokens/search?q=ORCA",
+            None
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/orca/tokens/MINT1",
+            None
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(router, Method::GET, "/api/v1/orca/protocol", None).await,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -356,7 +476,10 @@ async fn auth_and_ws_endpoints_are_reachable() {
         .body(Body::empty())
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
-    assert!(resp.status() == StatusCode::SWITCHING_PROTOCOLS || resp.status() == StatusCode::UPGRADE_REQUIRED);
+    assert!(
+        resp.status() == StatusCode::SWITCHING_PROTOCOLS
+            || resp.status() == StatusCode::UPGRADE_REQUIRED
+    );
 
     let req2 = Request::builder()
         .method(Method::GET)
@@ -368,7 +491,10 @@ async fn auth_and_ws_endpoints_are_reachable() {
         .body(Body::empty())
         .unwrap();
     let resp2 = router.oneshot(req2).await.unwrap();
-    assert!(resp2.status() == StatusCode::SWITCHING_PROTOCOLS || resp2.status() == StatusCode::UPGRADE_REQUIRED);
+    assert!(
+        resp2.status() == StatusCode::SWITCHING_PROTOCOLS
+            || resp2.status() == StatusCode::UPGRADE_REQUIRED
+    );
 }
 
 #[tokio::test]

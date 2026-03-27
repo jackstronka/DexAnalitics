@@ -47,6 +47,9 @@ pub use crate::metrics::impermanent_loss::{
 pub use crate::metrics::{APY, ImpermanentLoss, PnL};
 
 // Value objects
+pub use crate::position_fee_checkpoint::{
+    CheckpointSource, PositionFeeCheckpoint, PositionTruthMode,
+};
 pub use crate::value_objects::amount::Amount;
 pub use crate::value_objects::optimization_result::OptimizationResult;
 pub use crate::value_objects::percentage::Percentage;

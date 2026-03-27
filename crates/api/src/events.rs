@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
-use std::sync::RwLock as StdRwLock;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, sleep};
@@ -113,7 +113,6 @@ impl InProcessEventBus {
     fn dedup_key(event: &EventEnvelope) -> String {
         format!("{}:{}", event.event_type, event.event_id)
     }
-
 }
 
 #[async_trait]
@@ -281,4 +280,3 @@ mod tests {
         assert_eq!(s.duplicates, 1);
     }
 }
-

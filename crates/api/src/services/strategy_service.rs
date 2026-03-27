@@ -8,6 +8,7 @@ use crate::services::optimization_runner::{
     run_optimize_subprocess,
 };
 use crate::state::{AlertUpdate, AppState};
+use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
@@ -165,6 +166,7 @@ impl StrategyService {
             require_confirmation: !auto_execute,
             max_slippage_pct: Decimal::new(5, 3), // 0.5%
             dry_run,
+            fee_mode: PositionTruthMode::Heuristic,
         };
 
         // Create strategy executor
@@ -322,10 +324,10 @@ impl StrategyService {
         // Broadcast alert
         self.state
             .broadcast_alert(AlertUpdate {
-            level: "info".to_string(),
-            message: format!("Strategy {} started", strategy_id),
-            timestamp: chrono::Utc::now(),
-            position_address: None,
+                level: "info".to_string(),
+                message: format!("Strategy {} started", strategy_id),
+                timestamp: chrono::Utc::now(),
+                position_address: None,
             })
             .await;
 
@@ -377,10 +379,10 @@ impl StrategyService {
         // Broadcast alert
         self.state
             .broadcast_alert(AlertUpdate {
-            level: "info".to_string(),
-            message: format!("Strategy {} stopped", strategy_id),
-            timestamp: chrono::Utc::now(),
-            position_address: None,
+                level: "info".to_string(),
+                message: format!("Strategy {} stopped", strategy_id),
+                timestamp: chrono::Utc::now(),
+                position_address: None,
             })
             .await;
 

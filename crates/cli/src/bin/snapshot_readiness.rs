@@ -7,6 +7,12 @@ enum ProtocolArg {
     Meteora,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum FeeModeArg {
+    Heuristic,
+    PositionTruth,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "snapshot-readiness",
@@ -19,6 +25,9 @@ struct Args {
     /// Pool address used in data/pool-snapshots/{protocol}/{pool}/snapshots.jsonl
     #[arg(long)]
     pool_address: String,
+    /// Fee accounting mode (default: current heuristic path).
+    #[arg(long, value_enum, default_value_t = FeeModeArg::Heuristic)]
+    fee_mode: FeeModeArg,
 }
 
 fn protocol_dir(protocol: ProtocolArg) -> &'static str {
@@ -132,11 +141,12 @@ fn main_inner() -> anyhow::Result<()> {
     let lp_share_ready = with_ts >= 2 && with_vaults >= 2 && with_mints >= 2;
     let snapshot_fee_heuristic_ready =
         with_ts >= 2 && with_mints >= 2 && (with_fee_growth >= 2 || with_protocol_fee_counter >= 2);
-    let position_truth_ready = false;
+    let position_truth_ready = matches!(args.fee_mode, FeeModeArg::PositionTruth) && false;
 
     println!("Snapshot readiness audit:");
     println!("  protocol: {:?}", args.protocol);
     println!("  pool: {}", args.pool_address);
+    println!("  fee_mode: {:?}", args.fee_mode);
     println!("  file: {}", path.display());
     println!("  rows: {}", total);
     println!(
@@ -180,6 +190,11 @@ fn main_inner() -> anyhow::Result<()> {
             "NOT READY"
         }
     );
+    if matches!(args.fee_mode, FeeModeArg::PositionTruth) && !position_truth_ready {
+        println!(
+            "     Position-truth mode selected, but Tier3 evaluator/checkpoints are not wired yet."
+        );
+    }
 
     if args.protocol == ProtocolArg::Meteora && !snapshot_fee_heuristic_ready {
         println!(

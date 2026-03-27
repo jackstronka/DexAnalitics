@@ -23,9 +23,11 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | Document | Purpose |
 | -------- | ------- |
 | [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) | Orca-specific operational steps and notes |
+| [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | Step-by-step wallet setup + bot launch flow on devnet (`dry-run` -> `limited-live`) |
 | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) | Contract: `OrcaReadService` (REST) + `OrcaTxService` (on-chain), endpoint/method map, implementation checklist |
 | [`ORCA_EXTERNAL_IMPLEMENTATIONS.md`](ORCA_EXTERNAL_IMPLEMENTATIONS.md) | Patterns from Hummingbot/Orca for production-like Orca integrations |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | 3-phase checklist to move bot from devnet MVP to production-like readiness |
+| [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | Solana RPC vs Orca, public vs provider, free-tier pointers, dual fallback — notes for mainnet bot |
 
 ## Backtesting and strategies
 
@@ -81,6 +83,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) | ops, alerts, modes (snapshot) |
 | [`BOT_RESEARCH_DECISION_2026-03-23.md`](BOT_RESEARCH_DECISION_2026-03-23.md) | research, matrix, direction (snapshot) |
 | [`BOT_WORKLOG_2026-03-23.md`](BOT_WORKLOG_2026-03-23.md) | worklog, rationale (snapshot) |
+| [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | devnet, wallet, runbook, dry-run, limited-live, preflight |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | devnet, bot, production readiness, checklist, go/no-go |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | code changes, keywords, changelog, AI-searchable |
 | [`FEES_DATA_PLAN.md`](FEES_DATA_PLAN.md) | fees data |
@@ -92,6 +95,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) | Orca, operations |
 | [`ORCA_EXTERNAL_IMPLEMENTATIONS.md`](ORCA_EXTERNAL_IMPLEMENTATIONS.md) | orca, hummingbot, examples, rent, token-2022, tx-builders |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | architecture, crates, pipeline, CLI names, data paths |
+| [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | rpc, solana, mainnet, fallback, free tier, orca bot |
 | [`README.md`](README.md) | *this file* — TOC + A–Z index |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | solana, indexing, RPC, Geyser, swaps-sync, misconceptions |
 | [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) | agent_layer_profile, osobny tryb, chart screenshot, rules-as-training, consensus, eval harness, `AgentDecision`, P1–P13 |

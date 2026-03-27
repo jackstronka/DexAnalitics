@@ -10,15 +10,15 @@ pub mod strategies;
 pub mod tx;
 
 #[cfg(test)]
-mod pools_tests;
+mod devnet_e2e_tests;
+#[cfg(test)]
+mod endpoint_coverage_tests;
 #[cfg(test)]
 mod orca_tests;
 #[cfg(test)]
 mod phantom_auth_tests;
 #[cfg(test)]
-mod devnet_e2e_tests;
-#[cfg(test)]
-mod endpoint_coverage_tests;
+mod pools_tests;
 #[cfg(test)]
 mod tx_tests;
 

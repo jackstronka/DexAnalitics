@@ -12,6 +12,7 @@ use solana_sdk::signature::Signature;
 use solana_transaction_status_client_types::{
     EncodedConfirmedTransactionWithStatusMeta, UiTransactionEncoding,
 };
+use solana_transaction_status_client_types::{TransactionConfirmationStatus, TransactionStatus};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -362,17 +363,101 @@ impl RpcProvider {
         &self,
         transaction: &solana_sdk::transaction::Transaction,
     ) -> Result<Signature> {
+        // Devnet/mainnet RPCs are often flaky. A common failure mode is:
+        // - send succeeds on one endpoint
+        // - confirm/status polling happens on another due to failover rotation
+        // which makes the tx appear "not found" and ends as a send+confirm error.
+        //
+        // To avoid this, pin a single endpoint for the whole send+confirm lifecycle.
         let tx = transaction.clone();
-        self.execute_with_retry(|client| {
-            let tx = tx.clone();
-            async move {
-                client
-                    .send_and_confirm_transaction(&tx)
+        let mut last_err: Option<anyhow::Error> = None;
+
+        // Try endpoints in order, but keep each send+confirm pinned to a single endpoint.
+        for endpoint in self.config.all_endpoints() {
+            let endpoint = endpoint.to_string();
+            let client = RpcClient::new_with_timeout(endpoint.clone(), self.config.timeout);
+
+            // 1) Send with retries on this endpoint.
+            let mut send_attempt = 0u32;
+            let sig = loop {
+                match client.send_transaction(&tx).await {
+                    Ok(sig) => break Ok(sig),
+                    Err(e) => {
+                        let err = anyhow::Error::new(e).context("send_transaction");
+                        last_err = Some(err);
+                        if send_attempt >= self.config.max_retries {
+                            break Err(());
+                        }
+                        let delay = calculate_backoff(
+                            send_attempt,
+                            self.config.retry_base_delay_ms,
+                            self.config.retry_max_delay_ms,
+                        );
+                        warn!(
+                            endpoint = endpoint,
+                            attempt = send_attempt,
+                            delay_ms = delay,
+                            error = ?last_err.as_ref().unwrap(),
+                            "send_transaction failed; retrying"
+                        );
+                        sleep(Duration::from_millis(delay)).await;
+                        send_attempt += 1;
+                    }
+                }
+            };
+
+            let sig = match sig {
+                Ok(sig) => sig,
+                Err(()) => {
+                    warn!(endpoint = endpoint, "send failed on endpoint; trying next");
+                    continue;
+                }
+            };
+
+            // 2) Confirm by polling signature status on the same endpoint.
+            let deadline = Instant::now() + Duration::from_secs(90);
+            loop {
+                if Instant::now() >= deadline {
+                    last_err = Some(anyhow::anyhow!(
+                        "confirm timeout (endpoint={endpoint}, signature={sig})"
+                    ));
+                    warn!(endpoint = endpoint, signature = %sig, "confirm timed out; trying next endpoint");
+                    break;
+                }
+
+                let statuses: solana_client::rpc_response::Response<
+                    Vec<Option<TransactionStatus>>,
+                > = client
+                    .get_signature_statuses(&[sig])
                     .await
-                    .context("Failed to send and confirm transaction")
+                    .context("get_signature_statuses")?;
+                if let Some(Some(status)) = statuses.value.first() {
+                    if let Some(err) = status.err.clone() {
+                        return Err(anyhow::anyhow!("transaction error: {err:?}"));
+                    }
+
+                    let ok = match self.config.commitment {
+                        super::config::CommitmentLevel::Processed => true,
+                        super::config::CommitmentLevel::Confirmed => matches!(
+                            status.confirmation_status,
+                            Some(TransactionConfirmationStatus::Confirmed)
+                                | Some(TransactionConfirmationStatus::Finalized)
+                        ),
+                        super::config::CommitmentLevel::Finalized => matches!(
+                            status.confirmation_status,
+                            Some(TransactionConfirmationStatus::Finalized)
+                        ),
+                    };
+                    if ok {
+                        return Ok(sig);
+                    }
+                }
+
+                sleep(Duration::from_millis(800)).await;
             }
-        })
-        .await
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to send and confirm transaction")))
     }
 
     /// Sends a transaction without waiting for confirmation.

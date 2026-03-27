@@ -8,11 +8,10 @@ use crate::models::{
     DecreaseLiquidityRequest, EventBusMetricsResponse, HealthResponse, ListPoolsResponse,
     ListPositionsResponse, ListStrategiesResponse, MessageResponse, MetricsResponse,
     OpenPositionRequest, OrcaLockResponse, OrcaProtocolResponse, OrcaTokenListResponse,
-    OrcaTokenResponse, PhantomChallengeRequest, PhantomChallengeResponse,
-    PhantomSessionResponse, PhantomVerifyRequest, PnLResponse, PoolResponse, PoolStateResponse,
-    PortfolioAnalyticsResponse, PositionResponse, RebalanceRequest, SimulationRequest,
-    SimulationResponse, StrategyPerformanceResponse, StrategyResponse, SubmitSignedTxRequest,
-    SubmitSignedTxResponse,
+    OrcaTokenResponse, PhantomChallengeRequest, PhantomChallengeResponse, PhantomSessionResponse,
+    PhantomVerifyRequest, PnLResponse, PoolResponse, PoolStateResponse, PortfolioAnalyticsResponse,
+    PositionResponse, RebalanceRequest, SimulationRequest, SimulationResponse,
+    StrategyPerformanceResponse, StrategyResponse, SubmitSignedTxRequest, SubmitSignedTxResponse,
 };
 use utoipa::OpenApi;
 
@@ -87,6 +86,7 @@ use utoipa::OpenApi;
         handlers::orca_get_protocol,
         // Unsigned tx flow endpoints
         handlers::tx_open_build,
+        handlers::tx_increase_build,
         handlers::tx_decrease_build,
         handlers::tx_collect_build,
         handlers::tx_close_build,

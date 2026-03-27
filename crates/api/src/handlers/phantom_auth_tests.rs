@@ -1,8 +1,8 @@
 use super::*;
 use crate::models::{PhantomChallengeRequest, PhantomVerifyRequest};
 use crate::state::{ApiConfig, AppState};
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use clmm_lp_protocols::prelude::RpcConfig;
 use solana_sdk::signature::{Keypair, Signer};
 
@@ -84,4 +84,3 @@ async fn phantom_verify_rejects_replay_nonce() {
 
     assert_eq!(err.status_code(), axum::http::StatusCode::UNAUTHORIZED);
 }
-

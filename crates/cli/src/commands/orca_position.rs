@@ -9,6 +9,7 @@ use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::time::{Duration, sleep};
 use tracing::info;
 
 use super::orca_wallet::load_signing_wallet;
@@ -75,6 +76,8 @@ pub async fn run_position_open(
     tick_lower: Option<i32>,
     tick_upper: Option<i32>,
     range_width_pct: Option<f64>,
+    amount_a: u64,
+    amount_b: u64,
     slippage_bps: u16,
 ) -> Result<()> {
     let pool = Pubkey::from_str(pool_addr.trim()).context("invalid pool pubkey")?;
@@ -106,22 +109,20 @@ pub async fn run_position_open(
         ),
     };
 
-    let pos = derive_whirlpool_position_address(&pool, tl, tu);
     info!(
         pool = %pool,
         tick_lower = tl,
         tick_upper = tu,
-        position = %pos,
         dry_run = dry_run,
         "Orca open position"
     );
 
     if dry_run {
-        println!("dry-run: would open position {pos}");
+        println!("dry-run: would open position in pool {pool}");
         println!("  pool: {pool}");
         println!("  ticks: [{tl}, {tu}] (spacing {})", state.tick_spacing);
         println!(
-            "note: Whirlpool instruction account lists in this repo may be incomplete; test on devnet / simulate first."
+            "note: exact position address is assigned from SDK-generated position mint at tx build/open time."
         );
         return Ok(());
     }
@@ -132,8 +133,8 @@ pub async fn run_position_open(
         pool,
         tick_lower: tl,
         tick_upper: tu,
-        amount_a: u64::MAX,
-        amount_b: u64::MAX,
+        amount_a,
+        amount_b,
         slippage_bps,
     };
     let res = orca
@@ -141,8 +142,82 @@ pub async fn run_position_open(
         .await
         .context("open_position RPC")?;
     execution_ok(&res)?;
-    println!("position PDA: {pos}");
+    if let Some(position) = res.created_position {
+        println!("position PDA: {position}");
+    } else {
+        println!("position PDA: <unknown>");
+        println!("warning: open succeeded but returned no created_position");
+    }
     println!("signature: {}", res.signature);
+    Ok(())
+}
+
+/// Open a new position, wait N seconds, then close it (devnet convenience).
+pub async fn run_position_open_and_close(
+    pool_addr: String,
+    keypair: Option<std::path::PathBuf>,
+    sleep_secs: u64,
+    tick_lower: Option<i32>,
+    tick_upper: Option<i32>,
+    range_width_pct: Option<f64>,
+    amount_a: u64,
+    amount_b: u64,
+    slippage_bps: u16,
+) -> Result<()> {
+    let pool = Pubkey::from_str(pool_addr.trim()).context("invalid pool pubkey")?;
+    let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+    let reader = WhirlpoolReader::new(provider.clone());
+    let state = reader
+        .get_pool_state(pool_addr.trim())
+        .await
+        .context("fetch pool state")?;
+
+    let (tl, tu) = match (tick_lower, tick_upper, range_width_pct) {
+        (Some(l), Some(u), None) => {
+            ensure_ticks_on_spacing(l, u, state.tick_spacing)?;
+            (l, u)
+        }
+        (None, None, Some(w)) => {
+            if w <= 0.0 || w > 100.0 {
+                anyhow::bail!(
+                    "--range-width-pct must be in (0, 100], e.g. 10 for ±~5% price band around spot"
+                );
+            }
+            let width_dec =
+                Decimal::from_f64_retain(w / 100.0).context("range width as decimal")?;
+            calculate_tick_range(state.tick_current, width_dec, state.tick_spacing)
+        }
+        _ => anyhow::bail!(
+            "provide either (--tick-lower AND --tick-upper) OR --range-width-pct (percent of price width, e.g. 10)"
+        ),
+    };
+
+    let wallet = Arc::new(load_signing_wallet(keypair.clone())?);
+    let orca = WhirlpoolExecutor::new(provider.clone());
+    let params = OpenPositionParams {
+        pool,
+        tick_lower: tl,
+        tick_upper: tu,
+        amount_a,
+        amount_b,
+        slippage_bps,
+    };
+
+    let res = orca
+        .open_position(&params, wallet.keypair())
+        .await
+        .context("open_position RPC")?;
+    execution_ok(&res)?;
+    let position = res
+        .created_position
+        .ok_or_else(|| anyhow::anyhow!("open succeeded but missing created_position"))?;
+
+    println!("opened position PDA: {position}");
+    println!("open signature: {}", res.signature);
+    println!("sleeping {sleep_secs}s before close...");
+    sleep(Duration::from_secs(sleep_secs.max(1))).await;
+
+    run_position_close(position.to_string(), keypair, false).await?;
     Ok(())
 }
 
@@ -183,6 +258,86 @@ pub async fn run_position_decrease(
         println!(
             "requested liquidity decrease: {delta} (min tokens = 0; adjust executor for production slippage)"
         );
+    }
+    Ok(())
+}
+
+/// Collect fees from an existing Whirlpool position.
+pub async fn run_position_collect_fees(
+    position_addr: String,
+    keypair: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
+    let position_pk = Pubkey::from_str(position_addr.trim()).context("invalid position pubkey")?;
+    let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+    let pos_reader = PositionReader::new(provider.clone());
+    let on_chain = pos_reader
+        .get_position(position_addr.trim())
+        .await
+        .context("fetch position")?;
+    let pool_pk = on_chain.pool;
+
+    let tx_manager = Arc::new(TransactionManager::new(
+        provider.clone(),
+        TransactionConfig::default(),
+    ));
+    let lifecycle = Arc::new(LifecycleTracker::new());
+    let mut exec =
+        RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
+    exec.set_wallet(Arc::new(load_signing_wallet(keypair)?));
+    exec.set_dry_run(dry_run);
+    exec.execute_collect_fees_only(&position_pk, &pool_pk)
+        .await?;
+
+    if dry_run {
+        println!("dry-run: would collect fees for {position_pk}");
+    } else {
+        println!("collected fees for {position_pk}");
+    }
+    Ok(())
+}
+
+/// Harvest/collect from an existing Whirlpool position (Orca terminology).
+///
+/// In this repo it is equivalent to `run_position_collect_fees` and uses the same SDK path.
+pub async fn run_position_harvest(
+    position_addr: String,
+    keypair: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
+    run_position_collect_fees(position_addr, keypair, dry_run).await
+}
+
+/// Fully close an existing Whirlpool position (includes fee collection + liquidity removal).
+pub async fn run_position_close(
+    position_addr: String,
+    keypair: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
+    let position_pk = Pubkey::from_str(position_addr.trim()).context("invalid position pubkey")?;
+    let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+    let pos_reader = PositionReader::new(provider.clone());
+    let on_chain = pos_reader
+        .get_position(position_addr.trim())
+        .await
+        .context("fetch position")?;
+    let pool_pk = on_chain.pool;
+
+    let tx_manager = Arc::new(TransactionManager::new(
+        provider.clone(),
+        TransactionConfig::default(),
+    ));
+    let lifecycle = Arc::new(LifecycleTracker::new());
+    let mut exec =
+        RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
+    exec.set_wallet(Arc::new(load_signing_wallet(keypair)?));
+    exec.set_dry_run(dry_run);
+    exec.execute_full_close_only(&position_pk, &pool_pk).await?;
+
+    if dry_run {
+        println!("dry-run: would close position {position_pk}");
+    } else {
+        println!("closed position {position_pk}");
     }
     Ok(())
 }

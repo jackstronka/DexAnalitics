@@ -6,8 +6,8 @@ use crate::models::{
     OrcaTokenListResponse, OrcaTokenResponse, PoolResponse,
 };
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use clmm_lp_data::providers::{
     OrcaListPoolsQuery, OrcaListTokensQuery, OrcaRestClient, OrcaSearchPoolsQuery,
     OrcaSearchTokensQuery,
@@ -84,7 +84,10 @@ pub async fn orca_list_pools(
     Query(q): Query<OrcaListPoolsQuery>,
 ) -> ApiResult<Json<ListPoolsResponse>> {
     let client = rest_client(&state);
-    let paged = client.list_pools(q).await.map_err(|e| ApiError::internal(e.to_string()))?;
+    let paged = client
+        .list_pools(q)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     let pools = paged.data.into_iter().map(map_pool).collect::<Vec<_>>();
     Ok(Json(ListPoolsResponse {
         total: pools.len(),
@@ -285,4 +288,3 @@ pub async fn orca_get_protocol(
         volume_7d_usdc: parse_decimal_opt(wrapped.data.volume_7d_usdc),
     }))
 }
-
