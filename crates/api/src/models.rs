@@ -15,9 +15,9 @@ use utoipa::ToSchema;
 pub struct OpenPositionRequest {
     /// Pool address.
     pub pool_address: String,
-    /// Lower tick of the range.
+    /// Lower tick of the range (ignored when `full_range` is true).
     pub tick_lower: i32,
-    /// Upper tick of the range.
+    /// Upper tick of the range (ignored when `full_range` is true).
     pub tick_upper: i32,
     /// Amount of token A to deposit.
     pub amount_a: u64,
@@ -26,6 +26,9 @@ pub struct OpenPositionRequest {
     /// Slippage tolerance in basis points.
     #[serde(default = "default_slippage")]
     pub slippage_tolerance_bps: u16,
+    /// Open a **full-range** (Splash-style) position; on-chain tick bounds come from pool spacing.
+    #[serde(default)]
+    pub full_range: bool,
 }
 
 fn default_slippage() -> u16 {
@@ -200,9 +203,13 @@ pub struct BuildUnsignedTxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_lower: Option<i32>,
 
-    /// Optional Whirlpool tick upper bound (required for `open` build).
+    /// Optional Whirlpool tick upper bound (required for `open` build unless `full_range` is true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_upper: Option<i32>,
+
+    /// When `Some(true)`, build Orca full-range open (Splash-style); tick fields are ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_range: Option<bool>,
 }
 
 /// Unsigned tx response.

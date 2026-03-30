@@ -76,6 +76,8 @@ pub struct StrategyExecutor {
     running: std::sync::atomic::AtomicBool,
     /// Pool reader for fetching state.
     pool_reader: WhirlpoolReader,
+    /// Tick reader for boundary fee-growth outside (Tier3).
+    tick_reader: WhirlpoolTickReader,
     /// For `RetouchShift`: gating to allow only one retouch per out-of-range episode.
     retouch_armed: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, bool>>>,
     /// Latest optimization profile id (for IL ledger continuity / auditing).
@@ -93,6 +95,7 @@ impl StrategyExecutor {
         let lifecycle = Arc::new(LifecycleTracker::new());
         let circuit_breaker = Arc::new(CircuitBreaker::default());
         let pool_reader = WhirlpoolReader::new(provider.clone());
+        let tick_reader = WhirlpoolTickReader::new(provider.clone());
         let retouch_armed = Arc::new(RwLock::new(HashMap::new()));
 
         let mut rebalance_executor = RebalanceExecutor::new(
@@ -114,9 +117,100 @@ impl StrategyExecutor {
             config,
             running: std::sync::atomic::AtomicBool::new(false),
             pool_reader,
+            tick_reader,
             retouch_armed,
             optimization_run_id: Mutex::new(None),
         }
+    }
+
+    async fn capture_position_fee_checkpoint(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        event_type: &str,
+        source: CheckpointSource,
+    ) -> Option<PositionFeeCheckpoint> {
+        // Always refresh position first so checkpoints are contemporaneous.
+        if self.monitor.refresh_position(position).await.is_err() {
+            return None;
+        }
+        let monitored = self.monitor.get_position(position).await?;
+
+        let pool_state = self
+            .pool_reader
+            .get_pool_state(&monitored.pool.to_string())
+            .await
+            .ok()?;
+
+        // Tier3: fetch tick boundary feeGrowthOutside and compute feeGrowthInside.
+        let lower = self
+            .tick_reader
+            .get_tick_boundary_state(&monitored.pool, monitored.on_chain.tick_lower, pool_state.tick_spacing)
+            .await
+            .ok();
+        let upper = self
+            .tick_reader
+            .get_tick_boundary_state(&monitored.pool, monitored.on_chain.tick_upper, pool_state.tick_spacing)
+            .await
+            .ok();
+
+        let (fee_growth_outside_lower_a, fee_growth_outside_lower_b) = lower
+            .as_ref()
+            .map(|t| (Some(t.fee_growth_outside_a), Some(t.fee_growth_outside_b)))
+            .unwrap_or((None, None));
+        let (fee_growth_outside_upper_a, fee_growth_outside_upper_b) = upper
+            .as_ref()
+            .map(|t| (Some(t.fee_growth_outside_a), Some(t.fee_growth_outside_b)))
+            .unwrap_or((None, None));
+
+        let fee_growth_inside_a = match (fee_growth_outside_lower_a, fee_growth_outside_upper_a) {
+            (Some(lo), Some(up)) => Some(compute_fee_growth_inside_single(
+                pool_state.fee_growth_global_a,
+                lo,
+                up,
+                pool_state.tick_current,
+                monitored.on_chain.tick_lower,
+                monitored.on_chain.tick_upper,
+            )),
+            _ => None,
+        };
+        let fee_growth_inside_b = match (fee_growth_outside_lower_b, fee_growth_outside_upper_b) {
+            (Some(lo), Some(up)) => Some(compute_fee_growth_inside_single(
+                pool_state.fee_growth_global_b,
+                lo,
+                up,
+                pool_state.tick_current,
+                monitored.on_chain.tick_lower,
+                monitored.on_chain.tick_upper,
+            )),
+            _ => None,
+        };
+
+        Some(PositionFeeCheckpoint {
+            ts_utc: chrono::Utc::now().to_rfc3339(),
+            position: position.to_string(),
+            pool: monitored.pool.to_string(),
+            event_type: event_type.to_string(),
+            tick_lower: monitored.on_chain.tick_lower,
+            tick_upper: monitored.on_chain.tick_upper,
+            tick_current: Some(pool_state.tick_current),
+            liquidity: monitored.on_chain.liquidity.to_string(),
+            fees_owed_a: monitored.on_chain.fees_owed_a,
+            fees_owed_b: monitored.on_chain.fees_owed_b,
+            fee_growth_checkpoint_a: Some(monitored.on_chain.fee_growth_inside_a.to_string()),
+            fee_growth_checkpoint_b: Some(monitored.on_chain.fee_growth_inside_b.to_string()),
+            fee_growth_global_a: Some(pool_state.fee_growth_global_a.to_string()),
+            fee_growth_global_b: Some(pool_state.fee_growth_global_b.to_string()),
+            fee_growth_outside_lower_a: fee_growth_outside_lower_a.map(|v| v.to_string()),
+            fee_growth_outside_lower_b: fee_growth_outside_lower_b.map(|v| v.to_string()),
+            fee_growth_outside_upper_a: fee_growth_outside_upper_a.map(|v| v.to_string()),
+            fee_growth_outside_upper_b: fee_growth_outside_upper_b.map(|v| v.to_string()),
+            fee_growth_inside_a: fee_growth_inside_a.map(|v| v.to_string()),
+            fee_growth_inside_b: fee_growth_inside_b.map(|v| v.to_string()),
+            sqrt_price_x64: Some(pool_state.sqrt_price.to_string()),
+            collected_a: 0,
+            collected_b: 0,
+            source,
+        })
     }
 
     /// Sets the wallet for signing transactions.
@@ -172,32 +266,33 @@ impl StrategyExecutor {
         pool: &solana_sdk::pubkey::Pubkey,
         liquidity_amount: u128,
     ) -> anyhow::Result<()> {
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(position, "decrease_liquidity_pre", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            }
+        }
         self.rebalance_executor
             .execute_partial_decrease(position, pool, liquidity_amount)
             .await?;
 
-        self.lifecycle
-            .record_fee_checkpoint(PositionFeeCheckpoint {
-                ts_utc: chrono::Utc::now().to_rfc3339(),
-                position: position.to_string(),
-                pool: pool.to_string(),
-                event_type: "decrease_liquidity".to_string(),
-                tick_lower: 0,
-                tick_upper: 0,
-                liquidity: liquidity_amount.to_string(),
-                fees_owed_a: 0,
-                fees_owed_b: 0,
-                collected_a: 0,
-                collected_b: 0,
-                source: CheckpointSource::Derived,
-            })
-            .await;
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(position, "decrease_liquidity_post", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            }
+        }
         Ok(())
     }
 
     /// Opens a new Whirlpool position using explicit token caps.
     ///
     /// In dry-run mode this returns the derived position PDA without requiring wallet.
+    /// Set `full_range` for Splash-style full-range opens (ignores `tick_lower` / `tick_upper` on-chain).
     pub async fn execute_open_position(
         &self,
         pool: &solana_sdk::pubkey::Pubkey,
@@ -206,8 +301,9 @@ impl StrategyExecutor {
         amount_a: u64,
         amount_b: u64,
         slippage_bps: u16,
+        full_range: bool,
     ) -> anyhow::Result<solana_sdk::pubkey::Pubkey> {
-        let position = self
+        let (position, eff_tl, eff_tu) = self
             .rebalance_executor
             .execute_open_position(
                 pool,
@@ -216,25 +312,49 @@ impl StrategyExecutor {
                 amount_a,
                 amount_b,
                 slippage_bps,
+                full_range,
             )
             .await?;
 
-        self.lifecycle
-            .record_fee_checkpoint(PositionFeeCheckpoint {
-                ts_utc: chrono::Utc::now().to_rfc3339(),
-                position: position.to_string(),
-                pool: pool.to_string(),
-                event_type: "open_position".to_string(),
-                tick_lower,
-                tick_upper,
-                liquidity: "0".to_string(),
-                fees_owed_a: 0,
-                fees_owed_b: 0,
-                collected_a: 0,
-                collected_b: 0,
-                source: CheckpointSource::Derived,
-            })
-            .await;
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            // After opening, capture on-chain snapshot (position should now exist).
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(&position, "open_post", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            } else {
+                // Fallback minimal derived row for auditability.
+                self.lifecycle
+                    .record_fee_checkpoint(PositionFeeCheckpoint {
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                        position: position.to_string(),
+                        pool: pool.to_string(),
+                        event_type: "open_post_missing".to_string(),
+                        tick_lower: eff_tl,
+                        tick_upper: eff_tu,
+                        tick_current: None,
+                        liquidity: "0".to_string(),
+                        fees_owed_a: 0,
+                        fees_owed_b: 0,
+                        fee_growth_checkpoint_a: None,
+                        fee_growth_checkpoint_b: None,
+                        fee_growth_global_a: None,
+                        fee_growth_global_b: None,
+                        fee_growth_outside_lower_a: None,
+                        fee_growth_outside_lower_b: None,
+                        fee_growth_outside_upper_a: None,
+                        fee_growth_outside_upper_b: None,
+                        fee_growth_inside_a: None,
+                        fee_growth_inside_b: None,
+                        sqrt_price_x64: None,
+                        collected_a: 0,
+                        collected_b: 0,
+                        source: CheckpointSource::Missing,
+                    })
+                    .await;
+            }
+        }
         Ok(position)
     }
 
@@ -244,25 +364,25 @@ impl StrategyExecutor {
         position: &solana_sdk::pubkey::Pubkey,
         pool: &solana_sdk::pubkey::Pubkey,
     ) -> anyhow::Result<()> {
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(position, "collect_pre", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            }
+        }
         self.rebalance_executor
             .execute_collect_fees_only(position, pool)
             .await?;
-        self.lifecycle
-            .record_fee_checkpoint(PositionFeeCheckpoint {
-                ts_utc: chrono::Utc::now().to_rfc3339(),
-                position: position.to_string(),
-                pool: pool.to_string(),
-                event_type: "collect_fees".to_string(),
-                tick_lower: 0,
-                tick_upper: 0,
-                liquidity: "0".to_string(),
-                fees_owed_a: 0,
-                fees_owed_b: 0,
-                collected_a: 0,
-                collected_b: 0,
-                source: CheckpointSource::Missing,
-            })
-            .await;
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(position, "collect_post", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            }
+        }
         Ok(())
     }
 
@@ -272,25 +392,26 @@ impl StrategyExecutor {
         position: &solana_sdk::pubkey::Pubkey,
         pool: &solana_sdk::pubkey::Pubkey,
     ) -> anyhow::Result<()> {
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(position, "close_pre", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            }
+        }
         self.rebalance_executor
             .execute_full_close_only(position, pool)
             .await?;
-        self.lifecycle
-            .record_fee_checkpoint(PositionFeeCheckpoint {
-                ts_utc: chrono::Utc::now().to_rfc3339(),
-                position: position.to_string(),
-                pool: pool.to_string(),
-                event_type: "close_position".to_string(),
-                tick_lower: 0,
-                tick_upper: 0,
-                liquidity: "0".to_string(),
-                fees_owed_a: 0,
-                fees_owed_b: 0,
-                collected_a: 0,
-                collected_b: 0,
-                source: CheckpointSource::Derived,
-            })
-            .await;
+        if self.config.fee_mode == PositionTruthMode::PositionTruth {
+            // After close, position PDA may still exist briefly; best-effort capture.
+            if let Some(cp) = self
+                .capture_position_fee_checkpoint(position, "close_post", CheckpointSource::Onchain)
+                .await
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
+            }
+        }
         Ok(())
     }
 
@@ -343,6 +464,14 @@ impl StrategyExecutor {
         debug!(count = positions.len(), "Evaluating positions");
 
         for position in positions {
+            if self.config.fee_mode == PositionTruthMode::PositionTruth {
+                if let Some(cp) = self
+                    .capture_position_fee_checkpoint(&position.address, "poll", CheckpointSource::Onchain)
+                    .await
+                {
+                    self.lifecycle.record_fee_checkpoint(cp).await;
+                }
+            }
             if let Err(e) = self.evaluate_position(&position).await {
                 warn!(
                     position = %position.address,
@@ -541,9 +670,21 @@ impl StrategyExecutor {
                             event_type: "rebalance_out".to_string(),
                             tick_lower: position.on_chain.tick_lower,
                             tick_upper: position.on_chain.tick_upper,
+                            tick_current: Some(pool.tick_current),
                             liquidity: position.on_chain.liquidity.to_string(),
                             fees_owed_a: position.on_chain.fees_owed_a,
                             fees_owed_b: position.on_chain.fees_owed_b,
+                            fee_growth_checkpoint_a: Some(position.on_chain.fee_growth_inside_a.to_string()),
+                            fee_growth_checkpoint_b: Some(position.on_chain.fee_growth_inside_b.to_string()),
+                            fee_growth_global_a: Some(pool.fee_growth_global_a.to_string()),
+                            fee_growth_global_b: Some(pool.fee_growth_global_b.to_string()),
+                            fee_growth_outside_lower_a: None,
+                            fee_growth_outside_lower_b: None,
+                            fee_growth_outside_upper_a: None,
+                            fee_growth_outside_upper_b: None,
+                            fee_growth_inside_a: None,
+                            fee_growth_inside_b: None,
+                            sqrt_price_x64: Some(pool.sqrt_price.to_string()),
                             collected_a: result.fees_collected.map(|x| x.0).unwrap_or(0),
                             collected_b: result.fees_collected.map(|x| x.1).unwrap_or(0),
                             source: CheckpointSource::Onchain,
@@ -561,9 +702,21 @@ impl StrategyExecutor {
                                 event_type: "rebalance_in".to_string(),
                                 tick_lower: *new_tick_lower,
                                 tick_upper: *new_tick_upper,
+                                tick_current: Some(pool.tick_current),
                                 liquidity: result.liquidity_added.to_string(),
                                 fees_owed_a: 0,
                                 fees_owed_b: 0,
+                                fee_growth_checkpoint_a: None,
+                                fee_growth_checkpoint_b: None,
+                                fee_growth_global_a: Some(pool.fee_growth_global_a.to_string()),
+                                fee_growth_global_b: Some(pool.fee_growth_global_b.to_string()),
+                                fee_growth_outside_lower_a: None,
+                                fee_growth_outside_lower_b: None,
+                                fee_growth_outside_upper_a: None,
+                                fee_growth_outside_upper_b: None,
+                                fee_growth_inside_a: None,
+                                fee_growth_inside_b: None,
+                                sqrt_price_x64: Some(pool.sqrt_price.to_string()),
                                 collected_a: 0,
                                 collected_b: 0,
                                 source: CheckpointSource::Derived,

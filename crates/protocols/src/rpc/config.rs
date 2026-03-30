@@ -185,18 +185,23 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = RpcConfig::default();
-        assert!(config.primary_url.contains("mainnet"));
-        assert!(!config.fallback_urls.is_empty());
+        assert!(
+            config.primary_url.starts_with("http"),
+            "primary URL should be set (SOLANA_RPC_URL or default)"
+        );
     }
 
     #[test]
     fn test_all_endpoints() {
-        let config = RpcConfig::new("https://primary.com")
+        let mut config = RpcConfig::new("https://primary.com");
+        // `new` inherits `Default::default()` fallbacks from env + built-ins; clear for a stable count.
+        config.fallback_urls.clear();
+        let config = config
             .with_fallback("https://fallback1.com")
             .with_fallback("https://fallback2.com");
 
         let endpoints = config.all_endpoints();
-        assert_eq!(endpoints.len(), 5); // primary + 2 default + 2 added
+        assert_eq!(endpoints.len(), 3);
         assert_eq!(endpoints[0], "https://primary.com");
     }
 

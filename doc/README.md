@@ -28,6 +28,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`ORCA_EXTERNAL_IMPLEMENTATIONS.md`](ORCA_EXTERNAL_IMPLEMENTATIONS.md) | Patterns from Hummingbot/Orca for production-like Orca integrations |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | 3-phase checklist to move bot from devnet MVP to production-like readiness |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | Solana RPC vs Orca, public vs provider, free-tier pointers, dual fallback — notes for mainnet bot |
+| [`MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md) | `CLMM_EXPECTED_CLUSTER`, dry-run vs limited live, links to BOT ops + RPC notes |
 
 ## Backtesting and strategies
 
@@ -65,7 +66,7 @@ These files capture **research decisions and context at a point in time**. They 
 | Path | Purpose |
 | ---- | ------- |
 | [`../README.md`](../README.md) | Polish quick-start, CLI recipes, workspace list |
-| [`../STARTUP.md`](../STARTUP.md) | End-to-end startup procedures; curated pool addresses |
+| [`../STARTUP.md`](../STARTUP.md) | End-to-end startup; curated pools; `snapshot-backtest-prep` + `tools/run_snapshot_backtest_prep_loop.ps1` for fast Orca snapshot backtests |
 | [`../AGENTS.md`](../AGENTS.md) | Short map for AI assistants (crates, entrypoints, links) |
 
 When adding a new standalone doc under `doc/`, **add one row to the appropriate thematic table above** and **one line to the alphabetical index below**.

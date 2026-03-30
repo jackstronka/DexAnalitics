@@ -1560,11 +1560,18 @@ pub async fn enrich_curated_all(
     // The outer `decode_timeout_secs` still guards the full decode path; this mainly
     // prevents individual RPC endpoints from hanging too long before failover.
     let rpc_timeout = Duration::from_secs(decode_timeout_secs.clamp(4, 15));
-    let rpc_provider = RpcProvider::new(
-        RpcConfig::default()
-            .with_timeout(rpc_timeout)
-            .with_max_retries(decode_retries.min(3) as u32),
-    );
+    let rpc_cfg = RpcConfig::default()
+        .with_timeout(rpc_timeout)
+        .with_max_retries(decode_retries.min(3) as u32);
+    let primary = rpc_cfg.primary_url.as_str();
+    if primary.contains("devnet") || primary.contains("api.devnet.solana.com") {
+        anyhow::bail!(
+            "swaps-enrich-curated-all: SOLANA_RPC_URL points to devnet ({}), but STARTUP.md curated pools are on mainnet-beta. \
+Set SOLANA_RPC_URL to a mainnet RPC or unset it to use https://api.mainnet-beta.solana.com.",
+            rpc_cfg.primary_url
+        );
+    }
+    let rpc_provider = RpcProvider::new(rpc_cfg);
     let rpc = Arc::new(rpc_provider);
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),

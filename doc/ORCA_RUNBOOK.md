@@ -14,6 +14,8 @@ Powtarzalnie przygotować dane dla Orca Whirlpool tak, aby:
 ## RPC przed dekodowaniem (wszystkie protokoły w curated)
 
 - Ustaw **`SOLANA_RPC_URL`** (własny / płatny / archival jeśli potrzeba historii). Opcjonalnie **`SOLANA_RPC_FALLBACK_URLS`** (lista po przecinku).
+- **Mainnet:** rozważ **`CLMM_EXPECTED_CLUSTER=mainnet-beta`** — przy starcie `RpcProvider` odrzuci oczywiste mieszanie klastrów (np. devnet URL przy intencji mainnet). Szczegóły: [`doc/MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md).
+- **Mainnet (pre-live, sekcja danych):** zanim otworzysz jakąkolwiek pozycję na mainnecie, zmierz i zapisz **minimum position sizing** (to nie jest stała kwota; zależy od `current_tick`, `tick_spacing` i range). Procedura + szablon tabeli: [`doc/MAINNET_MIN_POSITION_SIZING.md`](MAINNET_MIN_POSITION_SIZING.md).
 - Bez sensownego `getTransaction` enrich nadal zwróci głównie `partial` / timeout — wtedy najpierw endpoint; równoległość jest ograniczona przez `--decode-concurrency` / `CLMM_ENRICH_DECODE_INFLIGHT` (patrz krok 3).
 
 ## Parametry “bezpieczne” dla Orca (polecane do stabilizacji RPC)

@@ -5,7 +5,12 @@ use clmm_lp_execution::prelude::{
     LifecycleTracker, RebalanceConfig, RebalanceExecutor, TransactionConfig, TransactionManager,
 };
 use clmm_lp_protocols::prelude::*;
+use orca_whirlpools::{
+    PositionOrBundle, WhirlpoolsConfigInput, fetch_positions_for_owner, fetch_splash_pool,
+    set_whirlpools_config_address,
+};
 use rust_decimal::Decimal;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -73,6 +78,7 @@ pub async fn run_position_open(
     pool_addr: String,
     keypair: Option<std::path::PathBuf>,
     dry_run: bool,
+    full_range: bool,
     tick_lower: Option<i32>,
     tick_upper: Option<i32>,
     range_width_pct: Option<f64>,
@@ -82,6 +88,54 @@ pub async fn run_position_open(
 ) -> Result<()> {
     let pool = Pubkey::from_str(pool_addr.trim()).context("invalid pool pubkey")?;
     let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+
+    if full_range {
+        if tick_lower.is_some() || tick_upper.is_some() || range_width_pct.is_some() {
+            anyhow::bail!(
+                "--full-range cannot be combined with --tick-lower / --tick-upper / --range-width-pct"
+            );
+        }
+        info!(pool = %pool, dry_run = dry_run, "Orca open full-range position");
+        if dry_run {
+            let reader = WhirlpoolReader::new(provider.clone());
+            let state = reader
+                .get_pool_state(pool_addr.trim())
+                .await
+                .context("fetch pool state")?;
+            let (tl, tu) = full_range_tick_indexes(state.tick_spacing);
+            println!("dry-run: would open full-range position in pool {pool}");
+            println!(
+                "  full-range ticks (from spacing {}): [{tl}, {tu}]",
+                state.tick_spacing
+            );
+            println!(
+                "note: exact position address is assigned from SDK-generated position mint at tx build/open time."
+            );
+            return Ok(());
+        }
+        let wallet = Arc::new(load_signing_wallet(keypair)?);
+        let orca = WhirlpoolExecutor::new(provider);
+        let params = OpenFullRangeParams {
+            pool,
+            amount_a,
+            amount_b,
+            slippage_bps,
+        };
+        let res = orca
+            .open_full_range_position(&params, wallet.keypair())
+            .await
+            .context("open_full_range_position RPC")?;
+        execution_ok(&res)?;
+        if let Some(position) = res.created_position {
+            println!("position PDA: {position}");
+        } else {
+            println!("position PDA: <unknown>");
+            println!("warning: open succeeded but returned no created_position");
+        }
+        println!("signature: {}", res.signature);
+        return Ok(());
+    }
+
     let reader = WhirlpoolReader::new(provider.clone());
     let state = reader
         .get_pool_state(pool_addr.trim())
@@ -157,6 +211,7 @@ pub async fn run_position_open_and_close(
     pool_addr: String,
     keypair: Option<std::path::PathBuf>,
     sleep_secs: u64,
+    full_range: bool,
     tick_lower: Option<i32>,
     tick_upper: Option<i32>,
     range_width_pct: Option<f64>,
@@ -172,41 +227,57 @@ pub async fn run_position_open_and_close(
         .await
         .context("fetch pool state")?;
 
-    let (tl, tu) = match (tick_lower, tick_upper, range_width_pct) {
-        (Some(l), Some(u), None) => {
-            ensure_ticks_on_spacing(l, u, state.tick_spacing)?;
-            (l, u)
-        }
-        (None, None, Some(w)) => {
-            if w <= 0.0 || w > 100.0 {
-                anyhow::bail!(
-                    "--range-width-pct must be in (0, 100], e.g. 10 for ±~5% price band around spot"
-                );
-            }
-            let width_dec =
-                Decimal::from_f64_retain(w / 100.0).context("range width as decimal")?;
-            calculate_tick_range(state.tick_current, width_dec, state.tick_spacing)
-        }
-        _ => anyhow::bail!(
-            "provide either (--tick-lower AND --tick-upper) OR --range-width-pct (percent of price width, e.g. 10)"
-        ),
-    };
-
     let wallet = Arc::new(load_signing_wallet(keypair.clone())?);
     let orca = WhirlpoolExecutor::new(provider.clone());
-    let params = OpenPositionParams {
-        pool,
-        tick_lower: tl,
-        tick_upper: tu,
-        amount_a,
-        amount_b,
-        slippage_bps,
+
+    let res = if full_range {
+        if tick_lower.is_some() || tick_upper.is_some() || range_width_pct.is_some() {
+            anyhow::bail!(
+                "--full-range cannot be combined with --tick-lower / --tick-upper / --range-width-pct"
+            );
+        }
+        let params = OpenFullRangeParams {
+            pool,
+            amount_a,
+            amount_b,
+            slippage_bps,
+        };
+        orca.open_full_range_position(&params, wallet.keypair())
+            .await
+            .context("open_full_range_position RPC")?
+    } else {
+        let (tl, tu) = match (tick_lower, tick_upper, range_width_pct) {
+            (Some(l), Some(u), None) => {
+                ensure_ticks_on_spacing(l, u, state.tick_spacing)?;
+                (l, u)
+            }
+            (None, None, Some(w)) => {
+                if w <= 0.0 || w > 100.0 {
+                    anyhow::bail!(
+                        "--range-width-pct must be in (0, 100], e.g. 10 for ±~5% price band around spot"
+                    );
+                }
+                let width_dec =
+                    Decimal::from_f64_retain(w / 100.0).context("range width as decimal")?;
+                calculate_tick_range(state.tick_current, width_dec, state.tick_spacing)
+            }
+            _ => anyhow::bail!(
+                "provide either (--tick-lower AND --tick-upper) OR --range-width-pct (percent of price width, e.g. 10)"
+            ),
+        };
+        let params = OpenPositionParams {
+            pool,
+            tick_lower: tl,
+            tick_upper: tu,
+            amount_a,
+            amount_b,
+            slippage_bps,
+        };
+        orca.open_position(&params, wallet.keypair())
+            .await
+            .context("open_position RPC")?
     };
 
-    let res = orca
-        .open_position(&params, wallet.keypair())
-        .await
-        .context("open_position RPC")?;
     execution_ok(&res)?;
     let position = res
         .created_position
@@ -339,6 +410,83 @@ pub async fn run_position_close(
     } else {
         println!("closed position {position_pk}");
     }
+    Ok(())
+}
+
+/// List Whirlpool positions for a wallet (`orca_whirlpools::fetch_positions_for_owner`).
+pub async fn run_orca_positions_list(
+    owner: Option<String>,
+    keypair: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+    let endpoint = provider.current_endpoint().await;
+    let config = if endpoint.contains("devnet") {
+        WhirlpoolsConfigInput::SolanaDevnet
+    } else {
+        WhirlpoolsConfigInput::SolanaMainnet
+    };
+    set_whirlpools_config_address(config).map_err(|e| anyhow::anyhow!("orca config: {e}"))?;
+    let rpc = RpcClient::new(endpoint);
+    let owner_pk = if let Some(s) = owner {
+        Pubkey::from_str(s.trim()).context("invalid --owner pubkey")?
+    } else {
+        load_signing_wallet(keypair)?.pubkey()
+    };
+    let positions = fetch_positions_for_owner(&rpc, owner_pk)
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch_positions_for_owner: {e}"))?;
+    println!("owner: {owner_pk}");
+    println!("entries: {}", positions.len());
+    for p in positions {
+        match p {
+            PositionOrBundle::Position(h) => {
+                let d = &h.data;
+                println!(
+                    "kind=position position={} pool={} ticks=[{}, {}] liquidity={} position_mint={}",
+                    h.address,
+                    d.whirlpool,
+                    d.tick_lower_index,
+                    d.tick_upper_index,
+                    d.liquidity,
+                    d.position_mint
+                );
+            }
+            PositionOrBundle::PositionBundle(b) => {
+                println!("kind=position_bundle address={}", b.address);
+                for bp in &b.positions {
+                    let d = &bp.data;
+                    println!(
+                        "  bundled_position={} pool={} ticks=[{}, {}] liquidity={}",
+                        bp.address,
+                        d.whirlpool,
+                        d.tick_lower_index,
+                        d.tick_upper_index,
+                        d.liquidity
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve Orca Splash pool for two mints (`fetch_splash_pool`).
+pub async fn run_orca_splash_pool_resolve(mint_a: String, mint_b: String) -> Result<()> {
+    let ma = Pubkey::from_str(mint_a.trim()).context("invalid --mint-a")?;
+    let mb = Pubkey::from_str(mint_b.trim()).context("invalid --mint-b")?;
+    let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
+    let endpoint = provider.current_endpoint().await;
+    let config = if endpoint.contains("devnet") {
+        WhirlpoolsConfigInput::SolanaDevnet
+    } else {
+        WhirlpoolsConfigInput::SolanaMainnet
+    };
+    set_whirlpools_config_address(config).map_err(|e| anyhow::anyhow!("orca config: {e}"))?;
+    let rpc = RpcClient::new(endpoint);
+    let info = fetch_splash_pool(&rpc, ma, mb)
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch_splash_pool: {e}"))?;
+    println!("{info:?}");
     Ok(())
 }
 

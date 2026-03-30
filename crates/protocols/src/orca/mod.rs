@@ -12,6 +12,10 @@ pub mod executor;
 pub mod pool_reader;
 /// Position reader for on-chain state.
 pub mod position_reader;
+/// Tick array reader and fee-growth helpers.
+pub mod tick_array;
+/// Tick boundary fetcher.
+pub mod tick_reader;
 /// Orca pool provider.
 pub mod provider;
 /// Orca whirlpool account structures.

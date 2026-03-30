@@ -125,18 +125,27 @@ impl PositionService {
             pool = %request.pool_address,
             tick_lower = request.tick_lower,
             tick_upper = request.tick_upper,
+            full_range = request.full_range,
             "Opening position"
         );
 
-        // Validate tick range
-        if request.tick_lower >= request.tick_upper {
-            return Err(ApiError::Validation(
-                "tick_lower must be less than tick_upper".to_string(),
-            ));
+        if !request.full_range {
+            // Validate tick range
+            if request.tick_lower >= request.tick_upper {
+                return Err(ApiError::Validation(
+                    "tick_lower must be less than tick_upper".to_string(),
+                ));
+            }
         }
 
         if self.dry_run {
             info!("Dry-run mode: would open position");
+            if request.full_range {
+                return Ok(OperationResult::dry_run(format!(
+                    "Would open full-range position in pool {}",
+                    request.pool_address
+                )));
+            }
             return Ok(OperationResult::dry_run(format!(
                 "Would open position in pool {} with range [{}, {}]",
                 request.pool_address, request.tick_lower, request.tick_upper
@@ -149,19 +158,21 @@ impl PositionService {
             ));
         };
 
-        // Fetch pool state to validate tick spacing.
-        let pool_state = self
-            .pool_reader
-            .get_pool_state(&request.pool_address)
-            .await
-            .map_err(|e| ApiError::not_found(format!("Pool not found: {}", e)))?;
+        if !request.full_range {
+            // Fetch pool state to validate tick spacing.
+            let pool_state = self
+                .pool_reader
+                .get_pool_state(&request.pool_address)
+                .await
+                .map_err(|e| ApiError::not_found(format!("Pool not found: {}", e)))?;
 
-        let tick_spacing = pool_state.tick_spacing as i32;
-        if request.tick_lower % tick_spacing != 0 || request.tick_upper % tick_spacing != 0 {
-            return Err(ApiError::Validation(format!(
-                "Tick bounds must be multiples of tick spacing ({})",
-                tick_spacing
-            )));
+            let tick_spacing = pool_state.tick_spacing as i32;
+            if request.tick_lower % tick_spacing != 0 || request.tick_upper % tick_spacing != 0 {
+                return Err(ApiError::Validation(format!(
+                    "Tick bounds must be multiples of tick spacing ({})",
+                    tick_spacing
+                )));
+            }
         }
 
         let guard = executor.read().await;
@@ -173,6 +184,7 @@ impl PositionService {
                 request.amount_a,
                 request.amount_b,
                 request.slippage_tolerance_bps,
+                request.full_range,
             )
             .await?;
         Ok(OperationResult::success_with_data(
@@ -522,6 +534,7 @@ mod tests {
             amount_a: 1,
             amount_b: 2,
             slippage_tolerance_bps: 50,
+            full_range: false,
         }
     }
 

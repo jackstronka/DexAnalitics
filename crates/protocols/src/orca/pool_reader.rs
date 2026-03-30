@@ -279,6 +279,13 @@ pub fn liquidity_amount_from_pct(liquidity: u128, pct: f64) -> u128 {
     scaled.floor().clamp(0.0, liquidity as f64) as u128
 }
 
+/// Minimum and maximum tick indexes for a full-range (Splash-style) position for `tick_spacing`.
+#[must_use]
+pub fn full_range_tick_indexes(tick_spacing: u16) -> (i32, i32) {
+    let r = orca_whirlpools_core::get_full_range_tick_indexes(tick_spacing);
+    (r.tick_lower_index, r.tick_upper_index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

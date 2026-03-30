@@ -2,17 +2,34 @@
 //!
 //! Used by both `backtest` (single run) and `backtest-optimize` (grid + rolling windows).
 
-use crate::engine::pricing::{from_base_units, price_ab_human_to_raw, price_to_sqrt_q64};
-use crate::engine::{fees as fee_engine, liquidity};
+use crate::engine::{fees as fee_engine, hodl, liquidity};
 use clmm_lp_data::swaps::SwapEvent;
 use clmm_lp_domain::prelude::{Amount, Price, PriceCandle};
 use clmm_lp_simulation::prelude::*;
+use clmm_lp_protocols::prelude::price_to_tick;
 use primitive_types::U256;
 use rayon::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+/// Match [`liquidity::estimate_position_liquidity`]: CLMM sqrt math uses **raw** A/B (token atoms),
+/// not UI `price_ab`. Calling `price_to_sqrt_q64` on human prices breaks when `dec_a != dec_b`
+/// (e.g. SOL 9 / USDC 6) → nonsense token amounts and huge bogus PnL.
+#[inline]
+fn sqrt_q64_from_price_ab_human(
+    price_ab_human: Decimal,
+    token_a_decimals: u32,
+    token_b_decimals: u32,
+) -> u128 {
+    let raw = crate::engine::pricing::price_ab_human_to_raw(
+        price_ab_human,
+        token_a_decimals,
+        token_b_decimals,
+    );
+    crate::engine::pricing::price_to_sqrt_q64(raw)
+}
 
 /// Per-step data used by simulations.
 #[derive(Clone, Copy, Debug)]
@@ -27,70 +44,17 @@ pub struct StepDataPoint {
     pub quote_usd: Decimal,
     /// LP share proxy (legacy; replaced by liquidity-share model when available).
     pub lp_share: Decimal,
-    /// Active pool liquidity (from protocol state) at this step.
-    /// Only available in snapshot-only price path mode.
-    pub pool_liquidity_active: Option<u128>,
+    /// Pool active liquidity (CLMM on-chain units), available for snapshot-derived steps.
+    /// Used for dynamic LiquidityShare fee attribution.
+    pub liquidity_active_raw: Option<u128>,
+    /// Current tick index at this step (Orca/Raydium snapshot-derived).
+    /// When set, can be used for tick-aligned in-range accounting.
+    pub tick_current: Option<i32>,
     /// Candle start timestamp (seconds).
     pub start_timestamp: u64,
 }
 
 pub type StepData = StepDataPoint;
-
-/// How `StratConfig::Periodic(hours)` measures elapsed time since the last rebalance.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PeriodicTimeBasis {
-    /// Elapsed = `steps_since_rebalance * step_seconds` (legacy; synthetic step series).
-    StepsTimesStepSeconds,
-    /// Elapsed = current step `start_timestamp - anchor_timestamp` (wall clock; Birdeye candles, pool snapshots).
-    #[default]
-    WallClockSeconds,
-}
-
-/// Optional repeat policy for [`StratConfig::RetouchShift`] while price stays out of range.
-///
-/// After the **first** retouch in an out-of-range episode, further retouches are allowed only when
-/// wall time since the last retouch is at least [`Self::cooldown_secs`], and **either**
-/// - at least [`Self::rearm_after_secs`] have passed since that retouch, **or**
-/// - price has moved at least [`Self::extra_move_pct`] further in the adverse direction vs the
-///   A/B price at the last retouch (`extra_move_pct` is a fraction, e.g. `0.003` = 0.3%).
-///
-/// When `None`, behavior is legacy: at most one retouch per continuous OOR episode until price
-/// returns in range.
-#[derive(Clone, Copy, Debug)]
-pub struct RetouchRepeatConfig {
-    pub cooldown_secs: u64,
-    pub rearm_after_secs: u64,
-    pub extra_move_pct: f64,
-}
-
-/// Signed extension of A/B price vs `ref_ab` in the direction of the current OOR side, as a fraction of `ref_ab`.
-fn retouch_signed_extra_move_pct(
-    price_ab: Decimal,
-    ref_ab: Decimal,
-    lower: Decimal,
-    upper: Decimal,
-) -> Decimal {
-    let ref_d = if ref_ab > Decimal::ZERO {
-        ref_ab
-    } else {
-        return Decimal::ZERO;
-    };
-    if price_ab > upper {
-        if price_ab > ref_ab {
-            (price_ab - ref_ab) / ref_d
-        } else {
-            Decimal::ZERO
-        }
-    } else if price_ab < lower {
-        if price_ab < ref_ab {
-            (ref_ab - price_ab) / ref_d
-        } else {
-            Decimal::ZERO
-        }
-    } else {
-        Decimal::ZERO
-    }
-}
 
 /// Strategy variant for grid search.
 #[derive(Clone, Copy, Debug)]
@@ -98,70 +62,6 @@ pub enum StratConfig {
     Static,
     Threshold(f64),
     Periodic(u64),
-    /// Rebalance/close when IL-like drag vs HODL exceeds thresholds.
-    ILLimit {
-        max_il: f64,
-        close_il: Option<f64>,
-        grace_steps: u64,
-    },
-    /// Shift only the exiting edge of the range towards current price,
-    /// keeping the original range width, with "once until back in range" gating.
-    ///
-    /// **Economics:** On-chain this is still “remove liquidity + open a new position” with a new
-    /// range (same as any rebalance): the simulator charges `tx_cost` / `rebalance_cost_model`,
-    /// increments `rebalance_count`, and redeploys `position_value − cost` into the shifted range.
-    RetouchShift,
-    /// Symmetric band around spot using grid `width_pct` (`half = width_pct/2` multiplicative).
-    ///
-    /// Rebalance **only** when A/B exits `[lower, upper]`. On rebalance, opens a new position
-    /// centered on the current price with the same relative width — i.e. “follow spot, ±half until
-    /// OOR”, with **no** in-range recenters from mid-deviation (unlike [`StratConfig::Threshold`]).
-    OorRecenter,
-}
-
-/// Shared parameters for a single backtest or grid run (capital, fees, pool, decimals).
-#[derive(Clone, Debug)]
-pub struct GridRunParams {
-    pub capital_dec: Decimal,
-    pub tx_cost_dec: Decimal,
-    /// Optional realistic rebalance cost model:
-    /// cost = fixed_cost_usd + notional_usd * slippage_bps / 10_000.
-    pub rebalance_cost_model: Option<RebalanceCostModel>,
-    pub fee_rate: Decimal,
-    pub pool_active_liquidity: Option<u128>,
-    pub token_a_decimals: u32,
-    pub token_b_decimals: u32,
-    /// Step duration in seconds (candle resolution), e.g. 3600 for 1H.
-    pub step_seconds: i64,
-    /// Wall-clock basis matches real `start_timestamp` gaps (required for dense snapshot paths).
-    pub periodic_time_basis: PeriodicTimeBasis,
-    /// Hybrid time / % repeat policy for [`StratConfig::RetouchShift`]; `None` = once per OOR episode.
-    pub retouch_repeat: Option<RetouchRepeatConfig>,
-    /// If true, use liquidity-based fee share when pool liquidity is known.
-    /// If false, always use `StepDataPoint.lp_share` (e.g. when `--lp-share` is provided).
-    pub use_liquidity_share: bool,
-}
-
-/// Realistic rebalance cost model.
-#[derive(Clone, Copy, Debug)]
-pub struct RebalanceCostModel {
-    /// Fixed USD component charged on each rebalance
-    /// (network + priority + optional tip + extra fixed overhead).
-    pub fixed_cost_usd: Decimal,
-    /// Slippage in basis points applied to current rebalanced notional.
-    pub slippage_bps: Decimal,
-}
-
-impl RebalanceCostModel {
-    #[must_use]
-    pub fn cost_for_notional(&self, notional_usd: Decimal) -> Decimal {
-        let slip = if self.slippage_bps > Decimal::ZERO && notional_usd > Decimal::ZERO {
-            notional_usd * self.slippage_bps / Decimal::from(10_000u32)
-        } else {
-            Decimal::ZERO
-        };
-        self.fixed_cost_usd + slip
-    }
 }
 
 /// Build step data (price, volume, share) for each candle.
@@ -171,7 +71,6 @@ impl RebalanceCostModel {
 ///   (high volume hours get more volume; often those are volatile hours when price may be out of range).
 /// - Dune daily volume for the pool gives the **scale** so the day total matches the pool.
 /// - So: `step_vol_usd = dune_daily_vol * (candle_vol_usd / birdeye_day_total)`.
-///
 /// When Birdeye has no volume for a day we fall back to uniform `daily_vol / 24`.
 /// Without Dune we use Birdeye candle volume as-is (realistic distribution, scale from lp_share).
 pub fn build_step_data(
@@ -209,7 +108,7 @@ pub fn build_step_data(
         })
         .collect();
     let mut birdeye_day_total: HashMap<String, Decimal> = HashMap::new();
-    for (candle, vol) in candle_slice.iter().zip(candle_vol_usd.iter()) {
+    for (candle, &ref vol) in candle_slice.iter().zip(candle_vol_usd.iter()) {
         let date_key = chrono::DateTime::from_timestamp(candle.start_timestamp as i64, 0)
             .unwrap_or_default()
             .format("%Y-%m-%d")
@@ -271,7 +170,8 @@ pub fn build_step_data(
                 step_volume_usd: step_vol,
                 quote_usd,
                 lp_share: share,
-                pool_liquidity_active: None,
+                liquidity_active_raw: None,
+                tick_current: None,
                 start_timestamp: candle.start_timestamp,
             }
         })
@@ -319,7 +219,7 @@ fn index_swaps_by_step<'a>(
     step_data: &[StepData],
     step_seconds: i64,
 ) -> BTreeMap<usize, Vec<&'a SwapEvent>> {
-    let mut map: BTreeMap<usize, Vec<&SwapEvent>> = BTreeMap::new();
+    let mut map: BTreeMap<usize, Vec<&'a SwapEvent>> = BTreeMap::new();
     if step_data.is_empty() {
         return map;
     }
@@ -337,28 +237,25 @@ fn index_swaps_by_step<'a>(
 }
 
 /// Run a single backtest (one range, one strategy) over step data. Returns (lower, upper, strat_name, summary).
-///
-/// Fee precedence per step:
-/// 1) `local_pool_fees_usd` if non-empty map (decoded / timing proxy from local JSONL)
-/// 2) `swaps` (Dune `SwapEvent` slice), if non-empty
-/// 3) candle volume × `fee_rate`
+/// If `swaps` is provided, fees are computed from Dune swap data (step_swap_fees_usd) instead of candle volume.
+/// If `snapshot_pool_fees_usd` is provided (and `swaps` is None), per-step **pool** fees in USD come from the map
+/// (key = step index, same convention as `snapshot_price_path` / `fee_growth` deltas). LP share is still applied
+/// via [`FeeShareModel`]. When both are absent, fees default to `step_volume_usd * fee_rate`.
 pub fn run_single(
     step_data: &[StepData],
     entry_price: Price,
     center: f64,
     width_pct: f64,
     strat: StratConfig,
-    params: &GridRunParams,
+    capital_dec: Decimal,
+    tx_cost_dec: Decimal,
+    fee_rate: Decimal,
+    pool_active_liquidity: Option<u128>,
+    token_a_decimals: u32,
+    token_b_decimals: u32,
     swaps: Option<&[SwapEvent]>,
-    local_pool_fees_usd: Option<&BTreeMap<usize, Decimal>>,
+    snapshot_pool_fees_usd: Option<&BTreeMap<usize, Decimal>>,
 ) -> (f64, f64, String, TrackerSummary) {
-    let capital_dec = params.capital_dec;
-    let tx_cost_dec = params.tx_cost_dec;
-    let rebalance_cost_model = params.rebalance_cost_model;
-    let fee_rate = params.fee_rate;
-    let pool_active_liquidity = params.pool_active_liquidity;
-    let token_a_decimals = params.token_a_decimals;
-    let token_b_decimals = params.token_b_decimals;
     let _ = entry_price; // kept for API compatibility; amount-based sim derives entry from step_data[0]
     // Amount-based accounting:
     // - Range is defined in A/B (quote units) and checked against `price_ab`
@@ -411,121 +308,70 @@ pub fn run_single(
         token_b_decimals,
     );
 
-    // HODL benchmark: hold the *same* initial token amounts that correspond to the LP
-    // position opened with `capital_dec` and the initial range at the entry price.
-    //
-    // This fixes cases where the real token split (value-weighted) is not 50/50 USD.
-    let initial_liquidity_l = liquidity_l;
-    let lower_ab_raw_for_hodl = price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
-    let upper_ab_raw_for_hodl = price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
-    let entry_ab_raw_for_hodl =
-        price_ab_human_to_raw(first.price_ab.value, token_a_decimals, token_b_decimals);
-    let sqrt_l_hodl = price_to_sqrt_q64(lower_ab_raw_for_hodl);
-    let sqrt_u_hodl = price_to_sqrt_q64(upper_ab_raw_for_hodl);
-    let sqrt_p_hodl = price_to_sqrt_q64(entry_ab_raw_for_hodl);
-    let (hodl_a_entry_base, hodl_b_entry_base) = liquidity::amounts_from_liquidity_at_price(
-        initial_liquidity_l,
-        sqrt_l_hodl,
-        sqrt_p_hodl,
-        sqrt_u_hodl,
-    );
-    let mut hodl_a_entry = from_base_units(hodl_a_entry_base, token_a_decimals);
-    let mut hodl_b_entry = from_base_units(hodl_b_entry_base, token_b_decimals);
-    let hodl_a_initial = hodl_a_entry;
-    let hodl_b_initial = hodl_b_entry;
-
     let mut total_fees = Decimal::ZERO;
     let mut total_rebalance_cost = Decimal::ZERO;
     let mut rebalance_count: u32 = 0;
     let mut steps_since_rebalance: u64 = 0;
-    // Anchor for `PeriodicTimeBasis::WallClockSeconds` (last open / rebalance wall time).
-    let mut periodic_anchor_ts: u64 = first.start_timestamp;
     let mut in_range_steps: u64 = 0;
 
     // equity curve for max drawdown
     let mut peak_equity = capital_dec;
     let mut max_drawdown = Decimal::ZERO;
-    let is_retouch = matches!(strat, StratConfig::RetouchShift);
-    let mut retouch_armed = true;
-    // Hybrid retouch: wall time and ref A/B price at last retouch (`None` = no retouch this OOR episode yet).
-    let mut retouch_last_ts: Option<u64> = None;
-    let mut retouch_ref_ab: Option<Decimal> = None;
-    let mut position_closed = false;
-    let mut closed_cash_value_usd = Decimal::ZERO;
-
     let strat_name = match strat {
         StratConfig::Static => "static".to_string(),
         StratConfig::Threshold(p) => format!("threshold_{:.0}%", p * 100.0),
         StratConfig::Periodic(h) => format!("periodic_{}h", h),
-        StratConfig::ILLimit {
-            max_il,
-            close_il,
-            grace_steps,
-        } => match close_il {
-            Some(c) => format!(
-                "il_limit_{:.0}%_close_{:.0}%_grace_{}",
-                max_il * 100.0,
-                c * 100.0,
-                grace_steps
-            ),
-            None => format!("il_limit_{:.0}%_grace_{}", max_il * 100.0, grace_steps),
-        },
-        StratConfig::RetouchShift => "retouch_shift".to_string(),
-        StratConfig::OorRecenter => "oor_recenter".to_string(),
     };
 
-    let mut fee_share_model = if params.use_liquidity_share {
-        pool_active_liquidity
-            .filter(|v| *v > 0)
-            .map(|pool_l| fee_engine::FeeShareModel::LiquidityShare {
-                position_liquidity: liquidity_l,
-                pool_active_liquidity: pool_l,
-            })
-            .unwrap_or(fee_engine::FeeShareModel::LegacyLpShare)
+    let mut fee_share_model = if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
+        fee_engine::FeeShareModel::LiquidityShare {
+            position_liquidity: liquidity_l,
+            pool_active_liquidity: pool_l,
+        }
     } else {
         fee_engine::FeeShareModel::LegacyLpShare
     };
 
-    let swap_index: Option<BTreeMap<usize, Vec<&SwapEvent>>> = swaps
-        .filter(|s| !s.is_empty())
-        .map(|s| index_swaps_by_step(s, step_data, params.step_seconds.max(1)));
+    let swap_index = swaps.map(|s| index_swaps_by_step(s, step_data, 3600));
+
+    // Debug aid: print fee-share mechanics for the first N in-range steps.
+    // Controlled via env var:
+    //   CLMM_DEBUG_STEP_LIQ_SHARE=20
+    let mut debug_left: u32 = std::env::var("CLMM_DEBUG_STEP_LIQ_SHARE")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let debug_enabled = debug_left > 0 && snapshot_pool_fees_usd.is_some();
+
+    // Tick-aligned in-range: use `tick_current` (when available) instead of float price bounds.
+    // Semantics follow Orca: lower tick inclusive, upper tick exclusive.
+    // Enabled via:
+    //   CLMM_IN_RANGE_TICK=1
+    let use_tick_in_range = std::env::var("CLMM_IN_RANGE_TICK")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0)
+        > 0;
 
     for (i, p) in step_data.iter().enumerate() {
         steps_since_rebalance += 1;
-        if position_closed {
-            let equity = closed_cash_value_usd + total_fees;
-            if equity > peak_equity {
-                peak_equity = equity;
-            }
-            if peak_equity > Decimal::ZERO {
-                let dd = (peak_equity - equity) / peak_equity;
-                if dd > max_drawdown {
-                    max_drawdown = dd;
-                }
-            }
-            continue;
-        }
         let price_ab = p.price_ab.value;
-        let in_range = price_ab >= current_lower_ab && price_ab <= current_upper_ab;
+        let in_range_float = price_ab >= current_lower_ab && price_ab <= current_upper_ab;
+        let mut in_range = in_range_float;
+        if use_tick_in_range {
+            if let Some(tick_current) = p.tick_current {
+                let tick_lower = price_to_tick(current_lower_ab.max(Decimal::ZERO));
+                let tick_upper = price_to_tick(current_upper_ab.max(Decimal::ZERO));
+                in_range = tick_current >= tick_lower && tick_current < tick_upper;
+            }
+        }
         if in_range {
             in_range_steps += 1;
-            if is_retouch {
-                if params.retouch_repeat.is_some() {
-                    // New in-range episode: next OOR may do an immediate first retouch again.
-                    retouch_last_ts = None;
-                    retouch_ref_ab = None;
-                } else {
-                    // Legacy: re-arm single retouch after price has returned inside the range.
-                    retouch_armed = true;
-                }
-            }
         }
 
-        let pool_fees = if let Some(m) = local_pool_fees_usd.filter(|m| !m.is_empty()) {
-            m.get(&i).copied().unwrap_or(Decimal::ZERO)
-        } else if let Some(ref idx) = swap_index {
+        let pool_fees = if let Some(ref idx) = swap_index {
             idx.get(&i)
-                .map(|swaps_here| {
+                .map(|swaps_here: &Vec<&SwapEvent>| {
                     swaps_here.iter().fold(Decimal::ZERO, |acc, s| {
                         let f = if s.fee_usd != Decimal::ZERO {
                             s.fee_usd
@@ -536,39 +382,78 @@ pub fn run_single(
                     })
                 })
                 .unwrap_or(Decimal::ZERO)
+        } else if let Some(snap) = snapshot_pool_fees_usd {
+            snap.get(&i).copied().unwrap_or(Decimal::ZERO)
         } else {
             p.step_volume_usd * fee_rate
         };
 
-        let step_fees: Decimal = if in_range {
-            pool_fees * fee_share_model.step_fee_share(p)
+        let step_fee_share = if in_range {
+            if snapshot_pool_fees_usd.is_some() {
+                if let Some(liq_active_raw) = p.liquidity_active_raw {
+                    if liq_active_raw > 0 {
+                        // Dynamic LiquidityShare for snapshot-fees:
+                        // share = position_liquidity / pool_active_liquidity_at_step
+                        let pos_l_dec = Decimal::from_u128(liquidity_l).unwrap_or(Decimal::ZERO);
+                        let liq_dec =
+                            Decimal::from_u128(liq_active_raw).unwrap_or(Decimal::ONE);
+                        if liq_dec > Decimal::ZERO {
+                            pos_l_dec / liq_dec
+                        } else {
+                            fee_share_model.step_fee_share(p)
+                        }
+                    } else {
+                        fee_share_model.step_fee_share(p)
+                    }
+                } else {
+                    fee_share_model.step_fee_share(p)
+                }
+            } else {
+                fee_share_model.step_fee_share(p)
+            }
         } else {
             Decimal::ZERO
         };
+        let step_fees: Decimal = if in_range {
+            pool_fees * step_fee_share
+        } else {
+            Decimal::ZERO
+        };
+
+        if debug_enabled && in_range && debug_left > 0 {
+            println!(
+                "DEBUG step_fee_share i={} ts={} price_ab={} in_range={} pool_fees_usd={} fee_model_kind={} lp_share={} step_fee_share={}",
+                i,
+                p.start_timestamp,
+                price_ab,
+                in_range,
+                pool_fees,
+                fee_share_model.kind(),
+                p.lp_share,
+                step_fee_share
+            );
+            debug_left -= 1;
+        }
         total_fees += step_fees;
 
         // Current position valuation (excluding fees)
-        let lower_ab_raw =
-            price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
-        let upper_ab_raw =
-            price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
-        let price_ab_raw = price_ab_human_to_raw(price_ab, token_a_decimals, token_b_decimals);
-
-        let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(lower_ab_raw);
-        let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(upper_ab_raw);
-        let sqrt_p = crate::engine::pricing::price_to_sqrt_q64(price_ab_raw);
+        let sqrt_l = sqrt_q64_from_price_ab_human(
+            current_lower_ab,
+            token_a_decimals,
+            token_b_decimals,
+        );
+        let sqrt_u = sqrt_q64_from_price_ab_human(
+            current_upper_ab,
+            token_a_decimals,
+            token_b_decimals,
+        );
+        let sqrt_p =
+            sqrt_q64_from_price_ab_human(price_ab, token_a_decimals, token_b_decimals);
         let (amt_a_base, amt_b_base) =
             liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
         let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
         let amt_b = crate::engine::pricing::from_base_units(amt_b_base, token_b_decimals);
         let position_value_usd = (amt_a * p.price_usd.value) + (amt_b * p.quote_usd);
-        let hodl_value_step =
-            (hodl_a_entry * p.price_usd.value) + (hodl_b_entry * p.quote_usd.max(Decimal::ZERO));
-        let il_like_step = if capital_dec > Decimal::ZERO {
-            (position_value_usd - hodl_value_step) / capital_dec
-        } else {
-            Decimal::ZERO
-        };
 
         // `position_value_usd` is already net of any rebalance costs that were paid when
         // reopening the position (we redeploy `position_value_usd - tx_cost`).
@@ -599,256 +484,39 @@ pub fn run_single(
                     }
                 }
             }
-            StratConfig::Periodic(interval_hours) => {
-                let interval_sec = interval_hours.saturating_mul(3600);
-                match params.periodic_time_basis {
-                    PeriodicTimeBasis::WallClockSeconds => {
-                        p.start_timestamp.saturating_sub(periodic_anchor_ts) >= interval_sec
-                    }
-                    PeriodicTimeBasis::StepsTimesStepSeconds => {
-                        let elapsed = (steps_since_rebalance as i64) * params.step_seconds.max(1);
-                        elapsed as u64 >= interval_sec
-                    }
-                }
-            }
-            StratConfig::ILLimit {
-                max_il,
-                close_il: _,
-                grace_steps,
-            } => {
-                let step_idx = (i as u64) + 1;
-                if step_idx <= grace_steps {
-                    false
-                } else if !in_range {
-                    true
-                } else {
-                    il_like_step.abs() >= Decimal::from_f64(max_il).unwrap_or(Decimal::ZERO).abs()
-                }
-            }
-            StratConfig::OorRecenter => !in_range,
-            StratConfig::RetouchShift => {
-                if in_range {
-                    false
-                } else if let Some(cfg) = params.retouch_repeat {
-                    // First OOR step of an episode: shift immediately. Later: cooldown, then time OR %.
-                    match retouch_last_ts {
-                        None => true,
-                        Some(last_ts) => {
-                            let dt = p.start_timestamp.saturating_sub(last_ts);
-                            if dt < cfg.cooldown_secs {
-                                false
-                            } else if dt >= cfg.rearm_after_secs {
-                                true
-                            } else {
-                                let ref_ab = retouch_ref_ab.unwrap_or(price_ab);
-                                let pct_move = retouch_signed_extra_move_pct(
-                                    price_ab,
-                                    ref_ab,
-                                    current_lower_ab,
-                                    current_upper_ab,
-                                );
-                                let threshold =
-                                    Decimal::from_f64(cfg.extra_move_pct).unwrap_or(Decimal::ZERO);
-                                pct_move >= threshold
-                            }
-                        }
-                    }
-                } else {
-                    !in_range && retouch_armed
-                }
-            }
-        };
-        let should_close = match strat {
-            StratConfig::ILLimit {
-                max_il: _,
-                close_il: Some(close_il),
-                grace_steps,
-            } => {
-                let step_idx = (i as u64) + 1;
-                step_idx > grace_steps
-                    && il_like_step.abs()
-                        >= Decimal::from_f64(close_il).unwrap_or(Decimal::ZERO).abs()
-            }
-            _ => false,
+            StratConfig::Periodic(interval) => steps_since_rebalance >= interval,
         };
 
-        if should_close && liquidity_l > 0 {
-            let close_cost = rebalance_cost_model.map_or(tx_cost_dec, |model| {
-                model.cost_for_notional(position_value_usd.max(Decimal::ZERO))
-            });
-            total_rebalance_cost += close_cost;
+        if should_rebalance && liquidity_l > 0 {
+            total_rebalance_cost += tx_cost_dec;
             rebalance_count += 1;
             steps_since_rebalance = 0;
-            periodic_anchor_ts = p.start_timestamp;
-            closed_cash_value_usd = (position_value_usd - close_cost).max(Decimal::ZERO);
-            liquidity_l = 0;
-            position_closed = true;
-        } else if should_rebalance && liquidity_l > 0 {
-            // Includes `RetouchShift`: same accounting as other rebalances (cost, `rebalance_count`,
-            // redeploy NAV minus cost into the new range); only the *geometry* of the new bounds differs.
-            //
-            // Benchmark (HODL) is updated at rebalance time as well:
-            // we "rebalance" the benchmark holdings to match the LP token composition
-            // for the new range, without paying tx costs.
-            let benchmark_capital_now_usd = (hodl_a_entry * p.price_usd.value)
-                + (hodl_b_entry * p.quote_usd.max(Decimal::ZERO));
 
-            // Estimate slippage not from whole position value,
-            // but from the delta in token amounts implied by relocating the range.
-            // This is a more realistic proxy for "how much you have to swap" at rebalance.
-            let (new_lower_ab, new_upper_ab) = if is_retouch {
-                if price_ab > current_upper_ab {
-                    let overflow = price_ab - current_upper_ab;
-                    (current_lower_ab + overflow, price_ab)
-                } else {
-                    // price_ab < current_lower_ab (out-of-range lower side)
-                    let overflow = current_lower_ab - price_ab;
-                    (price_ab, current_upper_ab - overflow)
-                }
-            } else {
-                let center_ab_now = price_ab.to_f64().unwrap_or(1.0);
-                (
-                    Decimal::from_f64(center_ab_now * (1.0 - half)).unwrap(),
-                    Decimal::from_f64(center_ab_now * (1.0 + half)).unwrap(),
-                )
-            };
-
-            let rebalance_cost = if let Some(model) = rebalance_cost_model {
-                let capital_usd_for_delta = position_value_usd.max(Decimal::ZERO);
-
-                // Target token split for the new range at the rebalance price.
-                let new_lower_usd_for_delta = new_lower_ab * p.quote_usd;
-                let new_upper_usd_for_delta = new_upper_ab * p.quote_usd;
-
-                let liquidity_l_for_delta = liquidity::estimate_position_liquidity_with_overrides(
-                    step_data,
-                    new_lower_usd_for_delta,
-                    new_upper_usd_for_delta,
-                    capital_usd_for_delta,
-                    token_a_decimals,
-                    token_b_decimals,
-                    liquidity::LiquidityEstimateOverrides {
-                        quote_usd: Some(p.quote_usd),
-                        price_ab: Some(price_ab),
-                        price_a_usd: Some(p.price_usd.value),
-                    },
-                );
-
-                let lower_ab_raw_for_delta =
-                    price_ab_human_to_raw(new_lower_ab, token_a_decimals, token_b_decimals);
-                let upper_ab_raw_for_delta =
-                    price_ab_human_to_raw(new_upper_ab, token_a_decimals, token_b_decimals);
-
-                let sqrt_l_for_delta = price_to_sqrt_q64(lower_ab_raw_for_delta);
-                let sqrt_u_for_delta = price_to_sqrt_q64(upper_ab_raw_for_delta);
-
-                let (tgt_a_base, tgt_b_base) = liquidity::amounts_from_liquidity_at_price(
-                    liquidity_l_for_delta,
-                    sqrt_l_for_delta,
-                    sqrt_p,
-                    sqrt_u_for_delta,
-                );
-                let tgt_a = from_base_units(tgt_a_base, token_a_decimals);
-                let tgt_b = from_base_units(tgt_b_base, token_b_decimals);
-
-                // Approx proxy notional: the larger USD-side of what must change.
-                let notional_a_usd = (tgt_a - amt_a).abs() * p.price_usd.value;
-                let notional_b_usd = (tgt_b - amt_b).abs() * p.quote_usd.max(Decimal::ZERO);
-                let delta_notional_usd = notional_a_usd.max(notional_b_usd);
-
-                // Retouch = withdraw entire position and mint a new one with shifted ticks. Slippage
-                // should scale with full position notional, not only the ideal token-delta swap size.
-                let notional_for_cost = if is_retouch {
-                    position_value_usd.max(Decimal::ZERO)
-                } else if delta_notional_usd > Decimal::ZERO {
-                    delta_notional_usd
-                } else {
-                    position_value_usd.max(Decimal::ZERO)
-                };
-
-                model.cost_for_notional(notional_for_cost)
-            } else {
-                tx_cost_dec
-            };
-
-            total_rebalance_cost += rebalance_cost;
-            rebalance_count += 1;
-            steps_since_rebalance = 0;
-            periodic_anchor_ts = p.start_timestamp;
-
-            // Re-deploy current position value minus rebalance cost; fees are NOT compounded here.
-            let capital_usd_now = (position_value_usd - rebalance_cost).max(Decimal::ZERO);
+            // Re-deploy current position value minus tx cost; fees are NOT compounded here.
+            let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
+            let center_ab_now = price_ab.to_f64().unwrap_or(1.0);
+            let new_lower_ab = Decimal::from_f64(center_ab_now * (1.0 - half)).unwrap();
+            let new_upper_ab = Decimal::from_f64(center_ab_now * (1.0 + half)).unwrap();
             current_lower_ab = new_lower_ab;
             current_upper_ab = new_upper_ab;
-            if is_retouch {
-                if params.retouch_repeat.is_some() {
-                    retouch_last_ts = Some(p.start_timestamp);
-                    retouch_ref_ab = Some(price_ab);
-                } else {
-                    // Legacy: at most one retouch until back in range.
-                    retouch_armed = false;
-                }
-            }
 
             // Convert AB bounds to USD using current quote USD for liquidity estimation.
             let new_lower_usd = current_lower_ab * p.quote_usd;
             let new_upper_usd = current_upper_ab * p.quote_usd;
-            liquidity_l = liquidity::estimate_position_liquidity_with_overrides(
+            liquidity_l = liquidity::estimate_position_liquidity(
                 step_data,
                 new_lower_usd,
                 new_upper_usd,
                 capital_usd_now,
                 token_a_decimals,
                 token_b_decimals,
-                liquidity::LiquidityEstimateOverrides {
-                    quote_usd: Some(p.quote_usd),
-                    price_ab: Some(price_ab),
-                    price_a_usd: Some(p.price_usd.value),
-                },
             );
 
-            // Update benchmark token amounts to the new segment start.
-            // Token amounts scale linearly with capital for a fixed range and price,
-            // so we derive LP's token amounts after rebalance and scale them up to
-            // match `benchmark_capital_now_usd` (i.e. ignore tx costs for the benchmark).
-            if capital_usd_now > Decimal::ZERO && liquidity_l > 0 {
-                let lower_ab_raw_for_bench =
-                    price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
-                let upper_ab_raw_for_bench =
-                    price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
-                let price_ab_raw_for_bench =
-                    price_ab_human_to_raw(price_ab, token_a_decimals, token_b_decimals);
-
-                let sqrt_l_for_bench = price_to_sqrt_q64(lower_ab_raw_for_bench);
-                let sqrt_u_for_bench = price_to_sqrt_q64(upper_ab_raw_for_bench);
-                let sqrt_p_for_bench = price_to_sqrt_q64(price_ab_raw_for_bench);
-
-                let (amt_a_base_bench, amt_b_base_bench) =
-                    liquidity::amounts_from_liquidity_at_price(
-                        liquidity_l,
-                        sqrt_l_for_bench,
-                        sqrt_p_for_bench,
-                        sqrt_u_for_bench,
-                    );
-                let lp_a = from_base_units(amt_a_base_bench, token_a_decimals);
-                let lp_b = from_base_units(amt_b_base_bench, token_b_decimals);
-
-                // If L or amounts degenerate to zero, keep the previous HODL benchmark instead of
-                // zeroing it (avoids absurd `hodl_value == 0` rows in optimize tables).
-                if !lp_a.is_zero() || !lp_b.is_zero() {
-                    let scale = benchmark_capital_now_usd / capital_usd_now;
-                    hodl_a_entry = lp_a * scale;
-                    hodl_b_entry = lp_b * scale;
-                }
-            }
-
-            if params.use_liquidity_share {
-                if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
-                    fee_share_model = fee_engine::FeeShareModel::LiquidityShare {
-                        position_liquidity: liquidity_l,
-                        pool_active_liquidity: pool_l,
-                    };
-                }
+            if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
+                fee_share_model = fee_engine::FeeShareModel::LiquidityShare {
+                    position_liquidity: liquidity_l,
+                    pool_active_liquidity: pool_l,
+                };
             }
         }
     }
@@ -861,41 +529,30 @@ pub fn run_single(
     };
 
     let last = step_data.last().unwrap();
-    let position_value_usd = if position_closed {
-        closed_cash_value_usd
-    } else {
-        let lower_ab_raw =
-            price_ab_human_to_raw(current_lower_ab, token_a_decimals, token_b_decimals);
-        let upper_ab_raw =
-            price_ab_human_to_raw(current_upper_ab, token_a_decimals, token_b_decimals);
-        let last_ab_raw =
-            price_ab_human_to_raw(last.price_ab.value, token_a_decimals, token_b_decimals);
-
-        let sqrt_l = crate::engine::pricing::price_to_sqrt_q64(lower_ab_raw);
-        let sqrt_u = crate::engine::pricing::price_to_sqrt_q64(upper_ab_raw);
-        let sqrt_p = crate::engine::pricing::price_to_sqrt_q64(last_ab_raw);
-        let (amt_a_base, amt_b_base) =
-            liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
-        let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
-        let amt_b = crate::engine::pricing::from_base_units(amt_b_base, token_b_decimals);
-        (amt_a * last.price_usd.value) + (amt_b * last.quote_usd)
-    };
+    let sqrt_l = sqrt_q64_from_price_ab_human(
+        current_lower_ab,
+        token_a_decimals,
+        token_b_decimals,
+    );
+    let sqrt_u = sqrt_q64_from_price_ab_human(
+        current_upper_ab,
+        token_a_decimals,
+        token_b_decimals,
+    );
+    let sqrt_p = sqrt_q64_from_price_ab_human(
+        last.price_ab.value,
+        token_a_decimals,
+        token_b_decimals,
+    );
+    let (amt_a_base, amt_b_base) =
+        liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
+    let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
+    let amt_b = crate::engine::pricing::from_base_units(amt_b_base, token_b_decimals);
+    let position_value_usd = (amt_a * last.price_usd.value) + (amt_b * last.quote_usd);
 
     let final_value = position_value_usd + total_fees;
     let final_pnl = final_value - capital_dec;
-    let hodl_value = {
-        let v = (hodl_a_entry * last.price_usd.value)
-            + (hodl_b_entry * last.quote_usd.max(Decimal::ZERO));
-        if hodl_a_entry.is_zero()
-            && hodl_b_entry.is_zero()
-            && (!hodl_a_initial.is_zero() || !hodl_b_initial.is_zero())
-        {
-            (hodl_a_initial * last.price_usd.value)
-                + (hodl_b_initial * last.quote_usd.max(Decimal::ZERO))
-        } else {
-            v
-        }
-    };
+    let hodl_value = hodl::hodl_value_50_50_usd(step_data, capital_dec);
     let vs_hodl = final_value - hodl_value;
 
     // "IL%" in amount-based mode: define as **under/over-performance vs HODL excluding fees**,
@@ -931,117 +588,71 @@ pub fn run_single(
 }
 
 /// Run grid of (width_pct, strategy) in parallel. Returns (width_pct, lower, upper, strat_name, summary).
+/// If `swaps` is provided, fees are computed from Dune swap data per step.
+/// If `snapshot_pool_fees_usd` is provided (and swaps are not), pool fees per step follow the snapshot index.
 pub fn run_grid(
     step_data: &[StepData],
     entry_price: Price,
     center: f64,
     width_pcts: &[f64],
     strategies: &[StratConfig],
-    params: &GridRunParams,
+    capital_dec: Decimal,
+    tx_cost_dec: Decimal,
+    fee_rate: Decimal,
+    pool_active_liquidity: Option<u128>,
+    token_a_decimals: u32,
+    token_b_decimals: u32,
     swaps: Option<&[SwapEvent]>,
-    local_pool_fees_usd: Option<Arc<BTreeMap<usize, Decimal>>>,
+    snapshot_pool_fees_usd: Option<BTreeMap<usize, Decimal>>,
 ) -> Vec<(f64, f64, f64, String, TrackerSummary)> {
     let step_data = Arc::new(step_data.to_vec());
     let swaps_arc: Option<Arc<Vec<SwapEvent>>> = swaps.map(|s| Arc::new(s.to_vec()));
+    let snap_arc: Option<Arc<BTreeMap<usize, Decimal>>> =
+        snapshot_pool_fees_usd.map(Arc::new);
     let jobs: Vec<(f64, StratConfig)> = width_pcts
         .iter()
         .flat_map(|&wp| strategies.iter().copied().map(move |s| (wp, s)))
         .collect();
     jobs.par_iter()
         .map(|(wp, strat)| {
-            let swaps_ref: Option<&[SwapEvent]> = swaps_arc.as_deref().map(|v| v.as_slice());
-            let local_ref = local_pool_fees_usd.as_deref();
+            let swaps_ref = swaps_arc.as_deref();
+            let snap_ref = snap_arc.as_deref();
             let (lower, upper, strat_name, summary) = run_single(
                 step_data.as_ref(),
                 entry_price,
                 center,
                 *wp,
                 *strat,
-                params,
-                swaps_ref,
-                local_ref,
+                capital_dec,
+                tx_cost_dec,
+                fee_rate,
+                pool_active_liquidity,
+                token_a_decimals,
+                token_b_decimals,
+                swaps_ref.map(|v| &**v),
+                snap_ref,
             );
             (*wp, lower, upper, strat_name, summary)
         })
         .collect()
 }
 
-fn pct_token_to_ratio(s: &str) -> Option<f64> {
-    s.strip_suffix('%')?.parse::<f64>().ok().map(|x| x / 100.0)
-}
-
-fn parse_il_limit_label(label: &str) -> Option<StratConfig> {
-    let rest = label.strip_prefix("il_limit_")?;
-    let (mid, grace_s) = rest.split_once("_grace_")?;
-    let grace_steps: u64 = grace_s.parse().ok()?;
-    if let Some((max_s, close_s)) = mid.split_once("_close_") {
-        let max_il = pct_token_to_ratio(max_s)?;
-        let close_il = pct_token_to_ratio(close_s)?;
-        Some(StratConfig::ILLimit {
-            max_il,
-            close_il: Some(close_il),
-            grace_steps,
-        })
-    } else {
-        let max_il = pct_token_to_ratio(mid)?;
-        Some(StratConfig::ILLimit {
-            max_il,
-            close_il: None,
-            grace_steps,
-        })
+/// Parse simulator strategy label (`run_single` output) back to [`StratConfig`] for JSON export.
+#[must_use]
+pub fn parse_strategy_label(name: &str) -> Option<StratConfig> {
+    let name = name.trim();
+    if name == "static" {
+        return Some(StratConfig::Static);
     }
-}
-
-/// Parse grid strategy name (from `run_single`) back to [`StratConfig`].
-pub fn parse_strategy_label(label: &str) -> Option<StratConfig> {
-    match label {
-        "static" => return Some(StratConfig::Static),
-        "retouch_shift" => return Some(StratConfig::RetouchShift),
-        "oor_recenter" => return Some(StratConfig::OorRecenter),
-        _ => {}
+    if let Some(rest) = name.strip_prefix("threshold_") {
+        let pct_str = rest.trim_end_matches('%').trim();
+        let pct = pct_str.parse::<f64>().ok()?;
+        return Some(StratConfig::Threshold(pct / 100.0));
     }
-    if let Some(h) = label
-        .strip_prefix("periodic_")
-        .and_then(|s| s.strip_suffix('h'))
-    {
-        return h.parse::<u64>().ok().map(StratConfig::Periodic);
-    }
-    if let Some(p) = label
-        .strip_prefix("threshold_")
-        .and_then(|s| s.strip_suffix('%'))
-    {
-        return p
-            .parse::<f64>()
-            .ok()
-            .map(|pct| StratConfig::Threshold(pct / 100.0));
-    }
-    if label.starts_with("il_limit_") {
-        return parse_il_limit_label(label);
+    if let Some(rest) = name.strip_prefix("periodic_") {
+        let num_str = rest.trim_end_matches('h').trim();
+        let steps = num_str.parse::<u64>().ok()?;
+        return Some(StratConfig::Periodic(steps));
     }
     None
-}
-
-#[cfg(test)]
-mod strat_label_tests {
-    use super::{StratConfig, parse_strategy_label};
-
-    #[test]
-    fn parse_periodic_threshold_il() {
-        assert!(matches!(
-            parse_strategy_label("periodic_24h"),
-            Some(StratConfig::Periodic(24))
-        ));
-        match parse_strategy_label("threshold_5%") {
-            Some(StratConfig::Threshold(p)) => assert!((p - 0.05).abs() < 1e-9),
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_strategy_label("il_limit_5%_grace_0").unwrap() {
-            StratConfig::ILLimit {
-                max_il,
-                close_il: None,
-                grace_steps: 0,
-            } => assert!((max_il - 0.05).abs() < 1e-9),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
 }

@@ -33,6 +33,11 @@
 - [ ] **A2** `swaps-decode-audit --save-report` — sprawdzić `% ok` per pool.
 - [ ] **A3** Harmonogram: snapshot + swaps sync + enrich (częstotliwość pod RPC).
 - [ ] **A4** `data-health-check` w harmonogramie; ewentualnie `--fail-on-alert`.
+- [ ] **A6** Snapshot cache guardian (cron): po `snapshot-run-curated-all` i/lub `orca_snapshot`:
+  - sprawdzaj jakość przez `clmm-lp-cli snapshot-readiness --protocol orca|raydium|meteora --pool-address <POOL>` (min. tier1 LP-share + tier2 snapshot-fee),
+  - uruchamiaj `snapshot-backtest-prep` (materializacja `data/backtest-snapshot-cache/.../window_h24|h48|h96...`),
+  - zapisuj status (staleness + ready/not-ready) w `data/snapshot_logs/`,
+  - użytkownik uruchamia wtedy `backtest` / `backtest-optimize` z `--price-path-source snapshots --prepared-snapshot-window ...` i **nie** parsuje/obrabia pełnych `snapshots.jsonl` w locie.
 - [ ] **A5** Stabilne uruchamianie 24/7 bez Task Scheduler: `ops-ingest-loop` jako proces długowieczny + Windows Service (np. NSSM) z auto-restart i logowaniem. Zalecany minimalny setup w NSSM:
   - rekomenduj uruchamiać gotowego bika (np. `target\\release\\clmm-lp-cli.exe` lub `target\\debug\\clmm-lp-cli.exe`), nie `cargo run` (żeby uniknąć problemów z working dir i parserem/PTY),
   - ustaw `Startup directory` = katalog repo (`F:\\CLMM-Liquidity-Provider\\CLMM-Liquidity-Provider`), żeby względne ścieżki do `data/` działały,
@@ -105,6 +110,10 @@ Powiązanie z checklistą „od czego zacząć” u góry. Po ukończeniu wpisz 
 - [x] **E2.5** Per-step active liquidity: w trybie snapshot-only podać `pool_liquidity_active` per timestamp i dzielić przez `L_active(t)` (range-aware share) zamiast stałej wartości z `fetch_pool_state`.
 - [ ] **E2.6** Anty-przeszacowanie: dodać kalibrację skalującą model share/fee (np. `share_calibrated = clamp(k * share_est, 0, 1)`) wyznaczaną na bazowym „referencyjnym” zakresie (najlepiej z `TIR ~ 100%`) tak, żeby model nie generował nierealnie wysokich `Fees Earned` dla wąskich range’ów.
 - [ ] **E2.7** Guardrail sanity-check: porównywać “modeled pool fees vs snapshot pool fees” oraz monitorować “share mass balance” po rebalansie (jeśli przekracza X%, log + clamp/fallback do legacy share).
+- [ ] **E2.8** Walidacja vs „real fees”: porównać model `--fee-source snapshots` z rzeczywistymi fee’ami on-chain dla wielu static ranges (np. 4 pasma jak w whETH/SOL testach). Jeśli model systematycznie under/over-shootuje dla wąskich range’ów, to:
+  - zweryfikować mapowanie zakresu cena A/B ↔ tickLower/tickUpper,
+  - upewnić się, że wejściowy split (token amounts) w symulacji odpowiada temu z realnego otwarcia (nie tylko 50/50 USD),
+  - rozważyć pozycjowo-akumulacyjne checkpointy fee (modele „position truth”) lub kalibrację czynnika `k` dla share/fee.
 
 ## Faza F — IL semantics unification (backtest)
 
@@ -118,6 +127,10 @@ Cel: wyeliminować mieszanie różnych definicji IL pod jedną etykietą w rapor
 - [x] **F4** Test regresyjny: static vs threshold (wielokrotne rebalance) i asercje, że:
   - `IL Segment (last)` może różnić się od `IL vs HODL (ex-fees)`,
   - etykiety/metryki nie są już mylone.
+
+- [ ] **F5** Snapshot-mode benchmark: `quote_usd` (token B / USD) ma być liczony **dynamicznie per krok** (dla poprawnego HODL i `IL vs HODL` gdy token B/USD spada/rosnie w czasie), zamiast stałej wartości z początku okna.
+  - Minimalnie: opcjonalna flaga / tryb (np. `--snapshot-quote-usd-source birdeye`) + bucketowanie timestampów do `resolution_seconds`.
+- [x] **F5b** Debug: w logice `--fee-source snapshots` przy `--price-path-source birdeye` dodać env-var debug (`CLMM_SNAPSHOT_FEE_DEBUG=1`) pokazujący mapowanie snapshot-fee deltas -> bucketów Birdeye (`step0_start_ts`, `resolution_seconds`, min/max `pts.ts`, min/max `idx`, liczność mapy).
 
 ## Tech debt
 

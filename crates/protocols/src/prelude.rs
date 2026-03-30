@@ -12,7 +12,9 @@
 pub use crate::PoolFetcher;
 
 // RPC provider
-pub use crate::rpc::{CommitmentLevel, EndpointHealth, HealthChecker, RpcConfig, RpcProvider};
+pub use crate::rpc::{
+    ClusterKind, CommitmentLevel, EndpointHealth, HealthChecker, RpcConfig, RpcProvider,
+};
 
 // Events
 pub use crate::events::{
@@ -23,14 +25,16 @@ pub use crate::events::{
 
 // Orca
 pub use crate::orca::executor::{
-    DecreaseLiquidityParams, ExecutionResult, IncreaseLiquidityParams, OpenPositionParams,
-    WhirlpoolExecutor, derive_whirlpool_position_address,
+    DecreaseLiquidityParams, ExecutionResult, IncreaseLiquidityParams, OpenFullRangeParams,
+    OpenPositionParams, WhirlpoolExecutor, derive_whirlpool_position_address,
 };
 pub use crate::orca::pool_reader::{
-    WhirlpoolReader, WhirlpoolState, calculate_tick_range, liquidity_amount_from_pct,
-    price_to_tick, tick_to_price,
+    WhirlpoolReader, WhirlpoolState, calculate_tick_range, full_range_tick_indexes,
+    liquidity_amount_from_pct, price_to_tick, tick_to_price,
 };
 pub use crate::orca::position_reader::{PositionReader, WhirlpoolPosition};
+pub use crate::orca::tick_array::compute_fee_growth_inside_single;
+pub use crate::orca::tick_reader::WhirlpoolTickReader;
 pub use crate::orca::provider::OrcaPoolProvider;
 pub use crate::orca::whirlpool::Whirlpool;
 

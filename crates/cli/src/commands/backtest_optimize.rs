@@ -116,32 +116,26 @@ pub async fn fetch_swaps_for_optimize(query_arg: &str) -> Result<Option<Vec<Swap
 /// Default strategy set for grid search.
 pub fn default_strategies(
     static_only: bool,
-    il_max_pct: f64,
-    il_close_pct: Option<f64>,
-    il_grace_steps: u64,
+    _il_max_pct: f64,
+    _il_close_pct: Option<f64>,
+    _il_grace_steps: u64,
 ) -> Vec<StratConfig> {
     if static_only {
         vec![StratConfig::Static]
     } else {
         vec![
             StratConfig::Static,
-            StratConfig::OorRecenter,
             StratConfig::Threshold(0.02),
             StratConfig::Threshold(0.03),
             StratConfig::Threshold(0.05),
             StratConfig::Threshold(0.07),
             StratConfig::Threshold(0.10),
             StratConfig::Threshold(0.15),
+            // `Periodic(n)` is **steps** between rebalances (same timebase as candle/step index).
             StratConfig::Periodic(12),
             StratConfig::Periodic(24),
             StratConfig::Periodic(48),
             StratConfig::Periodic(72),
-            StratConfig::ILLimit {
-                max_il: il_max_pct / 100.0,
-                close_il: il_close_pct.map(|v| v / 100.0),
-                grace_steps: il_grace_steps,
-            },
-            StratConfig::RetouchShift,
         ]
     }
 }

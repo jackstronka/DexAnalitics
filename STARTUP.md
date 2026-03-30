@@ -248,6 +248,31 @@ cargo run --bin clmm-lp-cli -- backtest \
   --fee-source snapshots
 ```
 
+### Backtest: prepared snapshot slices (scheduler / fast reads)
+
+1. Keep `data/pool-snapshots/orca/<POOL>/snapshots.jsonl` fresh (`snapshot-run-curated-all` or `orca-snapshot-curated` on a timer).
+2. Materialize rolling windows for backtests (default pools: SOL/USDC + whETH/SOL):
+
+```bash
+cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep
+# optional: --pools <A>,<B>  --windows-hours 24,48,96  --windows-days 7,30
+```
+
+Output: `data/backtest-snapshot-cache/orca/<POOL>/window_h24.jsonl`, …, plus `data/backtest-snapshot-cache/manifest.json`.
+
+3. Run backtests against the smaller file:
+
+```bash
+cargo run -p clmm-lp-cli --bin clmm-lp-cli -- backtest \
+  --price-path-source snapshots --prepared-snapshot-window h24 \
+  --snapshot-protocol orca --snapshot-pool-address <POOL> \
+  ... (same mints / --hours / dates as usual)
+```
+
+**Automation (Windows):** `tools/run_snapshot_backtest_prep_loop.ps1` — runs step (1)+(2); schedule every 30 minutes or use `-Loop -IntervalMinutes 30`.
+
+**Snapshot file choice (`snapshots.jsonl` vs `snapshots.jsonl.repaired`):** backtests use **`mtime`** — the **newer** of the two wins (tie → raw). Stale `.repaired` must not hide rows appended later to `snapshots.jsonl`.
+
 **Why `fee_growth_global_*` was `"0"` in some JSONL files:** older collectors / manual layouts could mis-read the account; the reader now tries **full Borsh layout** (653-byte Whirlpool) before the offset parser. **Re-run** `orca_snapshot` / `snapshot_curated` so new lines carry real `fee_growth_global_*` and `protocol_fee_owed_*`.
 
 **Free / low-cost price alternatives to Birdeye** (for other modes): Dexscreener, Jupiter price API, CoinGecko public endpoints, or **your own Solana RPC** + pool account decode (what snapshots already do for Orca).

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -50,23 +50,24 @@ impl DuneClient {
         })
     }
 
-    /// Build a client that can only call `fetch_swaps` (no TVL/volume).
-    /// Requires only `DUNE_API_KEY`. Use for backtest swap-based fees when
-    /// TVL/volume are not needed or come from another source.
+    /// Like [`Self::from_env`], but only **`DUNE_API_KEY` is required**. TVL/volume query IDs default
+    /// to placeholders — use this when you only call [`Self::fetch_swaps`] with an explicit query id.
     pub fn from_env_swaps_only() -> Result<Self> {
         let api_key = std::env::var("DUNE_API_KEY")?;
+        let tvl_query_id = std::env::var("DUNE_TVL_QUERY_ID").unwrap_or_else(|_| "0".to_string());
+        let volume_query_id =
+            std::env::var("DUNE_VOLUME_QUERY_ID").unwrap_or_else(|_| "0".to_string());
         Ok(Self {
             client: Client::new(),
             api_key,
-            tvl_query_id: String::new(),
-            volume_query_id: String::new(),
+            tvl_query_id,
+            volume_query_id,
         })
     }
 
-    async fn fetch_rows_inner<T: for<'de> Deserialize<'de>>(
+    async fn fetch_rows<T: for<'de> Deserialize<'de> + Serialize>(
         &self,
         query_id: &str,
-        skip_cache_read: bool,
     ) -> Result<Vec<T>> {
         /// Simple on-disk cache to avoid re-fetching identical Dune results.
         ///
@@ -83,25 +84,24 @@ impl DuneClient {
             path
         }
 
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct DuneRows<T> {
             rows: Vec<T>,
         }
 
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct DuneResult<T> {
             result: DuneRows<T>,
         }
 
         let path = cache_path(query_id);
 
-        // Try cache first unless user explicitly disables it or forces refresh.
+        // Try cache first unless user explicitly disables it via env.
         let disable_cache = std::env::var("DUNE_DISABLE_CACHE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        if !skip_cache_read
-            && !disable_cache
+        if !disable_cache
             && path.exists()
             && let Ok(bytes) = fs::read(&path)
             && let Ok(wrapper) = serde_json::from_slice::<DuneResult<T>>(&bytes)
@@ -121,34 +121,23 @@ impl DuneClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status.as_u16() == 402 {
-                return Err(anyhow::anyhow!(
-                    "Dune API 402 Payment Required: this request would exceed your per-request credit limit. \
-                    The query may return too many rows. Options: (1) In Dune, duplicate the query and add a date filter (e.g. last 30 days), then use that query ID with --query-id. \
-                    (2) Upgrade your plan at https://dune.com/settings/billing. \
-                    Raw: {}",
-                    text
-                ));
-            }
             return Err(anyhow::anyhow!("Dune API error: {} - {}", status, text));
         }
 
-        let bytes = resp.bytes().await?;
+        let wrapper: DuneResult<T> = resp.json().await?;
 
-        // Best-effort: cache raw response for future runs (avoids requiring T: Serialize).
+        // Best-effort: cache to disk for future runs.
         if !disable_cache {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let _ = fs::write(&path, &bytes);
+            let _ = fs::write(
+                &path,
+                serde_json::to_vec_pretty(&wrapper).unwrap_or_default(),
+            );
         }
 
-        let wrapper: DuneResult<T> = serde_json::from_slice(&bytes)?;
         Ok(wrapper.result.rows)
-    }
-
-    async fn fetch_rows<T: for<'de> Deserialize<'de>>(&self, query_id: &str) -> Result<Vec<T>> {
-        self.fetch_rows_inner::<T>(query_id, false).await
     }
 
     /// Fetch swap events for a given swaps query id (e.g. 6848259 for Orca).
@@ -160,21 +149,9 @@ impl DuneClient {
         self.fetch_rows(swaps_query_id).await
     }
 
-    /// Fetch swap events from Dune API and write to cache, skipping any existing cache file.
-    /// Use this to pre-fill or refresh the local cache (e.g. `dune-sync-swaps` command).
-    /// Cache path: `data/dune-cache/{query_id}.json`.
-    pub async fn fetch_swaps_force(&self, swaps_query_id: &str) -> Result<Vec<SwapEvent>> {
-        self.fetch_rows_inner(swaps_query_id, true).await
-    }
-
     /// Fetch daily TVL for all pools, caller filters by `pool_address`.
     pub async fn fetch_tvl(&self, pool_address: &str) -> Result<Vec<TvlPoint>> {
-        if self.tvl_query_id.is_empty() {
-            return Err(anyhow::anyhow!(
-                "DuneClient: TVL query ID not set (use from_env() for TVL/volume)"
-            ));
-        }
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct Row {
             date: String,
             pool_address: String,
@@ -207,12 +184,7 @@ impl DuneClient {
 
     /// Fetch daily volume and fees for all pools, caller filters by `pool_address`.
     pub async fn fetch_volume_fees(&self, pool_address: &str) -> Result<Vec<VolumePoint>> {
-        if self.volume_query_id.is_empty() {
-            return Err(anyhow::anyhow!(
-                "DuneClient: volume query ID not set (use from_env() for TVL/volume)"
-            ));
-        }
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct Row {
             trade_date: String,
             whirlpool_address: String,

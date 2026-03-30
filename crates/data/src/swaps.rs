@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Single swap event as returned by Dune `dex_solana.trades` queries.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SwapEvent {
     /// Local timestamp string from Dune, e.g. "2026-03-10 16:06".
     pub block_time: String,

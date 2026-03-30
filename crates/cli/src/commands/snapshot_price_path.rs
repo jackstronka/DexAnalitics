@@ -14,12 +14,45 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, MathematicalOps};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 use crate::backtest_engine::StepDataPoint;
+
+/// Prefer `snapshots.jsonl` when it is **newer** than `snapshots.jsonl.repaired` (mtime).
+///
+/// Append-only collectors update `snapshots.jsonl` continuously; `.repaired` is often an older
+/// snapshot of a cleaned prefix — always taking `.repaired` when present hid fresh rows and broke
+/// calendar / recent-hour windows.
+pub fn resolve_snapshot_jsonl_path(primary: &Path) -> PathBuf {
+    let repaired = primary
+        .file_name()
+        .map(|n| primary.with_file_name(format!("{}.repaired", n.to_string_lossy())))
+        .unwrap_or_else(|| primary.with_file_name("snapshots.jsonl.repaired"));
+    let have_p = primary.exists();
+    let have_r = repaired.exists();
+    match (have_p, have_r) {
+        (true, false) => primary.to_path_buf(),
+        (false, true) => repaired,
+        (true, true) => {
+            let mp = std::fs::metadata(primary).and_then(|m| m.modified());
+            let mr = std::fs::metadata(&repaired).and_then(|m| m.modified());
+            match (mp, mr) {
+                (Ok(tp), Ok(tr)) => {
+                    if tp >= tr {
+                        primary.to_path_buf()
+                    } else {
+                        repaired
+                    }
+                }
+                _ => primary.to_path_buf(),
+            }
+        }
+        (false, false) => primary.to_path_buf(),
+    }
+}
 
 /// One row from Orca snapshot JSONL (subset of fields).
 #[derive(Clone, Debug)]
@@ -174,7 +207,8 @@ fn parse_rows_raydium(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Ray
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.timestamp())
             .context("ts_utc missing")?;
-        if ts < start_ts || ts > end_ts {
+        // Treat `end_ts` as exclusive (matches CLI semantics: end-date is "up to, not including").
+        if ts < start_ts || ts >= end_ts {
             continue;
         }
 
@@ -271,6 +305,7 @@ fn fee_delta_tokens_raydium(p0: &RaydiumSnapRow, p1: &RaydiumSnapRow) -> (u128, 
 /// Build [`StepDataPoint`] grid + optional per-step fee map from Raydium JSONL only.
 pub async fn build_from_raydium_snapshots(
     pool_address: &str,
+    snapshot_jsonl_override: Option<&Path>,
     start_ts: i64,
     end_ts: i64,
     token_a: &Token,
@@ -278,17 +313,15 @@ pub async fn build_from_raydium_snapshots(
     capital: f64,
     lp_share_cli: Option<f64>,
 ) -> Result<SnapshotPricePathResult> {
-    let snapshots_jsonl = Path::new("data")
-        .join("pool-snapshots")
-        .join("raydium")
-        .join(pool_address)
-        .join("snapshots.jsonl");
-
-    let repaired_jsonl = snapshots_jsonl.with_file_name("snapshots.jsonl.repaired");
-    let path = if repaired_jsonl.exists() {
-        repaired_jsonl
+    let path = if let Some(p) = snapshot_jsonl_override {
+        resolve_snapshot_jsonl_path(p)
     } else {
-        snapshots_jsonl
+        let snapshots_jsonl = Path::new("data")
+            .join("pool-snapshots")
+            .join("raydium")
+            .join(pool_address)
+            .join("snapshots.jsonl");
+        resolve_snapshot_jsonl_path(&snapshots_jsonl)
     };
 
     if !path.exists() {
@@ -376,7 +409,8 @@ pub async fn build_from_raydium_snapshots(
             step_volume_usd: Decimal::ZERO,
             quote_usd,
             lp_share,
-            pool_liquidity_active: r.liq,
+            liquidity_active_raw: r.liq,
+            tick_current: Some(r.tick),
             start_timestamp: r.ts_u64,
         });
     }
@@ -484,7 +518,7 @@ fn parse_rows_meteora(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<Met
             .map(|dt| dt.timestamp())
             .context("ts_utc missing")?;
 
-        if ts < start_ts || ts > end_ts {
+        if ts < start_ts || ts >= end_ts {
             continue;
         }
 
@@ -550,6 +584,7 @@ fn pool_bpa_meteora(
 /// Build [`StepDataPoint`] grid + optional per-step fee map from Meteora JSONL only.
 pub async fn build_from_meteora_snapshots(
     pool_address: &str,
+    snapshot_jsonl_override: Option<&Path>,
     start_ts: i64,
     end_ts: i64,
     token_a: &Token,
@@ -557,17 +592,15 @@ pub async fn build_from_meteora_snapshots(
     capital: f64,
     lp_share_cli: Option<f64>,
 ) -> Result<SnapshotPricePathResult> {
-    let snapshots_jsonl = Path::new("data")
-        .join("pool-snapshots")
-        .join("meteora")
-        .join(pool_address)
-        .join("snapshots.jsonl");
-    // Prefer repaired JSONL if it exists.
-    let repaired_jsonl = snapshots_jsonl.with_file_name("snapshots.jsonl.repaired");
-    let path = if repaired_jsonl.exists() {
-        repaired_jsonl
+    let path = if let Some(p) = snapshot_jsonl_override {
+        resolve_snapshot_jsonl_path(p)
     } else {
-        snapshots_jsonl
+        let snapshots_jsonl = Path::new("data")
+            .join("pool-snapshots")
+            .join("meteora")
+            .join(pool_address)
+            .join("snapshots.jsonl");
+        resolve_snapshot_jsonl_path(&snapshots_jsonl)
     };
 
     if !path.exists() {
@@ -690,7 +723,8 @@ pub async fn build_from_meteora_snapshots(
             step_volume_usd: Decimal::ZERO,
             quote_usd,
             lp_share,
-            pool_liquidity_active: None,
+            liquidity_active_raw: None,
+            tick_current: None,
             start_timestamp: r.ts_u64,
         });
     }
@@ -775,7 +809,7 @@ fn parse_rows(path: &Path, start_ts: i64, end_ts: i64) -> Result<Vec<OrcaSnapRow
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.timestamp())
             .context("ts_utc missing")?;
-        if ts < start_ts || ts > end_ts {
+        if ts < start_ts || ts >= end_ts {
             continue;
         }
         let pool_mint_a = v
@@ -854,8 +888,12 @@ fn fee_delta_tokens(p0: &OrcaSnapRow, p1: &OrcaSnapRow) -> (u128, u128) {
 }
 
 /// Build [`StepDataPoint`] grid + optional per-step fee map from Orca JSONL only.
+///
+/// `snapshot_jsonl_override`: when set (e.g. `snapshot-backtest-prep` output), read this file
+/// instead of `data/pool-snapshots/orca/<pool>/snapshots.jsonl[.repaired]`.
 pub async fn build_from_orca_snapshots(
     pool_address: &str,
+    snapshot_jsonl_override: Option<&Path>,
     start_ts: i64,
     end_ts: i64,
     token_a: &Token,
@@ -863,24 +901,23 @@ pub async fn build_from_orca_snapshots(
     capital: f64,
     lp_share_cli: Option<f64>,
 ) -> Result<SnapshotPricePathResult> {
-    let snapshots_jsonl = Path::new("data")
-        .join("pool-snapshots")
-        .join("orca")
-        .join(pool_address)
-        .join("snapshots.jsonl");
-    // Some snapshot collectors may leave behind partially written/dirty JSONL lines
-    // near the end of the file; a `.repaired` sibling is produced to make parsing deterministic.
-    let repaired_jsonl = snapshots_jsonl.with_file_name("snapshots.jsonl.repaired");
-    let path = if repaired_jsonl.exists() {
-        repaired_jsonl
+    let path = if let Some(p) = snapshot_jsonl_override {
+        p.to_path_buf()
     } else {
-        snapshots_jsonl
+        let snapshots_jsonl = Path::new("data")
+            .join("pool-snapshots")
+            .join("orca")
+            .join(pool_address)
+            .join("snapshots.jsonl");
+        resolve_snapshot_jsonl_path(&snapshots_jsonl)
     };
 
     if !path.exists() {
         bail!(
             "Snapshot file not found (tried {}): {}",
-            "snapshots.jsonl[.repaired]",
+            snapshot_jsonl_override
+                .map(|_| "override path")
+                .unwrap_or("snapshots.jsonl[.repaired]"),
             path.display()
         );
     }
@@ -960,7 +997,8 @@ pub async fn build_from_orca_snapshots(
             step_volume_usd: Decimal::ZERO,
             quote_usd,
             lp_share,
-            pool_liquidity_active: r.liq,
+            liquidity_active_raw: r.liq,
+            tick_current: Some(r.tick),
             start_timestamp: r.ts_u64,
         });
     }

@@ -12,8 +12,8 @@ use borsh::BorshDeserialize;
 use orca_whirlpools::{
     DecreaseLiquidityParam, IncreaseLiquidityParam, WhirlpoolsConfigInput,
     close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
-    increase_liquidity_instructions, open_position_instructions_with_tick_bounds,
-    set_whirlpools_config_address,
+    increase_liquidity_instructions, open_full_range_position_instructions,
+    open_position_instructions_with_tick_bounds, set_whirlpools_config_address,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -70,6 +70,19 @@ pub struct OpenPositionParams {
     /// Amount of token A to deposit.
     pub amount_a: u64,
     /// Amount of token B to deposit.
+    pub amount_b: u64,
+    /// Slippage tolerance in basis points.
+    pub slippage_bps: u16,
+}
+
+/// Parameters for opening a **full-range** position (Orca Splash / max range for spacing).
+#[derive(Debug, Clone)]
+pub struct OpenFullRangeParams {
+    /// Pool address.
+    pub pool: Pubkey,
+    /// Amount of token A to deposit (max).
+    pub amount_a: u64,
+    /// Amount of token B to deposit (max).
     pub amount_b: u64,
     /// Slippage tolerance in basis points.
     pub slippage_bps: u16,
@@ -202,6 +215,56 @@ impl WhirlpoolExecutor {
         )
         .await
         .map_err(|e| anyhow::anyhow!("orca open_position_instructions failed: {e}"))?;
+
+        let whirlpool_program = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID)
+            .map_err(|e| anyhow::anyhow!("invalid whirlpool program id: {e}"))?;
+        let (position_pda, _) = Pubkey::find_program_address(
+            &[b"position", opened.position_mint.as_ref()],
+            &whirlpool_program,
+        );
+
+        let mut res = self
+            .send_transaction_with_signers(&opened.instructions, payer, &opened.additional_signers)
+            .await?;
+        if res.success {
+            res.created_position = Some(position_pda);
+        }
+        Ok(res)
+    }
+
+    /// Opens a **full-range** position (tick bounds from pool spacing; Splash-compatible).
+    pub async fn open_full_range_position(
+        &self,
+        params: &OpenFullRangeParams,
+        payer: &Keypair,
+    ) -> Result<ExecutionResult> {
+        info!(
+            pool = %params.pool,
+            "Opening full-range position (orca_whirlpools SDK)"
+        );
+
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
+
+        let opened = open_full_range_position_instructions(
+            &rpc,
+            params.pool,
+            IncreaseLiquidityParam {
+                token_max_a: params.amount_a,
+                token_max_b: params.amount_b,
+            },
+            Some(params.slippage_bps),
+            Some(payer.pubkey()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("orca open_full_range_position_instructions failed: {e}"))?;
 
         let whirlpool_program = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID)
             .map_err(|e| anyhow::anyhow!("invalid whirlpool program id: {e}"))?;

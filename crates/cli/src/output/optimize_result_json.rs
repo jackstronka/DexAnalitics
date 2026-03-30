@@ -1,6 +1,6 @@
 //! Build `clmm_lp_domain::optimize_result::OptimizeResultFile` after a grid run.
 
-use crate::backtest_engine::{RetouchRepeatConfig, StratConfig, parse_strategy_label};
+use crate::backtest_engine::{StratConfig, parse_strategy_label};
 use clmm_lp_domain::optimize_result::{
     OptimizeResultFile, OptimizeRetouchRepeat, OptimizeTrackerSummary, OptimizeWinner,
 };
@@ -27,19 +27,13 @@ pub fn build_optimize_result_file(
     strat_name: &str,
     summary: &TrackerSummary,
     score: Decimal,
-    retouch_repeat: Option<RetouchRepeatConfig>,
+    retouch_repeat: Option<OptimizeRetouchRepeat>,
 ) -> anyhow::Result<OptimizeResultFile> {
     let strat = parse_strategy_label(strat_name).ok_or_else(|| {
         anyhow::anyhow!("could not parse strategy label for JSON: {}", strat_name)
     })?;
 
     let winner = optimize_winner_from_strat(strat, strat_name, width_pct, lower_usd, upper_usd);
-
-    let rr = retouch_repeat.map(|c| OptimizeRetouchRepeat {
-        cooldown_secs: c.cooldown_secs,
-        rearm_after_secs: c.rearm_after_secs,
-        extra_move_pct: c.extra_move_pct,
-    });
 
     Ok(OptimizeResultFile {
         schema_version: OptimizeResultFile::CURRENT_SCHEMA_VERSION,
@@ -57,7 +51,7 @@ pub fn build_optimize_result_file(
         winner,
         score: score.to_string(),
         tracker_summary: tracker_summary_to_serde(summary),
-        retouch_repeat: rr,
+        retouch_repeat,
     })
 }
 
@@ -72,31 +66,19 @@ fn optimize_winner_from_strat(
         StratConfig::Static => "static",
         StratConfig::Periodic(_) => "periodic",
         StratConfig::Threshold(_) => "threshold",
-        StratConfig::ILLimit { .. } => "il_limit",
-        StratConfig::RetouchShift => "retouch_shift",
-        StratConfig::OorRecenter => "oor_recenter",
     }
     .to_string();
 
     let mut periodic_interval_hours = None;
     let mut threshold_ratio = None;
-    let mut il_max_ratio = None;
-    let mut il_close_ratio = None;
-    let mut il_grace_steps = None;
+    let il_max_ratio = None;
+    let il_close_ratio = None;
+    let il_grace_steps = None;
 
     match strat {
         StratConfig::Periodic(h) => periodic_interval_hours = Some(h),
         StratConfig::Threshold(p) => threshold_ratio = Some(p),
-        StratConfig::ILLimit {
-            max_il,
-            close_il,
-            grace_steps,
-        } => {
-            il_max_ratio = Some(max_il);
-            il_close_ratio = close_il;
-            il_grace_steps = Some(grace_steps);
-        }
-        _ => {}
+        StratConfig::Static => {}
     }
 
     OptimizeWinner {

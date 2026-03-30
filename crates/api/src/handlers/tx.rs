@@ -14,8 +14,8 @@ use clmm_lp_protocols::prelude::WhirlpoolPosition as ApiWhirlpoolPosition;
 use orca_whirlpools::{
     DecreaseLiquidityParam, IncreaseLiquidityParam, WhirlpoolsConfigInput,
     close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
-    increase_liquidity_instructions, open_position_instructions_with_tick_bounds,
-    set_whirlpools_config_address,
+    increase_liquidity_instructions, open_full_range_position_instructions,
+    open_position_instructions_with_tick_bounds, set_whirlpools_config_address,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::instruction::Instruction;
@@ -95,12 +95,6 @@ async fn build_unsigned(
     match op {
         TxOp::Open => {
             let pool = pool.expect("pool parsed by validate_build_request");
-            let tick_lower = req
-                .tick_lower
-                .expect("tick_lower parsed by validate_build_request");
-            let tick_upper = req
-                .tick_upper
-                .expect("tick_upper parsed by validate_build_request");
 
             let amount_a = req
                 .amount_a
@@ -116,20 +110,41 @@ async fn build_unsigned(
                 token_max_b: amount_b,
             };
 
-            // Use Orca SDK for real instruction building (unsigned build).
-            let opened = open_position_instructions_with_tick_bounds(
-                &rpc,
-                pool,
-                tick_lower,
-                tick_upper,
-                param,
-                Some(slippage_bps),
-                Some(wallet),
-            )
-            .await
-            .map_err(|e| {
-                ApiError::internal(format!("orca open_position_instructions failed: {e}"))
-            })?;
+            let opened = if req.full_range == Some(true) {
+                open_full_range_position_instructions(
+                    &rpc,
+                    pool,
+                    param,
+                    Some(slippage_bps),
+                    Some(wallet),
+                )
+                .await
+                .map_err(|e| {
+                    ApiError::internal(format!(
+                        "orca open_full_range_position_instructions failed: {e}"
+                    ))
+                })?
+            } else {
+                let tick_lower = req
+                    .tick_lower
+                    .expect("tick_lower parsed by validate_build_request");
+                let tick_upper = req
+                    .tick_upper
+                    .expect("tick_upper parsed by validate_build_request");
+                open_position_instructions_with_tick_bounds(
+                    &rpc,
+                    pool,
+                    tick_lower,
+                    tick_upper,
+                    param,
+                    Some(slippage_bps),
+                    Some(wallet),
+                )
+                .await
+                .map_err(|e| {
+                    ApiError::internal(format!("orca open_position_instructions failed: {e}"))
+                })?
+            };
 
             instructions = opened.instructions;
             additional_signers = opened.additional_signers;
@@ -316,6 +331,18 @@ fn validate_build_request(req: &BuildUnsignedTxRequest, op: TxOp) -> Result<(), 
             let slippage = req
                 .slippage_bps
                 .ok_or_else(|| ApiError::bad_request("Missing required field: slippage_bps"))?;
+
+            if req.full_range == Some(true) {
+                if amount_a == 0 || amount_b == 0 {
+                    return Err(ApiError::bad_request("amount_a and amount_b must be > 0"));
+                }
+                if slippage > MAX_SLIPPAGE_BPS {
+                    return Err(ApiError::Validation(format!(
+                        "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
+                    )));
+                }
+                return Ok(());
+            }
 
             let tick_lower = req
                 .tick_lower

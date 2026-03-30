@@ -172,6 +172,7 @@ async fn devnet_bot_lifecycle_keypair_smoke() {
             amount_a,
             amount_b,
             slippage_bps: 100,
+            full_range: false,
         })
         .await;
     assert!(open.is_ok(), "open_position failed: {open:?}");
@@ -264,6 +265,7 @@ async fn devnet_strategy_driven_rebalance_smoke() {
             amount_a,
             amount_b,
             slippage_bps: 100,
+            full_range: false,
         })
         .await;
     assert!(open.is_ok(), "open_position failed: {open:?}");
@@ -367,6 +369,7 @@ async fn devnet_unsigned_tx_sign_submit_smoke() {
             slippage_bps: Some(100),
             tick_lower: Some(tick_lower),
             tick_upper: Some(tick_upper),
+            full_range: None,
         }),
     )
     .await
@@ -440,6 +443,7 @@ async fn devnet_open_and_read_position_smoke() {
             slippage_bps: Some(100),
             tick_lower: Some(tick_lower),
             tick_upper: Some(tick_upper),
+            full_range: None,
         }),
     )
     .await
@@ -544,6 +548,7 @@ async fn devnet_open_and_read_position_proxy_pairs_smoke() {
                 slippage_bps: Some(100),
                 tick_lower: Some(tick_lower),
                 tick_upper: Some(tick_upper),
+                full_range: None,
             }),
         )
         .await
@@ -634,6 +639,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
             slippage_bps: Some(100),
             tick_lower: Some(tick_lower),
             tick_upper: Some(tick_upper),
+            full_range: None,
         }),
     )
     .await
@@ -689,6 +695,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
             slippage_bps: Some(100),
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -720,6 +727,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
             slippage_bps: None,
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -751,6 +759,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
             slippage_bps: None,
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -811,6 +820,7 @@ async fn devnet_unsigned_increase_liquidity_smoke() {
             slippage_bps: Some(200),
             tick_lower: Some(tick_lower),
             tick_upper: Some(tick_upper),
+            full_range: None,
         }),
     )
     .await
@@ -843,6 +853,7 @@ async fn devnet_unsigned_increase_liquidity_smoke() {
             slippage_bps: Some(200),
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -871,6 +882,7 @@ async fn devnet_unsigned_increase_liquidity_smoke() {
             slippage_bps: Some(200),
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -931,7 +943,9 @@ async fn devnet_bot_actions_smoke() {
     exec.set_wallet(wallet.clone());
 
     let position = exec
-        .execute_open_position(&pool, tick_lower, tick_upper, amount_a, amount_b, 200)
+        .execute_open_position(
+            &pool, tick_lower, tick_upper, amount_a, amount_b, 200, false,
+        )
         .await
         .expect("open_position via StrategyExecutor");
 
@@ -1000,6 +1014,7 @@ async fn devnet_submit_unsigned_tx_is_rejected() {
             slippage_bps: Some(100),
             tick_lower: Some(tick_lower),
             tick_upper: Some(tick_upper),
+            full_range: None,
         }),
     )
     .await

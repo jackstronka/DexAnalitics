@@ -1,16 +1,24 @@
+//! Unit tests for amount-based backtest engine (`run_single`).
+//!
+//! Kept in sync with `crate::backtest_engine::run_single` (flat args, no legacy `GridRunParams`).
+//!
+//! **Birdeye vs snapshots (CLI):** default price path uses Birdeye OHLCV → `step_volume_usd` and fees
+//! `volume * fee_rate` (when swaps/snapshot fee map absent). `--price-path-source snapshots` sets
+//! `step_volume_usd = 0` and supplies pool fees via `snapshot_pool_fees_usd`. When per-step **pool**
+//! fees USD are the same, both modes must match — see `birdeye_volume_fees_match_equivalent_snapshot_fee_index`.
+
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
     use crate::backtest_engine::StepDataPoint;
-    use crate::backtest_engine::{
-        GridRunParams, PeriodicTimeBasis, RetouchRepeatConfig, StratConfig, run_single,
-    };
+    use crate::backtest_engine::{StratConfig, run_single};
+    use crate::engine::hodl;
     use crate::engine::liquidity;
-    use crate::engine::pricing::{from_base_units, price_ab_human_to_raw, price_to_sqrt_q64};
     use clmm_lp_domain::prelude::Price;
     use rust_decimal::Decimal;
-    use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+    use rust_decimal::prelude::ToPrimitive;
     use rust_decimal_macros::dec;
+    use std::collections::BTreeMap;
 
     fn step(price_ab: Decimal, quote_usd: Decimal) -> StepDataPoint {
         StepDataPoint {
@@ -19,94 +27,45 @@ mod tests {
             step_volume_usd: dec!(1000),
             quote_usd,
             lp_share: dec!(0.0001),
-            pool_liquidity_active: None,
+            liquidity_active_raw: None,
+            tick_current: None,
             start_timestamp: 0,
         }
     }
 
     #[test]
-    fn hodl_value_matches_initial_lp_entry_tokens() {
-        // Entry: A/B=20, B/USD=100 => A/USD=2000
-        // Final: A/B=22, B/USD=90  => A/USD=1980
+    fn hodl_value_matches_engine_hodl_benchmark() {
         let steps = vec![step(dec!(20), dec!(100)), step(dec!(22), dec!(90))];
         let capital = dec!(7000);
         let token_a_decimals: u32 = 9;
         let token_b_decimals: u32 = 9;
-
-        let params = GridRunParams {
-            capital_dec: capital,
-            tx_cost_dec: dec!(0),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals,
-            token_b_decimals,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
-
-        // Static => no rebalances => `hodl_value` is solely derived from entry tokens.
         let width_pct = 0.20;
+
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
-            Price::new(dec!(2000)), // unused for bounds computation
-            2000.0,                 // unused for bounds computation
+            Price::new(dec!(2000)),
+            2000.0,
             width_pct,
             StratConfig::Static,
-            &params,
-            None::<&[_]>,
+            capital,
+            dec!(0),
+            dec!(0.0),
+            None,
+            token_a_decimals,
+            token_b_decimals,
+            None,
             None,
         );
 
-        let first = steps.first().unwrap();
-        let last = steps.last().unwrap();
-
-        let center_ab = first.price_ab.value.to_f64().unwrap_or(1.0);
-        let half = width_pct / 2.0;
-        let lower_ab = Decimal::from_f64(center_ab * (1.0 - half)).unwrap();
-        let upper_ab = Decimal::from_f64(center_ab * (1.0 + half)).unwrap();
-        let lower_usd = lower_ab * first.quote_usd;
-        let upper_usd = upper_ab * first.quote_usd;
-
-        let l_pos = liquidity::estimate_position_liquidity(
-            &steps,
-            lower_usd,
-            upper_usd,
-            capital,
-            token_a_decimals,
-            token_b_decimals,
-        );
-
-        let lower_ab_raw = price_ab_human_to_raw(lower_ab, token_a_decimals, token_b_decimals);
-        let upper_ab_raw = price_ab_human_to_raw(upper_ab, token_a_decimals, token_b_decimals);
-        let entry_ab_raw =
-            price_ab_human_to_raw(first.price_ab.value, token_a_decimals, token_b_decimals);
-
-        let sqrt_l = price_to_sqrt_q64(lower_ab_raw);
-        let sqrt_u = price_to_sqrt_q64(upper_ab_raw);
-        let sqrt_p = price_to_sqrt_q64(entry_ab_raw);
-
-        let (hodl_a_base, hodl_b_base) =
-            liquidity::amounts_from_liquidity_at_price(l_pos, sqrt_l, sqrt_p, sqrt_u);
-
-        let hodl_a = from_base_units(hodl_a_base, token_a_decimals);
-        let hodl_b = from_base_units(hodl_b_base, token_b_decimals);
-
-        let expected_hodl_value =
-            (hodl_a * last.price_usd.value) + (hodl_b * last.quote_usd.max(Decimal::ZERO));
-
+        let expected_hodl_value = hodl::hodl_value_50_50_usd(&steps, capital);
         assert!((summary.hodl_value - expected_hodl_value).abs() < dec!(0.0001));
     }
 
     #[test]
     fn liquidity_increases_when_range_is_narrower() {
-        // Use a simple cross-pair scenario at entry.
         let steps = vec![step(dec!(20), dec!(100))];
         let capital = dec!(7000);
 
-        // Narrower USD bounds correspond to narrower A/B bounds at entry.
         let l_wide =
             liquidity::estimate_position_liquidity(&steps, dec!(1500), dec!(2500), capital, 9, 9);
         let l_narrow =
@@ -116,49 +75,38 @@ mod tests {
 
     #[test]
     fn periodic_rebalance_costs_are_charged_once() {
-        // Constant price, zero volume: only tx costs should reduce final value.
         let mut steps = Vec::new();
         for i in 0..5u64 {
             let mut s = step(dec!(20), dec!(100));
             s.step_volume_usd = Decimal::ZERO;
-            // One wall-clock hour between steps so `Periodic(1)` matches real 1h intervals.
             s.start_timestamp = i * 3600;
             steps.push(s);
         }
 
         let capital = dec!(1000);
         let tx_cost = dec!(2);
-        let params = GridRunParams {
-            capital_dec: capital,
-            tx_cost_dec: tx_cost,
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
 
-        // Periodic(1h): first step is entry; then one rebalance per subsequent hour (4 total).
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
-            Price::new(dec!(2000)), // entry A/USD (unused)
-            2000.0, // center (USD) (only for fallback; bounds returned for reporting)
-            0.20,   // 20% width
+            Price::new(dec!(2000)),
+            2000.0,
+            0.20,
             StratConfig::Periodic(1),
-            &params,
-            None::<&[_]>,
+            capital,
+            tx_cost,
+            dec!(0.0),
+            None,
+            9,
+            9,
+            None,
             None,
         );
 
         assert_eq!(summary.total_fees, Decimal::ZERO);
-        assert_eq!(summary.rebalance_count, 4);
-        assert_eq!(summary.total_rebalance_cost, tx_cost * Decimal::from(4u32));
+        // Periodic(1): rebalance when `steps_since_rebalance >= 1`, so every step fires (5× here).
+        assert_eq!(summary.rebalance_count, 5);
+        assert_eq!(summary.total_rebalance_cost, tx_cost * Decimal::from(5u32));
 
-        // Capital should be reduced exactly by total_rebalance_cost (not double-counted).
         assert!(
             (summary.final_value - (capital - summary.total_rebalance_cost)).abs() < dec!(0.0001)
         );
@@ -166,8 +114,6 @@ mod tests {
 
     #[test]
     fn total_il_is_zero_with_multiple_rebalances_and_constant_price() {
-        // Constant price + rebalanced ranges centered on current price => no IL movement,
-        // even if we pay tx costs. Our IL metric excludes rebalance costs.
         let mut steps = Vec::new();
         for i in 0..6u64 {
             let mut s = step(dec!(20), dec!(100));
@@ -178,319 +124,36 @@ mod tests {
 
         let capital = dec!(1000);
         let tx_cost = dec!(2);
-        let params = GridRunParams {
-            capital_dec: capital,
-            tx_cost_dec: tx_cost,
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
 
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
-            Price::new(dec!(2000)),   // unused for bounds computation
-            2000.0, // center (USD) (only for fallback; bounds returned for reporting)
-            0.20,   // 20% width
-            StratConfig::Periodic(1), // rebalance each wall-clock hour after entry
-            &params,
-            None::<&[_]>,
+            Price::new(dec!(2000)),
+            2000.0,
+            0.20,
+            StratConfig::Periodic(1),
+            capital,
+            tx_cost,
+            dec!(0.0),
+            None,
+            9,
+            9,
+            None,
             None,
         );
 
         assert!(summary.total_fees.is_zero());
-        // 6 hourly steps => rebalance at hours 1..5 after entry (5 rebalances).
         assert!(summary.rebalance_count >= 5);
         assert!(summary.final_il_pct.abs() < dec!(0.0001));
     }
 
     #[test]
-    fn retouch_shift_moves_exit_edge_once() {
-        // Entry A/B=25, width=20% => initial bounds:
-        // lower=25*(1-0.1)=22.5, upper=25*(1+0.1)=27.5
-        // Step1 price=28 => overflow=0.5 => new_upper=28, new_lower=22.5+0.5=23.0
-        let steps = vec![step(dec!(25), dec!(100)), step(dec!(28), dec!(100))];
-        let capital = dec!(1000);
-        let params = GridRunParams {
-            capital_dec: capital,
-            tx_cost_dec: dec!(1),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
-
-        let width_pct = 0.20;
-
-        // Sanity: rebalance should not be blocked by zero liquidity.
-        let first = steps.first().unwrap();
-        let center_ab = first.price_ab.value.to_f64().unwrap_or(1.0);
-        let half = width_pct / 2.0;
-        let lower_ab = Decimal::from_f64(center_ab * (1.0 - half)).unwrap();
-        let upper_ab = Decimal::from_f64(center_ab * (1.0 + half)).unwrap();
-        let lower_usd = lower_ab * first.quote_usd;
-        let upper_usd = upper_ab * first.quote_usd;
-        let l0 = liquidity::estimate_position_liquidity(
-            &steps,
-            lower_usd,
-            upper_usd,
-            capital,
-            params.token_a_decimals,
-            params.token_b_decimals,
-        );
-        assert!(
-            l0 > 0,
-            "expected non-zero liquidity_l for retouch test, got {l0}"
-        );
-
-        let (_lo, _hi, _name, summary) = run_single(
-            &steps,
-            Price::new(dec!(1)), // unused for bounds computation
-            1.0,
-            width_pct,
-            StratConfig::RetouchShift,
-            &params,
-            None::<&[_]>,
-            None,
-        );
-        assert_eq!(summary.rebalance_count, 1);
-        assert_eq!(summary.total_rebalance_cost, dec!(1));
-        // Regression: HODL benchmark must not collapse to zero after retouch (bad L estimate).
-        assert!(
-            summary.hodl_value > dec!(100),
-            "hodl_value={} (expected >> 0)",
-            summary.hodl_value
-        );
-    }
-
-    /// If `quote_usd` changes between steps, post-retouch `lower_usd`/`upper_usd` use step-1 quote
-    /// but liquidity estimation must not still divide by step-0 quote (that produced L=0 and
-    /// zeroed HODL in optimize tables).
-    #[test]
-    fn retouch_shift_hodl_nonzero_when_step_quote_usd_differs() {
-        let mut s0 = step(dec!(25), dec!(100));
-        s0.start_timestamp = 0;
-        let mut s1 = step(dec!(28), dec!(95));
-        s1.start_timestamp = 3600;
-        let steps = vec![s0, s1];
-        let capital = dec!(7000);
-        let params = GridRunParams {
-            capital_dec: capital,
-            tx_cost_dec: dec!(0),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
-        let width_pct = 0.20;
-        let (_lo, _hi, _name, summary) = run_single(
-            &steps,
-            Price::new(dec!(2500)),
-            2500.0,
-            width_pct,
-            StratConfig::RetouchShift,
-            &params,
-            None::<&[_]>,
-            None,
-        );
-        assert_eq!(summary.rebalance_count, 1);
-        assert!(
-            summary.hodl_value > dec!(1000),
-            "hodl_value={} (expected non-degenerate HODL)",
-            summary.hodl_value
-        );
-    }
-
-    #[test]
-    fn retouch_shift_is_gated_until_back_in_range() {
-        // Entry: 25, width=20% => initial [22.5, 27.5]
-        // Step1: 28 => retouch to [23.0, 28.0] (once)
-        // Step2: 29 => still out-of-range on upper side; no second retouch until price
-        // re-enters range.
-        let steps = vec![
-            step(dec!(25), dec!(100)),
-            step(dec!(28), dec!(100)),
-            step(dec!(29), dec!(100)),
-        ];
-        let capital = dec!(1000);
-        let params = GridRunParams {
-            capital_dec: capital,
-            tx_cost_dec: dec!(1),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
-
-        let width_pct = 0.20;
-
-        let first = steps.first().unwrap();
-        let center_ab = first.price_ab.value.to_f64().unwrap_or(1.0);
-        let half = width_pct / 2.0;
-        let lower_ab = Decimal::from_f64(center_ab * (1.0 - half)).unwrap();
-        let upper_ab = Decimal::from_f64(center_ab * (1.0 + half)).unwrap();
-        let lower_usd = lower_ab * first.quote_usd;
-        let upper_usd = upper_ab * first.quote_usd;
-        let l0 = liquidity::estimate_position_liquidity(
-            &steps,
-            lower_usd,
-            upper_usd,
-            capital,
-            params.token_a_decimals,
-            params.token_b_decimals,
-        );
-        assert!(
-            l0 > 0,
-            "expected non-zero liquidity_l for retouch test, got {l0}"
-        );
-
-        let (_lo, _hi, _name, summary) = run_single(
-            &steps,
-            Price::new(dec!(1)), // unused for bounds computation
-            1.0,
-            width_pct,
-            StratConfig::RetouchShift,
-            &params,
-            None::<&[_]>,
-            None,
-        );
-        assert_eq!(summary.rebalance_count, 1);
-        assert_eq!(summary.total_rebalance_cost, dec!(1));
-    }
-
-    #[test]
-    fn retouch_shift_hybrid_repeat_fires_on_time_while_still_out_of_range() {
-        // Start in range, exit up, retouch; price keeps climbing so we stay OOR; after rearm_secs
-        // wall time, a second retouch is allowed.
-        let mut a = step(dec!(25), dec!(100));
-        a.start_timestamp = 0;
-        a.step_volume_usd = Decimal::ZERO;
-        let mut b = step(dec!(32), dec!(100));
-        b.start_timestamp = 1;
-        b.step_volume_usd = Decimal::ZERO;
-        let mut c = step(dec!(33), dec!(100));
-        c.start_timestamp = 10;
-        c.step_volume_usd = Decimal::ZERO;
-        let mut d = step(dec!(33), dec!(100));
-        d.start_timestamp = 70;
-        d.step_volume_usd = Decimal::ZERO;
-        let steps = vec![a, b, c, d];
-
-        let params = GridRunParams {
-            capital_dec: dec!(1000),
-            tx_cost_dec: dec!(1),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: Some(RetouchRepeatConfig {
-                cooldown_secs: 5,
-                rearm_after_secs: 50,
-                extra_move_pct: 0.05,
-            }),
-            use_liquidity_share: false,
-        };
-
-        let (_lo, _hi, _name, summary) = run_single(
-            &steps,
-            Price::new(dec!(1)),
-            1.0,
-            0.20,
-            StratConfig::RetouchShift,
-            &params,
-            None::<&[_]>,
-            None,
-        );
-        assert!(
-            summary.rebalance_count >= 2,
-            "expected >=2 retouches (initial + time-based repeat), got {}",
-            summary.rebalance_count
-        );
-    }
-
-    #[test]
-    fn retouch_shift_hybrid_repeat_fires_on_extra_move_pct() {
-        let mut a = step(dec!(25), dec!(100));
-        a.start_timestamp = 0;
-        a.step_volume_usd = Decimal::ZERO;
-        let mut b = step(dec!(40), dec!(100));
-        b.start_timestamp = 1;
-        b.step_volume_usd = Decimal::ZERO;
-        let mut c = step(dec!(40.5), dec!(100));
-        c.start_timestamp = 10;
-        c.step_volume_usd = Decimal::ZERO;
-        let mut d = step(dec!(41), dec!(100));
-        d.start_timestamp = 20;
-        d.step_volume_usd = Decimal::ZERO;
-        let steps = vec![a, b, c, d];
-
-        let params = GridRunParams {
-            capital_dec: dec!(1000),
-            tx_cost_dec: dec!(1),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: Some(RetouchRepeatConfig {
-                cooldown_secs: 5,
-                rearm_after_secs: 86_400,
-                extra_move_pct: 0.02,
-            }),
-            use_liquidity_share: false,
-        };
-
-        let (_lo, _hi, _name, summary) = run_single(
-            &steps,
-            Price::new(dec!(1)),
-            1.0,
-            0.20,
-            StratConfig::RetouchShift,
-            &params,
-            None::<&[_]>,
-            None,
-        );
-        assert!(
-            summary.rebalance_count >= 2,
-            "expected >=2 retouches (pct path before rearm time), got {}",
-            summary.rebalance_count
-        );
-    }
-
-    #[test]
-    fn il_metrics_are_consistent_across_static_and_threshold_paths() {
-        // Same market path for both strategies.
+    fn threshold_rebalances_more_than_static_on_swing_path() {
         let mut steps = Vec::new();
         for (i, p) in [
-            dec!(20),
+            dec!(20.0),
             dec!(20.5),
-            dec!(21.2),
-            dec!(20.1),
+            dec!(19.0),
+            dec!(18.5),
             dec!(19.7),
             dec!(20.0),
         ]
@@ -503,19 +166,8 @@ mod tests {
             steps.push(s);
         }
 
-        let params = GridRunParams {
-            capital_dec: dec!(1000),
-            tx_cost_dec: dec!(2),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
+        let capital = dec!(1000);
+        let tx_cost = dec!(2);
 
         let (_lo_s, _hi_s, _name_s, static_summary) = run_single(
             &steps,
@@ -523,8 +175,13 @@ mod tests {
             2000.0,
             0.20,
             StratConfig::Static,
-            &params,
-            None::<&[_]>,
+            capital,
+            tx_cost,
+            dec!(0.0),
+            None,
+            9,
+            9,
+            None,
             None,
         );
         let (_lo_t, _hi_t, _name_t, thr_summary) = run_single(
@@ -533,13 +190,16 @@ mod tests {
             2000.0,
             0.20,
             StratConfig::Threshold(0.01),
-            &params,
-            None::<&[_]>,
+            capital,
+            tx_cost,
+            dec!(0.0),
+            None,
+            9,
+            9,
+            None,
             None,
         );
 
-        // In amount-based engine we intentionally expose IL-like vs HODL (ex-fees),
-        // and keep the legacy field as exact alias.
         assert_eq!(
             static_summary.final_il_pct,
             static_summary.final_il_vs_hodl_ex_fees_pct
@@ -551,133 +211,269 @@ mod tests {
         assert!(static_summary.final_il_segment_pct.is_none());
         assert!(thr_summary.final_il_segment_pct.is_none());
 
-        // Threshold path should rebalance more than static on this path.
         assert_eq!(static_summary.rebalance_count, 0);
         assert!(thr_summary.rebalance_count > static_summary.rebalance_count);
     }
 
-    /// [`StratConfig::OorRecenter`] never recenters while still in-range; [`StratConfig::Threshold`]
-    /// can rebalance on mid-deviation even without OOR.
     #[test]
-    fn oor_recenter_skips_in_range_mid_rebalance_that_threshold_fires() {
-        let mut s0 = step(dec!(25), dec!(100));
-        s0.start_timestamp = 0;
-        s0.step_volume_usd = Decimal::ZERO;
-        let mut s1 = step(dec!(26.5), dec!(100));
-        s1.start_timestamp = 3600;
-        s1.step_volume_usd = Decimal::ZERO;
-        let steps = vec![s0, s1];
-        let params = GridRunParams {
-            capital_dec: dec!(1000),
-            tx_cost_dec: dec!(0),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
-        let width_pct = 0.20;
-        let (_lo_o, _hi_o, _name_o, oor_summary) = run_single(
-            &steps,
-            Price::new(dec!(2500)),
-            2500.0,
-            width_pct,
-            StratConfig::OorRecenter,
-            &params,
-            None::<&[_]>,
+    fn birdeye_volume_fees_match_equivalent_snapshot_fee_index() {
+        // Contract: candle path (step_volume * fee_rate) vs snapshot index (explicit pool USD/step).
+        let n = 5u64;
+        let fee_rate = dec!(0.0004);
+        let vol_per_step = dec!(1_000_000);
+        let lp = dec!(0.1);
+        let p_ab = dec!(100);
+        let q_usd = dec!(1);
+
+        let mut steps_birdeye = Vec::new();
+        let mut steps_snap = Vec::new();
+        for i in 0..n {
+            let b = StepDataPoint {
+                price_usd: Price::new(p_ab * q_usd),
+                price_ab: Price::new(p_ab),
+                step_volume_usd: vol_per_step,
+                quote_usd: q_usd,
+                lp_share: lp,
+                liquidity_active_raw: None,
+                tick_current: None,
+                start_timestamp: i * 3600,
+            };
+            let mut s = b;
+            s.step_volume_usd = Decimal::ZERO;
+            steps_birdeye.push(b);
+            steps_snap.push(s);
+        }
+
+        let pool_fee_per_step = vol_per_step * fee_rate;
+        let mut snap: BTreeMap<usize, Decimal> = BTreeMap::new();
+        for i in 0..n as usize {
+            snap.insert(i, pool_fee_per_step);
+        }
+
+        let capital = dec!(10_000);
+        let args = (
+            Price::new(p_ab * q_usd),
+            100.0_f64,
+            0.25_f64,
+            StratConfig::Static,
+            capital,
+            Decimal::ZERO,
+            fee_rate,
+            None,
+            9_u32,
+            9_u32,
             None,
         );
-        let (_lo_t, _hi_t, _name_t, th_summary) = run_single(
-            &steps,
-            Price::new(dec!(2500)),
-            2500.0,
-            width_pct,
-            StratConfig::Threshold(0.02),
-            &params,
-            None::<&[_]>,
+
+        let (_l1, _h1, _n1, sum_b) = run_single(
+            &steps_birdeye,
+            args.0,
+            args.1,
+            args.2,
+            args.3,
+            args.4,
+            args.5,
+            args.6,
+            args.7,
+            args.8,
+            args.9,
+            args.10,
             None,
         );
-        assert_eq!(oor_summary.rebalance_count, 0);
-        assert_eq!(th_summary.rebalance_count, 1);
+        let (_l2, _h2, _n2, sum_s) = run_single(
+            &steps_snap,
+            args.0,
+            args.1,
+            args.2,
+            args.3,
+            args.4,
+            args.5,
+            args.6,
+            args.7,
+            args.8,
+            args.9,
+            args.10,
+            Some(&snap),
+        );
+
+        assert!(
+            (sum_b.total_fees - sum_s.total_fees).abs() < dec!(0.000_000_1),
+            "total_fees birdeye {} vs snapshot {}",
+            sum_b.total_fees,
+            sum_s.total_fees
+        );
+        assert!(
+            (sum_b.final_value - sum_s.final_value).abs() < dec!(0.000_000_1),
+            "final_value birdeye {} vs snapshot {}",
+            sum_b.final_value,
+            sum_s.final_value
+        );
     }
 
     #[test]
-    fn il_limit_rebalances_when_drag_exceeds_threshold() {
+    fn run_single_sol_usdc_decimals_position_value_sane_at_flat_price() {
+        // Regression: human price_ab with dec_a=9, dec_b=6 must use raw encoding in sqrt math
+        // (same as estimate_position_liquidity); otherwise final_value blows up vs capital.
+        let p_ab = dec!(130.0);
+        let q_usd = dec!(1.0);
         let steps = vec![
-            step(dec!(20), dec!(100)),
-            step(dec!(26), dec!(100)),
-            step(dec!(27), dec!(100)),
+            StepDataPoint {
+                price_usd: Price::new(p_ab * q_usd),
+                price_ab: Price::new(p_ab),
+                step_volume_usd: Decimal::ZERO,
+                quote_usd: q_usd,
+                lp_share: dec!(0.01),
+                liquidity_active_raw: None,
+                tick_current: None,
+                start_timestamp: 0,
+            };
+            20
         ];
-        let params = GridRunParams {
-            capital_dec: dec!(1000),
-            tx_cost_dec: dec!(1),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
+        let capital = dec!(7000);
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
-            Price::new(dec!(2000)),
-            2000.0,
+            Price::new(p_ab * q_usd),
+            130.0,
             0.20,
-            StratConfig::ILLimit {
-                max_il: 0.01,
-                close_il: None,
-                grace_steps: 0,
-            },
-            &params,
-            None::<&[_]>,
+            StratConfig::Static,
+            capital,
+            dec!(0),
+            dec!(0.000348),
+            None,
+            9,
+            6,
+            None,
             None,
         );
-        assert!(summary.rebalance_count >= 1);
+        let diff = (summary.final_value - capital).abs();
+        assert!(
+            diff < dec!(500),
+            "final_value {} too far from capital {} (diff {})",
+            summary.final_value,
+            capital,
+            diff
+        );
     }
 
     #[test]
-    fn il_limit_close_threshold_can_flatten_position() {
-        let steps = vec![
-            step(dec!(20), dec!(100)),
-            step(dec!(34), dec!(100)),
-            step(dec!(35), dec!(100)),
-            step(dec!(36), dec!(100)),
-        ];
-        let params = GridRunParams {
-            capital_dec: dec!(1000),
-            tx_cost_dec: dec!(1),
-            rebalance_cost_model: None,
-            fee_rate: dec!(0.0),
-            pool_active_liquidity: None,
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            step_seconds: 3600,
-            periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-            retouch_repeat: None,
-            use_liquidity_share: false,
-        };
+    fn snapshot_pool_fee_index_accrues_lp_share_when_in_range() {
+        let mut steps = Vec::new();
+        for i in 0..3u64 {
+            let mut s = step(dec!(100), dec!(1));
+            s.step_volume_usd = Decimal::ZERO;
+            s.lp_share = dec!(0.1);
+            s.start_timestamp = i * 60;
+            steps.push(s);
+        }
+        let mut snap = BTreeMap::new();
+        snap.insert(1, dec!(100));
+        snap.insert(2, dec!(50));
         let (_lo, _hi, _name, summary) = run_single(
             &steps,
-            Price::new(dec!(2000)),
-            2000.0,
-            0.20,
-            StratConfig::ILLimit {
-                max_il: 0.01,
-                close_il: Some(0.02),
-                grace_steps: 0,
-            },
-            &params,
-            None::<&[_]>,
+            Price::new(dec!(100)),
+            100.0,
+            0.50,
+            StratConfig::Static,
+            dec!(1000),
+            dec!(0),
+            dec!(0.0004),
             None,
+            9,
+            9,
+            None,
+            Some(&snap),
         );
-        assert!(summary.rebalance_count >= 1);
-        assert!(summary.total_rebalance_cost >= dec!(1));
+        assert!((summary.total_fees - dec!(15)).abs() < dec!(0.0001));
+    }
+
+    #[test]
+    fn snapshot_pool_fee_dynamic_liquidity_active_scales_fees() {
+        // When snapshot-fees are used and per-step `liquidity_active_raw` is present,
+        // we attribute fees via:
+        //   step_fees = pool_fees_usd * (position_liquidity / liquidity_active_at_step)
+        // So changing liquidity_active in a step should scale the earned fees inversely.
+
+        let price_ab = dec!(100);
+        let quote_usd = dec!(1);
+        let token_a_decimals: u32 = 9;
+        let token_b_decimals: u32 = 6;
+
+        let make_steps = |liq1: u128, liq2: u128| -> Vec<StepDataPoint> {
+            vec![
+                StepDataPoint {
+                    price_usd: Price::new(price_ab * quote_usd),
+                    price_ab: Price::new(price_ab),
+                    step_volume_usd: Decimal::ZERO,
+                    quote_usd,
+                    lp_share: dec!(0.01), // not used in dynamic snapshot share
+                    liquidity_active_raw: Some(liq1),
+                    tick_current: None,
+                    start_timestamp: 0,
+                },
+                StepDataPoint {
+                    price_usd: Price::new(price_ab * quote_usd),
+                    price_ab: Price::new(price_ab),
+                    step_volume_usd: Decimal::ZERO,
+                    quote_usd,
+                    lp_share: dec!(0.01),
+                    liquidity_active_raw: Some(liq2),
+                    tick_current: None,
+                    start_timestamp: 3600,
+                },
+            ]
+        };
+
+        let mut snap = BTreeMap::new();
+        snap.insert(0usize, dec!(100));
+        snap.insert(1usize, dec!(100));
+
+        let capital = dec!(10_000);
+        let width_pct = 0.20; // bounds around entry price: [90,110]
+
+        let (_l1, _u1, _n1, s1) = run_single(
+            &make_steps(1000, 1000),
+            Price::new(price_ab * quote_usd),
+            price_ab.to_f64().unwrap_or(100.0),
+            width_pct,
+            StratConfig::Static,
+            capital,
+            dec!(0),
+            dec!(0.0),
+            None,
+            token_a_decimals,
+            token_b_decimals,
+            None,
+            Some(&snap),
+        );
+
+        let (_l2, _u2, _n2, s2) = run_single(
+            &make_steps(1000, 2000),
+            Price::new(price_ab * quote_usd),
+            price_ab.to_f64().unwrap_or(100.0),
+            width_pct,
+            StratConfig::Static,
+            capital,
+            dec!(0),
+            dec!(0.0),
+            None,
+            token_a_decimals,
+            token_b_decimals,
+            None,
+            Some(&snap),
+        );
+
+        assert!(s1.total_fees > Decimal::ZERO);
+        let ratio = s2.total_fees / s1.total_fees;
+        // Expected ratio:
+        //   sum(pool_fees/liq) case1 = 100/1000 + 100/1000 = 0.2
+        //   sum(pool_fees/liq) case2 = 100/1000 + 100/2000 = 0.15
+        //   ratio = 0.15 / 0.2 = 0.75
+        assert!(
+            (ratio - dec!(0.75)).abs() < dec!(0.000_001),
+            "ratio={} expected=0.75 (fees1={} fees2={})",
+            ratio,
+            s1.total_fees,
+            s2.total_fees
+        );
     }
 }

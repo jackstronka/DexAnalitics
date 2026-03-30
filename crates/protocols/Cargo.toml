@@ -26,6 +26,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 rust_decimal = { workspace = true }
 orca_whirlpools = { workspace = true }
+orca_whirlpools_core = { workspace = true }
 raydium_clmm = "0.1.13"
 carbon-meteora-dlmm-decoder = "0.12.0"
 

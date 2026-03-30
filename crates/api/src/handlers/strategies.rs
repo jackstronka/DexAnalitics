@@ -486,6 +486,11 @@ pub async fn start_strategy(
         executor_config,
     );
 
+    // Always enable Tier3 checkpoint ledger by default (append-only JSONL).
+    executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
+        "data/position-fee-checkpoints.jsonl",
+    )));
+
     // If auto_execute is enabled, we need a signing wallet (unless dry_run).
     if auto_execute && !dry_run {
         let keypair_path = std::env::var("KEYPAIR_PATH")

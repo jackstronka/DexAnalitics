@@ -1,45 +1,55 @@
-# Agent / AI assistant map
+# AGENTS.md
 
-Project: **Bociarz LP Strategy Lab** (derived from upstream CLMM Liquidity Provider, MIT).
+## Cursor Cloud specific instructions
 
-Rust **workspace** (edition **2024**). Root: [`Cargo.toml`](Cargo.toml). Human-oriented README: [`README.md`](README.md). Documentation index: [`doc/README.md`](doc/README.md). **Architecture and pipelines:** [`doc/PROJECT_OVERVIEW.md`](doc/PROJECT_OVERVIEW.md) (single high-level source of truth). **Prioritized backlog (fees/RPC/snapshots):** [`doc/TODO_ONCHAIN_NEXT_STEPS.md`](doc/TODO_ONCHAIN_NEXT_STEPS.md) (*Od czego zacząć*, fazy A–F + M).
+### Project overview
 
-## Crates (one line each)
+CLMM Liquidity Provider Strategy Optimizer — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScript web dashboard. See `README.md` and `STARTUP.md` for full details.
 
-| Crate | Role |
-| ----- | ---- |
-| `clmm-lp-domain` | Domain math (ticks/prices, IL, liquidity), entities |
-| `clmm-lp-simulation` | Backtest engine (positions, rebalances, time-in-range) |
-| `clmm-lp-optimization` | Range/grid optimizers and objectives |
-| `clmm-lp-protocols` | Solana protocol adapters (Orca, Raydium, Meteora) |
-| `clmm-lp-data` | External providers and local repos (Birdeye/Jupiter/Dune/swap data) |
-| `clmm-lp-execution` | Live monitoring, strategy execution, alerts, scheduler |
-| `clmm-lp-api` | REST API (see crate `lib.rs` for endpoints overview) |
-| `clmm-lp-cli` | Main CLI; subcommands and `Commands` enum |
+### Required system dependencies
 
-## Code entry points
+Installed once by the VM snapshot (not in the update script):
 
-- **CLI:** [`crates/cli/src/main.rs`](crates/cli/src/main.rs) — `Commands` / `Subcommand` dispatch; command implementations under [`crates/cli/src/commands/`](crates/cli/src/commands/).
-- **API server:** [`crates/api/src/main.rs`](crates/api/src/main.rs) and [`crates/api/src/lib.rs`](crates/api/src/lib.rs).
-- **Execution / monitoring:** [`crates/execution/src/lib.rs`](crates/execution/src/lib.rs) and submodules (e.g. `strategy/`, `monitor/`).
-- **Protocols / RPC:** [`crates/protocols/src/lib.rs`](crates/protocols/src/lib.rs), [`crates/protocols/src/rpc/`](crates/protocols/src/rpc/).
+- `libssl-dev`, `libpq-dev`, `pkg-config` — needed for Rust native compilation (OpenSSL, PostgreSQL client)
+- PostgreSQL 16 (local install, not Docker) — service must be running before the API server starts
+- Rust stable (1.90+, via `rustup`), Node.js 18+ (pre-installed)
 
-Each crate has a short module doc at `crates/<name>/src/lib.rs` (`//!`).
+### PostgreSQL setup
 
-## Local data (do not treat as source to hand-edit for “truth”)
+A local PostgreSQL instance is used. The database `clmm_lp` with user `clmm_user` / password `clmm_password` is created during initial setup. To start PostgreSQL if not running:
 
-Append-only JSONL under `data/` (see `README.md` and `PROJECT_OVERVIEW.md` for paths): `pool-snapshots/`, `swaps/`, optional `dune-cache/`, etc. Prefer CLI pipelines to regenerate. Optional backup copies may exist under `data-backup/` or similar—confirm with the team before relying on them.
+```bash
+sudo service postgresql start
+```
 
-## Conventions
+### Environment file
 
-- **Errors:** `thiserror` for typed errors in libraries; `anyhow::Result` is common at CLI / application boundaries.
-- **Tests:** `#[cfg(test)]` modules next to code; integration tests under `crates/<crate>/tests/` where present (e.g. CLI).
-- **Secrets:** never commit `.env` or API keys; use env vars as in `README.md` (`BIRDEYE_API_KEY`, `DUNE_API_KEY`, etc.).
+`.env` is copied from `.env.example` during initial setup. It contains database URL, API config, and placeholder API keys. The API server reads `DATABASE_URL`, `API_PORT`, etc. from this file.
 
-## When changing behavior users see
+### Common commands
 
-Update CLI help text in code, and if the change is user-facing across docs, add a line to [`doc/README.md`](doc/README.md) if a new doc file was added.
+Standard build/test/lint commands are in the `Makefile`:
 
-## Engineering notes (searchable history)
+| Task | Command |
+|------|---------|
+| Build | `make build` or `cargo build --workspace` |
+| Test | `make test` or `LOGLEVEL=WARN cargo test` |
+| Lint (strict) | `make lint` (uses `-D warnings`; has pre-existing warnings) |
+| Format | `make fmt` |
+| Pre-push | `make pre-push` |
 
-For **non-trivial** code changes (new behavior, CLI, formats, cross-crate contracts), append a short entry to [`doc/ENGINEERING_NOTES.md`](doc/ENGINEERING_NOTES.md) with a **`keywords:`** line so humans and AI can find it later (`grep`, `@ENGINEERING_NOTES`, codebase search). See the preamble in that file for when to skip.
+### Starting services
+
+Order: PostgreSQL → API Server → Web Dashboard
+
+1. **PostgreSQL**: `sudo service postgresql start`
+2. **API Server**: `RUST_LOG=info cargo run --bin clmm-lp-api` (port 8080)
+3. **Web Dashboard**: `cd web && npm run dev` (port 3000)
+
+### Known gotchas
+
+- **Vite proxy mismatch**: `web/vite.config.ts` proxies `/api` and `/ws` to port **8081**, but the API server defaults to port **8080**. If you need the dashboard to proxy to the API, either change `API_PORT=8081` when starting the API or update the vite config.
+- **`make lint` pre-existing warnings**: The codebase has pre-existing clippy warnings (unused variables in `crates/api/src/services/strategy_service.rs`, various lints in `crates/cli/src/main.rs`) that cause `make lint` to fail since it uses `-D warnings`. `cargo build --workspace` and `cargo test` both succeed.
+- **Cargo.lock is gitignored**: Each fresh checkout needs `cargo build` to resolve and lock dependencies.
+- **package-lock.json is gitignored**: Each fresh checkout needs `npm install` in the `web/` directory.
+- **Web frontend TypeScript check**: Run `npx tsc --noEmit` in `web/` to verify TypeScript types.

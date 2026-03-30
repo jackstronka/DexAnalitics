@@ -41,8 +41,16 @@ pub struct RpcProvider {
 
 impl RpcProvider {
     /// Creates a new RPC provider with the given configuration.
+    ///
+    /// When **`CLMM_EXPECTED_CLUSTER`** is set, validates inferable RPC URLs against it (see [`crate::rpc::cluster`]).
     #[must_use]
     pub fn new(config: RpcConfig) -> Self {
+        if let Err(e) = super::cluster::enforce_expected_cluster_for_rpc_config(&config) {
+            panic!(
+                "cluster guard (CLMM_EXPECTED_CLUSTER): {e:#}. \
+                 Unset CLMM_EXPECTED_CLUSTER or fix SOLANA_RPC_URL / SOLANA_RPC_FALLBACK_URLS."
+            );
+        }
         Self {
             config,
             health: Arc::new(HealthChecker::new()),
@@ -500,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_creation() {
-        let provider = RpcProvider::mainnet();
+        let provider = RpcProvider::new(RpcConfig::new("https://api.mainnet-beta.solana.com"));
         let endpoint = provider.current_endpoint().await;
         assert!(endpoint.contains("mainnet"));
     }

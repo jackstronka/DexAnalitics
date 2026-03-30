@@ -25,6 +25,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 use uuid::Uuid;
 
+fn parse_utc_datetime_or_date(s: &str) -> anyhow::Result<i64> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+    // Accept formats:
+    // - YYYY-MM-DD (interpreted as 00:00:00 UTC)
+    // - RFC3339 / ISO8601 with timezone (e.g. 2026-03-24T11:00:00Z)
+    // - YYYY-MM-DDTHH:MM[:SS] (assumed UTC)
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let dt = d.and_hms_opt(0, 0, 0).unwrap();
+        return Ok(Utc.from_utc_datetime(&dt).timestamp());
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.timestamp());
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(Utc.from_utc_datetime(&ndt).timestamp());
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
+        return Ok(Utc.from_utc_datetime(&ndt).timestamp());
+    }
+    anyhow::bail!(
+        "Invalid datetime. Expected YYYY-MM-DD or RFC3339/ISO8601 (e.g. 2026-03-24T11:00:00Z); got: {s}"
+    );
+}
+
 #[derive(Parser)]
 #[command(name = "clmm-lp-cli")]
 #[command(about = "Bociarz LP Strategy Lab — Strategy Optimizer CLI", long_about = None)]
@@ -319,6 +343,15 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = PricePathSourceArg::Birdeye)]
         price_path_source: PricePathSourceArg,
 
+        /// Use pre-sliced Orca JSONL from `snapshot-backtest-prep` (smaller file, faster). Label = `window_<label>.jsonl` (e.g. `h24`, `h48`, `d7`). Orca only.
+        #[arg(long, value_name = "LABEL")]
+        prepared_snapshot_window: Option<String>,
+
+        /// Optional snapshot JSONL suffix to read (e.g. `5m` reads `snapshots_5m.jsonl`).
+        /// For Orca prepared windows, this also selects cache under `data/backtest-snapshot-cache/orca_<suffix>/`.
+        #[arg(long)]
+        snapshot_jsonl_suffix: Option<String>,
+
         /// For local `decoded_swaps.jsonl` fee index: `ok` = strict swap rows only; `loose` = legacy filter (success + amount_in_raw).
         #[arg(long, value_enum, default_value_t = FeeSwapDecodeStatusArg::Ok)]
         fee_swap_decode_status: FeeSwapDecodeStatusArg,
@@ -451,6 +484,15 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = PricePathSourceArg::Birdeye)]
         price_path_source: PricePathSourceArg,
 
+        /// Use pre-sliced Orca JSONL from `snapshot-backtest-prep` (same as `backtest`). Orca only.
+        #[arg(long, value_name = "LABEL")]
+        prepared_snapshot_window: Option<String>,
+
+        /// Optional snapshot JSONL suffix to read (e.g. `5m` reads `snapshots_5m.jsonl`).
+        /// For Orca prepared windows, this also selects cache under `data/backtest-snapshot-cache/orca_<suffix>/`.
+        #[arg(long)]
+        snapshot_jsonl_suffix: Option<String>,
+
         /// RetouchShift hybrid: min seconds between consecutive retouches (anti-spam). Default 300 s so the 0.3% branch can fire before the 1 h rearm window.
         #[arg(long, default_value_t = 300)]
         retouch_repeat_cooldown_secs: u64,
@@ -554,6 +596,13 @@ enum Commands {
         #[arg(long)]
         pool_address: String,
     },
+    /// Read Orca Whirlpool live state from mainnet RPC (tick, price B/A, liquidity, mints).
+    /// Uses `SOLANA_RPC_URL` / fallbacks like other RPC commands (`RpcProvider::mainnet()`).
+    OrcaPoolRead {
+        /// Whirlpool pool address
+        #[arg(long)]
+        pool_address: String,
+    },
     /// Find DefiLlama yield pools (discovery helper)
     DefiLlamaFindPools {
         /// Search string (matched against symbol + project)
@@ -601,6 +650,24 @@ enum Commands {
         /// Optional: stop after N pools per protocol (useful for testing)
         #[arg(long)]
         limit: Option<usize>,
+        /// Optional snapshot output suffix (e.g. `5m` writes `snapshots_5m.jsonl` instead of `snapshots.jsonl`).
+        #[arg(long)]
+        snapshots_suffix: Option<String>,
+    },
+    /// Pre-slice Orca `snapshots.jsonl` into rolling windows under `data/backtest-snapshot-cache/` for fast `backtest`/`backtest-optimize` (`--prepared-snapshot-window`).
+    SnapshotBacktestPrep {
+        /// Comma-separated Orca pool addresses (default: SOL/USDC + whETH/SOL from curated list).
+        #[arg(long, value_delimiter = ',')]
+        pools: Option<Vec<String>>,
+        /// Comma-separated hour windows (wall-clock at prep time). Default: 24,48,96
+        #[arg(long, default_value = "24,48,96")]
+        windows_hours: String,
+        /// Comma-separated day windows. Default: 7,30
+        #[arg(long, default_value = "7,30")]
+        windows_days: String,
+        /// Optional snapshot source suffix (e.g. `5m` uses `snapshots_5m.jsonl` and writes cache under `orca_5m/`).
+        #[arg(long)]
+        snapshots_suffix: Option<String>,
     },
     /// Sync raw on-chain transaction stream for curated pools (P1 swaps MVP).
     SwapsSyncCuratedAll {
@@ -867,6 +934,9 @@ enum Commands {
         /// Print ticks + position PDA only (no transaction).
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// Open a **full-range** position (Splash-style); mutually exclusive with tick/range options.
+        #[arg(long, default_value_t = false)]
+        full_range: bool,
         /// Lower tick (must align to pool `tick_spacing`; use with `--tick-upper`).
         #[arg(long)]
         tick_lower: Option<i32>,
@@ -942,6 +1012,9 @@ enum Commands {
         /// Seconds to wait between open and close.
         #[arg(long, default_value_t = 10)]
         sleep_secs: u64,
+        /// Open full-range (Splash-style); mutually exclusive with tick/range options.
+        #[arg(long, default_value_t = false)]
+        full_range: bool,
         /// Lower tick (must align to pool `tick_spacing`; use with `--tick-upper`).
         #[arg(long)]
         tick_lower: Option<i32>,
@@ -960,6 +1033,21 @@ enum Commands {
         /// Max slippage in basis points for open tx.
         #[arg(long, default_value_t = 50)]
         slippage_bps: u16,
+    },
+    /// List Whirlpool positions for a wallet (`fetch_positions_for_owner`).
+    OrcaPositionsList {
+        /// Owner pubkey (base58). If omitted, uses signing key from `--keypair` / env.
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        keypair: Option<std::path::PathBuf>,
+    },
+    /// Resolve Orca Splash pool for two token mints (`fetch_splash_pool`).
+    OrcaSplashPool {
+        #[arg(long)]
+        mint_a: String,
+        #[arg(long)]
+        mint_b: String,
     },
     /// Swap tokens on an Orca Whirlpool (ExactIn/ExactOut). Useful on devnet to obtain dev tokens.
     OrcaSwap {
@@ -1185,6 +1273,8 @@ async fn main() -> Result<()> {
             snapshot_pool_address,
             resolution_seconds,
             price_path_source,
+            prepared_snapshot_window,
+            snapshot_jsonl_suffix,
             fee_swap_decode_status,
         } => {
             println!("đź“ˇ Initializing Backtest Engine...");
@@ -1248,15 +1338,8 @@ async fn main() -> Result<()> {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let (start_time, end_time, display_label) =
                 if let (Some(sd), Some(ed)) = (start_date.as_deref(), end_date.as_deref()) {
-                    use chrono::{NaiveDate, TimeZone, Utc};
-                    let s = NaiveDate::parse_from_str(sd, "%Y-%m-%d")?;
-                    let e = NaiveDate::parse_from_str(ed, "%Y-%m-%d")?;
-                    let s_ts = Utc
-                        .from_utc_datetime(&s.and_hms_opt(0, 0, 0).unwrap())
-                        .timestamp() as u64;
-                    let e_ts = Utc
-                        .from_utc_datetime(&e.and_hms_opt(0, 0, 0).unwrap())
-                        .timestamp() as u64;
+                    let s_ts = parse_utc_datetime_or_date(sd)? as u64;
+                    let e_ts = parse_utc_datetime_or_date(ed)? as u64;
                     (s_ts, e_ts, format!("{}..{}", sd, ed))
                 } else if let Some(h) = hours {
                     let s_ts = now.saturating_sub(h.saturating_mul(3600));
@@ -1290,6 +1373,51 @@ async fn main() -> Result<()> {
                 .and_then(Decimal::from_f64)
                 .filter(|s| *s > Decimal::ZERO && *s <= Decimal::ONE);
 
+            let snapshot_suffix_clean: Option<&str> = snapshot_jsonl_suffix
+                .as_deref()
+                .map(|s| s.trim().trim_start_matches('_'))
+                .filter(|s| !s.is_empty());
+
+            let orca_snapshot_jsonl_override: Option<std::path::PathBuf> =
+                if let Some(label) = prepared_snapshot_window.as_ref() {
+                    if !snapshots_only {
+                        anyhow::bail!(
+                            "--prepared-snapshot-window requires --price-path-source snapshots"
+                        );
+                    }
+                    if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                        anyhow::bail!(
+                            "--prepared-snapshot-window is only supported for --snapshot-protocol orca"
+                        );
+                    }
+                    let pool = snapshot_pool_address.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--prepared-snapshot-window requires --snapshot-pool-address"
+                        )
+                    })?;
+                    let p = crate::commands::snapshot_backtest_prep::orca_prepared_jsonl_path_with_suffix(
+                        pool,
+                        label,
+                        snapshot_suffix_clean,
+                    );
+                    if !p.exists() {
+                        anyhow::bail!(
+                            "Prepared snapshot file missing: {}. Run: cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep",
+                            p.display()
+                        );
+                    }
+                    println!("Using prepared snapshot cache: {}", p.display());
+                    Some(p)
+                } else {
+                    snapshot_suffix_clean.map(|s| {
+                        std::path::Path::new("data")
+                            .join("pool-snapshots")
+                            .join("orca")
+                            .join(snapshot_pool_address.as_ref().unwrap())
+                            .join(format!("snapshots_{}.jsonl", s))
+                    })
+                };
+
             let mut step_data: Vec<crate::backtest_engine::StepDataPoint> = if snapshots_only {
                 println!(
                     "đź”Ť Price path from Orca snapshots only (window {}): {}/{} â€” no Birdeye",
@@ -1300,6 +1428,7 @@ async fn main() -> Result<()> {
                 let pool = snapshot_pool_address.as_ref().unwrap();
                 let prep = crate::commands::snapshot_price_path::build_from_orca_snapshots(
                     pool,
+                    orca_snapshot_jsonl_override.as_deref(),
                     start_time as i64,
                     end_time as i64,
                     &token_a,
@@ -1313,11 +1442,26 @@ async fn main() -> Result<()> {
                     println!("âťŚ No snapshot rows in the requested time window.");
                     return Ok(());
                 }
-                println!(
-                    "âś… Loaded {} snapshot steps from data/pool-snapshots/orca/{}/snapshots.jsonl",
-                    prep.step_data.len(),
-                    pool
-                );
+                if let Some(ref p) = orca_snapshot_jsonl_override {
+                    println!(
+                        "âś… Loaded {} snapshot steps from prepared file {}",
+                        prep.step_data.len(),
+                        p.display()
+                    );
+                } else if let Some(s) = snapshot_suffix_clean {
+                    println!(
+                        "âś… Loaded {} snapshot steps from data/pool-snapshots/orca/{}/snapshots_{}.jsonl",
+                        prep.step_data.len(),
+                        pool,
+                        s
+                    );
+                } else {
+                    println!(
+                        "âś… Loaded {} snapshot steps from data/pool-snapshots/orca/{}/snapshots.jsonl",
+                        prep.step_data.len(),
+                        pool
+                    );
+                }
                 prep.step_data
             } else {
                 if use_cross_pair {
@@ -1950,6 +2094,32 @@ async fn main() -> Result<()> {
                                     }
                                 }
 
+                                // Debug aid for mapping snapshot-fee deltas -> Birdeye candle buckets
+                                // (use env var CLMM_SNAPSHOT_FEE_DEBUG=1).
+                                let fee_debug = std::env::var("CLMM_SNAPSHOT_FEE_DEBUG")
+                                    .ok()
+                                    .and_then(|s| s.parse::<u32>().ok())
+                                    .unwrap_or(0);
+                                if fee_debug > 0 {
+                                    let pts_min_ts = pts.first().map(|p| p.ts).unwrap_or(0);
+                                    let pts_max_ts = pts.last().map(|p| p.ts).unwrap_or(0);
+                                    let step0_ts =
+                                        step_data.first().map(|s| s.start_timestamp).unwrap_or(0);
+                                    let map_min_idx = map.keys().next().copied().unwrap_or(0);
+                                    let map_max_idx = map.keys().next_back().copied().unwrap_or(0);
+                                    println!(
+                                        "📌 snapshot-fee mapping debug: step0_start_ts={} resolution_seconds={} pts_ts=[{},{}] bucket_idx=[{},{}] bucket_values={} snap_path={}",
+                                        step0_ts,
+                                        step_seconds,
+                                        pts_min_ts,
+                                        pts_max_ts,
+                                        map_min_idx,
+                                        map_max_idx,
+                                        map.len(),
+                                        snap_path.display()
+                                    );
+                                }
+
                                 if map.is_empty() {
                                     println!(
                                         "âš ď¸Ź Snapshot fee deltas found in {}, but could not convert to USD for this pair. Falling back to candle/swap fees.",
@@ -2222,10 +2392,18 @@ async fn main() -> Result<()> {
                     let snapshot_pool_fees: Decimal = idx_map.values().cloned().sum();
                     let candle_pool_fees: Decimal =
                         step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
-                    if candle_pool_fees > Decimal::ZERO {
-                        let ratio = snapshot_pool_fees / candle_pool_fees;
-                        let max_ratio = Decimal::from(10u32);
-                        if ratio > max_ratio {
+                        if candle_pool_fees > Decimal::ZERO {
+                            let ratio = snapshot_pool_fees / candle_pool_fees;
+                            // Guardrail is useful for production defaults, but when comparing
+                            // snapshot-fee index vs Birdeye volume without Dune scaling,
+                            // `step_volume_usd` may be in a different unit scale.
+                            // Allow override for experiments/debug runs.
+                            let max_ratio = std::env::var("CLMM_SNAPSHOT_FEE_SANITY_MAX_RATIO")
+                                .ok()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .and_then(Decimal::from_f64)
+                                .unwrap_or_else(|| Decimal::from(10u32));
+                            if ratio > max_ratio {
                             println!(
                                 "âš ď¸Ź Snapshot fee sanity check failed: snapshot pool fees {:.2} vs candle baseline {:.2} (ratio {:.2}x > {:.2}x). Falling back from snapshot fees.",
                                 snapshot_pool_fees, candle_pool_fees, ratio, max_ratio
@@ -2273,7 +2451,8 @@ async fn main() -> Result<()> {
                             quote_usd: Decimal::ONE,
                             lp_share: lp_share_override
                                 .unwrap_or_else(|| Decimal::from_f64(0.01).unwrap()),
-                            pool_liquidity_active: None,
+                            liquidity_active_raw: None,
+                            tick_current: None,
                             start_timestamp: step_data
                                 .get(idx)
                                 .map(|p| p.start_timestamp)
@@ -2287,9 +2466,8 @@ async fn main() -> Result<()> {
 
                 let step_lp_share = if let Some(share) = lp_share_override {
                     share
-                } else if p.pool_liquidity_active.is_some() || pool_active_liquidity.is_some() {
-                    // Range-aware LP share: narrower/wider ranges change position liquidity,
-                    // which changes effective fee share even when TIR is 100%.
+                } else if pool_active_liquidity.is_some() {
+                    // Range-aware LP share vs pool active liquidity (constant pool L for the run).
                     let lower_usd = tracker.current_range.lower_price.value * p.quote_usd;
                     let upper_usd = tracker.current_range.upper_price.value * p.quote_usd;
                     let capital_now = tracker
@@ -2312,11 +2490,8 @@ async fn main() -> Result<()> {
                             },
                         );
                     let pos_l_dec = Decimal::from_u128(pos_l).unwrap_or(Decimal::ZERO);
-                    let pool_l_dec_opt = p
-                        .pool_liquidity_active
+                    let pool_l_dec = pool_active_liquidity
                         .filter(|v| *v > 0)
-                        .or(pool_active_liquidity.filter(|v| *v > 0));
-                    let pool_l_dec = pool_l_dec_opt
                         .map(|v| Decimal::from_u128(v).unwrap_or(Decimal::ONE))
                         .unwrap_or(Decimal::ONE);
                     if pool_l_dec > Decimal::ZERO {
@@ -2559,6 +2734,8 @@ async fn main() -> Result<()> {
             snapshot_pool_address,
             fee_swap_decode_status,
             price_path_source,
+            prepared_snapshot_window,
+            snapshot_jsonl_suffix,
             retouch_repeat_cooldown_secs,
             retouch_repeat_rearm_secs,
             retouch_repeat_extra_move_pct,
@@ -2566,6 +2743,18 @@ async fn main() -> Result<()> {
             optimize_result_json,
             optimize_result_json_copy_dir,
         } => {
+            use std::collections::BTreeMap;
+            let _ = (
+                use_realistic_rebalance_cost,
+                network_fee_usd,
+                priority_fee_usd,
+                jito_tip_usd,
+                slippage_bps,
+                retouch_repeat_off,
+                retouch_repeat_cooldown_secs,
+                retouch_repeat_rearm_secs,
+                retouch_repeat_extra_move_pct,
+            );
             // TODO(E2.6): wire these calibration params into optimize path as well.
             let _ = (range_share_k, range_share_cap_mult);
             let (token_a_decimals_guess, token_b_decimals_guess): (u8, u8) = {
@@ -2633,15 +2822,8 @@ async fn main() -> Result<()> {
 
             let (start_time, end_time, display_label) = if snapshots_only {
                 if let (Some(sd), Some(ed)) = (start_date.as_deref(), end_date.as_deref()) {
-                    use chrono::{NaiveDate, TimeZone, Utc};
-                    let s = NaiveDate::parse_from_str(sd, "%Y-%m-%d")?;
-                    let e = NaiveDate::parse_from_str(ed, "%Y-%m-%d")?;
-                    let s_ts = Utc
-                        .from_utc_datetime(&s.and_hms_opt(0, 0, 0).unwrap())
-                        .timestamp() as u64;
-                    let e_ts = Utc
-                        .from_utc_datetime(&e.and_hms_opt(0, 0, 0).unwrap())
-                        .timestamp() as u64;
+                    let s_ts = parse_utc_datetime_or_date(sd)? as u64;
+                    let e_ts = parse_utc_datetime_or_date(ed)? as u64;
                     (s_ts, e_ts, format!("{}..{}", sd, ed))
                 } else {
                     // Same total span as Birdeye path: `hours` or `days` per rolling window, times `windows`.
@@ -2673,6 +2855,11 @@ async fn main() -> Result<()> {
             let mut candles: Vec<clmm_lp_domain::entities::price_candle::PriceCandle> = Vec::new();
             let mut snapshot_step_data_full: Option<Vec<crate::backtest_engine::StepData>> = None;
             let mut snapshot_fee_index_full: Option<BTreeMap<usize, Decimal>> = None;
+
+            let snapshot_suffix_clean: Option<&str> = snapshot_jsonl_suffix
+                .as_deref()
+                .map(|s| s.trim().trim_start_matches('_'))
+                .filter(|s| !s.is_empty());
 
             let quote_usd_map: Option<HashMap<u64, Decimal>> = if snapshots_only {
                 None
@@ -2729,6 +2916,40 @@ async fn main() -> Result<()> {
                 }
             };
 
+            let orca_snapshot_jsonl_override: Option<std::path::PathBuf> =
+                if let Some(label) = prepared_snapshot_window.as_ref() {
+                    if !snapshots_only {
+                        anyhow::bail!(
+                            "--prepared-snapshot-window requires --price-path-source snapshots"
+                        );
+                    }
+                    if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                        anyhow::bail!(
+                            "--prepared-snapshot-window is only supported for --snapshot-protocol orca"
+                        );
+                    }
+                    let pool = snapshot_pool_address.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--prepared-snapshot-window requires --snapshot-pool-address"
+                        )
+                    })?;
+                    let p = crate::commands::snapshot_backtest_prep::orca_prepared_jsonl_path_with_suffix(
+                        pool,
+                        label,
+                        snapshot_suffix_clean,
+                    );
+                    if !p.exists() {
+                        anyhow::bail!(
+                            "Prepared snapshot file missing: {}. Run: cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep",
+                            p.display()
+                        );
+                    }
+                    println!("Using prepared snapshot cache: {}", p.display());
+                    Some(p)
+                } else {
+                    None
+                };
+
             if snapshots_only {
                 println!(
                     "đź”Ť backtest-optimize: price path from snapshots only (window {}): {}/{} â€” no Birdeye",
@@ -2739,8 +2960,18 @@ async fn main() -> Result<()> {
                 let pool = snapshot_pool_address.as_ref().unwrap();
                 let prep = match snapshot_protocol.unwrap() {
                     SnapshotProtocolArg::Orca => {
+                        let raw_override: Option<std::path::PathBuf> = snapshot_suffix_clean.map(|s| {
+                            std::path::Path::new("data")
+                                .join("pool-snapshots")
+                                .join("orca")
+                                .join(pool)
+                                .join(format!("snapshots_{}.jsonl", s))
+                        });
                         crate::commands::snapshot_price_path::build_from_orca_snapshots(
                             pool,
+                            orca_snapshot_jsonl_override
+                                .as_deref()
+                                .or(raw_override.as_deref()),
                             start_time as i64,
                             end_time as i64,
                             &token_a,
@@ -2751,8 +2982,16 @@ async fn main() -> Result<()> {
                         .await?
                     }
                     SnapshotProtocolArg::Raydium => {
+                        let raw_override: Option<std::path::PathBuf> = snapshot_suffix_clean.map(|s| {
+                            std::path::Path::new("data")
+                                .join("pool-snapshots")
+                                .join("raydium")
+                                .join(pool)
+                                .join(format!("snapshots_{}.jsonl", s))
+                        });
                         crate::commands::snapshot_price_path::build_from_raydium_snapshots(
                             pool,
+                            raw_override.as_deref(),
                             start_time as i64,
                             end_time as i64,
                             &token_a,
@@ -2763,8 +3002,16 @@ async fn main() -> Result<()> {
                         .await?
                     }
                     SnapshotProtocolArg::Meteora => {
+                        let raw_override: Option<std::path::PathBuf> = snapshot_suffix_clean.map(|s| {
+                            std::path::Path::new("data")
+                                .join("pool-snapshots")
+                                .join("meteora")
+                                .join(pool)
+                                .join(format!("snapshots_{}.jsonl", s))
+                        });
                         crate::commands::snapshot_price_path::build_from_meteora_snapshots(
                             pool,
+                            raw_override.as_deref(),
                             start_time as i64,
                             end_time as i64,
                             &token_a,
@@ -2784,12 +3031,20 @@ async fn main() -> Result<()> {
                     SnapshotProtocolArg::Raydium => "raydium",
                     SnapshotProtocolArg::Meteora => "meteora",
                 };
-                println!(
-                    "âś… Loaded {} snapshot steps from data/pool-snapshots/{}/{}/snapshots.jsonl",
-                    prep.step_data.len(),
-                    protocol_dir,
-                    pool
-                );
+                if let Some(ref p) = orca_snapshot_jsonl_override {
+                    println!(
+                        "âś… Loaded {} snapshot steps from prepared file {}",
+                        prep.step_data.len(),
+                        p.display()
+                    );
+                } else {
+                    println!(
+                        "âś… Loaded {} snapshot steps from data/pool-snapshots/{}/{}/snapshots.jsonl",
+                        prep.step_data.len(),
+                        protocol_dir,
+                        pool
+                    );
+                }
                 snapshot_fee_index_full = prep.per_step_fees_usd;
                 snapshot_step_data_full = Some(prep.step_data);
             }
@@ -2832,10 +3087,9 @@ async fn main() -> Result<()> {
                         Some(SnapshotProtocolArg::Raydium) | Some(SnapshotProtocolArg::Meteora)
                     )
                 {
-                    let liq = snapshot_step_data_full
-                        .as_ref()
-                        .and_then(|sd| sd.first())
-                        .and_then(|p| p.pool_liquidity_active);
+                    // Per-step pool active L was removed from `StepDataPoint`; use on-chain fetch for Orca
+                    // or leave unset for snapshot-only Raydium/Meteora (legacy LP share model).
+                    let liq = None;
                     (
                         liq,
                         None,
@@ -2919,12 +3173,7 @@ async fn main() -> Result<()> {
             let swaps_ref: Option<&[clmm_lp_data::swaps::SwapEvent]> = swaps.as_deref();
             let require_decode_ok = matches!(*fee_swap_decode_status, FeeSwapDecodeStatusArg::Ok);
 
-            use backtest_engine::{
-                GridRunParams, PeriodicTimeBasis, RetouchRepeatConfig, StratConfig,
-                build_step_data, fee_realism, run_grid,
-            };
-            use std::collections::BTreeMap;
-            use std::sync::Arc;
+            use backtest_engine::{StratConfig, build_step_data, fee_realism, run_grid};
 
             let series_len = if snapshots_only {
                 snapshot_step_data_full
@@ -2959,41 +3208,6 @@ async fn main() -> Result<()> {
                     .collect()
             };
             let tx_cost_dec = Decimal::from_f64(*tx_cost).unwrap();
-            let rebalance_cost_model = if *use_realistic_rebalance_cost {
-                let fixed = Decimal::from_f64(
-                    *tx_cost + *network_fee_usd + *priority_fee_usd + *jito_tip_usd,
-                )
-                .unwrap();
-                let slippage = Decimal::from_f64(*slippage_bps).unwrap();
-                Some(backtest_engine::RebalanceCostModel {
-                    fixed_cost_usd: fixed,
-                    slippage_bps: slippage,
-                })
-            } else {
-                None
-            };
-            let retouch_repeat = if *retouch_repeat_off {
-                None
-            } else {
-                Some(RetouchRepeatConfig {
-                    cooldown_secs: *retouch_repeat_cooldown_secs,
-                    rearm_after_secs: *retouch_repeat_rearm_secs,
-                    extra_move_pct: *retouch_repeat_extra_move_pct,
-                })
-            };
-            let grid_params = GridRunParams {
-                capital_dec,
-                tx_cost_dec,
-                rebalance_cost_model,
-                fee_rate,
-                pool_active_liquidity,
-                token_a_decimals: token_a_decimals as u32,
-                token_b_decimals: token_b_decimals as u32,
-                step_seconds: res as i64,
-                periodic_time_basis: PeriodicTimeBasis::WallClockSeconds,
-                retouch_repeat,
-                use_liquidity_share: lp_share_override.is_none(),
-            };
 
             let score_fn = |s: &TrackerSummary| -> Decimal {
                 match objective {
@@ -3016,6 +3230,14 @@ async fn main() -> Result<()> {
                     }
                 }
             };
+
+            let prefer_snapshot_fee_idx = snapshots_only
+                && (matches!(fee_source, FeeSourceArg::Snapshots)
+                    || (matches!(fee_source, FeeSourceArg::Auto)
+                        && snapshot_fee_index_full
+                            .as_ref()
+                            .map(|m| !m.is_empty())
+                            .unwrap_or(false)));
 
             #[allow(clippy::type_complexity)]
             let (mut results, fee_check_vol, fee_check_expected_100, audit_step_data): (Vec<OptimizeGridRow>, Decimal, Decimal, Option<Vec<backtest_engine::StepData>>) = if *windows <= 1 {
@@ -3118,7 +3340,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                let local_pool_fees_arc: Option<Arc<BTreeMap<usize, Decimal>>> = {
+                {
                     let use_snapshot_fees = matches!(fee_source, FeeSourceArg::Snapshots)
                         || (matches!(fee_source, FeeSourceArg::Auto)
                             && snapshots_only
@@ -3133,61 +3355,60 @@ async fn main() -> Result<()> {
                                     "🧪 backtest-optimize: snapshot pool fees from snapshots index ({} step buckets).",
                                     m.len()
                                 );
-                                Some(Arc::new(m.clone()))
                             }
                             _ => {
                                 println!(
                                     "⚠️ backtest-optimize: snapshot fee index unavailable/empty; fees may fall back to candles."
                                 );
-                                None
                             }
                         }
                     } else {
                         let use_local =
                             dune_swaps.is_none() || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
-                        if !use_local {
-                            None
-                        } else if let (Some(proto), Some(pool)) = (
-                            snapshot_protocol.as_ref(),
-                            snapshot_pool_address
-                                .as_deref()
-                                .or(whirlpool_address.as_deref()),
-                        ) {
-                            let pdir = match proto {
-                                SnapshotProtocolArg::Orca => "orca",
-                                SnapshotProtocolArg::Raydium => "raydium",
-                                SnapshotProtocolArg::Meteora => "meteora",
-                            };
-                            match crate::local_swap_fees::build_local_pool_fees_usd(
-                                pdir,
-                                pool,
-                                &step_data,
-                                res,
-                                token_a_decimals,
-                                token_b_decimals,
-                                fee_rate,
-                                require_decode_ok,
+                        if use_local {
+                            if let (Some(proto), Some(pool)) = (
+                                snapshot_protocol.as_ref(),
+                                snapshot_pool_address
+                                    .as_deref()
+                                    .or(whirlpool_address.as_deref()),
                             ) {
-                                Some(m) if !m.is_empty() => {
-                                    println!(
-                                        "🧪 backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
-                                        pdir,
-                                        m.len()
-                                    );
-                                    Some(Arc::new(m))
+                                let pdir = match proto {
+                                    SnapshotProtocolArg::Orca => "orca",
+                                    SnapshotProtocolArg::Raydium => "raydium",
+                                    SnapshotProtocolArg::Meteora => "meteora",
+                                };
+                                if let Some(m) = crate::local_swap_fees::build_local_pool_fees_usd(
+                                    pdir,
+                                    pool,
+                                    &step_data,
+                                    res,
+                                    token_a_decimals,
+                                    token_b_decimals,
+                                    fee_rate,
+                                    require_decode_ok,
+                                ) {
+                                    if !m.is_empty() {
+                                        println!(
+                                            "🧪 backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
+                                            pdir,
+                                            m.len()
+                                        );
+                                    }
                                 }
-                                _ => None,
-                            }
-                        } else {
-                            if dune_swaps.is_none() {
+                            } else if dune_swaps.is_none() {
                                 println!(
                                     "ℹ️ backtest-optimize: no Dune swaps; set --snapshot-protocol and --snapshot-pool-address (or --whirlpool-address) to use local data/swaps fees."
                                 );
                             }
-                            None
                         }
                     }
-                };
+                }
+                let snapshot_fees_for_grid: Option<BTreeMap<usize, Decimal>> =
+                    if prefer_snapshot_fee_idx {
+                        snapshot_fee_index_full.clone()
+                    } else {
+                        None
+                    };
                 let (fv, fe100) = fee_realism(&step_data, fee_rate);
                 let rows = run_grid(
                     &step_data,
@@ -3195,9 +3416,14 @@ async fn main() -> Result<()> {
                     center,
                     &width_pcts,
                     &strategies,
-                    &grid_params,
+                    capital_dec,
+                    tx_cost_dec,
+                    fee_rate,
+                    pool_active_liquidity,
+                    token_a_decimals as u32,
+                    token_b_decimals as u32,
                     swaps_ref,
-                    local_pool_fees_arc,
+                    snapshot_fees_for_grid,
                 );
                 let mut r: Vec<_> = rows
                     .into_iter()
@@ -3331,75 +3557,39 @@ async fn main() -> Result<()> {
                         fee_check_expected_100 = fe100;
                         audit_step_data = Some(step_data.clone());
                     }
-                    let local_pool_fees_arc: Option<Arc<BTreeMap<usize, Decimal>>> = {
-                        let use_snapshot_fees = matches!(fee_source, FeeSourceArg::Snapshots)
-                            || (matches!(fee_source, FeeSourceArg::Auto)
-                                && snapshots_only
-                                && snapshot_fee_index_full
-                                    .as_ref()
-                                    .map(|m| !m.is_empty())
-                                    .unwrap_or(false));
-                        if use_snapshot_fees {
-                            if let Some(full) = snapshot_fee_index_full.as_ref() {
-                                let mut win_map: BTreeMap<usize, Decimal> = BTreeMap::new();
-                                let win_start = range.start;
-                                let win_end = range.end;
-                                for (idx, v) in full.iter() {
-                                    if *idx >= win_start && *idx < win_end {
-                                        win_map.insert(*idx - win_start, *v);
+                    let window_snapshot_fees: Option<BTreeMap<usize, Decimal>> =
+                        if prefer_snapshot_fee_idx {
+                            snapshot_fee_index_full.as_ref().and_then(|full| {
+                                let mut m = BTreeMap::new();
+                                let s = range.start;
+                                for (g, fee) in full.iter() {
+                                    if *g >= range.start && *g < range.end {
+                                        m.insert(*g - s, *fee);
                                     }
                                 }
-                                if !win_map.is_empty() {
-                                    Some(Arc::new(win_map))
-                                } else {
+                                if m.is_empty() {
                                     None
+                                } else {
+                                    Some(m)
                                 }
-                            } else {
-                                None
-                            }
+                            })
                         } else {
-                            let use_local = dune_swaps.is_none()
-                                || swaps_ref.map(|s| s.is_empty()).unwrap_or(true);
-                            if !use_local {
-                                None
-                            } else if let (Some(proto), Some(pool)) = (
-                                snapshot_protocol.as_ref(),
-                                snapshot_pool_address
-                                    .as_deref()
-                                    .or(whirlpool_address.as_deref()),
-                            ) {
-                                let pdir = match proto {
-                                    SnapshotProtocolArg::Orca => "orca",
-                                    SnapshotProtocolArg::Raydium => "raydium",
-                                    SnapshotProtocolArg::Meteora => "meteora",
-                                };
-                                match crate::local_swap_fees::build_local_pool_fees_usd(
-                                    pdir,
-                                    pool,
-                                    &step_data,
-                                    res,
-                                    token_a_decimals,
-                                    token_b_decimals,
-                                    fee_rate,
-                                    require_decode_ok,
-                                ) {
-                                    Some(m) if !m.is_empty() => Some(Arc::new(m)),
-                                    _ => None,
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                    };
+                            None
+                        };
                     let rows = run_grid(
                         &step_data,
                         entry_price,
                         center,
                         &width_pcts,
                         &strategies,
-                        &grid_params,
+                        capital_dec,
+                        tx_cost_dec,
+                        fee_rate,
+                        pool_active_liquidity,
+                        token_a_decimals as u32,
+                        token_b_decimals as u32,
                         swaps_ref,
-                        local_pool_fees_arc,
+                        window_snapshot_fees,
                     );
                     for (wp_frac, lower, upper, strat_name, summary) in rows {
                         let key = (format!("{:.6}", wp_frac), strat_name.clone());
@@ -3583,7 +3773,7 @@ async fn main() -> Result<()> {
                     best.3.as_str(),
                     &best.4,
                     best.5,
-                    retouch_repeat,
+                    None,
                 )?;
                 crate::output::optimize_result_json::write_optimize_result_json(out_path, &file)?;
                 println!("Optimize result JSON written to {}", out_path.display());
@@ -4038,7 +4228,7 @@ async fn main() -> Result<()> {
                 "đź“ˇ Fetching Dune swaps (query {}) and saving to cache...",
                 query_id
             );
-            let swaps = dune.fetch_swaps_force(&query_id).await?;
+            let swaps = dune.fetch_swaps(&query_id).await?;
             let path = std::path::Path::new("data")
                 .join("dune-cache")
                 .join(format!("{}.json", query_id));
@@ -4101,6 +4291,36 @@ async fn main() -> Result<()> {
                 eff_pct
             );
         }
+        Commands::OrcaPoolRead { pool_address } => {
+            let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+            let reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc);
+            let state = reader.get_pool_state(pool_address.trim()).await?;
+
+            let base_fee = state.fee_rate();
+            let proto = Decimal::from(state.protocol_fee_rate_bps) / Decimal::from(10_000);
+            let eff = clmm_lp_domain::prelude::calculate_effective_fee_rate(base_fee, proto);
+            let base_pct = base_fee.to_f64().unwrap_or(0.0) * 100.0;
+            let proto_pct = proto.to_f64().unwrap_or(0.0) * 100.0;
+            let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
+
+            println!("Orca Whirlpool (mainnet RPC read): {}", pool_address.trim());
+            println!("  tick_current: {}", state.tick_current);
+            println!("  tick_spacing: {}", state.tick_spacing);
+            println!("  sqrt_price_x64: {}", state.sqrt_price);
+            println!(
+                "  price_token_b_per_token_a: {}  (raw ratio from sqrt; not USD)",
+                state.price
+            );
+            println!("  liquidity: {}", state.liquidity);
+            println!("  token_mint_a: {}", state.token_mint_a);
+            println!("  token_mint_b: {}", state.token_mint_b);
+            println!("  token_vault_a: {}", state.token_vault_a);
+            println!("  token_vault_b: {}", state.token_vault_b);
+            println!(
+                "  fees: base {:.4}%  protocol_cut {:.2}% of fees  effective_LP {:.4}%",
+                base_pct, proto_pct, eff_pct
+            );
+        }
         Commands::DefiLlamaFindPools {
             query,
             chain,
@@ -4161,7 +4381,10 @@ async fn main() -> Result<()> {
         Commands::MeteoraSnapshotCurated { limit } => {
             snapshots::collector::meteora_snapshot_curated(*limit).await?
         }
-        Commands::SnapshotRunCuratedAll { limit } => {
+        Commands::SnapshotRunCuratedAll {
+            limit,
+            snapshots_suffix,
+        } => {
             use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
             use clmm_lp_domain::prelude::calculate_effective_fee_rate;
             use rust_decimal::prelude::ToPrimitive;
@@ -4204,6 +4427,21 @@ async fn main() -> Result<()> {
                     e
                 )
             })?;
+
+            let snapshots_suffix_clean: Option<&str> = snapshots_suffix
+                .as_deref()
+                .map(|s| s.trim().trim_start_matches('_'))
+                .filter(|s| !s.is_empty());
+
+            let snapshot_jsonl_name = match snapshots_suffix_clean {
+                Some(s) => format!("snapshots_{}.jsonl", s),
+                None => "snapshots.jsonl".to_string(),
+            };
+
+            let status_jsonl_name = match snapshots_suffix_clean {
+                Some(s) => format!("snapshot-run-curated-all_{}.jsonl", s),
+                None => "snapshot-run-curated-all.jsonl".to_string(),
+            };
 
             let is_solana_pubkey = |s: &str| {
                 if s.len() < 32 || s.len() > 44 {
@@ -4431,7 +4669,7 @@ async fn main() -> Result<()> {
                     dir.push(&pool_address);
                     std::fs::create_dir_all(&dir)?;
                     let mut path = dir;
-                    path.push("snapshots.jsonl");
+                    path.push(snapshot_jsonl_name.as_str());
 
                     let line = serde_json::to_string(&snap)?;
                     let mut f = std::fs::OpenOptions::new()
@@ -4591,7 +4829,7 @@ async fn main() -> Result<()> {
                     dir.push(&pool_address);
                     std::fs::create_dir_all(&dir)?;
                     let mut path = dir;
-                    path.push("snapshots.jsonl");
+                    path.push(snapshot_jsonl_name.as_str());
 
                     let line = serde_json::to_string(&snap)?;
                     let mut f = std::fs::OpenOptions::new()
@@ -4725,7 +4963,7 @@ async fn main() -> Result<()> {
                     dir.push(&pool_address);
                     std::fs::create_dir_all(&dir)?;
                     let mut path = dir;
-                    path.push("snapshots.jsonl");
+                    path.push(snapshot_jsonl_name.as_str());
 
                     let line = serde_json::to_string(&snap)?;
                     let mut f = std::fs::OpenOptions::new()
@@ -4781,7 +5019,7 @@ async fn main() -> Result<()> {
             status_dir.push("snapshot_logs");
             std::fs::create_dir_all(&status_dir)?;
             let mut status_path = status_dir;
-            status_path.push("snapshot-run-curated-all.jsonl");
+            status_path.push(status_jsonl_name.as_str());
             let status_line = serde_json::to_string(&status)?;
             let mut sf = std::fs::OpenOptions::new()
                 .create(true)
@@ -4802,6 +5040,19 @@ async fn main() -> Result<()> {
                 status.errors.len()
             );
             println!("đź“ť Run status appended: {}", status_path.display());
+        }
+        Commands::SnapshotBacktestPrep {
+            pools,
+            windows_hours,
+            windows_days,
+            snapshots_suffix,
+        } => {
+            crate::commands::snapshot_backtest_prep::run_snapshot_backtest_prep(
+                pools.clone(),
+                windows_hours,
+                windows_days,
+                snapshots_suffix.as_deref(),
+            )?;
         }
         Commands::SwapsSyncCuratedAll {
             limit,
@@ -5157,6 +5408,7 @@ async fn main() -> Result<()> {
             pool,
             keypair,
             dry_run,
+            full_range,
             tick_lower,
             tick_upper,
             range_width_pct,
@@ -5172,6 +5424,7 @@ async fn main() -> Result<()> {
                 pool.clone(),
                 keypair.clone(),
                 *dry_run,
+                *full_range,
                 *tick_lower,
                 *tick_upper,
                 *range_width_pct,
@@ -5253,6 +5506,7 @@ async fn main() -> Result<()> {
             pool,
             keypair,
             sleep_secs,
+            full_range,
             tick_lower,
             tick_upper,
             range_width_pct,
@@ -5266,12 +5520,30 @@ async fn main() -> Result<()> {
                 pool.clone(),
                 keypair.clone(),
                 *sleep_secs,
+                *full_range,
                 *tick_lower,
                 *tick_upper,
                 *range_width_pct,
                 *amount_a,
                 *amount_b,
                 *slippage_bps,
+            )
+            .await?;
+        }
+        Commands::OrcaPositionsList { owner, keypair } => {
+            if owner.is_none() {
+                let _ = crate::commands::orca_wallet::load_signing_wallet(keypair.clone())
+                    .context(
+                        "signing key: --keypair, KEYPAIR_PATH, or SOLANA_KEYPAIR (or pass --owner)",
+                    )?;
+            }
+            crate::commands::orca_position::run_orca_positions_list(owner.clone(), keypair.clone())
+                .await?;
+        }
+        Commands::OrcaSplashPool { mint_a, mint_b } => {
+            crate::commands::orca_position::run_orca_splash_pool_resolve(
+                mint_a.clone(),
+                mint_b.clone(),
             )
             .await?;
         }

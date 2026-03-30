@@ -48,7 +48,8 @@ fn resolve_position_arg(
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(p) = path.parent() {
         if !p.as_os_str().is_empty() {
-            std::fs::create_dir_all(p).with_context(|| format!("create directory {}", p.display()))?;
+            std::fs::create_dir_all(p)
+                .with_context(|| format!("create directory {}", p.display()))?;
         }
     }
     Ok(())
@@ -134,6 +135,9 @@ pub async fn run_orca_bot(
     if let Some(ref p) = il_ledger_path {
         ensure_parent_dir(p)?;
     }
+    let position_fee_ledger_path = position_fee_ledger_path
+        .clone()
+        .or_else(|| Some(PathBuf::from("data/position-fee-checkpoints.jsonl")));
     if let Some(ref p) = position_fee_ledger_path {
         ensure_parent_dir(p)?;
     }

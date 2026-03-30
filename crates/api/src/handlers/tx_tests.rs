@@ -26,6 +26,7 @@ async fn tx_build_rejects_invalid_wallet_pubkey() {
             slippage_bps: None,
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -63,6 +64,7 @@ async fn tx_open_build_requires_pool_amounts_and_slippage() {
             slippage_bps: None,
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -86,6 +88,7 @@ async fn tx_decrease_build_requires_position_pool_and_liquidity() {
             slippage_bps: None,
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await
@@ -109,6 +112,7 @@ async fn tx_increase_build_requires_position_pool_and_amounts() {
             slippage_bps: None,
             tick_lower: None,
             tick_upper: None,
+            full_range: None,
         }),
     )
     .await

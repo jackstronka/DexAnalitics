@@ -3,6 +3,7 @@
 use crate::lifecycle::{FeesCollectedData, LifecycleTracker, RebalanceData, RebalanceReason};
 use crate::transaction::TransactionManager;
 use crate::wallet::Wallet;
+use anyhow::Context;
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
@@ -474,20 +475,23 @@ impl RebalanceExecutor {
         tick_lower: i32,
         tick_upper: i32,
     ) -> anyhow::Result<Pubkey> {
-        self.open_position_with_caps(
-            _pool,
-            tick_lower,
-            tick_upper,
-            u64::MAX,
-            u64::MAX,
-            self.config.max_slippage_bps,
-        )
-        .await
+        let (p, _, _) = self
+            .open_position_with_caps(
+                _pool,
+                tick_lower,
+                tick_upper,
+                u64::MAX,
+                u64::MAX,
+                self.config.max_slippage_bps,
+            )
+            .await?;
+        Ok(p)
     }
 
     /// Opens a new position with explicit token caps and slippage.
     ///
     /// In dry-run mode returns the derived Whirlpool position PDA without requiring wallet.
+    /// Returns `(position_pda, effective_tick_lower, effective_tick_upper)`.
     pub async fn execute_open_position(
         &self,
         pool: &Pubkey,
@@ -496,11 +500,28 @@ impl RebalanceExecutor {
         amount_a: u64,
         amount_b: u64,
         slippage_bps: u16,
-    ) -> anyhow::Result<Pubkey> {
+        full_range: bool,
+    ) -> anyhow::Result<(Pubkey, i32, i32)> {
         if self.dry_run {
-            return Ok(derive_whirlpool_position_address(
-                pool, tick_lower, tick_upper,
+            if full_range {
+                let reader = WhirlpoolReader::new(self.provider.clone());
+                let state = reader
+                    .get_pool_state(&pool.to_string())
+                    .await
+                    .context("fetch pool for full-range dry-run")?;
+                let (tl, tu) = full_range_tick_indexes(state.tick_spacing);
+                return Ok((derive_whirlpool_position_address(pool, tl, tu), tl, tu));
+            }
+            return Ok((
+                derive_whirlpool_position_address(pool, tick_lower, tick_upper),
+                tick_lower,
+                tick_upper,
             ));
+        }
+        if full_range {
+            return self
+                .open_full_range_position_with_caps(pool, amount_a, amount_b, slippage_bps)
+                .await;
         }
         self.open_position_with_caps(
             pool,
@@ -513,6 +534,47 @@ impl RebalanceExecutor {
         .await
     }
 
+    async fn open_full_range_position_with_caps(
+        &self,
+        pool: &Pubkey,
+        amount_a: u64,
+        amount_b: u64,
+        slippage_bps: u16,
+    ) -> anyhow::Result<(Pubkey, i32, i32)> {
+        let wallet = self.wallet.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot open position")
+        })?;
+        let orca = WhirlpoolExecutor::new(self.provider.clone());
+        let payer = wallet.keypair();
+        let params = OpenFullRangeParams {
+            pool: *pool,
+            amount_a,
+            amount_b,
+            slippage_bps,
+        };
+        let res = orca.open_full_range_position(&params, payer).await?;
+        self.ensure_execution_success("open_full_range_position", &res)
+            .await?;
+        let new_position = res.created_position.ok_or_else(|| {
+            anyhow::anyhow!(
+                "open_full_range_position succeeded but did not return created_position; cannot continue safely"
+            )
+        })?;
+        let reader = WhirlpoolReader::new(self.provider.clone());
+        let state = reader
+            .get_pool_state(&pool.to_string())
+            .await
+            .context("fetch pool after full-range open")?;
+        let (tl, tu) = full_range_tick_indexes(state.tick_spacing);
+        debug!(
+            new_position = %new_position,
+            tick_lower = tl,
+            tick_upper = tu,
+            "Open full-range position submitted"
+        );
+        Ok((new_position, tl, tu))
+    }
+
     async fn open_position_with_caps(
         &self,
         pool: &Pubkey,
@@ -521,7 +583,7 @@ impl RebalanceExecutor {
         amount_a: u64,
         amount_b: u64,
         slippage_bps: u16,
-    ) -> anyhow::Result<Pubkey> {
+    ) -> anyhow::Result<(Pubkey, i32, i32)> {
         let wallet = self.wallet.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot open position")
         })?;
@@ -531,7 +593,7 @@ impl RebalanceExecutor {
 
         // Send maximal token caps so the program uses the required amounts from wallet balances.
         let params = OpenPositionParams {
-            pool: pool.clone(),
+            pool: *pool,
             tick_lower,
             tick_upper,
             amount_a,
@@ -552,7 +614,7 @@ impl RebalanceExecutor {
             tick_upper = tick_upper,
             "Open position submitted"
         );
-        Ok(new_position)
+        Ok((new_position, tick_lower, tick_upper))
     }
 
     /// Increases liquidity in a position.

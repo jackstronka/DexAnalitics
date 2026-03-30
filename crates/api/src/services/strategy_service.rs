@@ -177,6 +177,11 @@ impl StrategyService {
             executor_config,
         );
 
+        // Always enable Tier3 checkpoint ledger by default (append-only JSONL).
+        executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
+            "data/position-fee-checkpoints.jsonl",
+        )));
+
         // Configure decision engine from stored strategy config.
         let strategy_type = strategy
             .config

@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use clmm_lp_execution::prelude::Wallet;
 use clmm_lp_protocols::prelude::RpcProvider;
 use clmm_lp_protocols::prelude::{
-    DecreaseLiquidityParams, ExecutionResult, IncreaseLiquidityParams, OpenPositionParams,
-    WhirlpoolExecutor,
+    DecreaseLiquidityParams, ExecutionResult, IncreaseLiquidityParams, OpenFullRangeParams,
+    OpenPositionParams, WhirlpoolExecutor,
 };
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
@@ -22,6 +22,8 @@ pub struct OpenPositionTxRequest {
     pub amount_a: u64,
     pub amount_b: u64,
     pub slippage_bps: u16,
+    /// Full-range (Splash-style) open; ignores tick bounds.
+    pub full_range: bool,
 }
 
 /// Request to increase liquidity.
@@ -88,6 +90,20 @@ impl OrcaTxService {
             .pool_address
             .parse::<Pubkey>()
             .context("invalid pool_address pubkey")?;
+
+        if req.full_range {
+            let params = OpenFullRangeParams {
+                pool,
+                amount_a: req.amount_a,
+                amount_b: req.amount_b,
+                slippage_bps: req.slippage_bps,
+            };
+            return self
+                .executor
+                .open_full_range_position(&params, wallet.keypair())
+                .await
+                .context("orca open_full_range_position RPC failed");
+        }
 
         let params = OpenPositionParams {
             pool,
