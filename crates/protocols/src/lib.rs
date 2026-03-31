@@ -22,6 +22,8 @@ pub mod raydium;
 pub mod rpc;
 /// Solana client wrapper.
 pub mod solana_client;
+/// Append-only JSONL ledgers (tx costs, lifecycle rows).
+pub mod ledger;
 
 use anyhow::Result;
 use async_trait::async_trait;

@@ -412,11 +412,16 @@ impl WhirlpoolExecutor {
     }
 
     /// Closes a position.
+    ///
+    /// `slippage_bps`: passed to Orca `close_position_instructions` (min token amounts). `None`
+    /// uses **100** bps (1%). Tight slippage can fail with Whirlpool `TokenMinSubceeded` (6018) on
+    /// small positions or volatile pools.
     pub async fn close_position(
         &self,
         position: &Pubkey,
         _pool: &Pubkey,
         payer: &Keypair,
+        slippage_bps: Option<u16>,
     ) -> Result<ExecutionResult> {
         info!(position = %position, "Closing position");
         let endpoint = self.provider.current_endpoint().await;
@@ -437,10 +442,11 @@ impl WhirlpoolExecutor {
         let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
             .context("parse WhirlpoolPosition (borsh)")?;
 
+        let slip = slippage_bps.or(Some(100));
         let closed = close_position_instructions(
             &rpc,
             parsed.position_mint,
-            Some(100),
+            slip,
             Some(payer.pubkey()),
         )
         .await

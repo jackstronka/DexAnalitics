@@ -255,6 +255,50 @@ fn tier3_position_truth_prints_suggested_commands_when_multiple_positions() {
 }
 
 #[test]
+fn tier3_position_truth_all_positions_flag_prints_batch_lines() {
+    let protocol = "meteora";
+    let pool = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6";
+    let cwd = temp_cwd_with_snapshot(protocol, pool, MIN_METEORA_JSONL);
+    let ledger_root = temp_cwd_with_position_fee_ledger(&format!(
+        "{{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:00Z\",\"position\":\"P1\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"derived\"}}\n\
+{{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:10Z\",\"position\":\"P1\",\"pool\":\"{pool}\",\"event_type\":\"collect_fees\",\"tick_lower\":0,\"tick_upper\":0,\"liquidity\":\"0\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"missing\"}}\n\
+{{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:20Z\",\"position\":\"P2\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"derived\"}}\n"
+    ));
+    let ledger_src = ledger_root.join("data").join("position-fee-checkpoints.jsonl");
+    let ledger_dst = cwd.join("data").join("position-fee-checkpoints.jsonl");
+    std::fs::copy(&ledger_src, &ledger_dst).expect("copy ledger");
+
+    let _guard1 = CleanupTempDir(cwd.clone());
+    let _guard2 = CleanupTempDir(ledger_root.clone());
+
+    let exe = env!("CARGO_BIN_EXE_snapshot_readiness");
+    let out = Command::new(exe)
+        .args([
+            "--protocol",
+            protocol,
+            "--pool-address",
+            pool,
+            "--fee-mode",
+            "position-truth",
+            "--all-positions-for-pool",
+        ])
+        .current_dir(&cwd)
+        .output()
+        .expect("failed to execute snapshot_readiness");
+
+    assert!(
+        out.status.success(),
+        "snapshot_readiness failed: status={:?}, stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("Tier3 batch (all positions for pool):"), "stdout:\n{stdout}");
+    assert!(stdout.contains("- P1: READY"), "stdout:\n{stdout}");
+    assert!(stdout.contains("- P2: NOT READY"), "stdout:\n{stdout}");
+}
+
+#[test]
 fn raydium_tier2_is_ready_for_fixture() {
     let stdout = readiness_stdout(
         "raydium",

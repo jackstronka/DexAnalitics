@@ -209,6 +209,7 @@ async fn devnet_bot_lifecycle_keypair_smoke() {
         .close_position(ClosePositionTxRequest {
             position_address: position,
             pool_address: pool,
+            slippage_bps: None,
         })
         .await;
     assert!(close.is_ok(), "close_position failed: {close:?}");

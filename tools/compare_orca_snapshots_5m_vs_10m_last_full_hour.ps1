@@ -10,6 +10,14 @@ param(
     [string] $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string] $Configuration = "release",
     [double] $Capital = 1000.0,
+    # Optional: speed up by using snapshot-backtest-prep cache (still intersected with the chosen time window).
+    # Example: -PreparedSnapshotWindow h24
+    [string] $PreparedSnapshotWindow = "",
+    # Optional: run snapshot-backtest-prep for both 10m and 5m before backtests (requires local snapshot JSONL files).
+    [switch] $RunSnapshotBacktestPrep,
+    # Windows for snapshot-backtest-prep (used only when -RunSnapshotBacktestPrep is set).
+    [string] $PrepWindowsHours = "24,48,96",
+    [string] $PrepWindowsDays = "7,30",
     # Default expectations: 5m should have ~12 rows/hour; we accept >=8.
     # 10m should have ~6 rows/hour; we accept >=4.
     [int] $MinRowsInWindow5m = 8,
@@ -121,13 +129,35 @@ function Invoke-Backtest(
         $args += @("--snapshot-jsonl-suffix", $suffix)
     }
 
+    if ($PreparedSnapshotWindow -and $PreparedSnapshotWindow.Trim()) {
+        $args += @("--prepared-snapshot-window", $PreparedSnapshotWindow.Trim())
+    }
+
     if (-not $Quiet) {
         $s = if ($suffix) { $suffix } else { "10m" }
-        Write-Host "[$(Get-Date -Format o)] backtest $($pair.name) suffix=$s window=$startStr..$endStr lower=$lower upper=$upper"
+        $psw = if ($PreparedSnapshotWindow -and $PreparedSnapshotWindow.Trim()) { $PreparedSnapshotWindow.Trim() } else { "-" }
+        Write-Host "[$(Get-Date -Format o)] backtest $($pair.name) suffix=$s window=$startStr..$endStr lower=$lower upper=$upper prepared_window=$psw"
     }
 
     $out = & $Exe @args 2>&1
     return @($out | ForEach-Object { "$_" })
+}
+
+function Invoke-SnapshotBacktestPrep([string] $suffix, [string[]] $pools) {
+    $args = @(
+        "snapshot-backtest-prep",
+        "--pools", ($pools -join ","),
+        "--windows-hours", $PrepWindowsHours,
+        "--windows-days", $PrepWindowsDays
+    )
+    if ($suffix) {
+        $args += @("--snapshots-suffix", $suffix)
+    }
+    if (-not $Quiet) {
+        $s = if ($suffix) { $suffix } else { "10m" }
+        Write-Host "[$(Get-Date -Format o)] snapshot-backtest-prep suffix=$s windows_hours=$PrepWindowsHours windows_days=$PrepWindowsDays"
+    }
+    $null = & $Exe @args 2>&1
 }
 
 function Parse-EntryPrice([string[]] $lines) {
@@ -165,6 +195,12 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $csvPath = Join-Path $outDir "compare_orca_snapshots_5m_vs_10m_last_full_hour_$tsTag.csv"
 
 $rows = New-Object System.Collections.Generic.List[object]
+
+$poolList = @($pairs | ForEach-Object { [string]$_.pool })
+if ($RunSnapshotBacktestPrep) {
+    Invoke-SnapshotBacktestPrep -suffix $null -pools $poolList
+    Invoke-SnapshotBacktestPrep -suffix "5m" -pools $poolList
+}
 
 foreach ($pair in $pairs) {
     foreach ($variant in $variants) {

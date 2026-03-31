@@ -3,7 +3,11 @@ param(
   [double]$MinDecodeOkPct = 65.0,
   [int]$HealthMaxAgeMinutes = 180,
   [int]$MaxAllowedHealthAlerts = 0,
-  [switch]$SkipDecodeAudit = $false
+  [switch]$SkipDecodeAudit = $false,
+  # Optional: set RPC env for this run (recommended for decode audit / enrich-heavy checks)
+  [string]$SolanaRpcUrl = "",
+  [string]$SolanaRpcFallbackUrls = "",
+  [string]$ExpectedCluster = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,6 +16,16 @@ function Info([string]$msg) { Write-Host ("[quick-verify] " + $msg) }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+
+. (Join-Path $PSScriptRoot "clmm_rpc_tools_helpers.ps1")
+if (Initialize-ClmmToolsRpcEnv) {
+  Info "Default CLMM_RPC_DENYLIST for mainnet (tools helper)."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($SolanaRpcUrl)) {
+  . (Join-Path $PSScriptRoot "solana_rpc_env.ps1")
+  Set-SolanaRpcEnv -SolanaRpcUrl $SolanaRpcUrl -SolanaRpcFallbackUrls $SolanaRpcFallbackUrls -ExpectedCluster $ExpectedCluster
+}
 
 $targets = @(
   @{ protocol = "orca"; pool = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE" },

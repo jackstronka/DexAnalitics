@@ -7,6 +7,7 @@ This directory contains Docker configuration for deploying the **Bociarz LP Stra
 | File | Description |
 |------|-------------|
 | `docker-compose.yml` | Docker Compose/Swarm configuration |
+| `orca-bot.compose.example.yml` | Example **Orca CLI bot** with `restart: unless-stopped` (see `doc/OPERATIONAL_CONTINUITY.md`) |
 | `api.Dockerfile` | API server image |
 | `cli.Dockerfile` | CLI tool image |
 | `web.Dockerfile` | Web dashboard image |

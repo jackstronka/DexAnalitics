@@ -18,6 +18,10 @@ use tokio::time::{Duration, sleep};
 use tracing::info;
 
 use super::orca_wallet::load_signing_wallet;
+use super::position_lifecycle_ledger::{
+    try_append_position_close_ledger, try_append_position_open_cost_ledger,
+};
+use clmm_lp_protocols::ledger::position_registry::try_append_registry_close;
 
 /// Resolve liquidity to remove: exactly one of `liquidity_pct` or `liquidity` (raw).
 pub(crate) fn resolve_decrease_liquidity_delta(
@@ -62,13 +66,41 @@ fn ensure_ticks_on_spacing(lower: i32, upper: i32, spacing: u16) -> Result<()> {
     Ok(())
 }
 
+async fn maybe_registry_open_cli(
+    provider: &Arc<RpcProvider>,
+    pool: Pubkey,
+    owner: &Pubkey,
+    sig: &solana_sdk::signature::Signature,
+    created: Option<Pubkey>,
+) {
+    if let Some(p) = created {
+        clmm_lp_protocols::ledger::position_registry::try_append_registry_open(
+            provider.as_ref(),
+            "cli",
+            &p,
+            &pool,
+            owner,
+            sig,
+        )
+        .await;
+    }
+}
+
 fn execution_ok(res: &ExecutionResult) -> Result<()> {
     if !res.success {
         let msg = res
             .error
             .clone()
             .unwrap_or_else(|| "unknown error".to_string());
-        anyhow::bail!("transaction failed: {msg}");
+        let mut detail = format!("transaction failed: {msg}");
+        if msg.contains("6018") || msg.contains("0x1782") {
+            detail.push_str(
+                "\nHint: Whirlpool 6018 (TokenMinSubceeded / min token out). \
+                 Retry with higher close slippage, e.g. `orca-position-close ... --slippage-bps 500` \
+                 (or 1000 for very small positions).",
+            );
+        }
+        anyhow::bail!("{detail}");
     }
     Ok(())
 }
@@ -113,8 +145,13 @@ pub async fn run_position_open(
             );
             return Ok(());
         }
+        let reader = WhirlpoolReader::new(provider.clone());
+        let pool_state = reader
+            .get_pool_state(pool_addr.trim())
+            .await
+            .context("fetch pool state")?;
         let wallet = Arc::new(load_signing_wallet(keypair)?);
-        let orca = WhirlpoolExecutor::new(provider);
+        let orca = WhirlpoolExecutor::new(provider.clone());
         let params = OpenFullRangeParams {
             pool,
             amount_a,
@@ -126,13 +163,33 @@ pub async fn run_position_open(
             .await
             .context("open_full_range_position RPC")?;
         execution_ok(&res)?;
-        if let Some(position) = res.created_position {
-            println!("position PDA: {position}");
+        let position_pda = res.created_position.map(|p| p.to_string());
+        if let Some(ref s) = position_pda {
+            println!("position PDA: {s}");
         } else {
             println!("position PDA: <unknown>");
             println!("warning: open succeeded but returned no created_position");
         }
         println!("signature: {}", res.signature);
+        let (tl, tu) = full_range_tick_indexes(pool_state.tick_spacing);
+        let fee_payer = wallet.pubkey();
+        try_append_position_open_cost_ledger(
+            &provider,
+            &pool_state,
+            amount_a,
+            amount_b,
+            slippage_bps,
+            &res.signature,
+            "full_range",
+            Some(tl),
+            Some(tu),
+            None,
+            position_pda,
+            &fee_payer,
+        )
+        .await;
+        maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, res.created_position)
+            .await;
         return Ok(());
     }
 
@@ -182,7 +239,7 @@ pub async fn run_position_open(
     }
 
     let wallet = Arc::new(load_signing_wallet(keypair)?);
-    let orca = WhirlpoolExecutor::new(provider);
+    let orca = WhirlpoolExecutor::new(provider.clone());
     let params = OpenPositionParams {
         pool,
         tick_lower: tl,
@@ -196,13 +253,32 @@ pub async fn run_position_open(
         .await
         .context("open_position RPC")?;
     execution_ok(&res)?;
-    if let Some(position) = res.created_position {
-        println!("position PDA: {position}");
+    let position_pda = res.created_position.map(|p| p.to_string());
+    if let Some(ref s) = position_pda {
+        println!("position PDA: {s}");
     } else {
         println!("position PDA: <unknown>");
         println!("warning: open succeeded but returned no created_position");
     }
     println!("signature: {}", res.signature);
+    let fee_payer = wallet.pubkey();
+    try_append_position_open_cost_ledger(
+        &provider,
+        &state,
+        amount_a,
+        amount_b,
+        slippage_bps,
+        &res.signature,
+        "tick_range",
+        Some(tl),
+        Some(tu),
+        range_width_pct,
+        position_pda,
+        &fee_payer,
+    )
+    .await;
+    maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, res.created_position)
+        .await;
     Ok(())
 }
 
@@ -283,12 +359,70 @@ pub async fn run_position_open_and_close(
         .created_position
         .ok_or_else(|| anyhow::anyhow!("open succeeded but missing created_position"))?;
 
+    if full_range {
+        let (tl, tu) = full_range_tick_indexes(state.tick_spacing);
+        let fee_payer = wallet.pubkey();
+        try_append_position_open_cost_ledger(
+            &provider,
+            &state,
+            amount_a,
+            amount_b,
+            slippage_bps,
+            &res.signature,
+            "full_range",
+            Some(tl),
+            Some(tu),
+            None,
+            Some(position.to_string()),
+            &fee_payer,
+        )
+        .await;
+        maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, Some(position)).await;
+    } else {
+        let (tl, tu) = match (tick_lower, tick_upper, range_width_pct) {
+            (Some(l), Some(u), None) => {
+                ensure_ticks_on_spacing(l, u, state.tick_spacing)?;
+                (l, u)
+            }
+            (None, None, Some(w)) => {
+                if w <= 0.0 || w > 100.0 {
+                    anyhow::bail!(
+                        "--range-width-pct must be in (0, 100], e.g. 10 for ±~5% price band around spot"
+                    );
+                }
+                let width_dec =
+                    Decimal::from_f64_retain(w / 100.0).context("range width as decimal")?;
+                calculate_tick_range(state.tick_current, width_dec, state.tick_spacing)
+            }
+            _ => anyhow::bail!(
+                "provide either (--tick-lower AND --tick-upper) OR --range-width-pct (percent of price width, e.g. 10)"
+            ),
+        };
+        let fee_payer = wallet.pubkey();
+        try_append_position_open_cost_ledger(
+            &provider,
+            &state,
+            amount_a,
+            amount_b,
+            slippage_bps,
+            &res.signature,
+            "tick_range",
+            Some(tl),
+            Some(tu),
+            range_width_pct,
+            Some(position.to_string()),
+            &fee_payer,
+        )
+        .await;
+        maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, Some(position)).await;
+    }
+
     println!("opened position PDA: {position}");
     println!("open signature: {}", res.signature);
     println!("sleeping {sleep_secs}s before close...");
     sleep(Duration::from_secs(sleep_secs.max(1))).await;
 
-    run_position_close(position.to_string(), keypair, false).await?;
+    run_position_close(position.to_string(), keypair, false, Some(slippage_bps)).await?;
     Ok(())
 }
 
@@ -384,6 +518,7 @@ pub async fn run_position_close(
     position_addr: String,
     keypair: Option<std::path::PathBuf>,
     dry_run: bool,
+    slippage_bps: Option<u16>,
 ) -> Result<()> {
     let position_pk = Pubkey::from_str(position_addr.trim()).context("invalid position pubkey")?;
     let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
@@ -394,22 +529,46 @@ pub async fn run_position_close(
         .context("fetch position")?;
     let pool_pk = on_chain.pool;
 
-    let tx_manager = Arc::new(TransactionManager::new(
-        provider.clone(),
-        TransactionConfig::default(),
-    ));
-    let lifecycle = Arc::new(LifecycleTracker::new());
-    let mut exec =
-        RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
-    exec.set_wallet(Arc::new(load_signing_wallet(keypair)?));
-    exec.set_dry_run(dry_run);
-    exec.execute_full_close_only(&position_pk, &pool_pk).await?;
-
     if dry_run {
         println!("dry-run: would close position {position_pk}");
-    } else {
-        println!("closed position {position_pk}");
+        return Ok(());
     }
+
+    let wallet = load_signing_wallet(keypair)?;
+    let fee_payer = wallet.pubkey();
+    let orca = WhirlpoolExecutor::new(provider.clone());
+    let res = orca
+        .close_position(&position_pk, &pool_pk, wallet.keypair(), slippage_bps)
+        .await
+        .context("close_position")?;
+    execution_ok(&res)?;
+    println!("signature: {}", res.signature);
+    println!("closed position {position_pk}");
+
+    let reader = WhirlpoolReader::new(provider.clone());
+    let pool_state = reader
+        .get_pool_state(&pool_pk.to_string())
+        .await
+        .context("fetch pool state for lifecycle ledger")?;
+    try_append_position_close_ledger(
+        &provider,
+        &pool_state,
+        &position_pk,
+        &fee_payer,
+        &res.signature,
+    )
+    .await;
+
+    try_append_registry_close(
+        &provider,
+        "cli",
+        &position_pk,
+        &pool_pk,
+        &fee_payer,
+        &res.signature,
+    )
+    .await;
+
     Ok(())
 }
 

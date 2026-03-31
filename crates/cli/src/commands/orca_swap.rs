@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use super::orca_wallet::load_signing_wallet;
+use clmm_lp_protocols::ledger::tx_lifecycle::try_append_cli_swap_tx_cost;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CliSwapType {
@@ -127,5 +128,9 @@ pub async fn run_orca_swap(
         .context("send+confirm swap tx")?;
     println!("signature: {sig}");
     println!("quote: {:?}", swap_ix.quote);
+
+    let fee_payer = wallet.pubkey();
+    try_append_cli_swap_tx_cost(provider.as_ref(), &fee_payer, &sig, &pool_pk).await;
+
     Ok(())
 }

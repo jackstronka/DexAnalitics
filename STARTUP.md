@@ -271,6 +271,125 @@ cargo run -p clmm-lp-cli --bin clmm-lp-cli -- backtest \
 
 **Automation (Windows):** `tools/run_snapshot_backtest_prep_loop.ps1` — runs step (1)+(2); schedule every 30 minutes or use `-Loop -IntervalMinutes 30`.
 
+**Spis skryptów w `tools/` + priorytety alertów (snapshot → Slack):** [`doc/SCRIPTS_CATALOG.md`](doc/SCRIPTS_CATALOG.md). **Bez Task Scheduler:** `tools/data_alerts_loop.ps1` pod **Shawl/NSSM** (snapshot + quick verify w jednej pętli). Pojedyncze strzały: `tools/snapshot_health_alert.ps1`, `tools/quick_verify_alert.ps1`. Wymagane `SLACK_WEBHOOK_URL` w `.env` — [`doc/OPERATIONAL_CONTINUITY.md`](doc/OPERATIONAL_CONTINUITY.md).
+
+### Compare: Orca snapshots 5m vs 10m (last full hour, ±1/2/3%)
+
+Goal: verify whether **5m cadence** (`snapshots_5m.jsonl`) materially changes backtest results vs the default **10m cadence** (`snapshots.jsonl`) for curated Orca pools.
+
+Prereqs:
+- Collect both datasets in parallel:
+  - 10m: `scripts/windows/run-snapshot-loop.ps1` (writes `snapshots.jsonl`)
+  - 5m: `scripts/windows/run-snapshot-loop-5m.ps1` (writes `snapshots_5m.jsonl`)
+- Build release binary once:
+
+```powershell
+cargo build --release --bin clmm-lp-cli
+```
+
+Run comparison (window = **last full UTC hour**, entry price = first price in that window):
+
+```powershell
+pwsh -File .\tools\compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1
+```
+
+Optional speed-up using prepared snapshot cache (still intersected with the same hour window):
+
+```powershell
+# Creates cache for 10m and 5m, then runs backtests using the smaller window files
+pwsh -File .\tools\compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1 -RunSnapshotBacktestPrep -PreparedSnapshotWindow h24
+```
+
+Output:
+- CSV report under `data/reports/compare_orca_snapshots_5m_vs_10m_last_full_hour_*.csv`
+- A quick console diff view per pair+width: ΔPnL / ΔFees / ΔTime-in-range.
+
+### RPC config (primary + fallbacks) — one source of truth
+
+The code reads RPC endpoints from environment variables:
+- `SOLANA_RPC_URL` (primary)
+- `SOLANA_RPC_FALLBACK_URLS` (comma-separated fallbacks)
+- optional safety guard: `CLMM_EXPECTED_CLUSTER` (e.g. `mainnet` or `devnet`)
+
+To keep scripts consistent, you can set them via the shared helper:
+
+```powershell
+. .\tools\solana_rpc_env.ps1
+Set-SolanaRpcEnv -SolanaRpcUrl "https://api.mainnet-beta.solana.com" -SolanaRpcFallbackUrls "https://solana-api.projectserum.com,https://rpc.ankr.com/solana" -ExpectedCluster "mainnet"
+```
+
+If you prefer a “file-based” setup (edit once, then dot-source before running commands), use:
+- `tools/mainnet_rpc_env.example.ps1` → copy to `tools/mainnet_rpc_env.ps1` and put your real provider URLs there.
+
+### Bot keypair (recommended: separate account from Phantom)
+
+For mainnet bot experiments, prefer a **dedicated bot keypair file** (separate from your Phantom treasury).
+
+Generate a new keypair file (prints only pubkey + path; does **not** print seed phrase to console):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\new_bot_keypair.ps1
+```
+
+If `solana-keygen` is **not** on Windows `PATH` but you have Solana CLI inside **WSL**, pass your distro name (see `wsl.exe -l -v`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\new_bot_keypair.ps1 -WslDistro "Ubuntu-22.04"
+```
+
+The keypair JSON is written under `%USERPROFILE%\.config\solana\clmm_lp_bot_mainnet.json` by default (override with `-OutFile`).
+
+Then fund the printed **pubkey** from Phantom (SOL for fees; SPL tokens such as whETH go to the **same** pubkey — see below) and point the bot/API to the file via `--keypair` or `KEYPAIR_PATH` / `SOLANA_KEYPAIR_PATH`.
+
+**Solana “wallets” vs SPL tokens:** one keypair ⇒ **one** owner address (pubkey). There are no Ethereum-style “sub-wallets” from the same seed in the default flow. What you have are:
+
+- **native SOL** on that address;
+- one or more **SPL token accounts** (often **associated token accounts**, ATAs) owned by that address — e.g. whETH, USDC each appear as a separate token account **for the same owner**.
+
+To **inspect balances** for that pubkey (after funding):
+
+```bash
+# In WSL (if you use Solana CLI there)
+solana config set --url https://api.mainnet-beta.solana.com
+solana balance <PUBKEY>
+```
+
+List **all SPL token accounts** owned by that address (whETH, USDC, …):
+
+```bash
+spl-token accounts <PUBKEY>
+# or explicitly:
+spl-token accounts --owner <PUBKEY>
+```
+
+If `spl-token` is not installed, use a Solana explorer: paste the pubkey and check **SOL** + **Tokens** tabs.
+
+**Exact snapshot (SOL + all SPL accounts) without Solana CLI:** from repo root, after setting RPC (e.g. `. .\tools\mainnet_rpc_env.ps1`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\solana_account_state.ps1 -Owner <PUBKEY>
+```
+
+Machine-readable JSON on stdout (`-Json`) or save for automation (`-OutJson .\data\tmp\account_state.json`). Uses JSON-RPC only (`getBalance`, `getTokenAccountsByOwner` for Token + Token-2022) and rotates through a few public read endpoints if one rate-limits.
+
+**Orca swap (one-off, on-chain):** wrapper script (pre/post wallet state + tx link):
+
+```powershell
+. .\tools\mainnet_rpc_env.ps1
+$kp = "$env:USERPROFILE\.config\solana\clmm_lp_bot_mainnet.json"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\orca_swap.ps1 `
+  -Owner <PUBKEY> `
+  -Keypair $kp `
+  -Pool <WHIRLPOOL_POOL_ADDRESS> `
+  -SpecifiedMint So11111111111111111111111111111111111111112 `
+  -SwapType exact-in `
+  -AmountRaw <AMOUNT_IN_BASE_UNITS> `
+  -SlippageBps 100 `
+  -Execute
+```
+
+Underlying CLI command (no wrapper): `clmm-lp-cli orca-swap --pool ... --specified-mint ... --swap-type exact-in|exact-out --amount <raw> --slippage-bps 100 --keypair <path> [--dry-run]`.
+
 **Snapshot file choice (`snapshots.jsonl` vs `snapshots.jsonl.repaired`):** backtests use **`mtime`** — the **newer** of the two wins (tie → raw). Stale `.repaired` must not hide rows appended later to `snapshots.jsonl`.
 
 **Why `fee_growth_global_*` was `"0"` in some JSONL files:** older collectors / manual layouts could mis-read the account; the reader now tries **full Borsh layout** (653-byte Whirlpool) before the offset parser. **Re-run** `orca_snapshot` / `snapshot_curated` so new lines carry real `fee_growth_global_*` and `protocol_fee_owed_*`.
@@ -335,26 +454,43 @@ Task Scheduler is brittle for short-interval repetition (sleep/battery/“missed
 
 **1. Loop scripts (in this repo)**
 
-- `scripts/windows/run-snapshot-loop.ps1` — `snapshot-run-curated-all` every N minutes (default 10), logs to `data/snapshot_logs/snapshot-loop.log`.
+- `scripts/windows/run-snapshot-loop.ps1` — `snapshot-run-curated-all` every N minutes (default 10), logs to `data/snapshot_logs/snapshot-loop.log` (writes `snapshots.jsonl`).
+- `scripts/windows/run-snapshot-loop-5m.ps1` — same command with `--snapshots-suffix 5m` every **5** minutes, logs to `data/snapshot_logs/snapshot-loop-5m.log` (writes `snapshots_5m.jsonl`). Safe to run **alongside** the 10m loop (separate files).
 - `scripts/windows/run-swaps-pipeline-loop.ps1` — `swaps-sync-curated-all` then `swaps-enrich-curated-all` each cycle, logs to `data/snapshot_logs/swaps-pipeline-loop.log`.
 
 Manual test (from anywhere):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop.ps1 -IntervalMinutes 10
+powershell -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop-5m.ps1
 ```
 
 **2. [Shawl](https://github.com/mtkennerly/shawl)** (wraps any command as a service; good fit for the scripts above)
 
-Example (adjust paths):
+Use **one Shawl service per loop** so 10m and 5m snapshot collectors run in parallel (adjust paths to your clone):
+
+**10m snapshots** (`snapshots.jsonl`):
 
 ```text
 shawl add --name clmm-snapshot-loop --cwd F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop.ps1
 ```
 
-Then `shawl run --name clmm-snapshot-loop` (or start the service from `services.msc`). Use a **second** service for `run-swaps-pipeline-loop.ps1` if you still want two parallel pipelines.
+**5m snapshots** (`snapshots_5m.jsonl`):
 
-**3. [NSSM](https://nssm.cc/)** — same idea as Shawl (GUI + CLI); set *Application* to `powershell.exe`, *Arguments* to `-NoProfile -ExecutionPolicy Bypass -File "...\run-snapshot-loop.ps1"`, *Startup directory* to repo root.
+```text
+shawl add --name clmm-snapshot-loop-5m --cwd F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop-5m.ps1
+```
+
+Start or install as Windows services, e.g. `shawl run --name clmm-snapshot-loop` and `shawl run --name clmm-snapshot-loop-5m`, or use **Services** (`services.msc`) after install. Optional third service: `run-swaps-pipeline-loop.ps1` under a name like `clmm-swaps-pipeline-loop`.
+
+**3. [NSSM](https://nssm.cc/)** — same idea as Shawl; register **two** services for the two snapshot loops (or three if you add swaps).
+
+| Service (example name) | Application | Arguments | Startup directory |
+|------------------------|-------------|-----------|-------------------|
+| `clmm-snapshot-loop` | `powershell.exe` | `-NoProfile -ExecutionPolicy Bypass -File "F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop.ps1"` | `F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider` |
+| `clmm-snapshot-loop-5m` | `powershell.exe` | `-NoProfile -ExecutionPolicy Bypass -File "F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\scripts\windows\run-snapshot-loop-5m.ps1"` | `F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider` |
+
+For swaps pipeline only: *Application* `powershell.exe`, *Arguments* `-NoProfile -ExecutionPolicy Bypass -File "...\run-swaps-pipeline-loop.ps1"`, same *Startup directory*.
 
 **4. Docker** — if you already run the stack in Compose, a small sidecar with `cron` or [Ofelia](https://github.com/mcuadros/ofelia) can invoke the CLI on a schedule inside Linux; on Windows this is only worth it if you are comfortable bind-mounting the repo and RPC access from the container.
 

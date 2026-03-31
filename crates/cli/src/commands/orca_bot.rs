@@ -61,6 +61,7 @@ pub async fn run_orca_bot(
     open_build_response_json: Option<PathBuf>,
     keypair: Option<PathBuf>,
     execute: bool,
+    fee_mode: String,
     eval_interval_secs: u64,
     poll_interval_secs: u64,
     optimize_result_json: Option<PathBuf>,
@@ -101,13 +102,21 @@ pub async fn run_orca_bot(
         TransactionConfig::default(),
     ));
 
+    let fee_mode = match fee_mode.trim().to_ascii_lowercase().as_str() {
+        "heuristic" => PositionTruthMode::Heuristic,
+        "position-truth" | "position_truth" | "truth" => PositionTruthMode::PositionTruth,
+        other => {
+            anyhow::bail!("invalid --fee-mode {other:?} (expected: heuristic | position-truth)")
+        }
+    };
+
     let executor_config = ExecutorConfig {
         eval_interval_secs,
         auto_execute,
         require_confirmation: !auto_execute,
         max_slippage_pct: Decimal::new(5, 3), // 0.5%
         dry_run,
-        fee_mode: PositionTruthMode::Heuristic,
+        fee_mode,
     };
 
     let mut executor = StrategyExecutor::new(
@@ -194,6 +203,7 @@ pub async fn run_orca_bot_open_and_run(
     amount_b: u64,
     slippage_bps: u16,
     execute: bool,
+    fee_mode: String,
     eval_interval_secs: u64,
     poll_interval_secs: u64,
     optimize_result_json: Option<PathBuf>,
@@ -269,6 +279,7 @@ pub async fn run_orca_bot_open_and_run(
         None,
         keypair,
         execute,
+        fee_mode,
         eval_interval_secs,
         poll_interval_secs,
         optimize_result_json,

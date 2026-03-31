@@ -415,7 +415,8 @@ impl RebalanceExecutor {
 
         let payer = wallet.keypair();
         let res = orca.collect_fees(position, pool, payer).await?;
-        self.ensure_execution_success("collect_fees", &res).await?;
+        self.ensure_execution_success("collect_fees", &res, Some(*pool), Some(*position))
+            .await?;
 
         // We currently don't parse fee amounts from on-chain state in this executor.
         // Returning (0,0) keeps lifecycle wiring intact while we tighten accounting later.
@@ -443,7 +444,7 @@ impl RebalanceExecutor {
             token_min_b: 0,
         };
         let res = orca.decrease_liquidity(&params, payer).await?;
-        self.ensure_execution_success("decrease_liquidity", &res)
+        self.ensure_execution_success("decrease_liquidity", &res, Some(*pool), Some(*position))
             .await?;
         debug!(
             position = %position,
@@ -461,8 +462,8 @@ impl RebalanceExecutor {
         let orca = WhirlpoolExecutor::new(self.provider.clone());
 
         let payer = wallet.keypair();
-        let res = orca.close_position(position, pool, payer).await?;
-        self.ensure_execution_success("close_position", &res)
+        let res = orca.close_position(position, pool, payer, None).await?;
+        self.ensure_execution_success("close_position", &res, Some(*pool), Some(*position))
             .await?;
         debug!(position = %position, "Close position submitted");
         Ok(())
@@ -553,7 +554,7 @@ impl RebalanceExecutor {
             slippage_bps,
         };
         let res = orca.open_full_range_position(&params, payer).await?;
-        self.ensure_execution_success("open_full_range_position", &res)
+        self.ensure_execution_success("open_full_range_position", &res, Some(*pool), None)
             .await?;
         let new_position = res.created_position.ok_or_else(|| {
             anyhow::anyhow!(
@@ -602,7 +603,8 @@ impl RebalanceExecutor {
         };
 
         let res = orca.open_position(&params, payer).await?;
-        self.ensure_execution_success("open_position", &res).await?;
+        self.ensure_execution_success("open_position", &res, Some(*pool), None)
+            .await?;
         let new_position = res.created_position.ok_or_else(|| {
             anyhow::anyhow!(
                 "open_position succeeded but did not return created_position; cannot continue safely"
@@ -633,8 +635,55 @@ impl RebalanceExecutor {
         &self,
         op_name: &str,
         result: &clmm_lp_protocols::orca::executor::ExecutionResult,
+        pool: Option<Pubkey>,
+        position: Option<Pubkey>,
     ) -> anyhow::Result<()> {
         validate_execution_result(op_name, result)?;
+
+        if result.success {
+            if let Some(w) = &self.wallet {
+                let fee_payer = w.pubkey();
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_rebalance_executor_tx_cost(
+                    self.provider.as_ref(),
+                    &fee_payer,
+                    &result.signature,
+                    op_name,
+                    pool,
+                    position,
+                    result.created_position,
+                )
+                .await;
+
+                if op_name == "close_position" {
+                    if let (Some(pool_pk), Some(pos_pk)) = (pool, position) {
+                        clmm_lp_protocols::ledger::position_registry::try_append_registry_close(
+                            self.provider.as_ref(),
+                            "orca_bot",
+                            &pos_pk,
+                            &pool_pk,
+                            &fee_payer,
+                            &result.signature,
+                        )
+                        .await;
+                    }
+                }
+                if matches!(
+                    op_name,
+                    "open_position" | "open_full_range_position"
+                ) && let (Some(pool_pk), Some(created)) = (pool, result.created_position)
+                {
+                    clmm_lp_protocols::ledger::position_registry::try_append_registry_open(
+                        self.provider.as_ref(),
+                        "orca_bot",
+                        &created,
+                        &pool_pk,
+                        &fee_payer,
+                        &result.signature,
+                    )
+                    .await;
+                }
+            }
+        }
 
         // Best-effort post-check through the common transaction manager path.
         // Some providers may not return status immediately for very fresh signatures.

@@ -1,0 +1,33 @@
+# Example: run data_alerts_loop.ps1 under systemd (Linux).
+# Requires PowerShell Core: sudo apt install powershell  (package "powershell" / pwsh)
+#
+# Install:
+#   sudo cp clmm-lp-data-alerts-loop.service.example /etc/systemd/system/clmm-lp-data-alerts-loop.service
+#   sudo systemctl edit --full clmm-lp-data-alerts-loop
+#   sudo systemctl enable --now clmm-lp-data-alerts-loop
+#
+# Logs: journalctl -u clmm-lp-data-alerts-loop -f
+#       plus repo data/snapshot_logs/data-alerts-loop.log
+#
+# Doc: doc/OPERATIONAL_CONTINUITY.md
+
+[Unit]
+Description=CLMM LP data alerts loop (snapshot + quick-verify → Slack)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clmm
+Group=clmm
+WorkingDirectory=/opt/clmm-lp
+
+EnvironmentFile=-/etc/clmm-lp/data-alerts.env
+
+ExecStart=/usr/bin/pwsh -NoLogo -NoProfile -File /opt/clmm-lp/tools/data_alerts_loop.ps1
+
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

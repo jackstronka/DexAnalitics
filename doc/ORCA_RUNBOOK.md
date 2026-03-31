@@ -16,7 +16,52 @@ Powtarzalnie przygotować dane dla Orca Whirlpool tak, aby:
 - Ustaw **`SOLANA_RPC_URL`** (własny / płatny / archival jeśli potrzeba historii). Opcjonalnie **`SOLANA_RPC_FALLBACK_URLS`** (lista po przecinku).
 - **Mainnet:** rozważ **`CLMM_EXPECTED_CLUSTER=mainnet-beta`** — przy starcie `RpcProvider` odrzuci oczywiste mieszanie klastrów (np. devnet URL przy intencji mainnet). Szczegóły: [`doc/MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md).
 - **Mainnet (pre-live, sekcja danych):** zanim otworzysz jakąkolwiek pozycję na mainnecie, zmierz i zapisz **minimum position sizing** (to nie jest stała kwota; zależy od `current_tick`, `tick_spacing` i range). Procedura + szablon tabeli: [`doc/MAINNET_MIN_POSITION_SIZING.md`](MAINNET_MIN_POSITION_SIZING.md).
+- **Ledger kosztów cyklu życia (CLI + bot + swap):** ten sam plik `data/ledger/orca_position_lifecycle.jsonl` (override: `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`; alias: `CLMM_POSITION_OPEN_LEDGER_PATH`). Po udanym `orca-position-open` / `orca-position-close` wiersze mają `source=cli`; po udanym **`orca-swap`** — `event=cli_swap`; po udanych operacjach Orca w **`RebalanceExecutor`** (collect / decrease / close / open) wiersze mają `source=orca_bot` i `event=bot_*`. Pola kosztów jak wyżej: `tx_fee_lamports` (`meta.fee`) oraz **`fee_payer_net_lamports_delta`** z `postBalances−preBalances` dla płatnika — przy zamknięciu część SOL wraca (rent/liquidity), więc delta bywa dodatnia; **łączny efekt** licz jako sumę wierszy open+close (nogi SPL osobno). **Sekwencja swap + rebalans + open:** ustaw **`CLMM_REBALANCE_SESSION_ID`** (ta sama wartość dla wszystkich kroków w tej samej sesji powłoki); wtedy każdy wiersz może mieć **`rebalance_session_id`** — sumuj po tym polu, żeby zsumować **swap + wszystkie tx rebalansu i otwarcia pozycji**.
 - Bez sensownego `getTransaction` enrich nadal zwróci głównie `partial` / timeout — wtedy najpierw endpoint; równoległość jest ograniczona przez `--decode-concurrency` / `CLMM_ENRICH_DECODE_INFLIGHT` (patrz krok 3).
+
+## Smoke mainnet: open → close (mały kapitał) dla curated Orca
+
+- **Curated Orca w `STARTUP.md`:** `SOL/USDC` (`Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE`), `whETH/SOL` (`HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF`), `cbBTC/USDC` (`HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM`). Pełny przejazd **otwarcie → krótki sleep → zamknięcie** dla wszystkich trzech pooli:  
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\orca_position_smoke_curated_pools.ps1 -Verify`  
+  (najpierw ustaw `SOLANA_RPC_URL` / `mainnet_rpc_env.ps1`; portfel musi mieć **oba tokeny** danej pary — np. cbBTC/USDC wymaga **cbBTC i USDC** w surowych jednostkach co najmniej `-AmountA`/`-AmountB`).
+- **Preflight przed open (zautomatyzowany zestaw):** `tools/orca_position_open_preflight.ps1` — `orca-pool-read` + `solana_account_state.ps1 -Json`; sprawdza `amount_a`/`amount_b` (raw) vs salda (dla wSOL: native + ATA), oraz rezerwę native SOL na fee (`-ReserveSolLamports`, domyślnie 15_000_000). **Domyślnie** wywołuje go `orca_position_open_then_close_quick.ps1` / `orca_position_open_then_close_fast.ps1` przed `orca-position-open`; pominąć tylko świadomie: `-SkipPreflight`.
+- **Auto-fund przed open (ta sama pula):** logika w `tools/orca_position_preflight_core.ps1` — pętla **exact-out** `orca-swap` na **tym samym** poolu, aż preflight przejdzie (`Invoke-OrcaPositionAutoFundFromPool`). Włącz: **`-AutoFund`** na `orca_position_open_then_close_quick.ps1` / `orca_position_open_then_close_fast.ps1` / `orca_position_smoke_curated_pools.ps1` (oraz parametry `-AutoFundMaxRounds`, `-FundSwapSlippageBps`, `-FundDeficitBufferBps`). Tylko **nogi tokenowe** (A/B); jeśli brakuje **native SOL** względem `-ReserveSolLamports`, skrypt zatrzymuje się (swap tego nie naprawia). Samo przygotowanie sald bez open: `tools/orca_position_auto_fund_for_open.ps1`.
+  - **Planowanie swapów (żeby uwzględnić ograniczenia auto-fund):** skrypt ma **ustaloną kolejność**: dopóki jest deficyt **tokenu A** (wg `token_mint_a` z puli), robi **exact-out na A** (płacisz **B**); gdy A jest OK, dopiero ewentualnie **exact-out na B** (płacisz **A**). Nie wybiera „inteligentnie” który deficyt jest pilniejszy. Praktyka: przed `-AutoFund` policz deficyty z preflightu i **upewnij się, że na starcie masz wystarczający zapas nogi „rozliczeniowej”** do pierwszego kroku (zwykle duży zapas **B**, jeśli brakuje obu — bo najpierw dolewane jest A). Jeśli **obie** nogi są za krótkie i **żadna** nie może zapłacić pierwszego swapu, najpierw **doładuj portfel ręcznie / CEX / inną pulą**, albo **zmniejsz** `-AmountA`/`-AmountB`, albo wykonaj **własną** sekwencję swapów (kolejność i źródło płynności pod Twoją kontrolę), a potem odpal open z preflightem. **Myśl osobno** o rezerwie native SOL na fee — auto-fund jej nie buduje.
+- **Jedna pula / dry-run logiki:** `tools/orca_position_open_then_close_quick.ps1` (preferuje `target\release\clmm-lp-cli.exe` jeśli zbudowany; `-CargoOnly` wymusza `cargo run`). **Szybsze iteracje / aktualny exe:** `.\tools\build_clmm_lp_cli.ps1` (albo cienki wrapper `.\tools\build_clmm_lp_cli_release.ps1`).
+- **Spójność z `quick_verify_data`:** ten sam pool **cbBTC/USDC** (`HxA6…`) jest w smoke curated i w `tools/quick_verify_data.ps1` — jeden adres, jedna para.
+- **Swapy na 3 curated parach (wszystkie sensowne kierunki w obrębie pary):**  
+  - Lista pul + przykłady 4 wariantów na parę (exact-in / exact-out, obie nogi):  
+    `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\orca_swap_curated.ps1 -ListPairs`  
+  - Wykonanie: `-Pair SOL_USDC | WHETH_SOL | CBBTC_USDC`, `-From` / `-To` (symbole **SOL**, **USDC**, **WHETH**, **CBBTC**; aliasy **WSOL→SOL**, **ETH/WETH→WHETH**, **BTC/WBTC→CBBTC**), `-SwapType exact-in|exact-out`, `-AmountRaw` (**jednostki From** przy `exact-in`, **jednostki To** przy `exact-out`), opcjonalnie `-Execute`, `-SlippageBps`, `-CargoOnly`. Skrypt woła `tools/orca_swap.ps1` (preferuje `target\*\clmm-lp-cli.exe` jak w innych narzędziach).  
+  - **Między parami** (np. z **SOL** zrobić **USDC** na `SOL_USDC`, potem **USDC→cbBTC** na `CBBTC_USDC`): **dwa** osobne wywołania `orca_swap_curated.ps1` — jedna pula nie przyjmuje SOL obok własnych dwóch mintów.  
+  - **Źródło prawdy adresów:** `tools/orca_curated_mainnet_pools.ps1` (importowane też przez `orca_position_smoke_curated_pools.ps1`).
+  - **Jedna bramka (rebalance / przygotowanie):** `tools/orca_curated_rebalance.ps1 -Action Help` — `ListPairs`, `Preflight`, `Open` (live, `-OpenOnly` wewnętrznie), `Close` (`-Position`), `Swap` (deleguje do `orca_swap_curated.ps1`), `FundCbBtc`, `Smoke`.
+- **Szacunek + swapy pod open na cbBTC/USDC:** `tools/orca_fund_cbbtc_usdc_open.ps1` — preflight na `HxA6…`, brakujące **cbBTC** szacuje z **dry-run** `orca-swap` (exact-out cbBTC), brak **USDC** z sumy (noga pozycji + USDC na ten swap); niedobór USDC uzupełnia planem **SOL→USDC** na puli `SOL_USDC` (exact-out USDC, też z dry-run). Domyślnie tylko **plan**; **`-Execute`** wysyła transakcje (`orca_swap.ps1`) w kolejności SOL/USDC → cbBTC/USDC, potem ponowny preflight. Jeśli portfel ma za mało **SOL** względem szacunku, skrypt kończy się błędem (zmniejsz `-AmountA`/`-AmountB` lub doładuj SOL).
+- **RPC:** skrypty w `tools/` mogą ustawić domyślne `CLMM_RPC_DENYLIST=ankr,projectserum` na mainnecie (patrz `tools/clmm_rpc_tools_helpers.ps1`), żeby unikać złych fallbacków.
+
+## Rebalance Whirlpool: zmiana zakresu (ticki) i swap
+
+### Czy trzeba zamknąć pozycję i otworzyć nową, żeby mieć inne ticki?
+
+**W typowym flow — tak.** W Orca Whirlpool (jak w modelu Uniswap v3) **jedna pozycja (NFT)** jest powiązana z **stałą parą** `tick_lower` / `tick_upper` na danej puli. Nie ma operacji „zmień zakres tej samej pozycji na nowe ticki”: żeby grać w **innym** przedziale, standardowo robisz:
+
+1. **Collect fees** (opcjonalnie, zależnie od strategii),
+2. **Decrease liquidity** (często do zera na starej pozycji),
+3. **Close position** (zwolnienie kont, NFT),
+4. **Open position** z nowymi tickami → **nowy adres pozycji (PDA)**.
+
+W tym repozytorium **`RebalanceExecutor`** realizuje właśnie ten wzorzec (zamknięcie starej pozycji + otwarcie nowej z nowym zakresem). **Alternatywa bez zamykania:** możesz **otworzyć drugą** pozycję w innym zakresie i utrzymywać dwie pozycje równolegle (dwa NFT, podział kapitału); to nie zastępuje „przesunięcia” pierwszej pozycji.
+
+### Swap przed rebalansem i `CLMM_REBALANCE_SESSION_ID` (stan vs docelowo)
+
+- **`RebalanceExecutor` (Rust) nie wykonuje swapu** Whirlpool w tej samej ścieżce co rebalans — jeśli musisz **najpierw** wymienić tokeny (np. wyrównać SOL/USDC przed `close`/`open`), użyj osobno **`orca-swap`** albo skryptu; udany swap trafia do ledgeru jako `event=cli_swap` (ten sam plik JSONL co pozycja).
+- Żeby **policzyć całość** (swap + tx rebalansu + open): ustaw **`CLMM_REBALANCE_SESSION_ID`** na **jedną** wartość **przed** każdym krokiem w tej samej sesji powłoki / w tym samym procesie, który uruchamia kolejne komendy — wiersze z tym samym `rebalance_session_id` możesz sumować (`tx_fee_lamports` albo delty płatnika, zgodnie z tym, co mierzysz).
+- **Proces bota:** jeśli startujesz bota z już ustawionym `CLMM_REBALANCE_SESSION_ID` w środowisku, wiersze `source=orca_bot` też dostaną to pole (o ile env jest widoczny dla procesu).
+- **Docelowo (integracja w kodzie):** gdy swap zostanie dodany przed rebalansem w Rust, sensowne jest **jedno** id sesji generowane w kodzie na początku sekwencji (np. z konfiguracji lub UUID) i przekazywane do zapisów ledgeru — bez polegania na ręcznym `export` między osobnymi procesami. Do tego momentu **wspólne env w jednej sesji** jest prostym sposobem na spójne sumowanie kosztów.
+
+### Rejestr pozycji (otwarte / zamknięte) dla kolektorów
+
+- Plik **`data/positions/registry.jsonl`** (override: **`CLMM_POSITION_REGISTRY_PATH`**): zdarzenia **`registry_open`** / **`registry_close`** po udanym open/close z CLI lub bota. Kolektory mogą z pliku wyliczyć, które `position_pubkey` są nadal otwarte (ostatni event wygrywa) i **przestać** zbierać dane per pozycja po `registry_close`. Pełny opis: [`doc/POSITION_REGISTRY.md`](POSITION_REGISTRY.md).
 
 ## Parametry “bezpieczne” dla Orca (polecane do stabilizacji RPC)
 Używaj poniższych domyślnych wartości:
@@ -158,6 +203,28 @@ Co zapisac po zamknieciu testu (dla kazdej czesci):
 - final value (USD), zebrane fees (USD), koszt tx/rebalance (USD),
 - timestamp wyjscia (UTC/local),
 - backtest uruchomiony na tym samym oknie i tym samym zakresie.
+
+### Porównanie 5m vs 10m dla snapshotów Orca (ostatnia pełna godzina)
+
+W repo jest gotowy skrypt PowerShell, który:
+- bierze okno **ostatniej pełnej godziny UTC**,
+- wyznacza **entry price** jako pierwszą cenę w oknie (parsuje `Entry Price` z outputu CLI),
+- odpala backtesty dla zakresów **±1% / ±2% / ±3%**,
+- robi to dla `snapshots_5m.jsonl` (flaga `--snapshot-jsonl-suffix 5m`) i dla domyślnego `snapshots.jsonl`,
+- zapisuje CSV i pokazuje szybkie różnice.
+
+Uruchomienie:
+
+```powershell
+cargo build --release --bin clmm-lp-cli
+pwsh -File .\tools\compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1
+```
+
+Opcjonalnie (szybciej): automatycznie wygeneruj cache i użyj `--prepared-snapshot-window`:
+
+```powershell
+pwsh -File .\tools\compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1 -RunSnapshotBacktestPrep -PreparedSnapshotWindow h24
+```
 
 ### Ważne: kapital realny vs kapital planowany
 
@@ -383,6 +450,7 @@ Ta sama pętla co `clmm-lp-api` (`PositionMonitor` + `StrategyExecutor`), urucha
 - **`--position`:** adres **pozycji** Whirlpool (NFT), nie adres poola.
 - **Opcjonalnie `--optimize-result-json`:** plik wyniku `backtest-optimize` → `DecisionConfig` (jak `POST /apply-optimize-result` w API).
 - **Historia pod backtest:** `--il-ledger-path` (JSONL: open / rebalance / close) oraz `--position-fee-ledger-path` (JSONL: checkpointy fee). CLI tworzy katalog nadrzędny pliku, jeśli nie istnieje. Konwencja i join z symulacją: `doc/BOT_OPERATIONS_MODEL_2026-03-23.md`.
+- **Ciągłość operacyjna (restart po crashu, systemd, Docker, logi):** [`doc/OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md); Windows: [`tools/orca_bot_run_supervised.ps1`](../tools/orca_bot_run_supervised.ps1).
 
 Przykład (tylko obserwacja):
 

@@ -31,7 +31,11 @@ param(
     [int] $IntervalMinutes = 30,
     [switch] $SkipSnapshots,
     [switch] $SkipSnapshotReadiness,
-    [switch] $Loop
+    [switch] $Loop,
+    # Optional: set RPC env for snapshot collectors (recommended)
+    [string] $SolanaRpcUrl = "",
+    [string] $SolanaRpcFallbackUrls = "",
+    [string] $ExpectedCluster = ""
 )
 
 Set-StrictMode -Version Latest
@@ -40,6 +44,16 @@ $ErrorActionPreference = "Stop"
 function Run-Once {
     Push-Location $RepoRoot
     try {
+        if (-not [string]::IsNullOrWhiteSpace($SolanaRpcUrl)) {
+            . (Join-Path $RepoRoot "tools/solana_rpc_env.ps1")
+            Set-SolanaRpcEnv -SolanaRpcUrl $SolanaRpcUrl -SolanaRpcFallbackUrls $SolanaRpcFallbackUrls -ExpectedCluster $ExpectedCluster
+        }
+
+        . (Join-Path $RepoRoot "tools/clmm_rpc_tools_helpers.ps1")
+        if (Initialize-ClmmToolsRpcEnv) {
+            Write-Host "[$(Get-Date -Format o)] rpc: default CLMM_RPC_DENYLIST for mainnet (ankr,projectserum)."
+        }
+
         if (-not $SkipSnapshots) {
             Write-Host "[$(Get-Date -Format o)] snapshot-run-curated-all..."
             & cargo run -q -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-run-curated-all

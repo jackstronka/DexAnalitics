@@ -81,6 +81,8 @@ impl EndpointHealth {
 pub struct HealthChecker {
     /// Health status for each endpoint.
     health_map: Arc<RwLock<HashMap<String, EndpointHealth>>>,
+    /// Endpoints that are hard-disabled for this process (e.g. "402 Payment Required").
+    disabled_endpoints: Arc<RwLock<HashMap<String, String>>>,
     /// Maximum consecutive failures before marking unhealthy.
     max_consecutive_failures: u32,
     /// Time to wait before retrying an unhealthy endpoint.
@@ -93,6 +95,7 @@ impl HealthChecker {
     pub fn new() -> Self {
         Self {
             health_map: Arc::new(RwLock::new(HashMap::new())),
+            disabled_endpoints: Arc::new(RwLock::new(HashMap::new())),
             max_consecutive_failures: 3,
             recovery_timeout: Duration::from_secs(60),
         }
@@ -114,6 +117,10 @@ impl HealthChecker {
 
     /// Records a successful request for an endpoint.
     pub async fn record_success(&self, endpoint: &str, response_time_ms: f64) {
+        if self.is_disabled(endpoint).await {
+            // Keep hard-disabled endpoints disabled even if a stray success is recorded.
+            return;
+        }
         let mut map = self.health_map.write().await;
         let health = map.entry(endpoint.to_string()).or_default();
         health.record_success(response_time_ms);
@@ -126,6 +133,10 @@ impl HealthChecker {
 
     /// Records a failed request for an endpoint.
     pub async fn record_failure(&self, endpoint: &str) {
+        if self.is_disabled(endpoint).await {
+            // Don't spam failure counters for a hard-disabled endpoint.
+            return;
+        }
         let mut map = self.health_map.write().await;
         let health = map.entry(endpoint.to_string()).or_default();
         health.record_failure();
@@ -138,6 +149,9 @@ impl HealthChecker {
 
     /// Checks if an endpoint is healthy.
     pub async fn is_healthy(&self, endpoint: &str) -> bool {
+        if self.is_disabled(endpoint).await {
+            return false;
+        }
         let map = self.health_map.read().await;
         match map.get(endpoint) {
             Some(health) => {
@@ -154,6 +168,24 @@ impl HealthChecker {
             }
             None => true, // Unknown endpoint is assumed healthy
         }
+    }
+
+    /// Hard-disable an endpoint for the lifetime of this process.
+    pub async fn disable_endpoint(&self, endpoint: &str, reason: impl Into<String>) {
+        let reason = reason.into();
+        let mut disabled = self.disabled_endpoints.write().await;
+        disabled.insert(endpoint.to_string(), reason);
+    }
+
+    /// Returns the hard-disable reason if present.
+    pub async fn disabled_reason(&self, endpoint: &str) -> Option<String> {
+        let disabled = self.disabled_endpoints.read().await;
+        disabled.get(endpoint).cloned()
+    }
+
+    async fn is_disabled(&self, endpoint: &str) -> bool {
+        let disabled = self.disabled_endpoints.read().await;
+        disabled.contains_key(endpoint)
     }
 
     /// Gets the health status for an endpoint.
@@ -190,10 +222,14 @@ impl HealthChecker {
     /// Returns the best healthy endpoint from a list.
     pub async fn get_best_endpoint<'a>(&self, endpoints: &'a [&'a str]) -> Option<&'a str> {
         let map = self.health_map.read().await;
+        let disabled = self.disabled_endpoints.read().await;
 
         let mut best: Option<(&str, f64)> = None;
 
         for &endpoint in endpoints {
+            if disabled.contains_key(endpoint) {
+                continue;
+            }
             let health = map.get(endpoint);
 
             // Check if healthy

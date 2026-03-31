@@ -51,6 +51,18 @@ impl RpcProvider {
                  Unset CLMM_EXPECTED_CLUSTER or fix SOLANA_RPC_URL / SOLANA_RPC_FALLBACK_URLS."
             );
         }
+        let endpoints = config.all_endpoints();
+        if endpoints.is_empty() {
+            // Should never happen, but fail-fast to avoid silent loops.
+            panic!("RpcConfig produced 0 endpoints (SOLANA_RPC_URL empty?)");
+        }
+        if endpoints.len() < 2 {
+            warn!(
+                primary = config.primary_url,
+                "RPC config has only 1 endpoint. If it rate-limits or becomes unavailable, snapshot collection will gap. \
+                 Consider setting SOLANA_RPC_FALLBACK_URLS and avoid paid/blocked endpoints (402/401/403)."
+            );
+        }
         Self {
             config,
             health: Arc::new(HealthChecker::new()),
@@ -98,6 +110,15 @@ impl RpcProvider {
             let next_idx = (*idx + i) % endpoints.len();
             let endpoint = endpoints[next_idx];
 
+            if let Some(reason) = self.health.disabled_reason(endpoint).await {
+                debug!(
+                    endpoint = endpoint,
+                    reason = reason,
+                    "Skipping hard-disabled RPC endpoint"
+                );
+                continue;
+            }
+
             if self.health.is_healthy(endpoint).await {
                 info!(
                     from = endpoints[*idx],
@@ -135,6 +156,14 @@ impl RpcProvider {
                     return Ok(result);
                 }
                 Err(e) => {
+                    if let Some(reason) = hard_disable_reason(&e) {
+                        warn!(
+                            endpoint = endpoint,
+                            reason = reason,
+                            "Hard-disabling RPC endpoint (will not retry)"
+                        );
+                        self.health.disable_endpoint(&endpoint, reason).await;
+                    }
                     warn!(
                         endpoint = endpoint,
                         retry = retry_count,
@@ -485,6 +514,30 @@ impl RpcProvider {
         })
         .await
     }
+}
+
+fn hard_disable_reason(err: &anyhow::Error) -> Option<String> {
+    // The Solana RPC client wraps HTTP failures into opaque errors; we match on their string forms.
+    // Example (observed): "HTTP status client error (402 Payment Required) for url (...)"
+    let mut chain_msgs: Vec<String> = Vec::new();
+    for c in err.chain() {
+        chain_msgs.push(c.to_string());
+    }
+    let msg_joined = chain_msgs.join(" | ");
+    let msg_lc = msg_joined.to_ascii_lowercase();
+
+    // Hard failures: endpoint requires payment or auth, or blocks the request. Retrying/rotating back
+    // to it just creates repeated gaps in snapshot collection.
+    if msg_lc.contains("(402")
+        || msg_lc.contains("402 payment required")
+        || msg_lc.contains("(401")
+        || msg_lc.contains("401 unauthorized")
+        || msg_lc.contains("(403")
+        || msg_lc.contains("403 forbidden")
+    {
+        return Some(msg_joined);
+    }
+    None
 }
 
 /// Calculates exponential backoff delay.

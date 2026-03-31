@@ -16,6 +16,8 @@ solana-sdk = { workspace = true }
 spl-token = { workspace = true }
 solana-transaction-status-client-types = "3.1"
 serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
 anyhow = { workspace = true }
 borsh = { workspace = true }
 base64 = { workspace = true }

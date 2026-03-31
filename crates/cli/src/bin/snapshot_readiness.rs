@@ -39,6 +39,11 @@ struct Args {
     /// with a hint to pass `--position-address`.
     #[arg(long)]
     position_address: Option<String>,
+    /// If set (Tier3 only): evaluate Tier3 for **all positions** found in the checkpoint ledger for this pool.
+    ///
+    /// Useful when you have multiple positions in the same pool and want a quick batch overview.
+    #[arg(long, default_value_t = false)]
+    all_positions_for_pool: bool,
 }
 
 fn protocol_dir(protocol: ProtocolArg) -> &'static str {
@@ -201,6 +206,43 @@ fn main_inner() -> anyhow::Result<()> {
                 }
             }
 
+            if args.all_positions_for_pool {
+                println!("Tier3 batch (all positions for pool):");
+                if positions_for_pool.is_empty() {
+                    println!("  (no positions found in ledger for this pool)");
+                    tier3_missing.push("no positions found in ledger for this pool".to_string());
+                    false
+                } else {
+                    for p in positions_for_pool.iter() {
+                        let rows: Vec<_> = all_rows_for_pool
+                            .iter()
+                            .filter(|r| r.position == *p)
+                            .collect();
+                        let mut missing: Vec<&'static str> = Vec::new();
+                        if rows.len() < 2 {
+                            missing.push(">=2 checkpoints");
+                        }
+                        if !rows.iter().any(|r| r.event_type == "open_position") {
+                            missing.push("open_position");
+                        }
+                        if !rows.iter().any(|r| {
+                            matches!(
+                                r.event_type.as_str(),
+                                "collect_fees" | "close_position" | "rebalance_out" | "rebalance_in"
+                            )
+                        }) {
+                            missing.push("collect/close/rebalance");
+                        }
+                        if missing.is_empty() {
+                            println!("  - {p}: READY");
+                        } else {
+                            println!("  - {p}: NOT READY (missing: {})", missing.join(", "));
+                        }
+                    }
+                    // Batch mode prints per-position status; Tier3 main flag stays READY.
+                    true
+                }
+            } else {
             let pos = if let Some(p) = pos_arg.clone() && !p.is_empty() {
                 Some(p)
             } else if positions_for_pool.len() == 1 {
@@ -268,6 +310,7 @@ fn main_inner() -> anyhow::Result<()> {
 
                     tier3_missing.is_empty()
                 }
+            }
             }
         }
     } else {

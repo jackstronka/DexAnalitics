@@ -863,6 +863,11 @@ enum Commands {
         /// Submit on-chain txs (rebalance / close / …). Without this flag, decisions are logged only (`dry_run`).
         #[arg(long, default_value_t = false)]
         execute: bool,
+        /// Fee checkpoint mode:
+        /// - `heuristic`: no Tier3 on-chain checkpoints; fee model stays heuristic (default).
+        /// - `position-truth`: record on-chain fee checkpoints on every evaluation tick to `--position-fee-ledger-path`.
+        #[arg(long, default_value = "heuristic")]
+        fee_mode: String,
         /// Strategy evaluation period (seconds).
         #[arg(long, default_value_t = 300)]
         eval_interval_secs: u64,
@@ -908,6 +913,9 @@ enum Commands {
         /// Submit on-chain txs during bot loop (rebalance/close). Without this flag, bot runs in dry-run mode.
         #[arg(long, default_value_t = false)]
         execute: bool,
+        /// Fee checkpoint mode: `heuristic` (default) or `position-truth` (writes Tier3 fee checkpoints).
+        #[arg(long, default_value = "heuristic")]
+        fee_mode: String,
         /// Strategy evaluation period (seconds).
         #[arg(long, default_value_t = 300)]
         eval_interval_secs: u64,
@@ -994,11 +1002,16 @@ enum Commands {
     },
     /// Fully close an existing Whirlpool position.
     OrcaPositionClose {
-        /// Position (NFT) address.
+        /// **Position PDA** (~216-byte Whirlpool account), not the pool (~653 bytes). For
+        /// `OpenPositionWithTokenExtensions` txs, Solscan lists `position` before `whirlpool` (pool).
         #[arg(long)]
         position: String,
         #[arg(long)]
         keypair: Option<std::path::PathBuf>,
+        /// Slippage for Orca close (min token amounts out). Default 100 bps (1%). Too low can fail with
+        /// Whirlpool `TokenMinSubceeded` (6018), especially on tiny positions or right after open.
+        #[arg(long)]
+        slippage_bps: Option<u16>,
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
@@ -5351,6 +5364,7 @@ async fn main() -> Result<()> {
             open_build_response_json,
             keypair,
             execute,
+            fee_mode,
             eval_interval_secs,
             poll_interval_secs,
             optimize_result_json,
@@ -5362,6 +5376,7 @@ async fn main() -> Result<()> {
                 open_build_response_json.clone(),
                 keypair.clone(),
                 *execute,
+                fee_mode.clone(),
                 *eval_interval_secs,
                 *poll_interval_secs,
                 optimize_result_json.clone(),
@@ -5380,6 +5395,7 @@ async fn main() -> Result<()> {
             amount_b,
             slippage_bps,
             execute,
+            fee_mode,
             eval_interval_secs,
             poll_interval_secs,
             optimize_result_json,
@@ -5396,6 +5412,7 @@ async fn main() -> Result<()> {
                 *amount_b,
                 *slippage_bps,
                 *execute,
+                fee_mode.clone(),
                 *eval_interval_secs,
                 *poll_interval_secs,
                 optimize_result_json.clone(),
@@ -5489,6 +5506,7 @@ async fn main() -> Result<()> {
         Commands::OrcaPositionClose {
             position,
             keypair,
+            slippage_bps,
             dry_run,
         } => {
             if !*dry_run {
@@ -5499,6 +5517,7 @@ async fn main() -> Result<()> {
                 position.clone(),
                 keypair.clone(),
                 *dry_run,
+                *slippage_bps,
             )
             .await?;
         }

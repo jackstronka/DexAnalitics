@@ -34,6 +34,12 @@ impl Default for RpcConfig {
         let env_fallbacks = std::env::var("SOLANA_RPC_FALLBACK_URLS")
             .ok()
             .unwrap_or_default();
+        let env_denylist = std::env::var("CLMM_RPC_DENYLIST").ok().unwrap_or_default();
+        let denylist: Vec<String> = env_denylist
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         let mut fallback_urls: Vec<String> = env_fallbacks
             .split(',')
             .map(|s| s.trim().to_string())
@@ -63,9 +69,19 @@ impl Default for RpcConfig {
             ]);
         }
 
+        // Optional denylist (substrings). Useful to avoid paid/blocked endpoints (e.g. 402).
+        if !denylist.is_empty() {
+            fallback_urls.retain(|u| !denylist.iter().any(|d| u.contains(d)));
+        }
+
+        let mut primary_url =
+            env_primary.unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+        if !denylist.is_empty() && denylist.iter().any(|d| primary_url.contains(d)) {
+            primary_url = "https://api.mainnet-beta.solana.com".to_string();
+        }
+
         Self {
-            primary_url: env_primary
-                .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string()),
+            primary_url,
             fallback_urls,
             timeout: Duration::from_secs(30),
             max_retries: 3,

@@ -1,0 +1,38 @@
+# Example systemd unit: Orca CLI bot (`orca-bot-run`).
+# Install: sudo cp clmm-lp-orca-bot.service.example /etc/systemd/system/clmm-lp-orca-bot.service
+#          sudo systemctl edit --full clmm-lp-orca-bot   # adjust paths
+#          sudo systemctl daemon-reload && sudo systemctl enable --now clmm-lp-orca-bot
+#
+# Doc: doc/OPERATIONAL_CONTINUITY.md
+
+[Unit]
+Description=CLMM LP Orca bot (clmm-lp-cli orca-bot-run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clmm
+Group=clmm
+WorkingDirectory=/opt/clmm-lp
+
+# RPC, CLMM_EXPECTED_CLUSTER, KEYPAIR_PATH, RUST_LOG, etc.
+EnvironmentFile=-/etc/clmm-lp/orca-bot.env
+
+# Adjust: path to release binary and all orca-bot-run flags.
+ExecStart=/opt/clmm-lp/bin/clmm-lp-cli orca-bot-run \
+  --position YOUR_POSITION_NFT_PUBKEY \
+  --execute \
+  --keypair /opt/clmm-lp/secrets/solana-keypair.json \
+  --il-ledger-path /opt/clmm-lp/data/il-ledger.jsonl \
+  --position-fee-ledger-path /opt/clmm-lp/data/position-fee-checkpoints.jsonl
+
+Restart=always
+RestartSec=15
+
+# Hardening (optional; tune for your layout)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

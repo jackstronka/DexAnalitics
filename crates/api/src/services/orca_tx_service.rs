@@ -58,6 +58,8 @@ pub struct CollectFeesTxRequest {
 pub struct ClosePositionTxRequest {
     pub position_address: String,
     pub pool_address: String,
+    /// `None` uses executor default (100 bps).
+    pub slippage_bps: Option<u16>,
 }
 
 pub struct OrcaTxService {
@@ -205,7 +207,7 @@ impl OrcaTxService {
             .context("invalid pool_address pubkey")?;
 
         self.executor
-            .close_position(&position, &pool, wallet.keypair())
+            .close_position(&position, &pool, wallet.keypair(), req.slippage_bps)
             .await
             .context("orca close_position RPC failed")
     }

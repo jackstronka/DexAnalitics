@@ -29,6 +29,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | 3-phase checklist to move bot from devnet MVP to production-like readiness |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | Solana RPC vs Orca, public vs provider, free-tier pointers, dual fallback — notes for mainnet bot |
 | [`MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md) | `CLMM_EXPECTED_CLUSTER`, dry-run vs limited live, links to BOT ops + RPC notes |
+| [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | systemd / Task Scheduler / Docker restart, logi, alerty (haki), RPC i klucze |
+| [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | spis `tools/*.ps1`, snapshot P0, Slack, CLI powiązane, skrypty spoza git (`scripts/`) |
 
 ## Backtesting and strategies
 
@@ -91,12 +93,14 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora, swap event, DLMM |
 | [`ONCHAIN_FEES_PROGRESS.md`](ONCHAIN_FEES_PROGRESS.md) | on-chain fees, progress |
 | [`ONCHAIN_FEES_TRUTH_PLAN.md`](ONCHAIN_FEES_TRUTH_PLAN.md) | on-chain fees, plan |
+| [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | bot supervision, systemd, Docker, Windows script, logs, alerts hooks |
 | [`ORCA_FEES_DATA_PLAN.md`](ORCA_FEES_DATA_PLAN.md) | Orca, fees plan |
 | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) | Orca, service contract, read/write split, endpoint map |
 | [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) | Orca, operations |
 | [`ORCA_EXTERNAL_IMPLEMENTATIONS.md`](ORCA_EXTERNAL_IMPLEMENTATIONS.md) | orca, hummingbot, examples, rent, token-2022, tx-builders |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | architecture, crates, pipeline, CLI names, data paths |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | rpc, solana, mainnet, fallback, free tier, orca bot |
+| [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | tools, powershell, snapshot-health, slack, monitoring, keywords |
 | [`README.md`](README.md) | *this file* — TOC + A–Z index |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | solana, indexing, RPC, Geyser, swaps-sync, misconceptions |
 | [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) | agent_layer_profile, osobny tryb, chart screenshot, rules-as-training, consensus, eval harness, `AgentDecision`, P1–P13 |

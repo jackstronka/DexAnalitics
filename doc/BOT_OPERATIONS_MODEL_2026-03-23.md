@@ -177,6 +177,7 @@ Quality:
 
 This operations model complements:
 - `doc/ORCA_RUNBOOK.md`
+- `doc/POSITION_REGISTRY.md` (append-only open/close registry for collectors)
 - `doc/BOT_HYBRID_DEFINITION_OF_READY_2026-03-23.md`
 - `doc/BOT_WORKLOG_2026-03-23.md`
 

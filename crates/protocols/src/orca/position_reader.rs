@@ -1,6 +1,11 @@
 //! Orca Whirlpool position reader.
 //!
 //! Reads position state from on-chain accounts.
+//!
+//! **Pool vs position:** the Whirlpool **pool** account is **653 bytes**; a **position** PDA is **216 bytes**
+//! (same layout for classic and `OpenPositionWithTokenExtensions` — the extra “token extensions” are on
+//! the **mint**, not the position state). Operators often paste the **pool** address from a tx by mistake;
+//! [`PositionReader::get_position`] detects that case and returns a clear error.
 
 use crate::events::OnChainPosition;
 use crate::rpc::RpcProvider;
@@ -10,6 +15,27 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+/// On-chain `Whirlpool` pool account size (`orca_whirlpools_client::generated::accounts::whirlpool::Whirlpool::LEN`).
+const WHIRLPOOL_POOL_ACCOUNT_LEN: usize = 653;
+/// Anchor/codama discriminator for the **pool** account (not the position).
+const WHIRLPOOL_POOL_DISCRIMINATOR: [u8; 8] = [63, 149, 209, 12, 225, 128, 99, 9];
+
+#[must_use]
+pub(crate) fn account_data_looks_like_whirlpool_pool(data: &[u8]) -> bool {
+    data.len() == WHIRLPOOL_POOL_ACCOUNT_LEN
+        && data
+            .get(0..8)
+            .is_some_and(|h| h == WHIRLPOOL_POOL_DISCRIMINATOR)
+}
+
+fn pool_vs_position_hint() -> &'static str {
+    "This pubkey is a Whirlpool **pool** account (653 bytes), not a **position** PDA (216 bytes). \
+     For `orca-position-close`, pass the position address. \
+     On Solscan, open the first `OpenPositionWithTokenExtensions` instruction: \
+     account index 2 = `position`, index 5 = `whirlpool` (pool). \
+     Or run `orca-positions-list` with your wallet keypair."
+}
 
 /// Whirlpool position account structure.
 #[derive(BorshDeserialize, Debug, Clone)]
@@ -67,8 +93,15 @@ impl PositionReader {
         info!(position = position_address, "Fetching position state");
 
         let account = self.provider.get_account(&pubkey).await?;
-        let position = WhirlpoolPosition::try_from_slice(&account.data)
-            .context("Failed to deserialize position account")?;
+        if account_data_looks_like_whirlpool_pool(&account.data) {
+            anyhow::bail!("{}", pool_vs_position_hint());
+        }
+        let position = WhirlpoolPosition::try_from_slice(&account.data).with_context(|| {
+            format!(
+                "Failed to deserialize Whirlpool position (expected ~216-byte position PDA). {}",
+                pool_vs_position_hint()
+            )
+        })?;
 
         debug!(
             liquidity = %position.liquidity,
@@ -223,6 +256,14 @@ fn tick_to_sqrt_price(tick: i32) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whirlpool_pool_discriminator_detected() {
+        let mut buf = vec![0u8; WHIRLPOOL_POOL_ACCOUNT_LEN];
+        buf[0..8].copy_from_slice(&WHIRLPOOL_POOL_DISCRIMINATOR);
+        assert!(account_data_looks_like_whirlpool_pool(&buf));
+        assert!(!account_data_looks_like_whirlpool_pool(&buf[..100]));
+    }
 
     #[test]
     fn test_tick_to_sqrt_price() {

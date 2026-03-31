@@ -14,6 +14,269 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-03-31 — tools: `orca_wheth_sol_three_bots_plan.ps1` (plan 3× pozycja WHETH/SOL)
+
+**keywords:** tools, WHETH_SOL, orca_curated_rebalance, orca-bot-run, capital plan, SCRIPTS_CATALOG
+**paths:** `tools/orca_wheth_sol_three_bots_plan.ps1`, `doc/SCRIPTS_CATALOG.md`
+
+- Skrypt **nie wysyła tx**: czyta `solana_account_state.ps1 -Json`, ceny CoinGecko (SOL/ETH), liczy heurystyczne **`AmountA`/`AmountB` na bot** (DeployUsd/NumBots, split 50/50 USD na nogi), sprawdza braki względem **3×** caps + `ReserveSolLamports`; drukuje przykładowe komendy `orca_curated_rebalance -Action Open` i `orca-bot-run`.
+
+## 2026-03-31 — tools: `solana_wallet_usd_estimate.ps1` (portfel w USD)
+
+**keywords:** tools, solana_wallet_usd_estimate, solana_account_state, CoinGecko, USDC, portfolio, SCRIPTS_CATALOG
+**paths:** `tools/solana_wallet_usd_estimate.ps1`, `doc/SCRIPTS_CATALOG.md`
+
+- Skrypt woła **`solana_account_state.ps1 -Json`**, sumuje **native SOL + wSOL (ATA)** jako jedną linię, SPL po **mincie**; ceny: **USDC/USDT = 1 USD**, **SOL / cbBTC (jako BTC) / whETH (jako ETH)** z **CoinGecko** `simple/price`; minty bez mapowania → **0 USD** + `unpriced_mint`. Opcja **`-Json`** (jedna linia), **`-SkipPriceFetch`** tylko kwoty UI.
+
+## 2026-03-31 — tools: `orca_curated_rebalance.ps1` + `-OpenOnly` w `orca_position_open_then_close_quick.ps1`
+
+**keywords:** tools, orca_curated_rebalance, orca_swap_curated, orca_position_open_then_close_quick, OpenOnly, curated, ORCA_RUNBOOK, SCRIPTS_CATALOG
+**paths:** `tools/orca_curated_rebalance.ps1`, `tools/orca_position_open_then_close_quick.ps1`, `doc/ORCA_RUNBOOK.md`, `doc/SCRIPTS_CATALOG.md`
+
+- **Dispatcher** dla trzech par curated (`SOL_USDC`, `WHETH_SOL`, `CBBTC_USDC`): akcje Help / ListPairs / Preflight / Open (samo `orca-position-open`) / Close / Swap (forward do `orca_swap_curated.ps1`) / FundCbBtc (`orca_fund_cbbtc_usdc_open.ps1`) / Smoke (`orca_position_smoke_curated_pools.ps1`).
+- **`orca_position_open_then_close_quick.ps1 -OpenOnly`:** po udanym open pomija sleep/close/verify — pozycja zostaje na łańcuchu (rebalans / produkcja).
+
+## 2026-03-31 — tools: uniwersalny build CLI (`build_clmm_lp_cli.ps1`) + wrapper release
+
+**keywords:** tools, powershell, build_clmm_lp_cli, build_clmm_lp_cli_release, clmm-lp-cli, cargo, SCRIPTS_CATALOG, ORCA_RUNBOOK
+**paths:** `tools/build_clmm_lp_cli.ps1`, `tools/build_clmm_lp_cli_release.ps1`, `doc/SCRIPTS_CATALOG.md`, `doc/ORCA_RUNBOOK.md`
+
+- **`build_clmm_lp_cli.ps1`:** `cargo build` dla **`clmm-lp-cli`** z **`-Configuration Release`** (domyślnie) lub **`Debug`**; wypisuje ścieżkę do `target\release|debug\clmm-lp-cli.exe`.
+- **`build_clmm_lp_cli_release.ps1`:** cienki wrapper wołający Release — zachowane stare odwołania w skryptach i doku.
+
+## 2026-03-31 — tools: `orca_fund_cbbtc_usdc_open.ps1` — dopłaty po swapach + wyższy domyślny bufor USDC
+
+**keywords:** tools, orca_fund_cbbtc_usdc_open, UsdcHeadroomBps, post-swap, preflight, cbBTC, USDC, ORCA_RUNBOOK
+**paths:** `tools/orca_fund_cbbtc_usdc_open.ps1`
+
+- Po zaplanowanych swapach **SOL/USDC** i **cbBTC/USDC** skrypt w pętli (domyślnie do **6** rund, param **`PostSwapTopUpMaxRounds`**) ponownie liczy preflight; jeśli brakuje tylko **USDC**, robi **exact-out USDC** na puli SOL/USDC z buforem **`UsdcHeadroomBps`**; jeśli brakuje tylko **cbBTC**, robi **exact-out cbBTC** na puli cbBTC/USDC — żeby zamknąć lukę między dry-run quote a faktycznym kosztem on-chain.
+- Domyślne **`UsdcHeadroomBps`** podniesione **300 → 600** (nadal nadpisywalne z CLI).
+
+## 2026-03-31 — tools: `orca_swap.ps1` — `Start-Process` zamiast `& cargo 2>&1` (stderr / exit code)
+
+**keywords:** tools, powershell, orca_swap, orca_fund_cbbtc_usdc_open, cargo, Start-Process, NativeCommandError, ORCA_RUNBOOK
+**paths:** `tools/orca_swap.ps1`
+
+- Wywołanie `clmm-lp-cli` (exe lub `cargo run`) idzie przez **Start-Process** z przekierowaniem stdout/stderr do plików tymczasowych; linie są potem drukowane przez **Write-Host**.
+- Cel: komunikaty cargo/rust na stderr nie trafiają do strumienia błędów hosta jako **NativeCommandError**, a kod wyjścia pochodzi z **ExitCode** procesu (stabilniejsze niż `$LASTEXITCODE` po merge `2>&1` w zagnieżdżonych `-File`), m.in. dla `orca_fund_cbbtc_usdc_open.ps1 -Execute`.
+
+## 2026-03-31 — tools + ops: `data_alerts_loop.ps1` + alternatywy dla Task Scheduler
+
+**keywords:** tools, data_alerts_loop, Shawl, NSSM, systemd, snapshot_health_alert, quick_verify_alert, OPERATIONAL_CONTINUITY
+**paths:** `tools/data_alerts_loop.ps1`, `doc/OPERATIONAL_CONTINUITY.md`, `tools/README.md`, `deploy/systemd/clmm-lp-data-alerts-loop.service.example`, `deploy/README.md`, `doc/SCRIPTS_CATALOG.md`
+
+- **`data_alerts_loop.ps1`:** jeden długo żyjący proces z interwałami snapshot vs quick-verify; log `data/snapshot_logs/data-alerts-loop.log`; zamiennik harmonogramu Windows.
+- **Dokumentacja:** Shawl/NSSM, opcjonalnie Task Scheduler; Linux: `systemd` + `pwsh` (przykładowa jednostka w `deploy/systemd/`).
+
+## 2026-03-31 — tools: `quick_verify_alert.ps1` (GO/NO-GO → Slack + throttle)
+
+**keywords:** tools, quick_verify_data, quick_verify_alert, slack, snapshot-readiness, data-health-check, SCRIPTS_CATALOG
+**paths:** `tools/quick_verify_alert.ps1`, `doc/SCRIPTS_CATALOG.md`, `tools/README.md`, `doc/OPERATIONAL_CONTINUITY.md`
+
+- Wrapper woła `quick_verify_data.ps1`; przy exit≠0 (w tym **exit 2** NO-GO) wysyła `notify_slack_webhook.ps1`; throttle `MinMinutesBetweenSameIssues` (domyślnie **60 min**) w `data/agent-alerts/quick-verify-slack-throttle/`; catch na throw z `quick_verify_data`.
+
+## 2026-03-31 — doc + tools: katalog skryptów (`SCRIPTS_CATALOG`) + `snapshot_health_alert` → Slack
+
+**keywords:** scripts, SCRIPTS_CATALOG, snapshot-health, snapshot_health_alert, notify_slack_webhook, tools/README, OPERATIONAL_CONTINUITY
+**paths:** `doc/SCRIPTS_CATALOG.md`, `doc/README.md`, `doc/OPERATIONAL_CONTINUITY.md`, `tools/README.md`, `tools/snapshot_health_alert.ps1`
+
+- **`doc/SCRIPTS_CATALOG.md`:** spis `tools/*.ps1` z kolumną keywords, sekcja P0 (snapshot/ciągłość/jakość), CLI powiązane, uwaga na `scripts/` w `.gitignore`.
+- **`tools/snapshot_health_alert.ps1`:** woła `snapshot_health_check.ps1`; przy exit≠0 Slack przez `notify_slack_webhook.ps1`; throttle `MinMinutesBetweenSameIssues` (domyślnie 15 min); stan w `data/agent-alerts/snapshot-slack-throttle/`.
+- **`tools/README.md`:** skrót + link do katalogu.
+
+## 2026-03-31 — tools: `orca_fund_cbbtc_usdc_open.ps1` (quote dry-run + opcjonalne swapy pod open)
+
+**keywords:** tools, powershell, orca_fund_cbbtc_usdc_open, orca-swap, dry-run, quote, cbBTC, USDC, SOL_USDC, ORCA_RUNBOOK
+**paths:** `tools/orca_fund_cbbtc_usdc_open.ps1`, `doc/ORCA_RUNBOOK.md`
+
+Skrypt szacuje braki do `orca-position-open` na puli **cbBTC/USDC** (`HxA6…`): parsuje `token_est_in` / `token_est_out` z stdout `orca-swap --dry-run`, planuje **SOL/USDC** exact-out USDC potem **cbBTC/USDC** exact-out cbBTC; **`-Execute`** woła `orca_swap.ps1`.
+
+## 2026-03-31 — tools: curated Orca swapy (3 pary, wszystkie nogi) + wspólna lista pul
+
+**keywords:** tools, powershell, orca_swap_curated, orca_curated_mainnet_pools, orca_swap, CargoOnly, SOL_USDC, WHETH_SOL, CBBTC_USDC, ORCA_RUNBOOK
+**paths:** `tools/orca_curated_mainnet_pools.ps1`, `tools/orca_swap_curated.ps1`, `tools/orca_swap.ps1`, `tools/orca_position_smoke_curated_pools.ps1`, `doc/ORCA_RUNBOOK.md`
+
+- **`orca_curated_mainnet_pools.ps1`:** jedna definicja trzech pul (mint_a/b, symbole) zgodna z `orca-pool-read`.
+- **`orca_swap_curated.ps1`:** `-From`/`-To` + `-SwapType` → `--specified-mint` / `exact-in|exact-out`; `-ListPairs`.
+- **`orca_swap.ps1`:** `-CargoOnly`, preferencja `Resolve-ClmmLpCliExe`, błąd przy niezerowym `LASTEXITCODE`.
+- **Smoke curated** buduje listę pul z `orca_curated_mainnet_pools.ps1`.
+
+## 2026-03-31 — tools: Slack Incoming Webhook helper (`notify_slack_webhook.ps1`)
+
+**keywords:** tools, powershell, slack, SLACK_WEBHOOK_URL, alerts, OPERATIONAL_CONTINUITY
+**paths:** `tools/notify_slack_webhook.ps1`, `doc/OPERATIONAL_CONTINUITY.md`
+
+- Skrypt wysyła `text` przez **Incoming Webhook** (kolejność: `-WebhookUrl`, env `SLACK_WEBHOOK_URL`, potem parsowanie **`SLACK_WEBHOOK_URL=` z repo-root `.env`**; opcjonalnie `-DotEnvPath`). Instrukcja Slack w `doc/OPERATIONAL_CONTINUITY.md` (sekcja Slack).
+
+## 2026-03-31 — tools: `solana_account_state.ps1 -Json` jako jedna linia (parsowanie preflight)
+
+**keywords:** tools, powershell, solana_account_state, ConvertTo-Json, orca_position_preflight_core, preflight
+**paths:** `tools/solana_account_state.ps1`
+
+Tryb `-Json` wypisywał wieloliniowy JSON; `orca_position_open_preflight.ps1` brał pierwszą linię zaczynającą się od `{` (sam `{`), więc `ConvertFrom-Json` padał. Na stdout **-Json** używa teraz `ConvertTo-Json -Compress` (jedna linia); zapis `-OutJson` nadal pretty-print.
+
+## 2026-03-31 — tools: auto-fund (exact-out swap) przed Orca position open
+
+**keywords:** tools, powershell, orca_position_preflight_core, Invoke-OrcaPositionAutoFundFromPool, AutoFund, orca-swap, exact-out, orca_position_auto_fund_for_open, orca_position_open_then_close_quick, orca_position_open_then_close_fast, orca_position_smoke_curated_pools, ORCA_RUNBOOK
+**paths:** `tools/orca_position_preflight_core.ps1`, `tools/orca_position_open_preflight.ps1`, `tools/orca_position_auto_fund_for_open.ps1`, `tools/orca_position_open_then_close_quick.ps1`, `tools/orca_position_open_then_close_fast.ps1`, `tools/orca_position_smoke_curated_pools.ps1`, `doc/ORCA_RUNBOOK.md`
+
+- **`orca_position_preflight_core.ps1`:** `Get-OrcaPositionOpenPreflightState`, `Test-OrcaPositionOpenPreflight`, `Invoke-OrcaPositionAutoFundFromPool` (pętla exact-out na tej samej puli do momentu OK preflightu).
+- **`orca_position_open_preflight.ps1`:** tylko param + standalone; wspólna logika w core.
+- **`orca_position_auto_fund_for_open.ps1`:** samo auto-fund + końcowy test preflight (bez `orca-position-open`).
+- **Quick / fast / smoke:** opcjonalnie **`-AutoFund`** i parametry bufora/slippage/max rund.
+- **`doc/ORCA_RUNBOOK.md`:** pod auto-fund dopisane **planowanie swapów** (stała kolejność A-then-B, zapas nogi płacącej, dual-deficit, SOL reserve).
+
+## 2026-03-31 — tools: preflight open + cbBTC/USDC w smoke curated
+
+**keywords:** tools, powershell, orca_position_open_preflight, orca_position_open_then_close_quick, orca_position_open_then_close_fast, orca_position_smoke_curated_pools, SkipPreflight, ReserveSolLamports, cbBTC, ORCA_RUNBOOK
+**paths:** `tools/orca_position_open_preflight.ps1`, `tools/orca_position_open_then_close_quick.ps1`, `tools/orca_position_open_then_close_fast.ps1`, `tools/orca_position_smoke_curated_pools.ps1`, `doc/ORCA_RUNBOOK.md`
+
+- `orca_position_open_preflight.ps1`: prawdziwy mint **cbBTC** w etykietach; blok standalone uruchamia się tylko gdy skrypt **nie** jest dot-sourced (`$MyInvocation.InvocationName -ne '.'`), żeby `. .\…preflight.ps1` nie robił `Set-Location`/`exit` w sesji nadrzędnej.
+- **Quick** i **fast** open→close: przed `orca-position-open` domyślnie wywołanie preflightu; `-SkipPreflight`, `-ReserveSolLamports` (przekazywane także ze smoke).
+- **Smoke curated:** trzeci pool `cbBTC/USDC` (`HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM`) jak w `STARTUP.md`.
+- **`doc/ORCA_RUNBOOK.md`:** smoke + preflight + usunięcie sprzecznej uwagi „HxA6 nie z STARTUP”.
+
+## 2026-03-31 — ops: ciągłość operacyjna bota (dokument + systemd + Docker + supervised PS1)
+
+**keywords:** operations, orca-bot-run, systemd, docker-compose, Task Scheduler, OPERATIONAL_CONTINUITY, orca_bot_run_supervised
+**paths:** `doc/OPERATIONAL_CONTINUITY.md`, `doc/ORCA_RUNBOOK.md`, `doc/README.md`, `doc/MAINNET_OPERATIONAL_CHECKLIST.md`, `deploy/systemd/clmm-lp-orca-bot.service.example`, `deploy/README.md`, `Docker/orca-bot.compose.example.yml`, `Docker/README.md`, `tools/orca_bot_run_supervised.ps1`
+
+- Nowy runbook: **`doc/OPERATIONAL_CONTINUITY.md`** (superwizja procesu, logi, haki alertów, RPC/klucze, checklist).
+- **Linux:** szablon `deploy/systemd/clmm-lp-orca-bot.service.example`.
+- **Docker:** przykład `Docker/orca-bot.compose.example.yml` (`restart: unless-stopped`, volume na keypair + ledgery).
+- **Windows:** `tools/orca_bot_run_supervised.ps1` — pętla restartu po niezerowym exit code; opcjonalnie `-LogDir` (ostrzeżenie dla Windows PowerShell 5.x w kwestii `$LASTEXITCODE` po `Tee-Object`).
+
+## 2026-03-31 — tools: Orca quick (release exe) + `orca_position_smoke_curated_pools` + helper w swap/snapshot verify
+
+**keywords:** tools, powershell, Resolve-ClmmLpCliExe, Invoke-ClmmLpCliStream, orca_position_open_then_close_quick, orca_position_smoke_curated_pools, build_clmm_lp_cli_release, orca_swap, quick_verify_data, run_snapshot_backtest_prep_loop, ORCA_RUNBOOK
+**paths:** `tools/clmm_rpc_tools_helpers.ps1`, `tools/orca_position_open_then_close_quick.ps1`, `tools/orca_position_smoke_curated_pools.ps1`, `tools/build_clmm_lp_cli_release.ps1`, `tools/orca_swap.ps1`, `tools/quick_verify_data.ps1`, `tools/run_snapshot_backtest_prep_loop.ps1`, `doc/ORCA_RUNBOOK.md`
+
+- Rozszerzono `clmm_rpc_tools_helpers.ps1` o **Resolve-ClmmLpCliExe**, **Invoke-ClmmLpCliStream**, **Invoke-ClmmLpCliCapture**; `orca_position_open_then_close_quick.ps1` używa release/debug exe gdy istnieje (`-CargoOnly` → zawsze `cargo run`).
+- Nowe: **`tools/orca_position_smoke_curated_pools.ps1`** (open+close dla pooli jak w `STARTUP.md` Orca), **`tools/build_clmm_lp_cli_release.ps1`**.
+- **Initialize-ClmmToolsRpcEnv** także w `orca_swap.ps1`, `quick_verify_data.ps1`, `run_snapshot_backtest_prep_loop.ps1`.
+- **`doc/ORCA_RUNBOOK.md`:** sekcja smoke + rozróżnienie poola z `quick_verify` vs curated.
+
+## 2026-03-31 — tools: Orca ops — `clmm_rpc_tools_helpers.ps1` + close slippage w quick + hint 6018
+
+**keywords:** tools, powershell, CLMM_RPC_DENYLIST, orca-position-close, slippage_bps, execution_ok, TokenMinSubceeded
+**paths:** `tools/clmm_rpc_tools_helpers.ps1`, `tools/orca_position_close_quick.ps1`, `tools/orca_position_open_then_close_quick.ps1`, `tools/orca_position_open_then_close_fast.ps1`, `crates/cli/src/commands/orca_position.rs`
+
+- `Initialize-ClmmToolsRpcEnv`: gdy `CLMM_RPC_DENYLIST` jest puste i `SOLANA_RPC_URL` wygląda na mainnet, ustawia `ankr,projectserum`, żeby domyślne fallbacki w `RpcConfig` omijały często blokowane URL-e.
+- `orca_position_close_quick.ps1` / `orca_position_open_then_close_quick.ps1`: domyślnie wyższy slippage na close (`-SlippageBps` / `-CloseSlippageBps`, 500 bps).
+- `execution_ok` dopina hint przy tekście błędu z **6018** / **0x1782**.
+
+## 2026-03-31 — tools: `restart_snapshot_loop_10m.ps1` (pin RPC; nie dotyka 5m)
+
+**keywords:** tools, powershell, snapshot-loop, run-snapshot-loop, SOLANA_RPC_URL, snapshot_logs
+**paths:** `tools/restart_snapshot_loop_10m.ps1`, `scripts/windows/run-snapshot-loop.ps1`
+
+Skrypt zatrzymuje proces PowerShell uruchomiony z `scripts/windows/run-snapshot-loop.ps1` (bez `run-snapshot-loop-5m.ps1`) i startuje pętlę ponownie z domyślnym pinem RPC jak w skrypcie. Jeśli stara pętla działa pod Task Scheduler/NSSM w innej sesji, wyłącz duplikat ręcznie.
+
+## 2026-03-30 — RPC: hard-disable paid/auth endpoints + optional denylist guard
+
+**keywords:** clmm-lp-protocols, rpc, failover, health, 402, Payment Required, denylist, SOLANA_RPC_URL, SOLANA_RPC_FALLBACK_URLS, CLMM_RPC_DENYLIST
+**paths:** `crates/protocols/src/rpc/provider.rs`, `crates/protocols/src/rpc/health.rs`, `crates/protocols/src/rpc/config.rs`
+
+RPC failover now **hard-disables** endpoints that return HTTP auth/paywall failures (402/401/403) to avoid repeated rotation into dead URLs causing snapshot gaps. Added optional env `CLMM_RPC_DENYLIST` (comma-separated substrings) to filter such endpoints up-front, plus a startup warning when only one endpoint remains after config/denylist.
+
+## 2026-03-31 — CLI: `orca-position-close --slippage-bps` (Whirlpool 6018 / TokenMinSubceeded)
+
+**keywords:** clmm-lp-cli, orca-position-close, WhirlpoolExecutor, close_position_instructions, slippage_bps, TokenMinSubceeded, 6018, tools, orca_position_open_then_close_fast.ps1
+**paths:** `crates/protocols/src/orca/executor.rs`, `crates/cli/src/commands/orca_position.rs`, `crates/cli/src/main.rs`, `crates/api/src/services/orca_tx_service.rs`, `tools/orca_position_open_then_close_fast.ps1`
+
+`WhirlpoolExecutor::close_position` przyjmuje opcjonalny `slippage_bps` (domyślnie jak wcześniej: **100** bps przez `None` / brak flagi). CLI `orca-position-close` ma `--slippage-bps`; `ClosePositionTxRequest` ma `slippage_bps: Option<u16>`. Skrypt `orca_position_open_then_close_fast.ps1` przekazuje domyślnie **500** bps na close (`-CloseSlippageBps`), żeby unikać błędu on-chain **6018** (*TokenMinSubceeded*) przy bardzo małej płynności / szybkim open→close.
+
+## 2026-03-30 — tools: `orca_position_open_then_close_fast.ps1` (close bez czekania na ledger)
+
+**keywords:** tools, powershell, orca-position-open, orca-position-close, timing, confirm->confirm, ledger, getTransaction
+**paths:** `tools/orca_position_open_then_close_fast.ps1`
+
+Dodano skrypt `tools/orca_position_open_then_close_fast.ps1`, który startuje `close` natychmiast po wypisaniu `position PDA:` z `open` (nie czeka na post-tx enrichment ledgera, który na public RPC potrafi lagować), i mierzy czas confirm->confirm z timestampów logów `Transaction confirmed signature=...`.
+
+## 2026-03-30 — tools: `orca_position_open_then_close_quick.ps1` mierzy czas confirm->confirm
+
+**keywords:** tools, powershell, orca-position-open, orca-position-close, automation, timing, confirm->confirm
+**paths:** `tools/orca_position_open_then_close_quick.ps1`
+
+Skrypt `tools/orca_position_open_then_close_quick.ps1` został rozszerzony o pomiar czasu pomiędzy momentem pojawienia się `signature:` dla open a dla close (na podstawie streamingowego odczytu stdout/stderr cargo), żeby nie mieszać tego z dodatkowym enrichmentem ledgera.
+
+## 2026-03-30 — tools: `orca_position_close_quick.ps1` (szybkie zamknięcie z registry)
+
+**keywords:** tools, powershell, orca-position-close, registry.jsonl, position_registry, automation
+**paths:** `tools/orca_position_close_quick.ps1`, `crates/protocols/src/ledger/position_registry.rs`
+
+Dodano skrypt `tools/orca_position_close_quick.ps1`: wybiera ostatnio aktywną pozycję (`registry_open` bez późniejszego `registry_close`) dla właściciela i odpala jedną komendę `clmm-lp-cli orca-position-close` z gotowym `--position` i `--keypair`.
+
+## 2026-03-30 — tools: `orca_position_open_then_close_quick.ps1` (open→close jednym kliknięciem)
+
+**keywords:** tools, powershell, orca-position-open, orca-position-close, automation, Whirlpool
+**paths:** `tools/orca_position_open_then_close_quick.ps1`
+
+Dopisano skrypt automatyzujący flow: `orca-position-open` (live, małe `--amount-a/--amount-b`) → parsowanie `position PDA` z outputu → krótki sleep → `orca-position-close` oraz opcjonalna weryfikacja `orca-positions-list entries=0`.
+
+## 2026-03-30 — CLI: `orca-position-close` dopisuje token refund delty (A/B) do ledgera
+
+**keywords:** clmm-lp-cli, orca-position-close, position_lifecycle_ledger, jsonl, token_delta, preTokenBalances, postTokenBalances
+**paths:** `crates/cli/src/commands/position_lifecycle_ledger.rs`
+
+Do wierszy `event=position_close` w `data/ledger/orca_position_lifecycle.jsonl` dopisano best-effort delty tokenów A/B (`token_a_net_delta_*`, `token_b_net_delta_*`) jako `post - pre` dla fee-payera (owner) liczonych z `meta.preTokenBalances`/`meta.postTokenBalances`. Dzięki temu “zwroty” są widoczne w ilościach (base units + UI), obok dotychczasowych kosztów SOL/fees.
+
+## 2026-03-30 — Orca: rozróżnienie pool (653 B) vs position PDA (216 B) + komunikat w `PositionReader`
+
+**keywords:** clmm-lp-protocols, clmm-lp-cli, orca-position-close, Whirlpool, OpenPositionWithTokenExtensions, position_reader, pool vs position
+**paths:** `crates/protocols/src/orca/position_reader.rs`, `crates/cli/src/main.rs`, `doc/POSITION_REGISTRY.md`
+
+`PositionReader::get_position` wykrywa podanie konta **puli** Whirlpool (653 B + discriminator puli) zamiast **PDA pozycji** (216 B) i zwraca czytelny błąd (kolejność kont w `OpenPositionWithTokenExtensions` na Solscan). `doc/POSITION_REGISTRY.md` — sekcja „Pula vs PDA”; help CLI `orca-position-close --position` doprecyzowany.
+
+## 2026-03-30 — STARTUP: Shawl/NSSM — druga usługa dla pętli snapshotów 5m
+
+**keywords:** STARTUP, Shawl, NSSM, Windows Service, run-snapshot-loop, run-snapshot-loop-5m, snapshots_5m, snapshot-loop-5m.log
+**paths:** `STARTUP.md`
+
+W sekcji *Alternatives to Task Scheduler* dopisano **drugą** usługę równoległą do `clmm-snapshot-loop`: **`clmm-snapshot-loop-5m`** (`run-snapshot-loop-5m.ps1` → `snapshots_5m.jsonl`, log `snapshot-loop-5m.log`). Tabela NSSM i osobne `shawl add` dla 10m vs 5m; ścieżki nadal wymagają dopasowania do lokalnego klonu.
+
+## 2026-03-30 — `position_registry.jsonl`: otwarte/zamknięte pozycje + sygnał dla kolektorów
+
+**keywords:** clmm-lp-protocols, clmm-lp-cli, clmm-lp-execution, position_registry, registry_open, registry_close, collectors, jsonl, CLMM_POSITION_REGISTRY_PATH
+**paths:** `crates/protocols/src/ledger/position_registry.rs`, `crates/cli/src/commands/orca_position.rs`, `crates/execution/src/strategy/rebalance.rs`, `doc/POSITION_REGISTRY.md`
+
+Dodano append-only **`data/positions/registry.jsonl`** (`CLMM_POSITION_REGISTRY_PATH`): `registry_open` / `registry_close`, `source` cli vs `orca_bot`, opcjonalnie `rebalance_session_id`. CLI `orca-position-open` / `close` oraz udane open/close w **`RebalanceExecutor`** dopisują wiersze — kolektory mogą wyliczać aktywne pozycje (ostatni event per `position_pubkey`) i **kończyć** zbieranie danych per pozycja po `registry_close`. Dokumentacja: `doc/POSITION_REGISTRY.md`.
+
+## 2026-03-30 — ORCA_RUNBOOK: rebalance (ticki), swap vs `RebalanceExecutor`, `CLMM_REBALANCE_SESSION_ID`
+
+**keywords:** ORCA_RUNBOOK, rebalance, Whirlpool, tick range, close position, open position, orca-swap, CLMM_REBALANCE_SESSION_ID, RebalanceExecutor
+**paths:** `doc/ORCA_RUNBOOK.md`
+
+Rozszerzono runbook: **immutable** zakres ticków na jednym NFT Whirlpool → typowy flow collect → decrease → close → open (nowy PDA); alternatywa dwóch pozycji; **`RebalanceExecutor`** bez wbudowanego swapu — swap przez CLI/skrypt + ledger `cli_swap`; **`CLMM_REBALANCE_SESSION_ID`** jako spójne sumowanie kosztów w jednej sesji; przyszłość: id sesji z konfiguracji/UUID w Rust zamiast wyłącznie env.
+
+## 2026-03-30 — Ledger: `cli_swap` + `CLMM_REBALANCE_SESSION_ID` (pełny koszt swap + rebalans + open)
+
+**keywords:** clmm-lp-protocols, clmm-lp-cli, orca-swap, tx_lifecycle, rebalance_session_id, jsonl, fee_payer_net_lamports_delta
+**paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/cli/src/commands/orca_swap.rs`, `crates/cli/src/commands/position_lifecycle_ledger.rs`
+
+Po udanym **`orca-swap`** dopisywany jest wiersz do tego samego pliku co lifecycle (`event=cli_swap`, `operation=orca_whirlpool_swap`, `source=cli`). Opcjonalnie **`CLMM_REBALANCE_SESSION_ID`** (to samo wartość w całej sekwencji: swap → close/open → bot) jest zapisywane do **`rebalance_session_id`** na wierszach: `cli_swap`, `position_open` / `position_close`, oraz `orca_bot` (rebalance executor) — suma **`tx_fee_lamports`** lub delt płatnika po tym samym id daje **całościowy** koszt operacji łączonej.
+
+## 2026-03-30 — protocols + execution: rebalance tx lifecycle ledger (`orca_bot`)
+
+**keywords:** clmm-lp-protocols, clmm-lp-execution, rebalance, tx_lifecycle, ledger, jsonl, orca_bot, position_lifecycle, enrich_tx_costs
+**paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/cli/src/commands/position_lifecycle_ledger.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+Shared append-only JSONL path (`data/ledger/orca_position_lifecycle.jsonl`, same env vars as CLI) and **`enrich_tx_costs`** (RPC `getTransaction` + `meta.fee` + fee payer `preBalances`/`postBalances`) live in **`clmm_lp_protocols::ledger::tx_lifecycle`**. After successful Orca ops in **`RebalanceExecutor`** (`collect_fees`, `decrease_liquidity`, `close_position`, `open_full_range_position`, `open_position`), a row is appended with **`source=orca_bot`**, **`event=bot_*`**, **`operation`** (internal op name), optional **`pool_address`** / **`position_pubkey`** (open flows fill position from `created_position`). CLI lifecycle rows add **`source=cli`** on the same **schema_version=2** file.
+
+## 2026-03-30 — CLI: ledger cyklu życia pozycji Orca (`orca_position_lifecycle.jsonl`)
+
+**keywords:** clmm-lp-cli, orca-position-open, orca-position-close, position_lifecycle_ledger, jsonl, meta.fee, preBalances, postBalances, fee_payer_net_lamports_delta, mint
+**paths:** `crates/cli/src/commands/position_lifecycle_ledger.rs`, `crates/cli/src/commands/orca_position.rs`
+
+Po **udanym** `orca-position-open` i `orca-position-close` dopisywany jest wiersz JSONL (**schema_version=2**): domyślnie `data/ledger/orca_position_lifecycle.jsonl`; ścieżka: `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` lub legacy `CLMM_POSITION_OPEN_LEDGER_PATH`. Pola: mint A/B, limity open (raw+UI), `tx_fee_lamports` (`meta.fee`), oraz **`fee_payer_pre/post` + `fee_payer_net_lamports_delta`** (dla płatnika z `preBalances`/`postBalances` w tej samej transakcji). Przy **open** delta jest zwykle ujemna (fee+rent+depozyt SOL do puli); przy **close** często dodatnia (zwrot rent + SOL z płynności) minus skutek fee — suma delt po obu tx daje przybliżony **bilans SOL** z tych operacji (nogi tokenowe USDC itd. osobno).
+
+## 2026-03-30 — tools: `solana_account_state.ps1` (SOL + SPL snapshot via JSON-RPC)
+
+**keywords:** tools, powershell, solana, rpc, getBalance, getTokenAccountsByOwner, account-state, spl-token, token-2022, mainnet
+**paths:** `tools/solana_account_state.ps1`
+
+Read-only skrypt Windows: zbiera **lamports + SPL** dla podanego ownera (`spl-token` i **Token-2022**), bez `solana`/`spl-token` CLI. Parametry RPC: `getTokenAccountsByOwner` z filtrem `{ programId }` i **osobnym** trzecim obiektem `{ encoding: jsonParsed }` (wymóg RPC). Kolejka URL: `SOLANA_RPC_URL` → `SOLANA_RPC_FALLBACK_URLS` → domyślne publiczne fallbacki (mniej 429 na pojedynczym hoście). Wyjście: konsola lub `-Json` / `-OutJson` pod kolejne kroki automatyzacji.
+
 ## 2026-03-30 — Bot Tier3: position-fee ledger + feeGrowthInside (Whirlpool)
 
 **keywords:** clmm-lp-execution, clmm-lp-protocols, clmm-lp-domain, PositionTruthMode, position_fee_ledger, PositionFeeCheckpoint, orca, whirlpool, tick_array, fee_growth_inside, fee_growth_outside, fee_growth_global

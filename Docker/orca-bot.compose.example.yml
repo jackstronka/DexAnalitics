@@ -1,0 +1,43 @@
+# Example: run Orca CLI bot with container restart policy.
+# Not loaded by default stack — copy/adjust paths and secrets locally.
+#
+# Build CLI image:
+#   docker build -f Docker/cli.Dockerfile -t clmm-lp-cli:local ..
+#
+# Run:
+#   docker compose -f Docker/orca-bot.compose.example.yml up -d
+#
+# Doc: doc/OPERATIONAL_CONTINUITY.md
+
+services:
+  orca-bot:
+    image: clmm-lp-cli:local
+    build:
+      context: ..
+      dockerfile: Docker/cli.Dockerfile
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:?set SOLANA_RPC_URL}
+      SOLANA_RPC_FALLBACK_URLS: ${SOLANA_RPC_FALLBACK_URLS:-}
+      CLMM_EXPECTED_CLUSTER: ${CLMM_EXPECTED_CLUSTER:-}
+      CLMM_RPC_DENYLIST: ${CLMM_RPC_DENYLIST:-}
+    volumes:
+      # Operator must supply host path to keypair JSON (read-only).
+      - ${CLMM_SOLANA_KEYPAIR_HOST_PATH:?set CLMM_SOLANA_KEYPAIR_HOST_PATH}:/run/secrets/solana-keypair.json:ro
+      # Persist JSONL ledgers
+      - orca_bot_data:/data
+    command:
+      - orca-bot-run
+      - --position
+      - ${ORCA_BOT_POSITION:?set ORCA_BOT_POSITION}
+      - --execute
+      - --keypair
+      - /run/secrets/solana-keypair.json
+      - --il-ledger-path
+      - /data/il-ledger.jsonl
+      - --position-fee-ledger-path
+      - /data/position-fee-checkpoints.jsonl
+
+volumes:
+  orca_bot_data: {}
