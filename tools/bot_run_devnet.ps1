@@ -37,6 +37,7 @@ if (-not $SkipLedger) {
     $IlLedgerPath = Join-Path $BotRunDir "il_ledger.jsonl"
     $PositionFeeLedgerPath = Join-Path $BotRunDir "position_fee_ledger.jsonl"
     Info ("Ledger run dir: " + $BotRunDir)
+    Info "For clmm-lp-api Bot activity IL tab: set CLMM_IL_LEDGER_PATH to the same path as -IlLedgerPath (see STARTUP.md)."
   }
 }
 

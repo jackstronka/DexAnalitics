@@ -186,6 +186,7 @@ pub async fn run_position_open(
             None,
             position_pda,
             &fee_payer,
+            "cli",
         )
         .await;
         maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, res.created_position)
@@ -275,6 +276,7 @@ pub async fn run_position_open(
         range_width_pct,
         position_pda,
         &fee_payer,
+        "cli",
     )
     .await;
     maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, res.created_position)
@@ -375,6 +377,7 @@ pub async fn run_position_open_and_close(
             None,
             Some(position.to_string()),
             &fee_payer,
+            "cli",
         )
         .await;
         maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, Some(position)).await;
@@ -412,6 +415,7 @@ pub async fn run_position_open_and_close(
             range_width_pct,
             Some(position.to_string()),
             &fee_payer,
+            "cli",
         )
         .await;
         maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, Some(position)).await;

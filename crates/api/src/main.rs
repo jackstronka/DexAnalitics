@@ -3,6 +3,7 @@
 //! This binary starts the REST API server with WebSocket support.
 
 use anyhow::Result;
+use dotenv::dotenv;
 use clmm_lp_api::server::{ApiServer, ServerConfig, shutdown_signal};
 use clmm_lp_api::state::ApiConfig;
 use clmm_lp_protocols::prelude::RpcConfig;
@@ -12,6 +13,7 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
+    dotenv().ok();
     tracing_subscriber::fmt::init();
 
     info!("Starting Bociarz LP Strategy Lab API Server");
@@ -59,6 +61,10 @@ fn load_config_from_env() -> ServerConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3),
+        repo_root: env::var("CLMM_REPO_ROOT").ok(),
+        script_runner_url: env::var("SCRIPT_RUNNER_URL").ok(),
+        script_runner_token: env::var("SCRIPT_RUNNER_TOKEN").ok(),
+        wallets_dir: env::var("CLMM_WALLETS_DIR").ok(),
         enable_cors: env::var("API_CORS_ALLOW_ALL")
             .map(|v| v == "true")
             .unwrap_or(true),

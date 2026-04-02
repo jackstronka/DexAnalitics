@@ -72,9 +72,13 @@ pub struct OrcaLockInfo {
 
 /// Service facade: REST + on-chain reads.
 pub struct OrcaReadService {
+    /// Reserved for on-chain/REST wiring; readers hold their own `RpcProvider` clone today.
+    #[allow(dead_code)]
     provider: Arc<RpcProvider>,
     whirlpool_reader: WhirlpoolReader,
     position_reader: PositionReader,
+    /// Orca public REST base (skeleton handlers); kept for upcoming implementation.
+    #[allow(dead_code)]
     rest_base_url: String,
 }
 

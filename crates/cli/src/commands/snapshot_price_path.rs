@@ -900,6 +900,8 @@ pub async fn build_from_orca_snapshots(
     token_b: &Token,
     capital: f64,
     lp_share_cli: Option<f64>,
+    pool_mint_a_decimals_override: Option<u8>,
+    pool_mint_b_decimals_override: Option<u8>,
 ) -> Result<SnapshotPricePathResult> {
     let path = if let Some(p) = snapshot_jsonl_override {
         p.to_path_buf()
@@ -930,21 +932,27 @@ pub async fn build_from_orca_snapshots(
         });
     }
 
-    let dec_pool_a: u8 = {
-        use crate::engine::token_meta::fetch_mint_decimals;
-        use clmm_lp_protocols::rpc::RpcProvider;
-        let rpc = RpcProvider::mainnet();
-        fetch_mint_decimals(&rpc, &rows[0].pool_mint_a)
-            .await
-            .unwrap_or(9)
+    let dec_pool_a: u8 = match pool_mint_a_decimals_override {
+        Some(d) => d,
+        None => {
+            use crate::engine::token_meta::fetch_mint_decimals;
+            use clmm_lp_protocols::rpc::RpcProvider;
+            let rpc = RpcProvider::mainnet();
+            fetch_mint_decimals(&rpc, &rows[0].pool_mint_a)
+                .await
+                .unwrap_or(9)
+        }
     };
-    let dec_pool_b: u8 = {
-        use crate::engine::token_meta::fetch_mint_decimals;
-        use clmm_lp_protocols::rpc::RpcProvider;
-        let rpc = RpcProvider::mainnet();
-        fetch_mint_decimals(&rpc, &rows[0].pool_mint_b)
-            .await
-            .unwrap_or(9)
+    let dec_pool_b: u8 = match pool_mint_b_decimals_override {
+        Some(d) => d,
+        None => {
+            use crate::engine::token_meta::fetch_mint_decimals;
+            use clmm_lp_protocols::rpc::RpcProvider;
+            let rpc = RpcProvider::mainnet();
+            fetch_mint_decimals(&rpc, &rows[0].pool_mint_b)
+                .await
+                .unwrap_or(9)
+        }
     };
 
     let quote_usd = mint_usd_dexscreener(&token_b.mint_address)

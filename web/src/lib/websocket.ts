@@ -96,6 +96,11 @@ export const positionsWs = new WebSocketClient()
 export const alertsWs = new WebSocketClient()
 
 export function connectWebSockets() {
+  // Dev toggle: disable WS to avoid Vite proxy spam during frequent API restarts.
+  // Set `VITE_DISABLE_WS=1` in `web/.env.local` and restart Vite.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const disable = ((import.meta as any).env?.VITE_DISABLE_WS ?? '') === '1'
+  if (disable) return
   positionsWs.connect('/ws/positions')
   alertsWs.connect('/ws/alerts')
 }

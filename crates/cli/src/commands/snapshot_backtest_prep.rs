@@ -5,13 +5,27 @@
 //! (still intersected with `--hours` / date window).
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::snapshot_price_path::resolve_snapshot_jsonl_path;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrcaPoolMeta {
+    pub pool_address: String,
+    pub token_mint_a: String,
+    pub token_mint_b: String,
+    pub token_mint_a_decimals: u8,
+    pub token_mint_b_decimals: u8,
+    pub tick_spacing: Option<u16>,
+    pub protocol_fee_rate_bps: Option<u16>,
+    pub fee_rate_raw: Option<u16>,
+    pub generated_at_utc: String,
+    pub snapshots_suffix: Option<String>,
+}
 
 /// Default Orca pools (STARTUP.md curated): SOL/USDC, whETH/SOL.
 const DEFAULT_ORCA_POOLS: &[&str] = &[
@@ -120,7 +134,7 @@ fn parse_u64_list(s: &str) -> Result<Vec<u64>> {
 }
 
 /// One-shot: slice each pool's Orca JSONL into `data/backtest-snapshot-cache/orca/<pool>/window_*.jsonl`.
-pub fn run_snapshot_backtest_prep(
+pub async fn run_snapshot_backtest_prep(
     pools: Option<Vec<String>>,
     windows_hours: &str,
     windows_days: &str,
@@ -174,6 +188,38 @@ pub fn run_snapshot_backtest_prep(
             .join(pool.trim());
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("mkdir {}", out_dir.display()))?;
+
+        // Create a side-car meta cache so that later backtests can run with RPC disabled.
+        // This meta is intentionally small: decimals + tick spacing + basic fee params.
+        let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
+        let reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc.clone());
+        let state = reader.get_pool_state(pool.trim()).await?;
+
+        use crate::engine::token_meta::fetch_mint_decimals;
+        let token_mint_a = state.token_mint_a.to_string();
+        let token_mint_b = state.token_mint_b.to_string();
+
+        let token_mint_a_decimals = fetch_mint_decimals(&rpc, &token_mint_a)
+            .await
+            .unwrap_or(9);
+        let token_mint_b_decimals = fetch_mint_decimals(&rpc, &token_mint_b)
+            .await
+            .unwrap_or(9);
+
+        let meta = OrcaPoolMeta {
+            pool_address: pool.trim().to_string(),
+            token_mint_a,
+            token_mint_b,
+            token_mint_a_decimals,
+            token_mint_b_decimals,
+            tick_spacing: Some(state.tick_spacing),
+            protocol_fee_rate_bps: Some(state.protocol_fee_rate_bps),
+            fee_rate_raw: Some(state.fee_rate_bps),
+            generated_at_utc: chrono::Utc::now().to_rfc3339(),
+            snapshots_suffix: snapshots_suffix.map(|s| s.trim().to_string()),
+        };
+        let meta_path = out_dir.join("pool_meta.json");
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)?;
 
         let mut pool_entry = PoolManifest {
             windows: BTreeMap::new(),

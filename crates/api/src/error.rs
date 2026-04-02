@@ -43,6 +43,10 @@ pub enum ApiError {
     /// Service unavailable.
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
+
+    /// Bad gateway (upstream returned error).
+    #[error("Bad gateway: {0}")]
+    BadGateway(String),
 }
 
 impl From<clmm_lp_execution::agent_decision::AgentDecisionValidationError> for ApiError {
@@ -72,6 +76,16 @@ impl ApiError {
         Self::Internal(msg.into())
     }
 
+    /// Creates a service unavailable error (e.g. optional upstream not configured).
+    pub fn service_unavailable(msg: impl Into<String>) -> Self {
+        Self::ServiceUnavailable(msg.into())
+    }
+
+    /// Upstream (e.g. script runner) returned an error response.
+    pub fn bad_gateway(msg: impl Into<String>) -> Self {
+        Self::BadGateway(msg.into())
+    }
+
     /// Gets the error code.
     pub fn code(&self) -> &'static str {
         match self {
@@ -83,6 +97,7 @@ impl ApiError {
             Self::Validation(_) => "VALIDATION_ERROR",
             Self::Internal(_) => "INTERNAL_ERROR",
             Self::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
+            Self::BadGateway(_) => "BAD_GATEWAY",
         }
     }
 
@@ -97,6 +112,7 @@ impl ApiError {
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
         }
     }
 }

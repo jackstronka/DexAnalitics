@@ -6,24 +6,40 @@ import {
   Droplets, 
   Settings,
   Activity,
+  History,
   Menu,
-  X
+  X,
+  Terminal,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
+import ApiBackendBanner from '@/components/ApiBackendBanner'
+import DevWalletBar from '@/components/DevWalletBar'
+import { getHealth } from '@/lib/api'
 import { connectWebSockets, disconnectWebSockets } from '@/lib/websocket'
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Positions', href: '/positions', icon: Wallet },
+  { name: 'Wallet', href: '/wallet', icon: Wallet },
+  { name: 'Positions', href: '/positions', icon: Activity },
   { name: 'Strategies', href: '/strategies', icon: Target },
   { name: 'Pools', href: '/pools', icon: Droplets },
+  { name: 'Scripts', href: '/scripts', icon: Terminal },
+  { name: 'Bot activity', href: '/bot-activity', icon: History },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
 
 export default function Layout() {
   const location = useLocation()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  const healthQ = useQuery({
+    queryKey: ['health'],
+    queryFn: getHealth,
+    refetchInterval: 30_000,
+    retry: 2,
+  })
 
   useEffect(() => {
     connectWebSockets()
@@ -86,8 +102,18 @@ export default function Layout() {
 
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <div className="h-2 w-2 rounded-full bg-green-500" />
-            <span>Connected</span>
+            <div
+              className={`h-2 w-2 rounded-full shrink-0 ${
+                healthQ.isSuccess ? 'bg-green-500' : healthQ.isError ? 'bg-destructive' : 'bg-yellow-500'
+              }`}
+            />
+            <span className="leading-tight">
+              {healthQ.isPending
+                ? 'API…'
+                : healthQ.isError
+                  ? 'Brak API'
+                  : 'API OK'}
+            </span>
           </div>
         </div>
       </aside>
@@ -104,11 +130,15 @@ export default function Layout() {
           >
             <Menu className="h-5 w-5" />
           </Button>
-          <div className="flex-1" />
-          <div className="text-sm text-muted-foreground">
+          <div className="flex-1 flex justify-end min-w-0">
+            <DevWalletBar />
+          </div>
+          <div className="text-sm text-muted-foreground shrink-0">
             v0.1.1-alpha.2
           </div>
         </header>
+
+        <ApiBackendBanner />
 
         {/* Page content */}
         <main className="flex-1 overflow-auto p-6">

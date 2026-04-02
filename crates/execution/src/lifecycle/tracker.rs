@@ -5,6 +5,7 @@ use super::{
     PositionClosedData, PositionOpenedData, RebalanceData,
 };
 use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint};
+use clmm_lp_protocols::ledger::tx_lifecycle::rebalance_session_id_from_env;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
@@ -304,6 +305,7 @@ impl LifecycleTracker {
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "position": position.to_string(),
             "pool": pool.to_string(),
+            "old_position": data.old_position,
             "amount_a_before": data.amount_a_before,
             "amount_b_before": data.amount_b_before,
             "amount_a_after": data.amount_a_after,
@@ -313,8 +315,10 @@ impl LifecycleTracker {
             "fees_a_collected": data.fees_a_collected,
             "fees_b_collected": data.fees_b_collected,
             "il_at_rebalance": data.il_at_rebalance.to_string(),
+            "tx_cost_lamports": data.tx_cost_lamports,
             "reason": format!("{:?}", data.reason),
             "optimization_run_id": data.optimization_run_id,
+            "rebalance_session_id": rebalance_session_id_from_env(),
         });
         self.append_il_ledger_jsonl(row).await;
     }

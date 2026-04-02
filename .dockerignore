@@ -1,77 +1,12 @@
-# =============================================================================
-# Docker Ignore File
-# =============================================================================
-# Excludes files from Docker build context to speed up builds and reduce image size
-
-# Git
+# Build context dla `docker/api` (całe repo poza ciężkimi / zbędnymi)
+target
+**/target
 .git
 .gitignore
-.gitattributes
-
-# Build artifacts
-target/
-**/target/
-debug/
-
-# IDE and editor files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.run/
-
-# Documentation (not needed for runtime)
-doc/
-docs/
-*.md
-!README.md
-
-# Test and coverage files
-*.profraw
-coverage/
-cobertura.xml
-tarpaulin-report.html
-lcov.info
-
-# Local configuration
+**/.DS_Store
+web/node_modules
+**/node_modules
+*.log
 .env
 .env.*
 !.env.example
-.local/
-.secrets
-
-# OS files
-.DS_Store
-**/.DS_Store
-Thumbs.db
-
-# Web dashboard (built separately in web.Dockerfile)
-web/node_modules/
-web/dist/
-web/.vite/
-
-# Docker files (avoid recursive copy)
-Docker/
-!Docker/nginx.conf
-
-# GitHub workflows
-.github/
-
-# Scripts and utilities
-scripts/
-Makefile
-
-# Backup files
-**/*.rs.bk
-**/*.bak
-**/*.backup
-
-# Logs
-*.log
-logs/
-
-# Temporary files
-tmp/
-temp/
-*.tmp

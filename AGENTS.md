@@ -40,15 +40,15 @@ Standard build/test/lint commands are in the `Makefile`:
 
 ### Starting services
 
-Order: PostgreSQL → API Server → Web Dashboard
+**Recommended (one terminal, API + dashboard):** `cd web && npm install && npm start` — same as `npm run dev:stack`; starts `clmm-lp-api` (port **8080**) and Vite (port **3000**); frees ports **3000**/**8080** first. See `STARTUP.md`.
 
-1. **PostgreSQL**: `sudo service postgresql start`
-2. **API Server**: `RUST_LOG=info cargo run --bin clmm-lp-api` (port 8080)
-3. **Web Dashboard**: `cd web && npm run dev` (port 3000)
+**Manual:** PostgreSQL if required by your setup → **API**: `RUST_LOG=info cargo run --bin clmm-lp-api` → **Web**: `cd web && npm run dev` (Vite only; use when API is already running elsewhere).
+
+**Docker (optional):** `docker compose up --build` from repo root or `make docker-up` — see `doc/DOCKER.md`. In Compose, set **`API_UPSTREAM`** (e.g. `http://api:8080`) so the Vite container can reach the API by service name.
 
 ### Known gotchas
 
-- **Vite proxy mismatch**: `web/vite.config.ts` proxies `/api` and `/ws` to port **8081**, but the API server defaults to port **8080**. If you need the dashboard to proxy to the API, either change `API_PORT=8081` when starting the API or update the vite config.
+- **Vite proxy**: `web/vite.config.ts` proxies `/api` and `/ws` to **`API_UPSTREAM`** or, by default, **http://127.0.0.1:8080**. For a different API port or Docker Compose, set **`API_UPSTREAM`** (and match `API_PORT` on the server if needed).
 - **`make lint` pre-existing warnings**: The codebase has pre-existing clippy warnings (unused variables in `crates/api/src/services/strategy_service.rs`, various lints in `crates/cli/src/main.rs`) that cause `make lint` to fail since it uses `-D warnings`. `cargo build --workspace` and `cargo test` both succeed.
 - **Cargo.lock is gitignored**: Each fresh checkout needs `cargo build` to resolve and lock dependencies.
 - **package-lock.json is gitignored**: Each fresh checkout needs `npm install` in the `web/` directory.

@@ -2,7 +2,7 @@
 
 **Purpose:** turn the long-running **CLI bot** (`orca-bot-run`) or **API + StrategyService** into something that survives crashes, reboots, and is observable — without changing strategy code.
 
-**Related:** [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) (Orca CLI), [`MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md), [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) (modes & alerts), [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md), [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) (optimize → apply paths).
+**Related:** [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) (Orca CLI), [`MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md), [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) (modes & alerts), [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md), [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) (optimize → apply paths), [`POSITION_REGISTRY.md`](POSITION_REGISTRY.md) (**szybki podgląd aktywnych pozycji:** replay `registry.jsonl`, API, `orca-positions-list`).
 
 ## What ships in-repo
 
@@ -11,6 +11,7 @@
 | [`deploy/systemd/clmm-lp-orca-bot.service.example`](../deploy/systemd/clmm-lp-orca-bot.service.example) | **Linux:** `systemd` unit template (`Restart=always`, env file, `ExecStart`). |
 | [`tools/orca_bot_run_supervised.ps1`](../tools/orca_bot_run_supervised.ps1) | **Windows:** restart loop around `clmm-lp-cli orca-bot-run` + optional log files. |
 | [`tools/notify_slack_webhook.ps1`](../tools/notify_slack_webhook.ps1) | **Slack:** POST `text` to Incoming Webhook (`SLACK_WEBHOOK_URL`). |
+| **`clmm-lp-api`** + **web** | **Historia operacji (3Commas‑style timeline):** `GET /api/v1/bot-activity/ledger` i `/registry` czytają te same pliki JSONL co CLI (`data/ledger/orca_position_lifecycle.jsonl`, `data/positions/registry.jsonl`). Strona dashboardu **Bot activity** (`/bot-activity`). `POST /api/v1/bot-activity/slack-summary` wysyła skrót ostatnich wierszy ledgera na Slack (wymaga `SLACK_WEBHOOK_URL` w **env procesu API**, nie tylko w `.env` użytkownika). |
 | [`tools/snapshot_health_alert.ps1`](../tools/snapshot_health_alert.ps1) | **Snapshots:** `snapshot_health_check` → przy błędzie Slack (throttle). |
 | [`tools/quick_verify_alert.ps1`](../tools/quick_verify_alert.ps1) | **Dane:** `quick_verify_data` → przy NO-GO Slack (throttle 60m). |
 | [`doc/SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | Spis skryptów + priorytety alertów. |
@@ -138,6 +139,7 @@ PATH=/home/TWOJ_USER/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 5. **Linux / CI:** `export SLACK_WEBHOOK_URL='https://hooks.slack.com/...'` (lub `source` pliku z sekretem), potem  
    `curl -sS -X POST -H 'Content-type: application/json' --data "{\"text\":\"test\"}" "$SLACK_WEBHOOK_URL"`
 6. **Plan Free:** m.in. limit **liczby aplikacji** w workspace — jedna mini-apka na webhook zwykle mieści się w budżecie; szczegóły: [slack.com/pricing/free](https://slack.com/pricing/free).
+7. **Digest z API (bez PowerShell):** po uruchomieniu `clmm-lp-api` z ustawionym `SLACK_WEBHOOK_URL` możesz wysłać skrót ostatnich wierszy ledgera: `POST /api/v1/bot-activity/slack-summary` z ciałem `{"limit":40}` (albo z dashboardu **Bot activity** → przycisk). API musi widzieć ten sam katalog `data/` co bot (np. uruchomienie z rootu repo lub override `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`).
 
 Opcjonalnie wywołuj `notify_slack_webhook.ps1` z **osobnego** zadania cron / `OnFailure=` (np. gdy `systemctl is-active` zwróci błąd), albo dopisz wywołanie do własnego wrappera po przekroczeniu `MaxRestarts` w `orca_bot_run_supervised.ps1`.
 

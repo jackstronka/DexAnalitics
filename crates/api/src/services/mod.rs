@@ -4,6 +4,7 @@
 //! the execution layer.
 
 pub mod optimization_runner;
+pub mod simulation_analytics;
 pub mod orca_read_service;
 pub mod orca_tx_service;
 pub mod position_service;

@@ -4,6 +4,7 @@
 //! separated into logical modules for maintainability.
 
 pub mod analyze;
+pub mod ledger_rebalance_summary;
 pub mod backtest;
 pub mod backtest_optimize;
 pub mod data;

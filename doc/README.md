@@ -8,6 +8,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
 
+**Roadmap strategii (Jupiter / multi-venue / CLMM):** [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) — hipoteza routingu i fee; przenoszenie zakresów pod wolumen skierowany przez agregator; co zweryfikować danymi.
+
 ## Architecture and product
 
 | Document | Purpose |
@@ -29,8 +31,11 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | 3-phase checklist to move bot from devnet MVP to production-like readiness |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | Solana RPC vs Orca, public vs provider, free-tier pointers, dual fallback — notes for mainnet bot |
 | [`MAINNET_OPERATIONAL_CHECKLIST.md`](MAINNET_OPERATIONAL_CHECKLIST.md) | `CLMM_EXPECTED_CLUSTER`, dry-run vs limited live, links to BOT ops + RPC notes |
+| [`POSITION_REGISTRY.md`](POSITION_REGISTRY.md) | `registry.jsonl` open/close, **szybki podgląd aktywnych pozycji** (replay, API, `orca-positions-list`) |
 | [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | systemd / Task Scheduler / Docker restart, logi, alerty (haki), RPC i klucze |
 | [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | spis `tools/*.ps1`, snapshot P0, Slack, CLI powiązane, skrypty spoza git (`scripts/`) |
+| [`UI_REQUIREMENTS_PHASE1.md`](UI_REQUIREMENTS_PHASE1.md) | Zakres dashboardu fazy 1 (skrypty, portfel, pozycje, ledger, akcje); **status implementacji** + wymagania środowiska |
+| [`DOCKER.md`](DOCKER.md) | `docker compose` (web + API), `API_UPSTREAM`; **Docker Desktop musi działać** (Windows — troubleshooting pipe) |
 
 ## Backtesting and strategies
 
@@ -38,6 +43,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | -------- | ------- |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | Strategy catalog semantics for `backtest` / `backtest-optimize` |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | Focused backtest-optimize notes (example pair / fees) |
+| [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) | Jupiter aggregation, routing vs fee tier, hypothesis for CLMM range placement across venues |
 
 ## Fees, swaps, and on-chain data plans
 
@@ -88,20 +94,24 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`BOT_WORKLOG_2026-03-23.md`](BOT_WORKLOG_2026-03-23.md) | worklog, rationale (snapshot) |
 | [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | devnet, wallet, runbook, dry-run, limited-live, preflight |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | devnet, bot, production readiness, checklist, go/no-go |
+| [`DOCKER.md`](DOCKER.md) | docker compose, web+api, API_UPSTREAM, Docker Desktop, Windows pipe |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | code changes, keywords, changelog, AI-searchable |
 | [`FEES_DATA_PLAN.md`](FEES_DATA_PLAN.md) | fees data |
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora, swap event, DLMM |
 | [`ONCHAIN_FEES_PROGRESS.md`](ONCHAIN_FEES_PROGRESS.md) | on-chain fees, progress |
 | [`ONCHAIN_FEES_TRUTH_PLAN.md`](ONCHAIN_FEES_TRUTH_PLAN.md) | on-chain fees, plan |
+| [`POSITION_REGISTRY.md`](POSITION_REGISTRY.md) | registry.jsonl, active positions, orca-positions-list, collectors, API registry |
 | [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | bot supervision, systemd, Docker, Windows script, logs, alerts hooks |
 | [`ORCA_FEES_DATA_PLAN.md`](ORCA_FEES_DATA_PLAN.md) | Orca, fees plan |
 | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) | Orca, service contract, read/write split, endpoint map |
 | [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) | Orca, operations |
 | [`ORCA_EXTERNAL_IMPLEMENTATIONS.md`](ORCA_EXTERNAL_IMPLEMENTATIONS.md) | orca, hummingbot, examples, rent, token-2022, tx-builders |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | architecture, crates, pipeline, CLI names, data paths |
+| [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) | Jupiter, multi-venue, routing, fee hypothesis, CLMM roadmap |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | rpc, solana, mainnet, fallback, free tier, orca bot |
 | [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | tools, powershell, snapshot-health, slack, monitoring, keywords |
 | [`README.md`](README.md) | *this file* — TOC + A–Z index |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | solana, indexing, RPC, Geyser, swaps-sync, misconceptions |
 | [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) | agent_layer_profile, osobny tryb, chart screenshot, rules-as-training, consensus, eval harness, `AgentDecision`, P1–P13 |
 | [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) | roadmap, phases A–F, M1/M2 sprint, start-here queue |
+| [`UI_REQUIREMENTS_PHASE1.md`](UI_REQUIREMENTS_PHASE1.md) | dashboard phase 1, scripts, wallet, positions, ledger, implementation status |

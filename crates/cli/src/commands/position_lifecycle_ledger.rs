@@ -255,6 +255,7 @@ pub async fn try_append_position_open_cost_ledger(
     range_width_pct: Option<f64>,
     position_pda: Option<String>,
     fee_payer: &Pubkey,
+    source: &'static str,
 ) {
     if let Err(e) = append_open_inner(
         provider,
@@ -269,6 +270,7 @@ pub async fn try_append_position_open_cost_ledger(
         range_width_pct,
         position_pda,
         fee_payer,
+        source,
     )
     .await
     {
@@ -289,6 +291,7 @@ async fn append_open_inner(
     range_width_pct: Option<f64>,
     position_pda: Option<String>,
     fee_payer: &Pubkey,
+    source: &'static str,
 ) -> Result<()> {
     let dec_a = mint_decimals(provider, &pool_state.token_mint_a)
         .await
@@ -310,7 +313,7 @@ async fn append_open_inner(
     let rec = PositionLifecycleRecord {
         schema_version: 2,
         ts_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        source: "cli",
+        source,
         event: "position_open",
         pool_address: pool_state.address.clone(),
         mint_a: pool_state.token_mint_a.to_string(),

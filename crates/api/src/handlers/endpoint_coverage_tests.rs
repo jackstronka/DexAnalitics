@@ -116,7 +116,7 @@ async fn all_position_endpoints_are_reachable() {
             router.clone(),
             Method::POST,
             "/api/v1/positions/invalid/decrease",
-            Some(serde_json::json!({"liquidity_amount":1})),
+            Some(serde_json::json!({"liquidity_amount":"1"})),
         )
         .await,
         StatusCode::BAD_REQUEST
@@ -267,17 +267,20 @@ async fn all_pool_and_analytics_endpoints_are_reachable() {
         initial_capital_usd: Decimal::new(100, 0),
         start_date: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
         end_date: chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
-        strategy_type: None,
+        ..Default::default()
     };
-    assert_eq!(
-        request(
-            router,
-            Method::POST,
-            "/api/v1/analytics/simulate",
-            Some(serde_json::json!(sim)),
-        )
-        .await,
-        StatusCode::OK
+    // Invalid pool id or RPC failure → 400/500; endpoint must be reachable.
+    let sim_code = request(
+        router,
+        Method::POST,
+        "/api/v1/analytics/simulate",
+        Some(serde_json::json!(sim)),
+    )
+    .await;
+    assert!(
+        sim_code == StatusCode::BAD_REQUEST
+            || sim_code == StatusCode::INTERNAL_SERVER_ERROR
+            || sim_code == StatusCode::OK
     );
 }
 
@@ -383,6 +386,32 @@ async fn all_orca_proxy_endpoints_are_reachable() {
     assert_eq!(
         request(router, Method::GET, "/api/v1/orca/protocol", None).await,
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn orca_positions_by_owner_validates_query() {
+    let state = test_state();
+    let router = create_versioned_router(state);
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/orca/positions-by-owner",
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            router,
+            Method::GET,
+            "/api/v1/orca/positions-by-owner?owner=not-a-valid-pubkey",
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST
     );
 }
 
@@ -494,6 +523,48 @@ async fn auth_and_ws_endpoints_are_reachable() {
     assert!(
         resp2.status() == StatusCode::SWITCHING_PROTOCOLS
             || resp2.status() == StatusCode::UPGRADE_REQUIRED
+    );
+}
+
+#[tokio::test]
+async fn scripts_list_endpoint_is_reachable() {
+    let state = test_state();
+    let router = create_versioned_router(state);
+    assert_eq!(
+        request(router, Method::GET, "/api/v1/scripts", None).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn bot_activity_il_ledger_endpoint_is_reachable() {
+    let state = test_state();
+    let router = create_versioned_router(state);
+    assert_eq!(
+        request(
+            router,
+            Method::GET,
+            "/api/v1/bot-activity/il-ledger",
+            None,
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn scripts_run_returns_503_without_runner() {
+    let state = test_state();
+    let router = create_versioned_router(state);
+    assert_eq!(
+        request(
+            router,
+            Method::POST,
+            "/api/v1/scripts/quick_verify_data/run",
+            Some(serde_json::json!({})),
+        )
+        .await,
+        StatusCode::SERVICE_UNAVAILABLE
     );
 }
 

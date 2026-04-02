@@ -31,6 +31,17 @@ pub fn rebalance_session_id_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Optional IL / rebalance JSONL path (`orca-bot-run --il-ledger-path` / **`CLMM_IL_LEDGER_PATH`**).
+/// Unlike [`ledger_path`], there is **no** default file — unset means IL rows are not persisted to disk unless the flag is passed.
+#[must_use]
+pub fn il_ledger_path_from_env() -> Option<PathBuf> {
+    std::env::var("CLMM_IL_LEDGER_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Default / env-resolved ledger path (same as CLI lifecycle ledger).
 #[must_use]
 pub fn ledger_path() -> PathBuf {

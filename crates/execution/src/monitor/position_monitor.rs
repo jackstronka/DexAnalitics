@@ -208,10 +208,24 @@ impl PositionMonitor {
 
     /// Updates a single position.
     async fn update_position(&self, address: &Pubkey) -> anyhow::Result<()> {
-        let position = self
+        let position = match self
             .position_reader
             .get_position(&address.to_string())
-            .await?;
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                if rpc_error_suggests_missing_account(&e) {
+                    warn!(
+                        position = %address,
+                        "Position account no longer exists (closed or invalid); removing from monitor"
+                    );
+                    self.remove_position(address).await;
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         let pool_state = self
             .pool_reader
             .get_pool_state(&position.pool.to_string())
@@ -334,6 +348,30 @@ impl PositionMonitor {
         }
 
         metrics
+    }
+}
+
+/// Best-effort: detect missing account from RPC / provider error chains (avoid infinite ERROR spam).
+fn rpc_error_suggests_missing_account(err: &anyhow::Error) -> bool {
+    let mut combined = err.to_string();
+    for cause in err.chain() {
+        combined.push(' ');
+        combined.push_str(&cause.to_string());
+    }
+    let lower = combined.to_lowercase();
+    lower.contains("accountnotfound")
+        || lower.contains("could not find account")
+}
+
+#[cfg(test)]
+mod rpc_err_tests {
+    use super::rpc_error_suggests_missing_account;
+
+    #[test]
+    fn detects_account_not_found_in_chain() {
+        let inner = anyhow::anyhow!("rpc: AccountNotFound");
+        let e: anyhow::Error = inner.context("Failed to get account");
+        assert!(rpc_error_suggests_missing_account(&e));
     }
 }
 

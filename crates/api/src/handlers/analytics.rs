@@ -1,7 +1,8 @@
 //! Analytics handlers.
 
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::models::{PortfolioAnalyticsResponse, SimulationRequest, SimulationResponse};
+use crate::services::simulation_analytics::run_dashboard_simulation;
 use crate::state::AppState;
 use axum::{Json, extract::State};
 use rust_decimal::Decimal;
@@ -91,39 +92,9 @@ pub async fn get_portfolio_analytics(
     )
 )]
 pub async fn run_simulation(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<SimulationRequest>,
 ) -> ApiResult<Json<SimulationResponse>> {
-    // Validate request
-    if request.tick_lower >= request.tick_upper {
-        return Err(ApiError::Validation(
-            "tick_lower must be less than tick_upper".to_string(),
-        ));
-    }
-
-    if request.start_date >= request.end_date {
-        return Err(ApiError::Validation(
-            "start_date must be before end_date".to_string(),
-        ));
-    }
-
-    // TODO: Implement actual simulation using clmm_lp_simulation
-    // For now, return placeholder response
-
-    let response = SimulationResponse {
-        id: uuid::Uuid::new_v4().to_string(),
-        pool_address: request.pool_address,
-        tick_lower: request.tick_lower,
-        tick_upper: request.tick_upper,
-        initial_capital_usd: request.initial_capital_usd,
-        final_value_usd: request.initial_capital_usd, // Placeholder
-        total_return_pct: Decimal::ZERO,
-        fee_earnings_pct: Decimal::ZERO,
-        il_pct: Decimal::ZERO,
-        sharpe_ratio: Decimal::ZERO,
-        max_drawdown_pct: Decimal::ZERO,
-        rebalance_count: 0,
-    };
-
+    let response = run_dashboard_simulation(&state, request).await?;
     Ok(Json(response))
 }

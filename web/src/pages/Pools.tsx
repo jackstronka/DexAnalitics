@@ -16,6 +16,10 @@ export default function Pools() {
 
   return (
     <div className="space-y-6">
+      <p className="text-xs text-muted-foreground">
+        Pule ładowane są z publicznego API Orca przez backend — przy błędzie proxy/portu lista będzie pusta.
+      </p>
+
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Pools</h1>
         <Button variant="outline" size="sm" onClick={() => refetch()}>
@@ -32,8 +36,11 @@ export default function Pools() {
           {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
           ) : pools.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              No pools found.
+            <div className="text-center py-8 text-muted-foreground text-sm space-y-2 max-w-lg mx-auto">
+              <p>Brak pul z API Orca.</p>
+              <p className="text-xs">
+                Sprawdź, czy backend odpowiada (proxy Vite → ten sam port co <code className="text-[11px]">API_PORT</code>) oraz czy host ma dostęp do publicznego API Orca.
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">

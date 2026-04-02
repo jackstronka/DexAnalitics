@@ -63,6 +63,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/orca/tokens/search", get(handlers::orca_search_tokens))
         .route("/orca/tokens/{mint}", get(handlers::orca_get_token))
         .route("/orca/protocol", get(handlers::orca_get_protocol))
+        .route(
+            "/orca/positions-by-owner",
+            get(handlers::orca_positions_by_owner),
+        )
         // Unsiged tx flow routes
         .route("/tx/open/build", post(handlers::tx_open_build))
         .route("/tx/increase/build", post(handlers::tx_increase_build))
@@ -76,6 +80,20 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::get_portfolio_analytics),
         )
         .route("/analytics/simulate", post(handlers::run_simulation))
+        // Bot activity (JSONL ledger / registry; Slack digest)
+        .route("/bot-activity/ledger", get(handlers::get_bot_ledger))
+        .route("/bot-activity/il-ledger", get(handlers::get_bot_il_ledger))
+        .route("/bot-activity/registry", get(handlers::get_bot_registry))
+        .route(
+            "/bot-activity/slack-summary",
+            post(handlers::post_bot_slack_summary),
+        )
+        // Tools scripts (manifest + runner proxy)
+        .route("/scripts", get(handlers::list_scripts))
+        .route("/scripts/{id}/run", post(handlers::run_script))
+        // Wallets (local keypairs directory + on-chain balances)
+        .route("/wallets", get(handlers::list_wallets))
+        .route("/wallets/balances", get(handlers::get_wallet_balances))
         // WebSocket routes
         .route("/ws/positions", get(websocket::positions_ws))
         .route("/ws/alerts", get(websocket::alerts_ws))

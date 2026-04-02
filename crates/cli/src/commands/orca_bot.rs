@@ -1,6 +1,7 @@
 //! CLI entry for Orca Whirlpool live bot: `PositionMonitor` + `StrategyExecutor` (same as `clmm-lp-api`).
 
 use super::orca_wallet::load_signing_wallet;
+use super::position_lifecycle_ledger::try_append_position_open_cost_ledger;
 use anyhow::{Context, Result};
 use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{
@@ -8,6 +9,7 @@ use clmm_lp_execution::prelude::{
     TransactionConfig, TransactionManager, decision_config_from_optimize_result,
     parse_optimize_result_json,
 };
+use clmm_lp_protocols::ledger::position_registry::try_append_registry_open;
 use clmm_lp_protocols::prelude::{
     OpenPositionParams, RpcConfig, RpcProvider, WhirlpoolExecutor, WhirlpoolReader,
     calculate_tick_range,
@@ -241,7 +243,7 @@ pub async fn run_orca_bot_open_and_run(
         ),
     };
 
-    let orca = WhirlpoolExecutor::new(provider);
+    let orca = WhirlpoolExecutor::new(provider.clone());
     let open = orca
         .open_position(
             &OpenPositionParams {
@@ -273,6 +275,34 @@ pub async fn run_orca_bot_open_and_run(
         open_signature = %open.signature,
         "Opened position for bot run"
     );
+
+    let fee_payer = wallet.pubkey();
+    let position_pda = Some(position.to_string());
+    try_append_position_open_cost_ledger(
+        provider.as_ref(),
+        &state,
+        amount_a,
+        amount_b,
+        slippage_bps,
+        &open.signature,
+        "tick_range",
+        Some(tl),
+        Some(tu),
+        range_width_pct,
+        position_pda,
+        &fee_payer,
+        "orca_bot",
+    )
+    .await;
+    try_append_registry_open(
+        provider.as_ref(),
+        "orca_bot",
+        &position,
+        &pool_pk,
+        &fee_payer,
+        &open.signature,
+    )
+    .await;
 
     run_orca_bot(
         Some(position.to_string()),

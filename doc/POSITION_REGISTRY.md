@@ -37,6 +37,19 @@ Append-only: dla każdego `position_pubkey` weź **ostatni** wiersz (po czasie /
 
 Proste podejście operacyjne: `grep` / skrypt, który buduje mapę `position → last_event`.
 
+## Szybko: aktywne pozycje dla botów (co jest „prawdą”)
+
+| Potrzeba | Ścieżka | Uwagi |
+| -------- | ------- | ----- |
+| **Lista LP on-chain dla portfela (źródło prawdy)** | `clmm-lp-cli orca-positions-list` z `--keypair` / `KEYPAIR_PATH` (patrz [`STARTUP.md`](../STARTUP.md)) | Wywołuje `fetch_positions_for_owner` (SDK Orca) — **nie** zależy od lokalnego JSONL. |
+| **Stan „otwarte vs zamknięte” w księdze repo** | Replay tego pliku (sekcja wyżej) albo `GET /api/v1/bot-activity/registry` + strona **Bot activity** (`/bot-activity`) w web | Te same ścieżki plików co CLI: `CLMM_POSITION_REGISTRY_PATH`. |
+| **Ciągły monitoring w czasie działania bota** | Pętla `orca-bot-run`: `PositionMonitor` co `--poll-interval-secs` (RPC: pozycja + pula, `in_range`, itd.) | Dotyczy tylko NFT **dodanych** do tego procesu; każdy bot = osobny proces na swoją `--position`. |
+| **Warianty strategii rebalansu (wiele „botów” decyzyjnych)** | Semantyka trybów: [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md); ops: [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md); przykłady wielu pozycji: [`WHETH_SOL_TWO_BOTS_10USD.md`](WHETH_SOL_TWO_BOTS_10USD.md), [`WHETH_SOL_THREE_BOTS_FIRST_RUN.md`](WHETH_SOL_THREE_BOTS_FIRST_RUN.md) | W kodzie: `StrategyMode` (`OorRecenter`, `Periodic`, `Threshold`, …) w `clmm-lp-execution`. |
+
+**Retro / luki:** jeśli `registry_open` nie został dopisany (np. stary open poza ścieżką CLI/bota), rejestr **nie** wystarczy — wtedy lista z **`orca-positions-list`** lub jednoręczny wpis (`Retro` poniżej).
+
+**Poza repo (inspiracje, nie roadmap):** typowe automaty CLMM łączą pętlę RPC/SDK (pool + pozycje właściciela) z warunkiem i transakcją; np. [Orca — AI agents](https://docs.orca.so/reference/ai-agents) opisuje schemat fetch → decide → execute. Produkty z własnym API vaultów (np. Kamino) dokładają warstwę REST/SDK do metryk — u nas **domyślnie** publiczny RPC + lokalne pliki, z jawną niepełnością przy limitach darmowego endpointu.
+
 ## Pula Whirlpool vs PDA pozycji (częsta pomyłka przy `close`)
 
 - Konto **puli** (`whirlpool`) ma **653 bajty** danych (to nie jest adres pozycji).

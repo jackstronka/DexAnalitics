@@ -27,6 +27,26 @@ if (-not [string]::IsNullOrWhiteSpace($SolanaRpcUrl)) {
   Set-SolanaRpcEnv -SolanaRpcUrl $SolanaRpcUrl -SolanaRpcFallbackUrls $SolanaRpcFallbackUrls -ExpectedCluster $ExpectedCluster
 }
 
+$cliExe = Resolve-ClmmLpCliExe $repoRoot
+if ($cliExe) {
+  Info ("Using " + $cliExe + " (avoids cargo run when debug exe is locked).")
+}
+
+function Invoke-ClmmLpCliQuiet {
+  param([Parameter(Mandatory)][string[]]$Argv)
+  $oldEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    if ($cliExe) {
+      & $cliExe @Argv 2>&1 | ForEach-Object { "$_" }
+    } else {
+      (& cargo run --quiet -p clmm-lp-cli --bin clmm-lp-cli -- @Argv) 2>&1 | ForEach-Object { "$_" }
+    }
+  } finally {
+    $ErrorActionPreference = $oldEap
+  }
+}
+
 $targets = @(
   @{ protocol = "orca"; pool = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE" },
   @{ protocol = "orca"; pool = "HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF" },
@@ -49,7 +69,7 @@ Info ("Snapshot readiness checks: " + $targets.Count + " pools")
 
 $snapshotRows = @()
 foreach ($t in $targets) {
-  $output = (& cargo run --quiet --bin clmm-lp-cli -- snapshot-readiness --protocol $t.protocol --pool-address $t.pool) | ForEach-Object { "$_" }
+  $output = Invoke-ClmmLpCliQuiet -Argv @("snapshot-readiness", "--protocol", $t.protocol, "--pool-address", $t.pool)
 
   $tier1 = "UNKNOWN"
   $tier2 = "UNKNOWN"
@@ -73,7 +93,7 @@ $tier12Ready = $snapshotRows | Where-Object { $_.tier1_lp_share -eq "READY" -and
 $snapshotTier12Ok = ($tier12Ready.Count -eq $snapshotRows.Count)
 
 Info ("Running health-check (max_age=${HealthMaxAgeMinutes}m, min_decode_ok=${MinDecodeOkPct}%)")
-$healthOut = (& cargo run --quiet --bin clmm-lp-cli -- data-health-check --max-age-minutes $HealthMaxAgeMinutes --min-decode-ok-pct $MinDecodeOkPct) | ForEach-Object { "$_" }
+$healthOut = Invoke-ClmmLpCliQuiet -Argv @("data-health-check", "--max-age-minutes", "$HealthMaxAgeMinutes", "--min-decode-ok-pct", "$MinDecodeOkPct")
 $healthAlerts = -1
 foreach ($line in $healthOut) {
   if ($line -match "health summary:\s+alerts=(\d+)") {
@@ -86,7 +106,7 @@ $healthOk = ($healthAlerts -le $MaxAllowedHealthAlerts)
 $decodeOkPct = -1.0
 if (-not $SkipDecodeAudit) {
   Info "Running decode audit"
-  $auditOut = (& cargo run --quiet --bin clmm-lp-cli -- swaps-decode-audit --save-report) | ForEach-Object { "$_" }
+  $auditOut = Invoke-ClmmLpCliQuiet -Argv @("swaps-decode-audit", "--save-report")
   foreach ($line in $auditOut) {
     if ($line -match "decode audit summary:.+ok=\d+\s+\(([\d\.]+)%\)") {
       $decodeOkPct = [double]$Matches[1]

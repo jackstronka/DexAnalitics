@@ -55,6 +55,16 @@ check: test fmt-check lint
 run:
 	cargo run
 
+# Web dashboard + API in one terminal (see web/scripts/start-dev-stack.mjs)
+.PHONY: dashboard
+dashboard:
+	cd web && npm install && npm start
+
+# API + Vite w Dockerze (patrz doc/DOCKER.md)
+.PHONY: docker-up
+docker-up:
+	docker compose up --build
+
 .PHONY: fix
 fix:
 	cargo fix --allow-staged --allow-dirty

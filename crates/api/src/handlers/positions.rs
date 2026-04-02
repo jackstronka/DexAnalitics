@@ -353,8 +353,16 @@ pub async fn decrease_liquidity(
         }
     }
 
+    let liquidity_amount: u128 = request
+        .liquidity_amount
+        .trim()
+        .parse()
+        .map_err(|_| {
+            ApiError::bad_request("liquidity_amount must be a non-negative decimal integer string")
+        })?;
+
     let op = svc
-        .decrease_liquidity(&address, request.liquidity_amount)
+        .decrease_liquidity(&address, liquidity_amount)
         .await?;
     if op.success {
         Ok(Json(MessageResponse::new(format!(

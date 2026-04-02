@@ -1,0 +1,38 @@
+# Standardowy układ: osobne kontenery w jednej sieci, Vite proxy → API po nazwie hosta.
+# Uruchomienie z katalogu repo:  docker compose up --build
+#
+# UI: http://localhost:3000  |  API: http://localhost:8080  |  Swagger: http://localhost:8080/docs
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      CLMM_REPO_ROOT: /repo
+    volumes:
+      - .:/repo
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_DOCKER: "1"
+      # Proxy Vite (dev server) → kontener api (nie localhost!)
+      API_UPSTREAM: http://api:8080
+      # HMR przy montowaniu kodu z hosta (Docker Desktop / niektóre wolumeny)
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./web:/app/web
+      - web_node_modules:/app/web/node_modules
+    depends_on:
+      - api
+
+volumes:
+  web_node_modules:

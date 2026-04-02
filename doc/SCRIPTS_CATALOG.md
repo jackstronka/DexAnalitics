@@ -10,7 +10,172 @@
 
 ---
 
+## Model pracy skryptów (manual / triggered / automatic)
+
+Poniższy podział odpowiada na “jak to u nas działa operacyjnie” — czyli **kto/ co odpala skrypt** i **gdzie trafiają alerty na Slacka**.
+
+### 1) Manual (jednorazowe)
+Odpala je operator “na żądanie”, gdy chce audyt/porównanie/diagnostykę.
+
+Przykłady: `tools/quick_verify_data.ps1`, `tools/compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1`, `tools/check_collector_5m_status.ps1`, `tools/restart_snapshot_loop_10m.ps1`, `tools/count_snapshot_rows_last_full_hour.ps1`.
+
+### 2) Triggered (wyzwalane przez harmonogram)
+Harmonogram odpala jeden shot; skrypt wysyła Slacka, gdy wykryje problemy (z throttle).
+
+Przykłady: `tools/snapshot_health_alert.ps1` i `tools/quick_verify_alert.ps1` (w środku wywołują `snapshot_health_check.ps1` oraz `quick_verify_data.ps1`).
+
+### 3) Automatic (ciągłe pętle / usługi)
+Długowieczne procesy utrzymujące spójność snapshotów i alertów bez zewnętrznych wyzwalaczy.
+
+Mechanizmy automatyzacji:
+- `tools/data_alerts_loop.ps1`: pętla “co X sekund/minut” uruchamia `snapshot_health_alert.ps1` oraz opcjonalnie `quick_verify_alert.ps1`. Docelowo uruchamiane pod **Shawl / NSSM**.
+- `tools/run_snapshot_health_monitor_loop.ps1`: pętla “health-only” (bez Slacka), stale dopisuje logi snapshotów.
+- `tools/run_snapshot_backtest_prep_loop.ps1`: pętla odświeżająca snapshoty i przygotowująca cache przez `snapshot-backtest-prep` (może być `-Loop` jako tryb ciągły, albo jednorazowo pod Task Scheduler).
+
+### Task Scheduler (Windows) — które skrypty i po co
+Na Windows najczęściej używamy Task Scheduler do **jednorazowych** “shotów”, żeby uruchamiać wrappery alertów (Slack przez throttle) oraz cache przygotowania pod backtesty.
+
+Skrypty:
+- `tools/snapshot_health_alert.ps1`: okresowo uruchamiany shot (najczęściej co ~10 minut) — gdy `snapshot_health_check` wykryje problemy, wyśle Slack.
+- `tools/quick_verify_alert.ps1`: okresowo uruchamiany shot (najczęściej co ~60 minut) — gdy `quick_verify_data` zwróci NO-GO, wyśle Slack.
+- `tools/run_snapshot_backtest_prep_loop.ps1`: okresowo (najczęściej co ~30 minut, one-shot) — robi `snapshot-run-curated-all` + `snapshot-backtest-prep` + (opcjonalnie) `snapshot-readiness`, żeby cache było świeże pod `backtest-optimize --price-path-source snapshots`.
+- `tools/orca_bot_run_supervised.ps1`: może być odpalany “At startup” przez Task Scheduler jako wrapper restartujący `orca-bot-run` po błędach (albo alternatywnie pod NSSM/Shawl).
+
+Slack: wspólny punkt przez wrappery
+Slack jest “spięty” przez `tools/notify_slack_webhook.ps1` oraz wrappery `snapshot_health_alert.ps1` / `quick_verify_alert.ps1`, które decydują o wysyłce i throttle.
+
+Cache do backtestów:
+`tools/run_snapshot_backtest_prep_loop.ps1` (przez `snapshot-backtest-prep`) generuje `data/backtest-snapshot-cache/*/pool_meta.json`, żeby `backtest-optimize --price-path-source snapshots` nie zależał od RPC dla `*_decimals`/`tick_spacing`.
+
+## Recommended Automatic set (Windows)
+Jeśli chcesz “bez Task Scheduler” i 24/7, rekomendowany minimalny zestaw usług:
+
+1. **Alerty danych (Slack):** `tools/data_alerts_loop.ps1` (Shawl/NSSM)
+2. **Cache do backtestów (okna + meta):** `tools/run_snapshot_backtest_prep_loop.ps1 -Loop -SlackOnError -LogFile data/snapshot_logs/snapshot-backtest-prep-loop.log`
+3. **Ingest (snapshots+swaps pipeline) jako CLI:** `tools/run_ops_ingest_loop.ps1` (wrapuje `clmm-lp-cli ops-ingest-loop` pod usługę)
+4. **Bot runtime:** `tools/orca_bot_run_supervised.ps1 ...` (jeśli bot ma działać stale)
+
+### Shawl — przykładowe komendy
+Uruchamiasz raz (rejestracja), potem startujesz usługę:
+
+- `shawl add --name clmm-data-alerts --cwd F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\tools\data_alerts_loop.ps1`
+- `shawl add --name clmm-snapshot-backtest-prep --cwd F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\tools\run_snapshot_backtest_prep_loop.ps1 -Loop -SlackOnError -LogFile F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\data\snapshot_logs\snapshot-backtest-prep-loop.log`
+- `shawl add --name clmm-ops-ingest-loop --cwd F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\tools\run_ops_ingest_loop.ps1 -SlackOnError`
+
+NSSM jest analogiczne (aplikacja `powershell.exe`, argumenty `-File ...`), patrz `STARTUP.md` oraz `doc/OPERATIONAL_CONTINUITY.md`.
+
+### Weryfikacja: co faktycznie odpala Task Scheduler u Ciebie
+Na tej maszynie Task Scheduler nie odpala `.ps1` (brak wpisów z `powershell.exe`/`*.ps1` w akcjach). Aktualnie odpala **Rust CLI** zadania:
+
+1. `clmm-lp snapshot-run-curated-all`
+   - tryb: daily
+   - akcja: `target\release\clmm-lp-cli.exe snapshot-run-curated-all`
+2. `clmm-lp swaps-sync+enrich-curated-all`
+   - tryb: daily
+   - akcja: uruchamia `target\release\clmm-lp-cli.exe` z komendy `cmd.exe` (z root repo jako `cd /d ...`)
+
+To oznacza, że Twoje PS-wrappers (`snapshot_health_alert.ps1`, `quick_verify_alert.ps1`, `run_snapshot_backtest_prep_loop.ps1`) są u Ciebie najpewniej uruchamiane innym mechanizmem (np. Shawl/NSSM) albo ręcznie, a Task Scheduler robi “ciężkie” kroki (snapshoty + swaps sync/enrich) jako CLI exec.
+
+### Owner / run-mode (operacyjny łańcuch danych -> Slack)
+Poniżej jest dopięte “kto to obsługuje” (od strony odpowiedzialności) i “jaki mechanizm uruchomieniowy” dla skryptów, które realnie spinają kompletność/synchronizację i alerty.
+
+| Skrypt / komenda | Kto obsługuje | Mechanizm uruchomienia | Co sprawdza / robi |
+|---|---|---|---|
+| `clmm-lp snapshot-run-curated-all` | Data Collector (bot/ops) | Task Scheduler (daily) | Odświeża snapshoty oraz JSONL statusy dla snapshotów 10m/5m |
+| `clmm-lp swaps-sync+enrich-curated-all` | Data Collector (bot/ops) | Task Scheduler (daily) | Sync swapów + enrich/decoded dane dla pipeline’u backtest/fees |
+| `tools/snapshot_health_check.ps1` | Data Quality Gate | wywoływane przez wrapper (one-shot) | Sprawdza świeżość + brak błędów w logach snapshot loop (10m/5m) |
+| `tools/snapshot_health_alert.ps1` | Data Ops Alerting | triggered shot (najczęściej Task Scheduler / cron) albo wywołania w `data_alerts_loop` | Na NOT OK wysyła Slack (z throttle) |
+| `tools/quick_verify_data.ps1` | Data Quality Gate | wywoływane przez wrapper (one-shot) | Agreguje readiness + `data-health-check` + opcjonalnie decode audit |
+| `tools/quick_verify_alert.ps1` | Data Ops Alerting | triggered shot (najczęściej hourly) albo wywołania w `data_alerts_loop` | Na NO-GO wysyła Slack (throttle) |
+| `tools/data_alerts_loop.ps1` | Data Ops Alerting | automatic long-lived (Shawl/NSSM) | Jednym procesem robi cyklicznie `snapshot_health_alert` i `quick_verify_alert` |
+| `tools/run_snapshot_backtest_prep_loop.ps1` | Research / Backtest Ops | triggered shot albo loop (one-shot + scheduler) | Buduje cache `data/backtest-snapshot-cache` pod `backtest-optimize --price-path-source snapshots` |
+| `tools/run_ops_ingest_loop.ps1` | Data Collector (bot/ops) | automatic long-lived (Shawl/NSSM) | Wrapuje `clmm-lp-cli ops-ingest-loop` pod usługę (ingest: snapshots → swaps sync → enrich → audit → health-check) + opcjonalny Slack na non-zero exit |
+| `tools/run_snapshot_health_monitor_loop.ps1` | Data Quality Gate | automatic long-lived (loop) | Tylko loguje “health” do plików, bez Slacka |
+| `tools/orca_bot_run_supervised.ps1` | Bot Supervisor | OS-level supervision: Task Scheduler (At startup) albo NSSM/Shawl | Restartuje `orca-bot-run` jeśli proces wyjdzie z błędem |
+| `tools/log_rotate.ps1` | Data Ops / Operator | triggered shot (Task Scheduler, daily) | Retencja: usuwa stare logi/raporty pod `data/` (żeby repo nie rosło bez końca przy usługach) |
+
+### Task Scheduler (Windows) — gotowy task dla `tools/log_rotate.ps1`
+Skrypt `tools/log_rotate.ps1` jest celowo **one-shot** i najlepiej odpalać go jako jeden task dziennie.
+
+**Proponowana nazwa taska:** `clmm-lp log-rotate`
+
+**Trigger (przykład):**
+- Daily, godzina np. **03:30**
+
+**Action:**
+- **Program/script:** `powershell.exe`
+- **Add arguments:**
+  - `-NoProfile -ExecutionPolicy Bypass -File "F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\tools\log_rotate.ps1" -KeepDays 14`
+- **Start in:**
+  - `F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider`
+
+**Test (bez kasowania):**
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "F:\CLMM-Liquidity-Provider\CLMM-Liquidity-Provider\tools\log_rotate.ps1" -KeepDays 14 -WhatIf`
+
+Uwaga: `log_rotate.ps1` usuwa tylko stare pliki spod `data/` (logi/raporty/alert-state). Nie dotyka `data/pool-snapshots/**` ani ledgerów bota, więc jest bezpieczny jako automatyczna retencja.
+
+## Owner / run-mode dla `tools/*.ps1`
+Poniższa tabela opisuje **kto** typowo “odpala” skrypt i **jaki mechanizm** jest do tego używany:
+- `Automatic` = long-lived proces (Shawl/NSSM)
+- `Triggered` = one-shot cyklicznie od harmonogramu (Task Scheduler / cron)
+- `Manual` = operator uruchamia ręcznie (albo używa jako helper/dot-source)
+
+| Script | Owner | Run-mode |
+|---|---|---|
+| `tools/bot_postrun_report.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/bot_preflight.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/bot_run_devnet.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/bot_session_devnet.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/build_clmm_lp_cli_release.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/build_clmm_lp_cli.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/check_collector_5m_status.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/clmm_rpc_tools_helpers.ps1` | Shared helpers | Dot-source library (manual usage by other scripts) |
+| `tools/compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/count_snapshot_rows_last_full_hour.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/data_alerts_loop.ps1` | Data Ops Alerting | Automatic (Shawl/NSSM long-lived loop) |
+| `tools/devnet_rebalance_wallet_half.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/mainnet_rpc_env.example.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/mainnet_rpc_env.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/new_bot_keypair.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/log_rotate.ps1` | Data Ops / Operator | Triggered (Task Scheduler daily one-shot retention) |
+| `tools/notify_slack_webhook.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_bot_run_supervised.ps1` | Bot Supervisor | Automatic (NSSM/Shawl long-lived restart loop) |
+| `tools/orca_curated_mainnet_pools.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_curated_rebalance.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_fund_cbbtc_usdc_open.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_auto_fund_for_open.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_close_quick.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_open_preflight.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_open_then_close_fast.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_open_then_close_quick.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_preflight_core.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_position_smoke_curated_pools.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_swap_curated.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_swap.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/orca_wheth_sol_three_bots_plan.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/quick_verify_alert.ps1` | Data Ops Alerting | Triggered (Task Scheduler / cron one-shot; Slack on NO-GO) |
+| `tools/quick_verify_data.ps1` | Data Quality Gate | One-shot audit (called by quick_verify_alert / data_alerts_loop) |
+| `tools/restart_snapshot_loop_10m.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/run_devnet_smokes.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/run_snapshot_backtest_prep_loop.ps1` | Research / Backtest Ops | Triggered (Task Scheduler one-shot every ~30m, or -Loop) |
+| `tools/run_ops_ingest_loop.ps1` | Data Collector (bot/ops) | Automatic (Shawl/NSSM long-lived runner; `-SlackOnError` on non-zero exit) |
+| `tools/run_snapshot_health_monitor_loop.ps1` | Data Quality Gate | Automatic (Shawl/NSSM long-lived loop; check-only, no Slack) |
+| `tools/snapshot_health_alert.ps1` | Data Ops Alerting | Triggered (Task Scheduler / cron one-shot; Slack on NOT OK) |
+| `tools/snapshot_health_check.ps1` | Data Quality Gate | One-shot check (called by snapshot_health_alert / data_alerts_loop / monitor loop) |
+| `tools/solana_account_state.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/solana_rpc_env.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/solana_wallet_usd_estimate.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/Start-Dashboard.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/Stop-ClmmApi.ps1` | Operator | Manual / one-shot (operator) |
+| `tools/wheth_sol_three_bots_manual_range_25_25p5.ps1` | Operator | Manual / one-shot (operator) |
+
 ## P0 — Ciągłość snapshotów i jakość danych (pierwsze do alertów)
+
+W praktyce “kompletność / brak błędów / sync / luki” mapujemy na zestaw checków:
+- `snapshot-readiness`: bramka Tier1/Tier2/Tier3 (gotowość pod fees/IL) dla konkretnego poola
+- `data-health-check`: świeżość (max age) + jakość decode (min % ok)
+- `snapshot_health_check`: wykrywanie świeżych ERROR w logach pętli snapshotów
+- (opcjonalnie) `swaps-decode-audit`: audyt jakości dekodowania swapów
 
 Te elementy najlepiej **najpierw** przełożyć na Slack: świeżość kolekcji, brak OK runów, błędy w logach pętli, regres jakości decode/snapshot readiness.
 

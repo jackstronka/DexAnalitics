@@ -8,8 +8,10 @@ Before starting, ensure you have the following installed:
 
 - **Rust**: 1.75+ (`rustup update stable`)
 - **Node.js**: 18+ (`node --version`)
-- **PostgreSQL**: 14+ (running on port 5432)
+- **PostgreSQL**: 14+ (running on port 5432) — *niektóre ścieżki CLI/DB; samo API dashboardu często działa bez migracji, patrz kod*
 - **Make**: Build automation tool
+
+**Frontend (wymagania z [`doc/UI_REQUIREMENTS_PHASE1.md`](doc/UI_REQUIREMENTS_PHASE1.md)):** Node w `web/`, działające API pod adresem zgodnym z [`web/vite.config.ts`](web/vite.config.ts) (proxy). **Docker:** opcjonalnie [`doc/DOCKER.md`](doc/DOCKER.md) — na **Windows** musi działać **Docker Desktop** (inaczej błąd połączenia z `dockerDesktopLinuxEngine`).
 
 ## Quick Start (TL;DR)
 
@@ -148,23 +150,47 @@ Expected response:
 - Swagger UI: `http://localhost:8080/docs`
 - WebSocket: `ws://localhost:8080/ws`
 
+**Scripts page (optional):** The dashboard route `/scripts` lists `tools/*.ps1` from [`tools/scripts-manifest.json`](tools/scripts-manifest.json) and shows last runs from `data/script_runs.jsonl`. Set **`CLMM_REPO_ROOT`** to this repository’s root when starting the API so those paths resolve. To enable **Run** from the UI, start the localhost runner on the operator machine (Windows): see [`tools/script_runner/README.md`](tools/script_runner/README.md) — set **`CLMM_SCRIPT_RUNNER_TOKEN`** on the runner, and the same value as **`SCRIPT_RUNNER_TOKEN`** on the API plus **`SCRIPT_RUNNER_URL`** (e.g. `http://127.0.0.1:9847`).
+
+**Bot activity / IL ledger (optional):** If you run `orca-bot-run` or `orca-bot-open-and-run` with **`--il-ledger-path`**, set **`CLMM_IL_LEDGER_PATH`** to that same path when starting **`clmm-lp-api`** so the dashboard can read IL / `rebalance` rows via `GET /api/v1/bot-activity/il-ledger` (see **Bot activity** and **Position → Ledger**). Lifecycle tx costs still use **`CLMM_POSITION_LIFECYCLE_LEDGER_PATH`** (default `data/ledger/orca_position_lifecycle.jsonl`).
+
 ### Step 6: Start the Web Dashboard
 
-Open another terminal and start the web dashboard:
+**Zalecane — jeden terminal (API + Vite, prefiksy logów, `timings` w concurrently):**
+
+- **Windows:** podwójne kliknięcie **`Start-Dashboard.bat`** w korzeniu repo **albo**  
+  `powershell -ExecutionPolicy Bypass -File tools/Start-Dashboard.ps1`
+- **macOS / Linux / ręcznie:** po `npm install` w `web/`:
 
 ```bash
 cd web
+npm start
+```
 
-# Install dependencies (first time only)
-npm install
+(`npm run dev:stack` to alias tego samego.)
 
-# Start development server
+Przed startem skrypt **równolegle** zwalnia porty **3000** / **8080** i kończy **`clmm-lp-api`**, potem krótki baner w terminalu. Ustawia **`CLMM_REPO_ROOT`**. **Ctrl+C** kończy oba procesy.
+
+Opcjonalnie: **`CLMM_OPEN_BROWSER=true`** (obok `npm start`) — uruchomi Vite z **`--open`** (przeglądarka sama się otworzy).
+
+---
+
+**Tylko frontend** (bez API — panel pokaże baner „brak API”, chyba że backend uruchomisz osobno):
+
+```bash
+cd web
 npm run dev
 ```
 
 The dashboard will be available at `http://localhost:3000`.
 
-> **Note**: The dashboard requires the API server to be running on port 8080.
+**Pinned dev wallet:** [`web/.env.development`](web/.env.development) sets `VITE_DEV_WALLET_PUBKEY` for `npm run dev` (test operator pubkey). Override in `web/.env.local` if needed. The address appears in the top bar and on the Wallet page (display only; no private key in the frontend).
+
+> **Note**: Pełny panel (`dev:stack`) uruchamia API na porcie **8080** — zgodnie z proxy w [`web/vite.config.ts`](web/vite.config.ts).
+
+### Docker (API + Vite w Compose)
+
+Typowy setup „jak w firmach”: **`docker compose up --build`** z katalogu repo — serwisy `api` i `web` w jednej sieci, proxy Vite ustawione na `http://api:8080` (zmienna **`API_UPSTREAM`**). Szczegóły i różnice dev vs prod: **[`doc/DOCKER.md`](doc/DOCKER.md)**. Skrót: `make docker-up`.
 
 ---
 
@@ -338,6 +364,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\new_bot_keypair.ps1 
 ```
 
 The keypair JSON is written under `%USERPROFILE%\.config\solana\clmm_lp_bot_mainnet.json` by default (override with `-OutFile`).
+
+**Resolution order (scripts + many CLI wrappers):** `KEYPAIR_PATH` → `SOLANA_KEYPAIR_PATH` → `%USERPROFILE%\.config\solana\clmm_lp_bot_mainnet.json`. Use the same file for documented mainnet flows (`orca-swap`, `orca-position-open`, `orca-bot-run`, `tools/orca_curated_rebalance.ps1`, etc.). **Never commit** the JSON; ACLs on the file should be restrictive.
+
+**Quick health check (no tx):** confirm the file exists and is a 64-byte Solana secret-key JSON array (PowerShell: `Get-Content $path -Raw | ConvertFrom-Json` → array length 64). If `solana-keygen` is on `PATH`, `solana-keygen pubkey <path>` prints the owner address.
+
+**List Orca LP positions for this wallet:** `cargo run -p clmm-lp-cli --bin clmm-lp-cli -- orca-positions-list --keypair <same-path>` (uses the same resolution order if you omit `--keypair` and set `KEYPAIR_PATH`). Example two-bot field notes: `data/experiments/wheth-sol-manual-range-25-25p5/OPERATIONS_JOURNAL.md`.
 
 Then fund the printed **pubkey** from Phantom (SOL for fees; SPL tokens such as whETH go to the **same** pubkey — see below) and point the bot/API to the file via `--keypair` or `KEYPAIR_PATH` / `SOLANA_KEYPAIR_PATH`.
 
@@ -591,6 +623,20 @@ AggregateError [ECONNREFUSED]
 ```bash
 cargo run --bin clmm-lp-api
 ```
+
+The Vite dev proxy in [`web/vite.config.ts`](web/vite.config.ts) points to **`http://localhost:8080`** (default API port). If you run the API on another port (e.g. `API_PORT=8081`), change the `proxy` `target` in that file to match, or the dashboard will show empty data / connection errors.
+
+### Windows: `failed to remove ... clmm-lp-api.exe` / Odmowa dostępu (os error 5)
+
+**Cause:** poprzednia instancja **`clmm-lp-api`** nadal działa i blokuje plik w `target\debug\`.
+
+**Fix:**
+
+1. Zamknij okno konsoli, w którym działało API, **albo** w PowerShell z katalogu repo:  
+   `powershell -ExecutionPolicy Bypass -File tools/Stop-ClmmApi.ps1`
+2. Ponów: `cargo run --bin clmm-lp-api`
+
+Uruchamianie przez **`npm run dev:stack`** / **`Start-Dashboard.bat`** najpierw zwalnia porty i proces `clmm-lp-api`, więc ten błąd nie powinien się powtarzać przy ponownym starcie.
 
 ### Missing Birdeye API Key
 

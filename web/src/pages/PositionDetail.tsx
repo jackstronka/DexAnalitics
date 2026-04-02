@@ -1,10 +1,55 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, Link } from 'react-router-dom'
+import * as Tabs from '@radix-ui/react-tabs'
 import { ArrowLeft, RefreshCw, X, DollarSign } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { getPosition, closePosition, collectFees } from '@/lib/api'
+import {
+  getPosition,
+  closePosition,
+  collectFees,
+  rebalancePosition,
+  decreaseLiquidity,
+  getBotLedger,
+  getBotIlLedger,
+} from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress, formatDate } from '@/lib/utils'
+
+type LedgerRow = Record<string, unknown>
+
+function groupLedgerBySession(rows: LedgerRow[]): Map<string | null, LedgerRow[]> {
+  const m = new Map<string | null, LedgerRow[]>()
+  for (const r of rows) {
+    const raw = r.rebalance_session_id
+    const sid = typeof raw === 'string' && raw.trim() ? raw.trim() : null
+    const key = sid ?? '_no_session'
+    if (!m.has(key)) m.set(key, [])
+    m.get(key)!.push(r)
+  }
+  return m
+}
+
+function rowFee(r: LedgerRow): string {
+  const v = r.tx_fee_lamports
+  if (typeof v === 'number') return `${v}`
+  if (typeof v === 'string') return v
+  return '—'
+}
+
+function rowEvent(r: LedgerRow): string {
+  const e = r.event
+  return typeof e === 'string' ? e : '—'
+}
+
+function rowSource(r: LedgerRow): string {
+  const s = r.source
+  return typeof s === 'string' ? s : '—'
+}
+
+function rowTs(r: LedgerRow): string {
+  const t = r.ts_utc
+  return typeof t === 'string' ? t : '—'
+}
 
 export default function PositionDetail() {
   const { address } = useParams<{ address: string }>()
@@ -16,14 +61,70 @@ export default function PositionDetail() {
     enabled: !!address,
   })
 
+  const { data: ledgerData } = useQuery({
+    queryKey: ['bot-ledger', address],
+    queryFn: () => getBotLedger(1500, address),
+    enabled: !!address,
+  })
+
+  const { data: ilLedgerData } = useQuery({
+    queryKey: ['bot-il-ledger', address],
+    queryFn: () => getBotIlLedger(200, address),
+    enabled: !!address,
+  })
+
   const closeMutation = useMutation({
     mutationFn: () => closePosition(address!),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['positions'] }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['positions'] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+    },
   })
 
   const collectMutation = useMutation({
     mutationFn: () => collectFees(address!),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['position', address] }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['position', address] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+    },
+  })
+
+  const rebalanceMutation = useMutation({
+    mutationFn: async () => {
+      const lo = window.prompt('New tick lower')
+      const hi = window.prompt('New tick upper')
+      if (lo === null || hi === null) throw new Error('Cancelled')
+      const lower = parseInt(lo, 10)
+      const upper = parseInt(hi, 10)
+      if (Number.isNaN(lower) || Number.isNaN(upper)) throw new Error('Invalid ticks')
+      return rebalancePosition(address!, {
+        new_tick_lower: lower,
+        new_tick_upper: upper,
+      })
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['position', address] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+    },
+  })
+
+  const decreaseMutation = useMutation({
+    mutationFn: async () => {
+      const raw = window.prompt('Liquidity amount to remove (base units, decimal string)')
+      if (raw === null) throw new Error('Cancelled')
+      const trimmed = raw.trim()
+      if (!/^\d+$/.test(trimmed)) throw new Error('Must be a non-negative integer string')
+      return decreaseLiquidity(address!, trimmed)
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['position', address] })
+      void queryClient.invalidateQueries({ queryKey: ['positions'] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
+      void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+    },
   })
 
   if (isLoading) {
@@ -33,6 +134,10 @@ export default function PositionDetail() {
   if (!position) {
     return <div className="text-center py-8">Position not found</div>
   }
+
+  const ledgerRows = (ledgerData?.rows ?? []) as LedgerRow[]
+  const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
+  const bySession = groupLedgerBySession(ledgerRows)
 
   return (
     <div className="space-y-6">
@@ -45,93 +150,247 @@ export default function PositionDetail() {
         <h1 className="text-3xl font-bold">Position Details</h1>
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Position Info</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Address</span>
-              <span className="font-mono">{shortenAddress(position.address, 8)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Pool</span>
-              <span className="font-mono">{shortenAddress(position.pool_address, 8)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Tick Range</span>
-              <span>{position.tick_lower} → {position.tick_upper}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Liquidity</span>
-              <span>{position.liquidity}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">In Range</span>
-              <span className={position.in_range ? 'text-green-500' : 'text-yellow-500'}>
-                {position.in_range ? 'Yes' : 'No'}
-              </span>
-            </div>
-            {position.created_at && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Created</span>
-                <span>{formatDate(position.created_at)}</span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Performance</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Value</span>
-              <span className="font-bold">{formatUSD(position.value_usd)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Net PnL</span>
-              <span className={parseFloat(position.pnl.net_pnl_pct) >= 0 ? 'text-green-500' : 'text-red-500'}>
-                {formatUSD(position.pnl.net_pnl_usd)} ({formatPercent(position.pnl.net_pnl_pct)})
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Fees Earned</span>
-              <span className="text-green-500">{formatUSD(position.pnl.fees_earned_usd)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Impermanent Loss</span>
-              <span className="text-yellow-500">{formatPercent(position.pnl.il_pct)}</span>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Actions</CardTitle>
-        </CardHeader>
-        <CardContent className="flex gap-4">
-          <Button onClick={() => collectMutation.mutate()} disabled={collectMutation.isPending}>
-            <DollarSign className="h-4 w-4 mr-2" />
-            {collectMutation.isPending ? 'Collecting...' : 'Collect Fees'}
-          </Button>
-          <Button variant="outline">
-            <RefreshCw className="h-4 w-4 mr-2" />
-            Rebalance
-          </Button>
-          <Button 
-            variant="destructive" 
-            onClick={() => closeMutation.mutate()}
-            disabled={closeMutation.isPending}
+      <Tabs.Root defaultValue="overview">
+        <Tabs.List className="flex gap-2 border-b border-border pb-2">
+          <Tabs.Trigger
+            value="overview"
+            className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
-            <X className="h-4 w-4 mr-2" />
-            {closeMutation.isPending ? 'Closing...' : 'Close Position'}
-          </Button>
-        </CardContent>
-      </Card>
+            Overview
+          </Tabs.Trigger>
+          <Tabs.Trigger
+            value="ledger"
+            className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+          >
+            Ledger / rebalances
+          </Tabs.Trigger>
+        </Tabs.List>
+
+        <Tabs.Content value="overview" className="mt-4 space-y-6">
+          <div className="grid gap-6 md:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Position Info</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Address</span>
+                  <span className="font-mono">{shortenAddress(position.address, 8)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Pool</span>
+                  <span className="font-mono">{shortenAddress(position.pool_address, 8)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Tick Range</span>
+                  <span>
+                    {position.tick_lower} → {position.tick_upper}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Liquidity</span>
+                  <span>{position.liquidity}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">In Range</span>
+                  <span className={position.in_range ? 'text-green-500' : 'text-yellow-500'}>
+                    {position.in_range ? 'Yes' : 'No'}
+                  </span>
+                </div>
+                {position.created_at && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Created</span>
+                    <span>{formatDate(position.created_at)}</span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Performance</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Value</span>
+                  <span className="font-bold">{formatUSD(position.value_usd)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Net PnL</span>
+                  <span
+                    className={
+                      parseFloat(position.pnl.net_pnl_pct) >= 0 ? 'text-green-500' : 'text-red-500'
+                    }
+                  >
+                    {formatUSD(position.pnl.net_pnl_usd)} ({formatPercent(position.pnl.net_pnl_pct)})
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Fees Earned</span>
+                  <span className="text-green-500">{formatUSD(position.pnl.fees_earned_usd)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Impermanent Loss</span>
+                  <span className="text-yellow-500">{formatPercent(position.pnl.il_pct)}</span>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Actions</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-4">
+              <Button onClick={() => collectMutation.mutate()} disabled={collectMutation.isPending}>
+                <DollarSign className="h-4 w-4 mr-2" />
+                {collectMutation.isPending ? 'Collecting...' : 'Collect Fees'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => rebalanceMutation.mutate()}
+                disabled={rebalanceMutation.isPending}
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                {rebalanceMutation.isPending ? 'Rebalancing...' : 'Rebalance'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => decreaseMutation.mutate()}
+                disabled={decreaseMutation.isPending}
+              >
+                {decreaseMutation.isPending ? 'Decreasing...' : 'Decrease liquidity'}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      'Zamknąć tę pozycję? Operacji nie cofniesz z poziomu tego panelu (on-chain tx).',
+                    )
+                  ) {
+                    return
+                  }
+                  closeMutation.mutate()
+                }}
+                disabled={closeMutation.isPending}
+              >
+                <X className="h-4 w-4 mr-2" />
+                {closeMutation.isPending ? 'Closing...' : 'Close Position'}
+              </Button>
+            </CardContent>
+          </Card>
+        </Tabs.Content>
+
+        <Tabs.Content value="ledger" className="mt-4 space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Lifecycle ledger (filtered)</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground space-y-2">
+              <p>
+                Rows from <code className="text-xs">/bot-activity/ledger</code> whose JSON contains this position
+                address. Grouped by <code className="text-xs">rebalance_session_id</code> when present (swap + bot +
+                open/close in one session).
+              </p>
+              {ledgerData?.file_missing && (
+                <p className="text-yellow-500">Ledger file missing on API host ({ledgerData.path}).</p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">IL ledger (rebalance events)</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground space-y-2">
+              <p>
+                From <code className="text-xs">/bot-activity/il-ledger</code> — rows where JSON contains this address
+                (new <code className="text-xs">position</code> or <code className="text-xs">old_position</code>). Requires{' '}
+                <code className="text-xs">CLMM_IL_LEDGER_PATH</code> on the API host (same file as{' '}
+                <code className="text-xs">orca-bot-run --il-ledger-path</code>).
+              </p>
+              {ilLedgerData?.file_missing && (
+                <p className="text-yellow-500">
+                  IL ledger not configured or file missing ({ilLedgerData.path}).
+                </p>
+              )}
+              {!ilLedgerData?.file_missing && ilRows.length > 0 && (
+                <div className="overflow-x-auto rounded-md border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="px-2 py-1 text-left">timestamp</th>
+                        <th className="px-2 py-1 text-left">old → new</th>
+                        <th className="px-2 py-1 text-left">reason</th>
+                        <th className="px-2 py-1 text-left">tx_cost_lamports</th>
+                        <th className="px-2 py-1 text-left">session</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ilRows.map((r, i) => (
+                        <tr key={i} className="border-t border-border/60">
+                          <td className="px-2 py-1 whitespace-nowrap">
+                            {typeof r.timestamp === 'string' ? r.timestamp : '—'}
+                          </td>
+                          <td className="px-2 py-1 font-mono max-w-[12rem] truncate" title={String(r.old_position ?? '')}>
+                            {String(r.old_position ?? '—')} → {String(r.position ?? '—')}
+                          </td>
+                          <td className="px-2 py-1">{String(r.reason ?? '—')}</td>
+                          <td className="px-2 py-1">{String(r.tx_cost_lamports ?? '—')}</td>
+                          <td className="px-2 py-1 max-w-[8rem] truncate" title={String(r.rebalance_session_id ?? '')}>
+                            {String(r.rebalance_session_id ?? '—')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {!ilLedgerData?.file_missing && ilRows.length === 0 && (
+                <p className="text-muted-foreground">No IL rows for this address yet.</p>
+              )}
+            </CardContent>
+          </Card>
+
+          {Array.from(bySession.entries()).map(([session, rows]) => (
+            <Card key={session ?? 'null'}>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Session: {session === '_no_session' ? '(no rebalance_session_id)' : session}
+                </CardTitle>
+                <p className="text-xs text-muted-foreground">{rows.length} row(s)</p>
+              </CardHeader>
+              <CardContent className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b text-left text-muted-foreground">
+                      <th className="py-1 pr-2">Time</th>
+                      <th className="py-1 pr-2">Source</th>
+                      <th className="py-1 pr-2">Event</th>
+                      <th className="py-1 pr-2">Fee (lamports)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i} className="border-b border-border/50">
+                        <td className="py-1 pr-2 whitespace-nowrap">{rowTs(r)}</td>
+                        <td className="py-1 pr-2">{rowSource(r)}</td>
+                        <td className="py-1 pr-2 font-mono">{rowEvent(r)}</td>
+                        <td className="py-1 pr-2">{rowFee(r)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          ))}
+
+          {ledgerRows.length === 0 && !ledgerData?.file_missing && (
+            <p className="text-muted-foreground text-sm">No matching lines yet for this address.</p>
+          )}
+        </Tabs.Content>
+      </Tabs.Root>
     </div>
   )
 }

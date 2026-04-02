@@ -50,8 +50,8 @@ pub struct RebalanceRequest {
 /// Request to decrease liquidity in a position.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DecreaseLiquidityRequest {
-    /// Liquidity amount to remove.
-    pub liquidity_amount: u128,
+    /// Liquidity amount to remove (base units as decimal string; supports full u128 range in JSON).
+    pub liquidity_amount: String,
 }
 
 /// Position response.
@@ -131,6 +131,35 @@ pub struct ListPositionsResponse {
     pub positions: Vec<PositionResponse>,
     /// Total count.
     pub total: usize,
+}
+
+/// On-chain Orca Whirlpool positions for a wallet (RPC scan; same source as `orca-positions-list` CLI).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaOwnerPositionsResponse {
+    /// Owner pubkey (base58).
+    pub owner: String,
+    /// RPC URL used for the scan.
+    pub rpc_url: String,
+    /// Number of position rows (bundles expand to one row per bundled position).
+    pub total: usize,
+    pub entries: Vec<OrcaOwnerPositionEntry>,
+}
+
+/// One Whirlpool position row from `fetch_positions_for_owner`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaOwnerPositionEntry {
+    /// `position` or `bundled_position`.
+    pub kind: String,
+    pub position_address: String,
+    pub pool_address: String,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    /// Raw liquidity (u128 as decimal string).
+    pub liquidity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_bundle_address: Option<String>,
 }
 
 // ============================================================================
@@ -595,9 +624,55 @@ pub struct SimulationRequest {
     /// End date.
     #[schema(value_type = String)]
     pub end_date: chrono::NaiveDate,
-    /// Strategy type.
+    /// Strategy type (default: static range — no rebalance).
+    #[serde(default = "default_sim_strategy")]
+    pub strategy_type: StrategyType,
+    /// Annualized GBM volatility for the **synthetic** price path (0.55 ≈ 55%).
+    #[serde(default = "default_gbm_vol")]
+    pub gbm_volatility: f64,
+    /// Annualized drift for GBM (usually 0).
     #[serde(default)]
-    pub strategy_type: Option<StrategyType>,
+    pub gbm_drift: f64,
+    /// For `Periodic`: rebalance every N simulation steps (default 7 with daily steps ≈ weekly).
+    #[serde(default)]
+    pub periodic_interval_steps: Option<u64>,
+    /// For `Threshold` / `OorRecenter`: midpoint deviation threshold (e.g. 0.05 = 5%). Ignored for OOR-only if using defaults below.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub threshold_pct: Option<Decimal>,
+    /// For `IlLimit`: max |IL| before rebalance (e.g. 0.08 = 8%).
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub il_limit_pct: Option<Decimal>,
+}
+
+fn default_sim_strategy() -> StrategyType {
+    StrategyType::StaticRange
+}
+
+fn default_gbm_vol() -> f64 {
+    0.55
+}
+
+impl Default for SimulationRequest {
+    fn default() -> Self {
+        Self {
+            pool_address: String::new(),
+            tick_lower: -100,
+            tick_upper: 100,
+            initial_capital_usd: Decimal::new(1_000, 0),
+            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+                .expect("valid date"),
+            end_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10)
+                .expect("valid date"),
+            strategy_type: StrategyType::StaticRange,
+            gbm_volatility: default_gbm_vol(),
+            gbm_drift: 0.0,
+            periodic_interval_steps: None,
+            threshold_pct: None,
+            il_limit_pct: None,
+        }
+    }
 }
 
 /// Simulation response.
@@ -620,20 +695,28 @@ pub struct SimulationResponse {
     /// Total return percentage.
     #[schema(value_type = String)]
     pub total_return_pct: Decimal,
-    /// Fee earnings percentage.
+    /// Fee earnings percentage (fees / initial capital).
     #[schema(value_type = String)]
     pub fee_earnings_pct: Decimal,
     /// IL percentage.
     #[schema(value_type = String)]
     pub il_pct: Decimal,
-    /// Sharpe ratio.
+    /// Sharpe ratio (annualized, heuristic from PnL path).
     #[schema(value_type = String)]
     pub sharpe_ratio: Decimal,
     /// Max drawdown percentage.
     #[schema(value_type = String)]
     pub max_drawdown_pct: Decimal,
+    /// Fraction of steps in range (0–1).
+    #[schema(value_type = String)]
+    pub time_in_range_pct: Decimal,
+    /// Final value minus HODL of initial capital at final/entry price ratio.
+    #[schema(value_type = String)]
+    pub vs_hodl_usd: Decimal,
     /// Number of rebalances.
     pub rebalance_count: u32,
+    /// How the price path and strategy were chosen (transparency for operators).
+    pub methodology_note: String,
 }
 
 // ============================================================================
@@ -755,6 +838,186 @@ impl MessageResponse {
             message: message.into(),
         }
     }
+}
+
+// ============================================================================
+// Bot activity (JSONL ledger / registry → web + Slack)
+// ============================================================================
+
+/// Last *matching* JSON lines from `orca_position_lifecycle.jsonl` (CLI + bot tx costs).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BotActivityJsonlResponse {
+    /// Resolved filesystem path.
+    pub path: String,
+    /// True when the file does not exist yet.
+    pub file_missing: bool,
+    /// Lines successfully parsed (after optional substring filter).
+    pub total_matching_lines: usize,
+    /// Rows returned (tail slice, max `limit`).
+    pub rows_returned: usize,
+    /// Parsed JSON objects (newest matching lines last).
+    #[schema(value_type = Vec<Object>)]
+    pub rows: Vec<serde_json::Value>,
+}
+
+/// Open / close registry rows (`registry.jsonl`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BotRegistryJsonlResponse {
+    pub path: String,
+    pub file_missing: bool,
+    pub total_matching_lines: usize,
+    pub rows_returned: usize,
+    #[schema(value_type = Vec<Object>)]
+    pub rows: Vec<serde_json::Value>,
+}
+
+/// POST body: how many recent ledger rows to include in the Slack digest.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SlackActivitySummaryRequest {
+    /// Max rows from the **tail** of the lifecycle ledger (after parse). Capped at 80.
+    #[serde(default = "default_slack_activity_limit")]
+    pub limit: usize,
+}
+
+fn default_slack_activity_limit() -> usize {
+    40
+}
+
+impl Default for SlackActivitySummaryRequest {
+    fn default() -> Self {
+        Self {
+            limit: default_slack_activity_limit(),
+        }
+    }
+}
+
+/// Result of posting a digest to Slack Incoming Webhook.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SlackActivitySummaryResponse {
+    pub ok: bool,
+    /// Error or provider message when `ok` is false.
+    pub error: Option<String>,
+    /// Rows formatted into the message body.
+    pub rows_included: usize,
+    /// Whether `SLACK_WEBHOOK_URL` was set.
+    pub webhook_configured: bool,
+}
+
+// ============================================================================
+// Tools scripts (manifest + script_runs.jsonl + runner proxy)
+// ============================================================================
+
+/// One row appended to `data/script_runs.jsonl` by the localhost runner.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ScriptRunRecord {
+    #[serde(default)]
+    pub schema_version: u32,
+    pub script_id: String,
+    pub ts_utc: String,
+    pub ok: bool,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub stdout_excerpt: Option<String>,
+    #[serde(default)]
+    pub stderr_excerpt: Option<String>,
+    #[serde(default)]
+    pub error_excerpt: Option<String>,
+    #[serde(default)]
+    pub triggered_by: Option<String>,
+}
+
+/// Entry from `tools/scripts-manifest.json` (and/or auto-scan `tools/*.ps1`) plus optional last run metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ScriptCatalogItem {
+    pub id: String,
+    pub path: String,
+    pub summary: String,
+    #[serde(default)]
+    pub when_to_use: Option<String>,
+    #[serde(default)]
+    pub risk: Option<String>,
+    #[serde(default = "default_runnable_true")]
+    pub runnable: bool,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub last_run: Option<ScriptRunRecord>,
+    /// True when the row came from filesystem scan only (no row in `scripts-manifest.json`).
+    #[serde(default)]
+    pub auto_discovered: bool,
+}
+
+fn default_runnable_true() -> bool {
+    true
+}
+
+/// `GET /scripts` — manifest + last run per script (from JSONL).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ScriptsListResponse {
+    pub repo_root: String,
+    pub manifest_path: String,
+    pub manifest_missing: bool,
+    pub script_runs_path: String,
+    pub script_runs_missing: bool,
+    /// `SCRIPT_RUNNER_URL` and `SCRIPT_RUNNER_TOKEN` are set (run may still fail if runner is down).
+    pub runner_configured: bool,
+    pub scripts: Vec<ScriptCatalogItem>,
+}
+
+/// `POST /scripts/{id}/run` — forwarded to localhost runner when configured.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RunScriptRequest {
+    #[serde(default)]
+    pub triggered_by: Option<String>,
+}
+
+impl Default for RunScriptRequest {
+    fn default() -> Self {
+        Self {
+            triggered_by: None,
+        }
+    }
+}
+
+// ============================================================================
+// Wallets (local keypairs directory + on-chain balances)
+// ============================================================================
+
+/// One wallet keypair discovered on disk (API host).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletEntry {
+    /// Stable id for UI (usually filename stem).
+    pub id: String,
+    /// Filename under the wallets directory.
+    pub filename: String,
+    /// Solana pubkey (base58).
+    pub pubkey: String,
+}
+
+/// `GET /wallets` — list wallets from a directory on the API host.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletsListResponse {
+    /// Directory scanned on the API host.
+    pub wallets_dir: String,
+    pub wallets: Vec<WalletEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletTokenBalance {
+    pub mint: String,
+    /// UI amount as string (from jsonParsed RPC).
+    pub ui_amount: String,
+}
+
+/// `GET /wallets/balances` — on-chain read-only balances for an owner pubkey.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletBalancesResponse {
+    pub owner: String,
+    pub rpc_url: String,
+    pub lamports: u64,
+    pub sol: String,
+    pub tokens: Vec<WalletTokenBalance>,
 }
 
 #[cfg(test)]

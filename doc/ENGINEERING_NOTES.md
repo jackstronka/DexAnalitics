@@ -14,6 +14,265 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-02 — Runner skryptów: wygodniejszy start + stabilne HTTP/1.1
+
+**keywords:** scripts, runner, web, api, http1, dotenv, tools
+**paths:** `tools/script_runner/Start-ClmmScriptRunner.ps1`, `tools/Start-ClmmScriptRunner.ps1`, `web/src/pages/Scripts.tsx`, `crates/api/src/handlers/scripts.rs`
+
+- Runner skryptów przy starcie importuje root `.env` (tylko brakujące zmienne), więc nie trzeba ręcznie ustawiać `CLMM_SCRIPT_RUNNER_TOKEN` ani `SOLANA_RPC_URL` w oknie PowerShell.
+- API wymusza HTTP/1.1 do komunikacji z runnerem (HttpListener jest wrażliwy na nowsze tryby), co usuwa losowe 502/500 przy `POST /scripts/{id}/run`.
+- UI `/scripts` pokazuje stan uruchamiania i blokuje wieloklik dla tego samego skryptu do czasu zakończenia.
+
+## 2026-04-02 — Scripts: poprawione `tools/scripts-manifest.json` opisy
+
+**keywords:** web, Scripts.tsx, tools, scripts-manifest, summary, when_to_use, runner
+**paths:** `tools/scripts-manifest.json`, `doc/SCRIPTS_CATALOG.md`, `web/src/pages/Scripts.tsx`
+
+- Uzupełniono/naprawiono `summary` w manifeście dla wszystkich `tools/*.ps1`, tak aby UI “Catalog” pokazywało opis faktycznej roli skryptu (nie generyczne “Operator script …”).
+- Dodano brakujące wpisy dla `Start-Dashboard.ps1` i `Stop-ClmmApi.ps1` (wcześniej były tylko `auto_discovered`).
+
+## 2026-04-02 — clmm-lp-cli: `pool_meta.json` cache dla snapshot backtestów (decimals + tick_spacing)
+
+**keywords:** clmm-lp-cli, snapshot-backtest-prep, backtest-optimize, pool_meta, decimals, tick_spacing, rpc, snapshots
+**paths:** `crates/cli/src/commands/snapshot_backtest_prep.rs`, `crates/cli/src/main.rs`, `crates/cli/src/commands/snapshot_price_path.rs`
+
+- `snapshot-backtest-prep` zapisuje pod `data/backtest-snapshot-cache/` plik `pool_meta.json` (na pool) z `token_mint_a/b` + `*_decimals` oraz `tick_spacing` pobranymi z Whirlpool state.
+- `backtest-optimize` w trybie `--price-path-source snapshots` próbuje czytać `pool_meta.json` i przekazuje `*_decimals` jako override do `snapshot_price_path::build_from_orca_snapshots`, dzięki czemu (przy gotowym cache) wyniki są powtarzalne nawet gdy RPC jest blokowane.
+- `tick_spacing` jest cache’owane dla spójności metadanych i przyszłych kroków; obecnie snapshot-fees backtests nie wymagają go do wyliczeń ceny/fee z samego `snapshots.jsonl`.
+
+## 2026-04-02 — clmm-lp-cli: `backtest-optimize` nie robi RPC `fetch_pool_state` przy snapshotach opłat
+
+**keywords:** clmm-lp-cli, backtest-optimize, snapshots, fee-source snapshots, fetch_pool_state, rpc
+**paths:** `crates/cli/src/main.rs`
+
+- W trybie `--price-path-source snapshots` + `--fee-source snapshots` (snapshot-fees jako źródło prawdy) pominięto `crate::commands::backtest_optimize::fetch_pool_state()` — to usuwa zależność od on-chain Orca pool state w backtestach i pozwala działać nawet przy blokowanych/publicznych endpointach RPC.
+- Fallback do on-chain RPC zostaje, gdy nie używamy snapshot fees (np. gdy `fee_source != snapshots` lub snapshot fee model jest wyłączony).
+
+## 2026-04-02 — API: `dotenv()` + env dla runnera skryptów
+
+**keywords:** clmm-lp-api, dotenv, scripts runner, SCRIPT_RUNNER_URL, SCRIPT_RUNNER_TOKEN
+**paths:** `crates/api/src/main.rs`, `crates/api/Cargo.toml`, `.env.example`
+
+- `clmm-lp-api` nie ładował wcześniej root `.env` — dodano `dotenv().ok()` i zależność `dotenv`, żeby `SCRIPT_RUNNER_URL` / `SCRIPT_RUNNER_TOKEN` działały zgodnie z dokumentacją.
+- Uzupełniono `/.env.example` o zmienne dla lokalnego `tools/script_runner`.
+
+## 2026-04-01 — web: `@vitejs/plugin-react` ^6 (Vite 8 peer)
+
+**keywords:** web, vite, @vitejs/plugin-react, npm, ERESOLVE
+**paths:** `web/package.json`
+
+- `vite@^8` kolidował z `@vitejs/plugin-react@4.x` (peer tylko do Vite 4–7). Podniesiono plugin do **^6**, zgodnie z peer `vite@^8`.
+
+## 2026-04-01 — UI §1 skrypty: audyt w `UI_REQUIREMENTS_PHASE1.md`, modal „Logi” (excerpt runu)
+
+**keywords:** UI_REQUIREMENTS_PHASE1, Scripts.tsx, SCRIPTS_CATALOG, script_runs.jsonl
+**paths:** `doc/UI_REQUIREMENTS_PHASE1.md`, `web/src/pages/Scripts.tsx`
+
+- Tabela **mapowanie wymagań → implementacja** dla §1; strona Scripts: link do `doc/SCRIPTS_CATALOG.md`, przycisk **Logi** (stdout/stderr/error z `last_run`).
+
+## 2026-04-01 — GET /scripts: `resolve_repo_root` — spacer w górę od cwd / exe (pusta lista skryptów)
+
+**keywords:** clmm-lp-api, CLMM_REPO_ROOT, scripts-manifest, GET /scripts
+**paths:** `crates/api/src/handlers/scripts.rs`, `web/src/pages/Scripts.tsx`
+
+- Gdy API startuje z podkatalogu (np. `web/`), wcześniej `current_dir` nie zawierał `tools/` → **0 skryptów**. Teraz: szukanie root po `tools/scripts-manifest.json` albo `Cargo.toml` + `tools/` + `crates/`, potem spacer od `current_exe` (`target/debug/…`).
+- UI: komunikat gdy katalog pusty + pole `repo_root` (diagnostyka).
+
+## 2026-04-01 — Scripts: API + runner — pełna lista `tools/*.ps1` (merge z manifestem), pole `auto_discovered`
+
+**keywords:** clmm-lp-api, GET /scripts, ScriptCatalogItem, scripts-manifest, Start-ClmmScriptRunner, UI_REQUIREMENTS_PHASE1
+**paths:** `crates/api/src/handlers/scripts.rs`, `crates/api/src/models.rs`, `tools/script_runner/Start-ClmmScriptRunner.ps1`, `web/src/pages/Scripts.tsx`, `doc/UI_REQUIREMENTS_PHASE1.md`
+
+- `list_scripts`: skan top-level `tools/*.ps1`, merge z manifestem (ścieżka już w manifeście → bez duplikatu); bez manifestu — tylko skan. `POST /scripts/{id}/run`: manifest lub `tools/{id}.ps1`.
+- Runner PS: `Resolve-ScriptEntry` — ten sam fallback; brak twardego wymogu manifestu przy starcie.
+
+## 2026-04-01 — doc: Docker Desktop (Windows) troubleshooting, `UI_REQUIREMENTS_PHASE1` + status implementacji, confirm przy zamknięciu pozycji
+
+**keywords:** docker, Docker Desktop, UI_REQUIREMENTS_PHASE1, PositionDetail, DOCKER.md, STARTUP.md
+**paths:** `doc/DOCKER.md`, `doc/UI_REQUIREMENTS_PHASE1.md`, `STARTUP.md`, `web/src/pages/PositionDetail.tsx`
+
+- Błąd pipe `dockerDesktopLinuxEngine` → uruchomić Docker Desktop; rozszerzony `UI_REQUIREMENTS_PHASE1.md` (środowisko + tabela statusu fazy 1).
+- **Close position:** `window.confirm` przed `closePosition` (§5 destruktywne akcje).
+
+## 2026-04-01 — Docker Compose: `api` + `web`, `API_UPSTREAM`, `doc/DOCKER.md`
+
+**keywords:** docker, docker-compose, vite, API_UPSTREAM, VITE_DOCKER, CHOKIDAR_USEPOLLING, Makefile docker-up
+**paths:** `docker-compose.yml`, `docker/api/Dockerfile`, `docker/web/Dockerfile`, `.dockerignore`, `web/vite.config.ts`, `doc/DOCKER.md`, `Makefile`, `STARTUP.md`
+
+- Dev: bind mount `./web`, wolumen na `node_modules`; proxy Vite do `http://api:8080` zamiast localhost w kontenerze.
+- Prod: osobno (build statyczny + nginx/CDN) — opisane krótko w `doc/DOCKER.md`.
+
+## 2026-04-01 — web: `npm run dev:stack` — jeden terminal (concurrently + kill-port), uproszczony Start-Dashboard
+
+**keywords:** web, npm, dev:stack, concurrently, kill-port, Start-Dashboard, vite, clmm-lp-api
+**paths:** `web/scripts/start-dev-stack.mjs`, `web/package.json`, `tools/Start-Dashboard.ps1`, `Start-Dashboard.bat`, `STARTUP.md`
+
+- Domyślny start: **`npm start`** (= `dev:stack`) — równoległe zwolnienie portów + `taskkill`/`pkill` API, baner (picocolors), concurrently z **`prefix: name`**, **`padPrefix`**, **`timings`**, kolory hex; opcjonalnie **`CLMM_OPEN_BROWSER=true`** → `vite --open`.
+- `Start-Dashboard.bat` / `tools/Start-Dashboard.ps1`: `npm install` (jeśli brak `node_modules`) → **`npm start`**.
+
+## 2026-04-01 — Windows: `Stop-ClmmApi.ps1`, zatrzymanie starego API przed `Start-Dashboard` (blokada `clmm-lp-api.exe`)
+
+**keywords:** windows, cargo, clmm-lp-api, Start-Dashboard, Stop-ClmmApi, orca_read_service
+**paths:** `tools/Stop-ClmmApi.ps1`, `tools/Start-Dashboard.ps1`, `crates/api/src/services/orca_read_service.rs`, `STARTUP.md`
+
+- `cargo run` nie może nadpisać `.exe`, gdy proces nadal działa — skrypt stop + auto-stop w launcherze.
+- `OrcaReadService`: `#[allow(dead_code)]` na polach zarezerwowanych pod REST (usuwa warning przy buildzie API).
+
+## 2026-04-01 — Windows: `Start-Dashboard.bat` + baner „brak API” w Layout
+
+**keywords:** web, vite, Start-Dashboard, CLMM_REPO_ROOT, ApiBackendBanner, proxy
+**paths:** `Start-Dashboard.bat`, `tools/Start-Dashboard.ps1`, `web/src/components/ApiBackendBanner.tsx`, `web/src/components/Layout.tsx`, `STARTUP.md`
+
+- Jedno kliknięcie uruchamia API (:8080) i Vite (:3000); `CLMM_REPO_ROOT` ustawione dla Scripts.
+- Gdy backend nie odpowiada, czerwony baner + status w sidebarze zamiast „pustych” zakładek bez wyjaśnienia.
+
+## 2026-04-01 — API + web: `GET /orca/positions-by-owner` (skan NFT jak `orca-positions-list`)
+
+**keywords:** clmm-lp-api, orca_whirlpools, fetch_positions_for_owner, OrcaOwnerPositionsResponse, web, Positions, Wallet, RpcProvider
+**paths:** `crates/api/src/handlers/orca_onchain.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Positions.tsx`, `web/src/pages/Wallet.tsx`, `web/src/components/ApiDataHint.tsx`
+
+- Endpoint RPC dla portfela (query `owner` base58); osobna karta na **Positions**; **Wallet** pokazuje licznik on-chain gdy ustawiony `VITE_DEV_WALLET_PUBKEY`.
+
+## 2026-04-01 — web: wyjaśnienie pustych list (monitor vs Orca), proxy Vite→8080, IL w analytics
+
+**keywords:** web, vite, PositionMonitor, ApiDataHint, PortfolioAnalytics, total_il_pct, React Query
+**paths:** `web/src/components/ApiDataHint.tsx`, `web/vite.config.ts`, `web/src/main.tsx`, `web/src/lib/api.ts`, `STARTUP.md`
+
+- Vite proxy domyślnie na **port 8080** (jak API). `PortfolioAnalytics` w UI: **`total_il_pct`** (zgodnie z API), nie `total_il_usd`.
+- Cache React Query: **stale 5 min**, **gc 30 min**. Karta **ApiDataHint** na Dashboard / Wallet / Positions — dlaczego brak pozycji przy aktywnych NFT na Orca (monitor ≠ skan portfela).
+
+## 2026-04-01 — web: pinned dev wallet (`VITE_DEV_WALLET_PUBKEY`)
+
+**keywords:** web, vite, VITE_DEV_WALLET_PUBKEY, devWallet, Wallet, Layout
+**paths:** `web/src/lib/devWallet.ts`, `web/src/components/DevWalletBar.tsx`, `web/.env.example`, `web/.env.development`, `STARTUP.md`
+
+- UI pokazuje stały pubkey z env; domyślnie `web/.env.development` (Vite dev), nadpisanie przez `web/.env.local`.
+
+## 2026-04-01 — flows: IL ledger + API + web + whETH script (`CLMM_IL_LEDGER_PATH`)
+
+**keywords:** bot-activity, il-ledger, CLMM_IL_LEDGER_PATH, il_ledger_path_from_env, get_bot_il_ledger, BotActivity, PositionDetail, wheth_sol_three_bots
+**paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/routes.rs`, `web/src/pages/BotActivity.tsx`, `web/src/pages/PositionDetail.tsx`, `tools/wheth_sol_three_bots_manual_range_25_25p5.ps1`, `STARTUP.md`, `doc/ORCA_RUNBOOK.md`
+
+- **`il_ledger_path_from_env()`** w protocols; **GET `/bot-activity/il-ledger`** — tail+filter jak lifecycle; brak env → odpowiedź „unset”.
+- Web: karta **IL / rebalance ledger** na Bot activity; blok na szczegółach pozycji; `getBotIlLedger` w `api.ts`.
+- Skrypt whETH 3× bot: `--il-ledger-path` per strategia (`il_ledger_bot_*.jsonl`).
+
+## 2026-04-01 — IL ledger + CLI: wpisy `rebalance` (stary PDA, koszt tx, session id) + `ledger-rebalance-summary`
+
+**keywords:** LifecycleTracker, RebalanceData, rebalance_session_id, tx_cost_lamports, old_position, ledger-rebalance-summary, CLMM_IL_LEDGER_PATH
+**paths:** `crates/execution/src/lifecycle/tracker.rs`, `crates/execution/src/lifecycle/events.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/cli/src/commands/ledger_rebalance_summary.rs`, `crates/cli/src/main.rs`
+
+- Wiersz JSONL `event: "rebalance"` (IL ledger): dopisane `old_position`, `tx_cost_lamports`, `rebalance_session_id` (z `CLMM_REBALANCE_SESSION_ID` jak w `orca_position_lifecycle.jsonl`).
+- Nowa komenda CLI: **`ledger-rebalance-summary`** — zbiórka wierszy `rebalance` z `--il-ledger` / `CLMM_IL_LEDGER_PATH` oraz sumy po `rebalance_session_id` w lifecycle JSONL (`--lifecycle-ledger` lub domyślna ścieżka z env).
+
+## 2026-04-01 — api + web: `POST /positions/{addr}/decrease` — `liquidity_amount` jako string (u128)
+
+**keywords:** clmm-lp-api, DecreaseLiquidityRequest, decrease_liquidity, positions, web
+**paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+- Ciało JSON: `liquidity_amount` jest **stringiem** dziesiętnym (pełny zakres u128 bez utraty precyzji w przeglądarce). UI: przycisk „Decrease liquidity” na szczegółach pozycji.
+
+## 2026-04-01 — api + web + tools: manifest skryptów, `script_runs.jsonl`, runner localhost, strony Scripts / Wallet, ledger na pozycji
+
+**keywords:** clmm-lp-api, web, scripts-manifest.json, script_runs.jsonl, SCRIPT_RUNNER_URL, tools/script_runner, UI_REQUIREMENTS_PHASE1, bot-activity ledger, rebalance_session_id
+**paths:** `crates/api/src/handlers/scripts.rs`, `tools/scripts-manifest.json`, `tools/script_runner/Start-ClmmScriptRunner.ps1`, `web/src/pages/Scripts.tsx`, `web/src/pages/Wallet.tsx`, `doc/UI_REQUIREMENTS_PHASE1.md`
+
+- REST: `GET /api/v1/scripts` (manifest + ostatni run z JSONL), `POST /api/v1/scripts/{id}/run` (proxy do runnera z `SCRIPT_RUNNER_*`). Konfiguracja: `CLMM_REPO_ROOT`, opcjonalnie runner URL/token.
+- Runner PS: `tools/script_runner/Start-ClmmScriptRunner.ps1` — allowlista `tools/*.ps1`, zapis wierszy do `data/script_runs.jsonl`.
+- Web: `/scripts`, `/wallet`; szczegół pozycji: zakładka timeline z `GET /bot-activity/ledger?filter=` i grupowanie po `rebalance_session_id`; akcje collect / rebalance / decrease / close.
+
+## 2026-04-01 — doc + journal: historia rebalansów, koszty, `--il-ledger-path`, szablon tabeli
+
+**keywords:** rebalance, il_ledger_path, CLMM_REBALANCE_SESSION_ID, orca_position_lifecycle.jsonl, OPERATIONS_JOURNAL, ORCA_RUNBOOK
+**paths:** `doc/ORCA_RUNBOOK.md`, `data/experiments/wheth-sol-manual-range-25-25p5/OPERATIONS_JOURNAL.md`
+
+- W `ORCA_RUNBOOK.md` dopisana podsekcja **„Historia rebalansów (liczenie zdarzeń) i kosztów tx”**: `--il-ledger-path` → wiersze `event: "rebalance"`; koszty nadal z lifecycle JSONL + suma po `rebalance_session_id`; eksplorator + opcjonalna tabela w dzienniku.
+- W `OPERATIONS_JOURNAL.md` (eksperyment whETH/SOL) sekcja **„Rebalanse — historia i koszty”** z tabelą operatora i odnośnikami.
+
+## 2026-04-01 — tools: `quick_verify_data.ps1` preferuje `target/release|debug/clmm-lp-cli.exe`
+
+**keywords:** tools, quick_verify_data, Resolve-ClmmLpCliExe, cargo run, snapshot-readiness, data-health-check
+**paths:** `tools/quick_verify_data.ps1`, `tools/clmm_rpc_tools_helpers.ps1`
+
+- **Problem:** `cargo run` rebuilduje i nadpisuje `target/debug/clmm-lp-cli.exe` — przy uruchomionym procesie (blokada pliku) skrypt padał z „failed to remove … exe”.
+- **Zmiana:** jeśli istnieje binarka z `Resolve-ClmmLpCliExe` (najpierw release), używamy jej zamiast `cargo run`; w logu widać linię `Using …clmm-lp-cli.exe`.
+
+## 2026-04-01 — doc: szybki stan aktywnych pozycji + linki do wielu strategii / inspiracji zewnętrznych
+
+**keywords:** POSITION_REGISTRY, OPERATIONAL_CONTINUITY, orca-positions-list, Bot activity, StrategyMode, WHETH_SOL
+**paths:** `doc/POSITION_REGISTRY.md`, `doc/OPERATIONAL_CONTINUITY.md`
+
+- W `POSITION_REGISTRY.md` dopisana tabela: **on-chain** (`orca-positions-list`) vs **registry/API** vs **monitor w `orca-bot-run`**; odsyłacze do `BACKTEST_OPTIMIZE_STRATEGIES`, `BOT_OPERATIONS_MODEL`, whETH multi-bot; krótki akapit o wzorcach spoza repo (Orca AI agents, ekosystemy z REST vaultów) przy zachowaniu priorytetu darmowego RPC.
+- W `OPERATIONAL_CONTINUITY.md` w **Related** dodany link do `POSITION_REGISTRY.md`.
+
+## 2026-04-01 — execution: rebalans częściowy (close OK, open fail) + monitor bez spamu po zamkniętym PDA
+
+**keywords:** clmm-lp-execution, RebalanceResult, StrategyExecutor, PositionMonitor, rebalance, AccountNotFound
+**paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/monitor/position_monitor.rs`
+
+- **`RebalanceResult::old_position_closed_on_chain`:** ustawiane po udanym `close_position`; gdy `open` się nie uda, `success` pozostaje `false`, ale executor usuwa **stary** PDA z monitora (i czyści `retouch_armed` dla `RetouchShift`), żeby nie logować w kółko `Failed to get account`.
+- **Monitor:** jeśli `get_position` zwraca błąd typu „brak konta” (łańcuch zawiera m.in. `AccountNotFound`), pozycja jest **usuwana** z monitora zamiast powtarzać `ERROR` co poll.
+
+## 2026-03-31 — CLI: `orca-bot-open-and-run` zapisuje `registry_open` + `position_open` jak `orca-position-open`
+
+**keywords:** orca-bot-open-and-run, registry.jsonl, orca_position_lifecycle.jsonl, position_registry, try_append_registry_open, WhirlpoolExecutor
+**paths:** `crates/cli/src/commands/orca_bot.rs`, `crates/cli/src/commands/position_lifecycle_ledger.rs`
+
+- **Problem:** Open wykonany wyłącznie przez SDK w `run_orca_bot_open_and_run` nie wywoływał ścieżek z `orca-position-open`, więc brakowało wierszy **`registry_open`** oraz **`position_open`** w ledgerze — kolektory oparte na `registry.jsonl` nie widziały NFT.
+- **Zmiana:** Po udanym `open_position` dopisywane są te same rekordy co po CLI (`try_append_position_open_cost_ledger` z `source: "orca_bot"`, `try_append_registry_open(..., "orca_bot", ...)`). `try_append_position_open_cost_ledger` przyjmuje jawny parametr `source` (`"cli"` z `orca-position-open`).
+
+## 2026-03-31 — doc: whETH/SOL — 2× bot ~10 USD, zakres 25–25,5, dziennik i koszty
+
+**keywords:** WHETH_SOL, two-bots, 10USD, oor_recenter, periodic, ledger, ORCA_RUNBOOK, journal
+**paths:** `doc/WHETH_SOL_TWO_BOTS_10USD.md`, `doc/WHETH_SOL_THREE_BOTS_FIRST_RUN.md`
+
+- Plan operacyjny: **dwie** strategie (np. `winner-A` + `winner-B`), deploy **~10 USD** (ok. **5 USD/pozycja** heurystycznie), reszta salda na **fee rebalansów**; ticki **[-55416,-55216]**; monitoring/rebalans przez `orca-bot-run` z **`--execute`**. Dopisany przewodnik: tabele capów (przykład), ledger (`orca_position_lifecycle.jsonl`, registry, `CLMM_REBALANCE_SESSION_ID`), szablon dziennika.
+
+## 2026-03-31 — doc: STARTUP — kolejność `KEYPAIR_PATH` / domyślny plik bota mainnet
+
+**keywords:** KEYPAIR_PATH, SOLANA_KEYPAIR_PATH, clmm_lp_bot_mainnet.json, STARTUP, operations
+**paths:** `STARTUP.md` (sekcja Bot keypair)
+
+- Dopisane: **resolution order** dla skryptów/CLI, przypomnienie o braku commitu keypaira, **szybki health check** (istnienie pliku + JSON 64 elementów / opcjonalnie `solana-keygen pubkey`).
+
+## 2026-03-31 — ops: whETH/SOL 3× bot — ręczny zakres 25–25.5 SOL/whETH + JSON strategii
+
+**keywords:** orca-bot-open-and-run, optimize-result-json, WHETH_SOL, oor_recenter, periodic, threshold, tools
+**paths:** `data/experiments/wheth-sol-manual-range-25-25p5/winner-*.json`, `tools/wheth_sol_three_bots_manual_range_25_25p5.ps1`, `doc/WHETH_SOL_THREE_BOTS_FIRST_RUN.md`
+
+- Dla puli `Hktf…` (mint A = SOL, mint B = whETH) ticki **[-55416, -55216]** odpowiadają w przybliżeniu **25.0–25.5 SOL za 1 whETH** (weryfikacja: `orca-pool-read`). Trzy pliki `OptimizeResultFile` (schema v1): **oor_recenter**, **periodic 12h**, **threshold 5%**; `width_pct` = **0.02** (~2%) dla spójności z szerokością pasma. Skrypt PowerShell drukuje gotowe komendy `orca-bot-open-and-run` (osobne terminale).
+
+## 2026-03-31 — API: `POST /analytics/simulate` — pełna symulacja (`clmm_lp_simulation`)
+
+**keywords:** clmm-lp-api, analytics, simulate, clmm_lp_simulation, GBM, WhirlpoolReader
+**paths:** `crates/api/src/services/simulation_analytics.rs`, `crates/api/src/handlers/analytics.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`
+
+- Endpoint **nie jest już placeholderem**: pobiera stan puli z RPC (`WhirlpoolReader`), buduje zakres z `tick_to_price`, generuje **syntetyczną ścieżkę dzienna GBM** od aktualnej ceny, uruchamia `simulate_with_strategy` (strategie z `StrategyType` + domyślne progi), zwraca m.in. `time_in_range_pct`, `vs_hodl_usd`, `methodology_note`.
+- `SimulationRequest` rozszerzony o `gbm_volatility` / `gbm_drift` / parametry strategii; `SimulationResponse` o pola jawnej metodologii. Historyczny replay jak `backtest` CLI nadal osobno — opis w `methodology_note`.
+
+## 2026-03-31 — doc: WHETH 3× bot — CLI vs API optimize + symulacja zakresu
+
+**keywords:** backtest-optimize, clmm-lp-cli, clmm-lp-api, analytics simulate, WHETH_SOL_FIRST_RUN, optimize_profile
+**paths:** `doc/WHETH_SOL_THREE_BOTS_FIRST_RUN.md`, `crates/api/src/handlers/analytics.rs`, `crates/api/src/services/optimization_runner.rs`
+
+- Dopisane sekcje: **skąd jest optimize** (siatka tylko w CLI; API = subprocess `backtest-optimize` lub `apply-optimize-result`; `POST /analytics/simulate` = placeholder), oraz **procedura symulacji doboru `width_pct`/parametrów** przed openami.
+
+## 2026-03-31 — API + web: historia bota (JSONL) + Slack digest
+
+**keywords:** clmm-lp-api, web, bot-activity, Slack, SLACK_WEBHOOK_URL, orca_position_lifecycle.jsonl, registry.jsonl, OPERATIONAL_CONTINUITY
+**paths:** `crates/api/src/handlers/bot_activity.rs`, `web/src/pages/BotActivity.tsx`, `web/src/lib/api.ts`, `doc/OPERATIONAL_CONTINUITY.md`
+
+- **GET** `/api/v1/bot-activity/ledger` i `/registry` — ostatnie wiersze JSONL (opcjonalnie `?filter=` substring, `?limit=`), te same ścieżki co CLI (`CLMM_POSITION_LIFECYCLE_LEDGER_PATH`, `CLMM_POSITION_REGISTRY_PATH`).
+- **POST** `/api/v1/bot-activity/slack-summary` — treść z ogonu ledgera → Incoming Webhook (`SLACK_WEBHOOK_URL` w env procesu API).
+- **Web:** strona **Bot activity** (`/bot-activity`) — tabele + przycisk wysyłki na Slack.
+
+## 2026-03-31 — doc: pierwsze uruchomienie 3× bot whETH/SOL (strategie + dziennik)
+
+**keywords:** WHETH_SOL, orca-bot-run, StrategyMode, BOT_OPERATIONS_MODEL, ORCA_RUNBOOK, operations
+**paths:** `doc/WHETH_SOL_THREE_BOTS_FIRST_RUN.md`, `doc/ORCA_RUNBOOK.md`
+
+- Nowy przewodnik: propozycja zestawu strategii (`oor_recenter` / `periodic` / `threshold` + alternatywy), bezpieczna sekwencja (dry-run → jeden live na raz), szablon tabeli dziennika i checklist; link z `ORCA_RUNBOOK.md`.
+
 ## 2026-03-31 — tools: `orca_wheth_sol_three_bots_plan.ps1` (plan 3× pozycja WHETH/SOL)
 
 **keywords:** tools, WHETH_SOL, orca_curated_rebalance, orca-bot-run, capital plan, SCRIPTS_CATALOG

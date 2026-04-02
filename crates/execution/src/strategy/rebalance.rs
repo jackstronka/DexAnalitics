@@ -76,6 +76,9 @@ pub struct RebalanceParams {
 pub struct RebalanceResult {
     /// Whether rebalance was successful.
     pub success: bool,
+    /// `true` after the old position was closed on-chain. If [`Self::success`] is false and this is true,
+    /// the old NFT no longer exists (open failed or another partial step failed after close).
+    pub old_position_closed_on_chain: bool,
     /// Old position address.
     pub old_position: Pubkey,
     /// New position address (if created).
@@ -186,6 +189,7 @@ impl RebalanceExecutor {
 
         let mut result = RebalanceResult {
             success: false,
+            old_position_closed_on_chain: false,
             old_position: params.position,
             new_position: None,
             fees_collected: None,
@@ -265,6 +269,7 @@ impl RebalanceExecutor {
             result.error = Some(e.to_string());
             return result;
         }
+        result.old_position_closed_on_chain = true;
         result.tx_cost_lamports += 5000;
 
         // Step 3: Open new position
@@ -341,6 +346,7 @@ impl RebalanceExecutor {
                     fees_a_collected: Some(fa),
                     fees_b_collected: Some(fb),
                     optimization_run_id: params.optimization_run_id.clone(),
+                    old_position: Some(params.position.to_string()),
                 },
             )
             .await;

@@ -27,6 +27,7 @@ Cargo.lock
 .run/
 .env
 .local/
+/web/.env.local
 /Docker/.erlang.cookie
 /Doc/.*.drawio.bkp
 /**/.DS_Store

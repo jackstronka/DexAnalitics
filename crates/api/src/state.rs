@@ -198,6 +198,14 @@ pub struct ApiConfig {
     pub event_bus_shadow_mode: bool,
     /// Max publish retries before DLQ/failure path.
     pub event_bus_max_retries: u8,
+    /// Repository root on the API host (`tools/scripts-manifest.json`, `data/script_runs.jsonl`).
+    pub repo_root: Option<String>,
+    /// Local script runner base URL, e.g. `http://127.0.0.1:9847` (see `tools/script_runner/`).
+    pub script_runner_url: Option<String>,
+    /// Bearer token shared with the runner (`CLMM_SCRIPT_RUNNER_TOKEN` on the runner host).
+    pub script_runner_token: Option<String>,
+    /// Directory with wallet keypair JSON files on the API host (used by `GET /wallets`).
+    pub wallets_dir: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -214,6 +222,10 @@ impl Default for ApiConfig {
             event_bus_backend: "nats".to_string(),
             event_bus_shadow_mode: true,
             event_bus_max_retries: 3,
+            repo_root: None,
+            script_runner_url: None,
+            script_runner_token: None,
+            wallets_dir: None,
         }
     }
 }

@@ -394,6 +394,7 @@ impl PositionService {
                         fees_a_collected: None,
                         fees_b_collected: None,
                         optimization_run_id: None,
+                        old_position: Some(position_pubkey.to_string()),
                     },
                 )
                 .await;

@@ -20,6 +20,12 @@ param(
   [int]$RestartDelaySecs = 15,
   [int]$MaxRestarts = 0,
   [string]$LogDir = '',
+  # Optional: send Slack alerts on crashes/restart bursts (requires SLACK_WEBHOOK_URL in env or repo-root .env).
+  [switch]$SlackOnError,
+  # Throttle identical failure signatures (minutes).
+  [int]$SlackThrottleMinutes = 15,
+  # Send Slack when MaxRestarts is reached and we abort.
+  [switch]$SlackOnMaxRestarts,
   [switch]$CargoOnly,
   [switch]$RestartOnCleanExit,
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -37,6 +43,39 @@ if (-not $BotArgs -or $BotArgs.Count -eq 0) {
 . (Join-Path $PSScriptRoot 'clmm_rpc_tools_helpers.ps1')
 [void](Initialize-ClmmToolsRpcEnv)
 
+$notifyScript = Join-Path $RepoRoot "tools\notify_slack_webhook.ps1"
+function Send-SlackThrottled([string] $signature, [string] $text) {
+  if (-not $SlackOnError) { return }
+  if (-not (Test-Path -LiteralPath $notifyScript)) { return }
+
+  $throttleDir = Join-Path $RepoRoot "data\agent-alerts\orca-bot-supervised-slack-throttle"
+  New-Item -ItemType Directory -Force -Path $throttleDir | Out-Null
+  $statePath = Join-Path $throttleDir "state.json"
+  $now = [datetime]::UtcNow
+
+  $send = $true
+  if (Test-Path -LiteralPath $statePath) {
+    try {
+      $st = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+      $prevSig = [string]$st.sig
+      $prevTs = $null
+      try { $prevTs = [datetime]::Parse([string]$st.ts_utc).ToUniversalTime() } catch { $prevTs = $null }
+      if ($prevSig -eq $signature -and $null -ne $prevTs) {
+        $delta = ($now - $prevTs).TotalMinutes
+        if ($delta -lt $SlackThrottleMinutes) { $send = $false }
+      }
+    } catch { $send = $true }
+  }
+
+  if (-not $send) { return }
+  try {
+    & $notifyScript -Text $text
+    @{ sig = $signature; ts_utc = $now.ToString("o") } | ConvertTo-Json | Out-File -FilePath $statePath -Encoding utf8
+  } catch {
+    # best-effort
+  }
+}
+
 $exe = if (-not $CargoOnly) { Resolve-ClmmLpCliExe $RepoRoot } else { $null }
 if (-not $CargoOnly -and -not $exe) {
   Write-Warning "No release/debug clmm-lp-cli.exe under target\; using cargo run (slower). Use tools/build_clmm_lp_cli.ps1 or -CargoOnly."
@@ -46,6 +85,9 @@ $restartCount = 0
 while ($true) {
   if ($MaxRestarts -gt 0 -and $restartCount -ge $MaxRestarts) {
     Write-Error "MaxRestarts ($MaxRestarts) reached; aborting."
+    if ($SlackOnMaxRestarts) {
+      Send-SlackThrottled -signature ("max_restarts_" + $MaxRestarts) -text ("[orca-bot] MaxRestarts reached (" + $MaxRestarts + "); aborting supervised loop.")
+    }
     exit 1
   }
 
@@ -86,6 +128,14 @@ while ($true) {
   }
 
   Write-Host "=== orca-bot-run exited with code $code ==="
+
+  if ($code -ne 0) {
+    $logHint = ""
+    if ($LogDir -and -not [string]::IsNullOrWhiteSpace($LogDir)) {
+      $logHint = " log=" + $logFile
+    }
+    Send-SlackThrottled -signature ("exit_" + $code) -text ("[orca-bot] crashed exit=" + $code + " cycle=" + $restartCount + $logHint)
+  }
 
   if ($code -eq 0 -and -not $RestartOnCleanExit) {
     exit 0

@@ -1,0 +1,571 @@
+{
+  "schema_version": 1,
+  "scripts": [
+    {
+      "id": "Start-ClmmApi-8081",
+      "path": "tools/Start-ClmmApi-8081.ps1",
+      "summary": "Uruchamia API (clmm-lp-api) na porcie 8081 bez dotykania 8080 (Jenkins). Ustawia API_PORT=8081 i CLMM_REPO_ROOT, a potem startuje cargo run w osobnym oknie.",
+      "when_to_use": "Windows, gdy 8080 jest zajety (np. Jenkins). Uzyj, gdy chcesz stabilnie miec API na 8081.",
+      "risk": "low",
+      "runnable": false,
+      "actions": ["copy_command"]
+    },
+    {
+      "id": "Start-Dashboard-Safe",
+      "path": "tools/Start-Dashboard-Safe.ps1",
+      "summary": "Uruchamia dashboard bez kill-port: startuje API na 8081 (osobne okno) i Vite na 3000 (w tym oknie), proxy ustawione na API_UPSTREAM=http://127.0.0.1:8081. Nie dotyka 8080 (Jenkins).",
+      "when_to_use": "Windows, gdy nie chcesz by npm start zwalnial porty (zwlaszcza 8080).",
+      "risk": "low",
+      "runnable": false,
+      "actions": ["copy_command"]
+    },
+    {
+      "id": "bot_postrun_report",
+      "path": "tools/bot_postrun_report.ps1",
+      "summary": "Generuje i zapisuje raport po runie do data/reports (JSON).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "bot_preflight",
+      "path": "tools/bot_preflight.ps1",
+      "summary": "Sprawdza wymagane narzedzia (cargo), wymagany env SOLANA_RPC_URL oraz opcjonalnie zrodlo keypaira (KEYPAIR_PATH/SOLANA_KEYPAIR_PATH lub SOLANA_KEYPAIR). Testuje dostepnosc RPC metoda getHealth i konczy sukcesem, jesli srodowisko jest gotowe.",
+      "when_to_use": "Uruchamiaj z root repo; wymagane SOLANA_RPC_URL, a do transakcji takze keypair (zgodnie z STARTUP.md).",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "bot_run_devnet",
+      "path": "tools/bot_run_devnet.ps1",
+      "summary": "Uruchamia clmm-lp-cli orca-bot-run (dla pozycji, tryb dry-run/limited-live, opcjonalny preflight, IL ledger, position-fee ledger).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "bot_session_devnet",
+      "path": "tools/bot_session_devnet.ps1",
+      "summary": "Uruchamia sesję bota devnet na pozycji w trybie dry-run lub limited-live, obsługuje limit czasu i po zakończeniu zapisuje raport przez bot_postrun_report.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "build_clmm_lp_cli",
+      "path": "tools/build_clmm_lp_cli.ps1",
+      "summary": "Kompiluje clmm-lp-cli przez cargo build: domyslnie wariant Release, opcjonalnie Debug (parametr -Configuration). Docelowy exe: target/release/clmm-lp-cli.exe lub target/debug/clmm-lp-cli.exe.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "build_clmm_lp_cli_release",
+      "path": "tools/build_clmm_lp_cli_release.ps1",
+      "summary": "Kompatybilne opakowanie: buduje tylko clmm-lp-cli w wariancie Release (preferuje tools/build_clmm_lp_cli.ps1).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "check_collector_5m_status",
+      "path": "tools/check_collector_5m_status.ps1",
+      "summary": "Szybka diagnostyka kolektora snapshotow 5m: ogon statusu, ogon logow pętli i ostatni ts_utc/lub statystyki dla ustalonych pul.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "clmm_rpc_tools_helpers",
+      "path": "tools/clmm_rpc_tools_helpers.ps1",
+      "summary": "Helpery dla tools/*.ps1: ustawia denylist fallback dla mainnet po SOLANA_RPC_URL oraz daje funkcje uruchamiania clmm-lp-cli (exe lub cargo run).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": false,
+      "actions": [
+        "copy_command"
+      ]
+    },
+    {
+      "id": "compare_orca_snapshots_5m_vs_10m_last_full_hour",
+      "path": "tools/compare_orca_snapshots_5m_vs_10m_last_full_hour.ps1",
+      "summary": "Porownuje wyniki backtestow dla ustalonych pul Orca (okno ostatniej pelnej godziny UTC) na snapshotach 5m vs 10m i zapisuje CSV do data/reports.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "count_snapshot_rows_last_full_hour",
+      "path": "tools/count_snapshot_rows_last_full_hour.ps1",
+      "summary": "Liczy liczbe wierszy snapshotow w ostatniej pelnej godzinie UTC dla pul Orca (snapshots.jsonl i snapshots_5m.jsonl) i wypisuje wyniki.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "data_alerts_loop",
+      "path": "tools/data_alerts_loop.ps1",
+      "summary": "Pętla monitoringu danych: cyklicznie uruchamia snapshot_health_alert i (opcjonalnie) quick_verify_alert z logiem w data/snapshot_logs/data-alerts-loop.log.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "devnet_rebalance_wallet_half",
+      "path": "tools/devnet_rebalance_wallet_half.ps1",
+      "summary": "Rebalans polowkowy portfela na devnecie: z WSL odczytuje balans SOL i devUSDC, wylicza plan swapow tak, aby wartosc w SOL i devUSDC zblizyla sie do ~50/50; opcjonalnie zamyka/ponownie otwiera wskazana pozycje i przy -Execute wysyla transakcje.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "mainnet_rpc_env",
+      "path": "tools/mainnet_rpc_env.ps1",
+      "summary": "Konfiguracja mainnet RPC: dot-source tools/mainnet_rpc_env.ps1 ustawia SOLANA_RPC_URL, SOLANA_RPC_FALLBACK_URLS i CLMM_EXPECTED_CLUSTER=mainnet-beta.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "mainnet_rpc_env.example",
+      "path": "tools/mainnet_rpc_env.example.ps1",
+      "summary": "Przyklad konfiguracji mainnet RPC: jak skopiowac do tools/mainnet_rpc_env.ps1 i jakie zmienne nalezy ustawic (SOLANA_RPC_URL/FALLBACK).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": false,
+      "actions": [
+        "copy_command"
+      ]
+    },
+    {
+      "id": "new_bot_keypair",
+      "path": "tools/new_bot_keypair.ps1",
+      "summary": "Generuje plik keypair dla bota (Solany) w wybranej lokalizacji: wypisuje tylko pubkey i sciezke (bez seed phrase).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "notify_slack_webhook",
+      "path": "tools/notify_slack_webhook.ps1",
+      "summary": "Wysyla jednorazowa wiadomosc do Slacka przez Incoming Webhook (URL z parametru lub SLACK_WEBHOOK_URL/ .env).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_bot_run_supervised",
+      "path": "tools/orca_bot_run_supervised.ps1",
+      "summary": "Uruchamia orca-bot-run w petli superwizowanej: po crashu (exit!=0) restartuje po zwloke, exit 0 traktuje jako zamierzone zakonczenie.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_curated_mainnet_pools",
+      "path": "tools/orca_curated_mainnet_pools.ps1",
+      "summary": "Zestaw par Orca na mainnecie (3 pary) jako ustalony punkt odniesienia dla skryptow: definiuje pulle i minty dla SOL/USDC, whETH/SOL oraz cbBTC/USDC.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_curated_rebalance",
+      "path": "tools/orca_curated_rebalance.ps1",
+      "summary": "Zbiorczy skrypt operatorski dla ustalonego zestawu 3 par Orca na mainnecie: pomaga wypisac pary, wykonac kontrole wymagan, otworzyc/zamknac pozycje, wykonac swap oraz przygotowac funding pod cbBTC/USDC.",
+      "when_to_use": "Uruchamiaj z root repo; ustaw SOLANA_RPC_URL oraz keypair (wg STARTUP.md).",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_fund_cbbtc_usdc_open",
+      "path": "tools/orca_fund_cbbtc_usdc_open.ps1",
+      "summary": "Planuje (i opcjonalnie wykonuje) funding dla otwarcia cbBTC/USDC: robi preflight deficytow i cytuje zamiany dry-run; z -Execute odpala zamiany.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_auto_fund_for_open",
+      "path": "tools/orca_position_auto_fund_for_open.ps1",
+      "summary": "Uzupełnia brakujące tokeny przed otwarciem pozycji: wykonuje zamiany exact-out na puli tak, aby preflight dla orca-position-open mial wieksza szanse przejsc. Nie wysyla orca-position-open; weryfikuje potem preflight.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_close_quick",
+      "path": "tools/orca_position_close_quick.ps1",
+      "summary": "Szybkie zamkniecie pozycji Whirlpool: wybiera ostatnia aktywna pozycje z registry.jsonl (lub fallback on-chain) i uruchamia orca-position-close.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_open_preflight",
+      "path": "tools/orca_position_open_preflight.ps1",
+      "summary": "Kontrola przed otwarciem pozycji Orca: sprawdza minty puli oraz czy portfel ma wystarczajace tokeny A/B i zapas SOL na oplaty. Zwraca kod 0 (OK) lub 1 (braki).",
+      "when_to_use": "Uruchamiaj z root repo; ustaw SOLANA_RPC_URL oraz keypair (wg STARTUP.md).",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_open_then_close_fast",
+      "path": "tools/orca_position_open_then_close_fast.ps1",
+      "summary": "Fast open->close: start close immediately after `position PDA:` appears. This avoids waiting for open's post-tx ledger enrichment (getTransaction retries), which can add tens of s…",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_open_then_close_quick",
+      "path": "tools/orca_position_open_then_close_quick.ps1",
+      "summary": "Szybki scenariusz open->close: otwiera pozycje male kwoty, czeka kilka sekund i zamyka; opcjonalnie preflight oraz autofund.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_preflight_core",
+      "path": "tools/orca_position_preflight_core.ps1",
+      "summary": "Repeated exact-out swaps on the same Whirlpool until preflight passes (token A/B only). Requires enough of the *other* leg to pay each swap; does not fix native SOL fee reserve.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_position_smoke_curated_pools",
+      "path": "tools/orca_position_smoke_curated_pools.ps1",
+      "summary": "Test na mainnecie (smoke) dla ustalonych pul Orca: dla kazdej puli z listy tools/orca_curated_mainnet_pools.ps1 uruchamia open, krótko czeka i close. Wymaga sfinansowanego portfela i zapasów SPL.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_swap",
+      "path": "tools/orca_swap.ps1",
+      "summary": "Odczyt stanu portfela + swap w Orca Whirlpool: pre/postflight przez solana_account_state.ps1 i uruchomienie clmm-lp-cli orca-swap; domyslnie dry-run, o ile nie podasz -Execute.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_swap_curated",
+      "path": "tools/orca_swap_curated.ps1",
+      "summary": "Swap na ustalonym mainnecie Orca (3 pary) w dowolnym kierunku: mapuje symbole tokenow na minty i przekazuje parametry do orca_swap.ps1 (exact-in/exact-out okresla, czy Twoj input to From czy To).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "high",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "orca_wheth_sol_three_bots_plan",
+      "path": "tools/orca_wheth_sol_three_bots_plan.ps1",
+      "summary": "Plan dla 3 botow na parze whETH/SOL: liczy heurystycznie rowne notional USD dla bota (50/50 dla legow SOL i whETH) na podstawie stanu portfela. Nie wysyla transakcji, tylko drukuje komendy do wykonania (rebalance/open/swap).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "quick_verify_alert",
+      "path": "tools/quick_verify_alert.ps1",
+      "summary": "Runs quick_verify_data.ps1; on failure (exit 2), posts summary to Slack (with throttle).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "quick_verify_data",
+      "path": "tools/quick_verify_data.ps1",
+      "summary": "Generuje i zapisuje raport po runie do data/reports (JSON).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "restart_snapshot_loop_10m",
+      "path": "tools/restart_snapshot_loop_10m.ps1",
+      "summary": "Restartuje 10-minutowa petle snapshotow: zatrzymuje istniejacy run-snapshot-loop.ps1 (10m) i uruchamia ponownie (bez dotykania 5m).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "run_devnet_smokes",
+      "path": "tools/run_devnet_smokes.ps1",
+      "summary": "Smoke testy devnet: ustawia env (RPC, keypair, pool/ticki/limity) i odpal cargo test -p clmm-lp-api devnet_.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "run_snapshot_backtest_prep_loop",
+      "path": "tools/run_snapshot_backtest_prep_loop.ps1",
+      "summary": "Odświeza snapshoty i przygotowuje okna backtestu: uruchamia cykliczne pobranie snapshotow dla listy pul Orca oraz buduje cache (snapshot-backtest-prep). Przy -Loop robi petle.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "run_ops_ingest_loop",
+      "path": "tools/run_ops_ingest_loop.ps1",
+      "summary": "Wrapper usługi: uruchamia `clmm-lp-cli ops-ingest-loop` jako long-lived proces (Shawl/NSSM). Loguje stdout/stderr do data/logs/; opcjonalnie wysyła Slack na non-zero exit (flaga -SlackOnError).",
+      "when_to_use": "Repo root; używaj zamiast Task Scheduler dla 24/7 ingestu (snapshots -> swaps sync -> enrich -> audit -> health-check). Wymaga ustawionego RPC env; Slack wymaga SLACK_WEBHOOK_URL w env lub repo-root .env.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "log_rotate",
+      "path": "tools/log_rotate.ps1",
+      "summary": "Retention: usuwa stare logi/raporty pod data/ (data/logs, data/snapshot_logs, data/reports, data/agent-alerts) według KeepDays.",
+      "when_to_use": "Repo root; uruchamiaj raz dziennie z Task Scheduler (one-shot) żeby repo nie rosło bez końca przy usługach Shawl/NSSM.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "run_snapshot_health_monitor_loop",
+      "path": "tools/run_snapshot_health_monitor_loop.ps1",
+      "summary": "Monitor zdrowia snapshotow w pętli: co interval odpala snapshot_health_check i dopisuje log do data/snapshot_logs/snapshot-health-loop.log.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "snapshot_health_alert",
+      "path": "tools/snapshot_health_alert.ps1",
+      "summary": "Runs snapshot_health_check.ps1; on failure, posts to Slack (with throttle).",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "snapshot_health_check",
+      "path": "tools/snapshot_health_check.ps1",
+      "summary": "Sprawdza zdrowie kolektorow snapshotow (10m + 5m): czyta status JSONL kolektorow i ocenia wiek ostatniego OK run oraz ostatnie ERROR w logach pętli. Zapisuje wynik do snapshot-health.jsonl i konczy exit 0/1.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "solana_account_state",
+      "path": "tools/solana_account_state.ps1",
+      "summary": "Migawka stanu konta Solany (read-only): native SOL + tokeny SPL przez JSON-RPC; opcjonalnie zapis do JSON.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "solana_rpc_env",
+      "path": "tools/solana_rpc_env.ps1",
+      "summary": "Ustawia srodowisko RPC Solany: dot-source tools/solana_rpc_env.ps1 i Set-SolanaRpcEnv ustawia SOLANA_RPC_URL/FALLBACK oraz (opcjonalnie) CLMM_EXPECTED_CLUSTER.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "solana_wallet_usd_estimate",
+      "path": "tools/solana_wallet_usd_estimate.ps1",
+      "summary": "Oszacowanie wartosci portfela w USD: sumuje SOL i SPL po mintach i (domyslnie) pobiera ceny z CoinGecko; opcjonalnie -Json i -SkipPriceFetch.",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
+      "id": "Start-Dashboard",
+      "path": "tools/Start-Dashboard.ps1",
+      "summary": "Uruchamia dashboard w jednym oknie: zatrzymuje stare procesy, potem API (:8080) + Vite (:3000) z połączonymi logami.",
+      "when_to_use": "Repo root; uruchamia API (:8080) + Vite (:3000) w jednym oknie.",
+      "risk": "unknown",
+      "runnable": false,
+      "actions": [
+        "copy_command"
+      ]
+    },
+    {
+      "id": "Stop-ClmmApi",
+      "path": "tools/Stop-ClmmApi.ps1",
+      "summary": "Zatrzymuje proces(y) clmm-lp-api.exe (Windows blokuje nadpisanie pliku przy cargo run, gdy API nadal działa).",
+      "when_to_use": "Windows: zatrzymuje dziaĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇajÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€šĂ‚Â¦ce clmm-lp-api.exe.",
+      "risk": "unknown",
+      "runnable": false,
+      "actions": [
+        "copy_command"
+      ]
+    },
+    {
+      "id": "wheth_sol_three_bots_manual_range_25_25p5",
+      "path": "tools/wheth_sol_three_bots_manual_range_25_25p5.ps1",
+      "summary": "Print three ready-to-run commands: whETH/SOL pool Hktf…, ticks [-55416,-55216] ≈ 25.0–25.5 SOL per whETH. Strategies: A oor_recenter, B periodic 12h, C threshold 5% (JSON under da…",
+      "when_to_use": "Repo root; set SOLANA_RPC_URL / keypair per STARTUP.md.",
+      "risk": "medium",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    }
+  ]
+}

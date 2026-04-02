@@ -651,10 +651,23 @@ impl StrategyExecutor {
 
                 let result = self.rebalance_executor.execute(params).await;
 
-                if !result.success
-                    && let Some(err) = result.error
-                {
-                    error!(error = %err, "Rebalance failed");
+                if !result.success {
+                    if result.old_position_closed_on_chain && result.new_position.is_none() {
+                        error!(
+                            position = %position.address,
+                            pool = %position.pool,
+                            error = ?result.error,
+                            "Rebalance incomplete: old position closed on-chain but new position was not opened; removing stale monitor entry (restart with a new position NFT or re-open manually)"
+                        );
+                        let old_addr = position.address;
+                        self.monitor.remove_position(&old_addr).await;
+                        if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
+                            let mut m = self.retouch_armed.write().await;
+                            m.remove(&old_addr);
+                        }
+                    } else if let Some(ref err) = result.error {
+                        error!(error = %err, "Rebalance failed");
+                    }
                 }
 
                 // Keep the monitor set in sync with the actual rebalance outcome:

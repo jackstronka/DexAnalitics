@@ -4,14 +4,19 @@
 
 use crate::handlers;
 use crate::models::{
-    BuildUnsignedTxRequest, BuildUnsignedTxResponse, CreateStrategyRequest,
-    DecreaseLiquidityRequest, EventBusMetricsResponse, HealthResponse, ListPoolsResponse,
-    ListPositionsResponse, ListStrategiesResponse, MessageResponse, MetricsResponse,
-    OpenPositionRequest, OrcaLockResponse, OrcaProtocolResponse, OrcaTokenListResponse,
-    OrcaTokenResponse, PhantomChallengeRequest, PhantomChallengeResponse, PhantomSessionResponse,
-    PhantomVerifyRequest, PnLResponse, PoolResponse, PoolStateResponse, PortfolioAnalyticsResponse,
-    PositionResponse, RebalanceRequest, SimulationRequest, SimulationResponse,
-    StrategyPerformanceResponse, StrategyResponse, SubmitSignedTxRequest, SubmitSignedTxResponse,
+    BotActivityJsonlResponse, BotRegistryJsonlResponse, BuildUnsignedTxRequest,
+    BuildUnsignedTxResponse, CreateStrategyRequest, DecreaseLiquidityRequest,
+    EventBusMetricsResponse, HealthResponse, ListPoolsResponse, ListPositionsResponse,
+    ListStrategiesResponse, MessageResponse, MetricsResponse, OpenPositionRequest,
+    OrcaLockResponse, OrcaOwnerPositionEntry, OrcaOwnerPositionsResponse, OrcaProtocolResponse,
+    OrcaTokenListResponse, OrcaTokenResponse,
+    PhantomChallengeRequest, PhantomChallengeResponse, PhantomSessionResponse, PhantomVerifyRequest,
+    PnLResponse, PoolResponse, PoolStateResponse,     PortfolioAnalyticsResponse, PositionResponse,
+    RebalanceRequest, RunScriptRequest, ScriptCatalogItem, ScriptRunRecord, ScriptsListResponse,
+    SimulationRequest, SimulationResponse, SlackActivitySummaryRequest,
+    SlackActivitySummaryResponse, StrategyPerformanceResponse, StrategyResponse,
+    SubmitSignedTxRequest, SubmitSignedTxResponse,
+    WalletBalancesResponse, WalletEntry, WalletTokenBalance, WalletsListResponse,
 };
 use utoipa::OpenApi;
 
@@ -41,7 +46,10 @@ use utoipa::OpenApi;
         (name = "Pools", description = "Pool information and state"),
         (name = "Orca", description = "Orca Public REST proxy endpoints"),
         (name = "Transactions", description = "Unsigned tx build + submit endpoints"),
-        (name = "Analytics", description = "Portfolio analytics and simulations")
+        (name = "Analytics", description = "Portfolio analytics and simulations"),
+        (name = "Bot activity", description = "Orca JSONL ledger + registry (CLI/bot history); Slack digest"),
+        (name = "Scripts", description = "tools/*.ps1 manifest, run history, localhost runner proxy"),
+        (name = "Wallets", description = "Local keypairs directory + on-chain balances")
     ),
     paths(
         // Health endpoints
@@ -84,6 +92,7 @@ use utoipa::OpenApi;
         handlers::orca_search_tokens,
         handlers::orca_get_token,
         handlers::orca_get_protocol,
+        handlers::orca_positions_by_owner,
         // Unsigned tx flow endpoints
         handlers::tx_open_build,
         handlers::tx_increase_build,
@@ -94,6 +103,17 @@ use utoipa::OpenApi;
         // Analytics endpoints
         handlers::get_portfolio_analytics,
         handlers::run_simulation,
+        // Bot activity
+        handlers::get_bot_ledger,
+        handlers::get_bot_il_ledger,
+        handlers::get_bot_registry,
+        handlers::post_bot_slack_summary,
+        // Scripts
+        handlers::list_scripts,
+        handlers::run_script,
+        // Wallets
+        handlers::list_wallets,
+        handlers::get_wallet_balances,
     ),
     components(
         schemas(
@@ -128,6 +148,8 @@ use utoipa::OpenApi;
             OrcaTokenResponse,
             OrcaTokenListResponse,
             OrcaProtocolResponse,
+            OrcaOwnerPositionsResponse,
+            OrcaOwnerPositionEntry,
             // Transactions
             BuildUnsignedTxRequest,
             BuildUnsignedTxResponse,
@@ -137,6 +159,21 @@ use utoipa::OpenApi;
             PortfolioAnalyticsResponse,
             SimulationRequest,
             SimulationResponse,
+            // Bot activity
+            BotActivityJsonlResponse,
+            BotRegistryJsonlResponse,
+            SlackActivitySummaryRequest,
+            SlackActivitySummaryResponse,
+            // Scripts
+            ScriptsListResponse,
+            ScriptCatalogItem,
+            ScriptRunRecord,
+            RunScriptRequest,
+            // Wallets
+            WalletsListResponse,
+            WalletEntry,
+            WalletBalancesResponse,
+            WalletTokenBalance,
         )
     ),
     modifiers(&SecurityAddon)

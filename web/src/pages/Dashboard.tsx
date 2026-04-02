@@ -10,28 +10,9 @@ import {
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import ApiDataHint from '@/components/ApiDataHint'
 import { getPortfolioAnalytics, getPositions, getHealth } from '@/lib/api'
 import { formatUSD, formatPercent } from '@/lib/utils'
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts'
-
-// Mock chart data - in production this would come from API
-const chartData = [
-  { time: '00:00', value: 10000 },
-  { time: '04:00', value: 10200 },
-  { time: '08:00', value: 10150 },
-  { time: '12:00', value: 10400 },
-  { time: '16:00', value: 10350 },
-  { time: '20:00', value: 10500 },
-  { time: '24:00', value: 10450 },
-]
 
 export default function Dashboard() {
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
@@ -55,6 +36,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <ApiDataHint />
+
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Dashboard</h1>
         <div className="flex items-center gap-2">
@@ -120,49 +103,30 @@ export default function Dashboard() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Impermanent Loss</CardTitle>
+            <CardTitle className="text-sm font-medium">IL (avg %)</CardTitle>
             <AlertTriangle className="h-4 w-4 text-yellow-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-yellow-500">
-              {analyticsLoading ? '...' : formatUSD(analytics?.total_il_usd || '0')}
+              {analyticsLoading ? '...' : formatPercent(analytics?.total_il_pct || '0')}
             </div>
             <p className="text-xs text-muted-foreground">
-              Unrealized IL
+              Across monitored positions
             </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Chart */}
       <Card>
         <CardHeader>
-          <CardTitle>Portfolio Value (24h)</CardTitle>
+          <CardTitle>Portfolio over time</CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-                <XAxis dataKey="time" stroke="#888" />
-                <YAxis stroke="#888" />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: '#1a1a1a', 
-                    border: '1px solid #333',
-                    borderRadius: '8px'
-                  }}
-                />
-                <Line 
-                  type="monotone" 
-                  dataKey="value" 
-                  stroke="#22c55e" 
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+        <CardContent className="text-sm text-muted-foreground">
+          Historical time series is not wired to a dedicated endpoint yet. Use{' '}
+          <Link to="/wallet" className="text-primary underline">
+            Wallet
+          </Link>{' '}
+          for current totals and open positions.
         </CardContent>
       </Card>
 

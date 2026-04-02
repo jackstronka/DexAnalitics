@@ -38,6 +38,7 @@ Powtarzalnie przygotować dane dla Orca Whirlpool tak, aby:
   - **Jedna bramka (rebalance / przygotowanie):** `tools/orca_curated_rebalance.ps1 -Action Help` — `ListPairs`, `Preflight`, `Open` (live, `-OpenOnly` wewnętrznie), `Close` (`-Position`), `Swap` (deleguje do `orca_swap_curated.ps1`), `FundCbBtc`, `Smoke`.
 - **Szacunek + swapy pod open na cbBTC/USDC:** `tools/orca_fund_cbbtc_usdc_open.ps1` — preflight na `HxA6…`, brakujące **cbBTC** szacuje z **dry-run** `orca-swap` (exact-out cbBTC), brak **USDC** z sumy (noga pozycji + USDC na ten swap); niedobór USDC uzupełnia planem **SOL→USDC** na puli `SOL_USDC` (exact-out USDC, też z dry-run). Domyślnie tylko **plan**; **`-Execute`** wysyła transakcje (`orca_swap.ps1`) w kolejności SOL/USDC → cbBTC/USDC, potem ponowny preflight. Jeśli portfel ma za mało **SOL** względem szacunku, skrypt kończy się błędem (zmniejsz `-AmountA`/`-AmountB` lub doładuj SOL).
 - **RPC:** skrypty w `tools/` mogą ustawić domyślne `CLMM_RPC_DENYLIST=ankr,projectserum` na mainnecie (patrz `tools/clmm_rpc_tools_helpers.ps1`), żeby unikać złych fallbacków.
+- **Pierwsze uruchomienie wielu botów na tej samej parze (np. 3× whETH/SOL, różne strategie rebalansu + szablon dziennika):** [`doc/WHETH_SOL_THREE_BOTS_FIRST_RUN.md`](WHETH_SOL_THREE_BOTS_FIRST_RUN.md).
 
 ## Rebalance Whirlpool: zmiana zakresu (ticki) i swap
 
@@ -58,6 +59,14 @@ W tym repozytorium **`RebalanceExecutor`** realizuje właśnie ten wzorzec (zamk
 - Żeby **policzyć całość** (swap + tx rebalansu + open): ustaw **`CLMM_REBALANCE_SESSION_ID`** na **jedną** wartość **przed** każdym krokiem w tej samej sesji powłoki / w tym samym procesie, który uruchamia kolejne komendy — wiersze z tym samym `rebalance_session_id` możesz sumować (`tx_fee_lamports` albo delty płatnika, zgodnie z tym, co mierzysz).
 - **Proces bota:** jeśli startujesz bota z już ustawionym `CLMM_REBALANCE_SESSION_ID` w środowisku, wiersze `source=orca_bot` też dostaną to pole (o ile env jest widoczny dla procesu).
 - **Docelowo (integracja w kodzie):** gdy swap zostanie dodany przed rebalansem w Rust, sensowne jest **jedno** id sesji generowane w kodzie na początku sekwencji (np. z konfiguracji lub UUID) i przekazywane do zapisów ledgeru — bez polegania na ręcznym `export` między osobnymi procesami. Do tego momentu **wspólne env w jednej sesji** jest prostym sposobem na spójne sumowanie kosztów.
+
+### Historia rebalansów (liczenie zdarzeń) i kosztów tx
+
+- **Zdarzenie „rebalance” w pliku (opcjonalnie):** uruchamiając bota z **`--il-ledger-path <plik.jsonl>`** (`orca-bot-run` / `orca-bot-open-and-run`), po **udanym** `RebalanceExecutor::execute` (zamknięcie starej pozycji + otwarcie nowej) `LifecycleTracker::record_rebalance` dopisuje wiersz JSON z `"event": "rebalance"` (m.in. stare/nowe ticki, `reason`, `optimization_run_id`). **Bez** tej flagi historia rebalansów jest tylko w logach procesu / pamięci trackera — **nie** w osobnym pliku.
+- **Koszty każdej tx (fee + delta SOL płatnika):** nadal **`data/ledger/orca_position_lifecycle.jsonl`** — wiersze `source=orca_bot` (`bot_collect_fees`, operacje rebalance, itd.) oraz ewentualnie `cli_swap` / `position_open` w tej samej sesji; sumuj po **`rebalance_session_id`** gdy używasz **`CLMM_REBALANCE_SESSION_ID`** (patrz akapit wyżej).
+- **Pełny łańcuch poza repo:** eksplorator (Solscan) po **podpisie** lub po adresie portfela — repo nie zastępuje bloku; dziennik operacyjny (np. `data/experiments/.../OPERATIONS_JOURNAL.md`) może trzymać **tabelę ręczną** (data, stary PDA → nowy PDA, id sesji kosztów, link do tx).
+- **Agregacja lokalna:** `clmm-lp-cli ledger-rebalance-summary` — czyta IL JSONL (`--il-ledger` / `CLMM_IL_LEDGER_PATH`) oraz lifecycle JSONL (domyślnie jak wyżej); sumuje `tx_cost_lamports` dla wierszy `rebalance` i grupuje koszty on-chain po `rebalance_session_id`.
+- **Dashboard (`clmm-lp-api`):** ustaw **`CLMM_IL_LEDGER_PATH`** na ten sam plik co `--il-ledger-path` bota — endpoint `GET /api/v1/bot-activity/il-ledger` i strony **Bot activity** / szczegół pozycji (**IL ledger**) czytają ten plik.
 
 ### Rejestr pozycji (otwarte / zamknięte) dla kolektorów
 

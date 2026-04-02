@@ -932,6 +932,15 @@ enum Commands {
         #[arg(long)]
         position_fee_ledger_path: Option<std::path::PathBuf>,
     },
+    /// Summarize rebalance rows (`event: rebalance`) in IL JSONL + tx costs in `orca_position_lifecycle.jsonl` (by `CLMM_REBALANCE_SESSION_ID`).
+    LedgerRebalanceSummary {
+        /// IL / rebalance JSONL (same as `orca-bot-run --il-ledger-path`). Falls back to `CLMM_IL_LEDGER_PATH`.
+        #[arg(long)]
+        il_ledger: Option<std::path::PathBuf>,
+        /// Lifecycle JSONL (default: `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` or `data/ledger/orca_position_lifecycle.jsonl`).
+        #[arg(long)]
+        lifecycle_ledger: Option<std::path::PathBuf>,
+    },
     /// Open a new Orca Whirlpool LP position (on-chain). Without `--dry-run` requires a signing key.
     OrcaPositionOpen {
         /// Whirlpool pool address.
@@ -1448,6 +1457,8 @@ async fn main() -> Result<()> {
                     &token_b,
                     *capital,
                     *lp_share,
+                    None,
+                    None,
                 )
                 .await?;
                 prebuilt_snapshot_fee_index = prep.per_step_fees_usd;
@@ -1689,18 +1700,23 @@ async fn main() -> Result<()> {
             {
                 match crate::commands::backtest_optimize::fetch_swaps_for_optimize(arg).await {
                     Ok(Some(s)) => {
-                        let (_pool_l, _eff, _da, _db, vault_a, vault_b) =
-                            if let Some(pool) = whirlpool_address.as_ref() {
-                                crate::commands::backtest_optimize::fetch_pool_state(
-                                    pool,
-                                    token_a_decimals,
-                                    token_b_decimals,
-                                    use_cross_pair,
-                                )
-                                .await?
-                            } else {
-                                (None, None, token_a_decimals, token_b_decimals, None, None)
-                            };
+                        // In snapshot-only mode with snapshot fees we should not require any
+                        // Orca on-chain pool metadata; filter swaps by mint addresses instead.
+                        let (_pool_l, _eff, _da, _db, vault_a, vault_b) = if snapshots_only
+                            && matches!(fee_source, FeeSourceArg::Snapshots)
+                        {
+                            (None, None, token_a_decimals, token_b_decimals, None, None)
+                        } else if let Some(pool) = whirlpool_address.as_ref() {
+                            crate::commands::backtest_optimize::fetch_pool_state(
+                                pool,
+                                token_a_decimals,
+                                token_b_decimals,
+                                use_cross_pair,
+                            )
+                            .await?
+                        } else {
+                            (None, None, token_a_decimals, token_b_decimals, None, None)
+                        };
                         Some(crate::commands::backtest_optimize::filter_swaps_for_pool(
                             s,
                             vault_a.as_deref(),
@@ -2203,18 +2219,23 @@ async fn main() -> Result<()> {
                 .as_ref()
                 .or(snapshot_pool_address.as_ref())
             {
-                let (pool_l, eff, _da, _db, _va, _vb) =
-                    crate::commands::backtest_optimize::fetch_pool_state(
-                        pool,
-                        token_a_decimals,
-                        token_b_decimals,
-                        use_cross_pair,
+                // When ranking by snapshot fees, RPC-derived fee rate is not required.
+                if snapshots_only && matches!(fee_source, FeeSourceArg::Snapshots) {
+                    (None, Decimal::from_f64(0.003).unwrap())
+                } else {
+                    let (pool_l, eff, _da, _db, _va, _vb) =
+                        crate::commands::backtest_optimize::fetch_pool_state(
+                            pool,
+                            token_a_decimals,
+                            token_b_decimals,
+                            use_cross_pair,
+                        )
+                        .await?;
+                    (
+                        pool_l,
+                        eff.unwrap_or_else(|| Decimal::from_f64(0.003).unwrap()),
                     )
-                    .await?;
-                (
-                    pool_l,
-                    eff.unwrap_or_else(|| Decimal::from_f64(0.003).unwrap()),
-                )
+                }
             } else {
                 (None, Decimal::from_f64(0.003).unwrap())
             };
@@ -2770,18 +2791,107 @@ async fn main() -> Result<()> {
             );
             // TODO(E2.6): wire these calibration params into optimize path as well.
             let _ = (range_share_k, range_share_cap_mult);
-            let (token_a_decimals_guess, token_b_decimals_guess): (u8, u8) = {
-                use crate::engine::token_meta::fetch_mint_decimals;
-                use clmm_lp_protocols::rpc::RpcProvider;
-                let rpc = RpcProvider::mainnet();
-                let da = fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9);
-                let db = if let Some(mb) = mint_b.as_ref() {
-                    fetch_mint_decimals(&rpc, mb).await.unwrap_or(9)
+            let snapshots_only = matches!(price_path_source, PricePathSourceArg::Snapshots);
+            let maybe_orca_pool_meta: Option<crate::commands::snapshot_backtest_prep::OrcaPoolMeta> =
+                if snapshots_only
+                    && matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca))
+                    && snapshot_pool_address.is_some()
+                {
+                    let pool = snapshot_pool_address.as_ref().unwrap();
+
+                    // Prefer the exact suffix directory (if provided), but fall back to the legacy `orca/` layout.
+                    let suffix_clean = snapshot_jsonl_suffix
+                        .as_ref()
+                        .map(|s| s.trim().trim_start_matches('_'))
+                        .filter(|s| !s.is_empty());
+
+                    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+                    if let Some(s) = suffix_clean.as_ref() {
+                        candidates.push(
+                            std::path::Path::new("data")
+                                .join("backtest-snapshot-cache")
+                                .join(format!("orca_{}", s))
+                                .join(pool.trim())
+                                .join("pool_meta.json"),
+                        );
+                    }
+                    candidates.push(
+                        std::path::Path::new("data")
+                            .join("backtest-snapshot-cache")
+                            .join("orca")
+                            .join(pool.trim())
+                            .join("pool_meta.json"),
+                    );
+
+                    let mut out: Option<crate::commands::snapshot_backtest_prep::OrcaPoolMeta> = None;
+                    for c in candidates {
+                        if !c.exists() {
+                            continue;
+                        }
+                        let raw = std::fs::read_to_string(&c).with_context(|| {
+                            format!("read pool meta cache: {}", c.display())
+                        })?;
+                        out = Some(serde_json::from_str(&raw).with_context(|| {
+                            format!("parse pool meta cache: {}", c.display())
+                        })?);
+                        break;
+                    }
+                    out
                 } else {
-                    6u8
+                    None
                 };
-                (da, db)
+
+            let (token_a_decimals_guess, token_b_decimals_guess): (u8, u8) = {
+                match maybe_orca_pool_meta.as_ref() {
+                    Some(meta) => {
+                        let da = if mint_a.eq_ignore_ascii_case(&meta.token_mint_a) {
+                            meta.token_mint_a_decimals
+                        } else if mint_a.eq_ignore_ascii_case(&meta.token_mint_b) {
+                            meta.token_mint_b_decimals
+                        } else {
+                            anyhow::bail!(
+                                "pool_meta.json mismatch: mint-a {} not found in meta ({} / {})",
+                                mint_a,
+                                meta.token_mint_a,
+                                meta.token_mint_b
+                            );
+                        };
+
+                        let db = if let Some(mb) = mint_b.as_ref() {
+                            if mb.eq_ignore_ascii_case(&meta.token_mint_a) {
+                                meta.token_mint_a_decimals
+                            } else if mb.eq_ignore_ascii_case(&meta.token_mint_b) {
+                                meta.token_mint_b_decimals
+                            } else {
+                                anyhow::bail!(
+                                    "pool_meta.json mismatch: mint-b {} not found in meta ({} / {})",
+                                    mb,
+                                    meta.token_mint_a,
+                                    meta.token_mint_b
+                                );
+                            }
+                        } else {
+                            6u8
+                        };
+
+                        (da, db)
+                    }
+                    None => {
+                        // Fallback to RPC when meta is missing.
+                        use crate::engine::token_meta::fetch_mint_decimals;
+                        use clmm_lp_protocols::rpc::RpcProvider;
+                        let rpc = RpcProvider::mainnet();
+                        let da = fetch_mint_decimals(&rpc, mint_a).await.unwrap_or(9);
+                        let db = if let Some(mb) = mint_b.as_ref() {
+                            fetch_mint_decimals(&rpc, mb).await.unwrap_or(9)
+                        } else {
+                            6u8
+                        };
+                        (da, db)
+                    }
+                }
             };
+            // End token decimals guesses.
             let token_a = Token::new(mint_a, symbol_a, token_a_decimals_guess, symbol_a);
             let (token_b, use_cross_pair) =
                 if let (Some(sb), Some(mb)) = (symbol_b.as_ref(), mint_b.as_ref()) {
@@ -2798,7 +2908,6 @@ async fn main() -> Result<()> {
                     )
                 };
 
-            let snapshots_only = matches!(price_path_source, PricePathSourceArg::Snapshots);
             if matches!(fee_source, FeeSourceArg::Snapshots) && !snapshots_only {
                 anyhow::bail!(
                     "--fee-source snapshots in backtest-optimize requires --price-path-source snapshots"
@@ -2991,6 +3100,12 @@ async fn main() -> Result<()> {
                             &token_b,
                             *capital,
                             *lp_share,
+                            maybe_orca_pool_meta
+                                .as_ref()
+                                .map(|m| m.token_mint_a_decimals),
+                            maybe_orca_pool_meta
+                                .as_ref()
+                                .map(|m| m.token_mint_b_decimals),
                         )
                         .await?
                     }
@@ -3092,6 +3207,22 @@ async fn main() -> Result<()> {
                 Option<String>,
                 Option<String>,
             ) = if let Some(pool) = pool_for_onchain_state {
+                // Snapshot-only simulation with snapshot fees should not require Orca-specific
+                // on-chain layout parsing; snapshot-derived fee index is the source of truth.
+                if snapshots_only && matches!(fee_source, FeeSourceArg::Snapshots) {
+                    (
+                        None,
+                        None,
+                        token_a_decimals_guess,
+                        if use_cross_pair {
+                            token_b_decimals_guess
+                        } else {
+                            6u8
+                        },
+                        None,
+                        None,
+                    )
+                } else {
                 // Snapshot-only simulation for Raydium/Meteora should not depend on Orca-specific
                 // on-chain layout parsing. For Orca we still prefer on-chain pool state.
                 if snapshots_only
@@ -3123,6 +3254,7 @@ async fn main() -> Result<()> {
                         use_cross_pair,
                     )
                     .await?
+                }
                 }
             } else {
                 (
@@ -5065,7 +5197,8 @@ async fn main() -> Result<()> {
                 windows_hours,
                 windows_days,
                 snapshots_suffix.as_deref(),
-            )?;
+            )
+            .await?;
         }
         Commands::SwapsSyncCuratedAll {
             limit,
@@ -5420,6 +5553,15 @@ async fn main() -> Result<()> {
                 position_fee_ledger_path.clone(),
             )
             .await?;
+        }
+        Commands::LedgerRebalanceSummary {
+            il_ledger,
+            lifecycle_ledger,
+        } => {
+            crate::commands::ledger_rebalance_summary::run_ledger_rebalance_summary(
+                il_ledger.clone(),
+                lifecycle_ledger.clone(),
+            )?;
         }
         Commands::OrcaPositionOpen {
             pool,

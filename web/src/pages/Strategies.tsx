@@ -27,6 +27,10 @@ export default function Strategies() {
 
   return (
     <div className="space-y-6">
+      <p className="text-xs text-muted-foreground">
+        Lista strategii pochodzi z API — utwórz wpis lub zobacz pełne wyjaśnienie źródeł danych na stronie Dashboard.
+      </p>
+
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Strategies</h1>
         <div className="flex gap-2">
