@@ -162,6 +162,16 @@ async fn all_position_endpoints_are_reachable() {
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
+        request(
+            router.clone(),
+            Method::POST,
+            "/api/v1/positions/invalid/strategy",
+            Some(serde_json::json!({ "strategy_id": null })),
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
         request(router, Method::GET, "/api/v1/positions/invalid/pnl", None).await,
         StatusCode::BAD_REQUEST
     );

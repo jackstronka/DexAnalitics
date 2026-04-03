@@ -14,6 +14,50 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-04 — `PositionResponse.uncollected_fees`: opłaty per token jak w Orca
+
+**keywords:** UncollectedFeesInfo, fee_owed, PositionDetail, GET /positions, position_valuation, uncollected_fees_info_for_position
+**paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_valuation.rs`, `crates/api/src/handlers/positions.rs`, `web/src/pages/PositionDetail.tsx`
+
+- Z waluacji USD (`compute_position_usd_valuation`) wystawiane są etykiety mintów (SOL/USDC/skrót) oraz kwoty `fee_owed` w jednostkach UI; pole opcjonalne gdy waluacja się nie uda.
+- **Poprawka:** gdy pełna waluacja zwraca błąd (RPC), a zakres USDC nadal pochodzi z `tick_range_usdc_for_position` (osobny fetch z `.ok()`), `uncollected_fees` było puste — dodano `uncollected_fees_info_for_position` (tylko pool + decymale + `fee_owed`, bez math liquidity / cen).
+- `GET /positions/:address`: przed waluacją USD wywołanie `refresh_position_fees_from_chain` (świeże `fee_owed` z RPC; monitor mógł pokazywać `$0.000` względem Orca). Web: `formatUsdUncollectedFees` — 6 miejsc dla kwot &lt; $0.01.
+- `fees_usd` w `compute_position_usd_valuation`: mnożenie **Decimal** (fee UI × cena), nie `f64`; log `warn` gdy `fee_owed` &gt; 0 a USD = 0 (brak ceny mintu). UI: surowe `fees_earned_a/b` pod linią USD.
+- Dashboard: „Uncollected fees (USD)” na szczegółach pozycji (format sub-cent).
+
+## 2026-04-04 — Link pozycji ↔ strategia: `monitor.add_position` best-effort (RPC)
+
+**keywords:** link_position_strategy, ensure_strategy_running_after_position_link, start_strategy_executor_core, PositionMonitor, add_position, Failed to get account
+**paths:** `crates/api/src/handlers/strategies.rs`, `crates/api/src/handlers/positions.rs`
+
+- Gdy publiczny RPC nie zwraca konta pozycji (`Failed to get account`), twarde **400** po zapisie `position_addresses` blokowało UI; teraz powiązanie zostaje zapisane, start executora kontynuowany, a komunikat HTTP **200** może zawierać ostrzeżenie zamiast błędu.
+- Dotyczy: `POST /positions/{address}/strategy`, `POST /strategies/{id}/start`, oraz open z `strategy_id` (ścieżka z notatką zamiast wyłącznie „automation started”).
+
+## 2026-04-04 — Vite: scalanie root `.env` dla `API_PORT` / proxy (mniej HTTP 502)
+
+**keywords:** vite, API_UPSTREAM, API_PORT, loadEnv, dev proxy, 502
+**paths:** `web/vite.config.ts`, `web/.env.example`
+
+- `defineConfig` ładuje `loadEnv` z **repo root** i z `web/` (`web` nadpisuje root) — samo `npm run dev` widzi ten sam `API_PORT` co `cargo run --bin clmm-lp-api` z root `.env`, bez ręcznego `API_UPSTREAM`.
+- Domyślny port proxy bez env: **8080** (zgodnie z `.env.example` i `start-dev-stack.mjs`), zamiast samego `web/` z hardcoded `8081`.
+
+## 2026-04-04 — `POST /positions/{address}/strategy`: przypisz / zmień / odłącz strategię od PDA
+
+**keywords:** link_position_strategy, LinkPositionStrategyRequest, position_addresses, executor_disabled_position_addresses, PositionDetail, append_position_address_to_strategy
+**paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/routes.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+- Body: `{ "strategy_id": "<uuid>" | null }`. Ustawienie ID: usuwa PDA ze wszystkich strategii (także z list wyłączeń executora), dopisuje do wybranej, persystencja, `ensure_strategy_running_after_position_link`. `null`: tylko odłączenie (unlink).
+- UI na szczegółach pozycji: lista powiązań lub „None linked”, select wszystkich strategii, **Apply** / **Remove link**; po sukcesie invalidacja `['strategies']`.
+
+## 2026-04-04 — `GET /strategies`: zawsze scalaj `position_addresses` z surowego JSON
+
+**keywords:** list_strategies, StrategyParameters, position_addresses, Open Position, strategy_id, PositionDetail
+**paths:** `crates/api/src/handlers/strategies.rs`, `web/src/pages/PositionDetail.tsx`
+
+- Lista i szczegóły strategii parsowały `parameters` przez `serde_json::from_value::<StrategyParameters>`; przy **nieudanym** deserializowaniu (np. starsze / nietypowe wartości liczbowe) używane było `unwrap_or_default()` — **tracone** `parameters.position_addresses`, więc UI pokazywało „None linked” mimo że po `POST /positions` z `strategy_id` adres był dopisany w pamięci/pliku.
+- Dodano `strategy_parameters_from_stored_config`: najpierw best-effort `StrategyParameters`, potem **nadpisanie** `position_addresses` i `executor_disabled_position_addresses` z **surowego** obiektu `parameters` w `config`.
+- Frontend: dopasowanie PDA z listą — `trim` + obsługa wartości nie-string; tooltip przy „None linked”.
+
 ## 2026-04-03 — `PositionResponse`: zakres w USDC (pary z jednym USDC)
 
 **keywords:** PositionResponse, range_lower_usdc, range_upper_usdc, tick_range_usdc, PositionDetail, Dashboard

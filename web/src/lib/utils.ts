@@ -27,9 +27,32 @@ export function formatUsdFixed(value: number | string, fractionDigits: number): 
   }).format(num)
 }
 
+/**
+ * USD for uncollected LP fees: 3 dp for normal amounts; for sub-cent non-zero values use 6 dp so
+ * e.g. $0.0007 does not show as $0.000.
+ */
+export function formatUsdUncollectedFees(value: number | string): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value
+  if (!Number.isFinite(num)) return '—'
+  const abs = Math.abs(num)
+  const fractionDigits = abs === 0 ? 3 : abs < 0.01 ? 6 : 3
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(num)
+}
+
 export function formatPercent(value: number | string): string {
   const num = typeof value === 'string' ? parseFloat(value) : value
   return `${num >= 0 ? '+' : ''}${num.toFixed(2)}%`
+}
+
+export function formatPercentFixed(value: number | string, fractionDigits: number): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value
+  if (!Number.isFinite(num)) return '—'
+  return `${num >= 0 ? '+' : ''}${num.toFixed(fractionDigits)}%`
 }
 
 export function formatNumber(value: number | string, decimals = 2): string {

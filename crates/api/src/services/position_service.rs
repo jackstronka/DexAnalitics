@@ -818,11 +818,12 @@ mod tests {
         let mut svc = PositionService::new(state);
         svc.set_dry_run(false);
         let pool = Pubkey::new_unique();
+        // `full_range: true` skips RPC pool fetch before the executor check; a random pool
+        // would otherwise return NotFound and never reach the intended failure path.
+        let mut req = sample_open_position_request(pool);
+        req.full_range = true;
 
-        let res = svc
-            .open_position(&sample_open_position_request(pool))
-            .await
-            .expect("op result");
+        let res = svc.open_position(&req).await.expect("op result");
 
         assert!(!res.success);
         assert!(

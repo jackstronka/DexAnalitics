@@ -25,7 +25,41 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Deserialize `parameters` from persisted strategy JSON. Overlays `position_addresses` and
+/// `executor_disabled_position_addresses` from the **raw** `parameters` object so linked PDAs are
+/// still returned when strict [`StrategyParameters`] deserialization fails (e.g. odd `Decimal`
+/// encodings in older configs) — otherwise `GET /strategies` dropped them and the UI showed
+/// "None linked" after Open Position.
+fn strategy_parameters_from_stored_config(parameters: Option<&serde_json::Value>) -> StrategyParameters {
+    let Some(p) = parameters else {
+        return StrategyParameters::default();
+    };
+    let mut params: StrategyParameters = serde_json::from_value(p.clone()).unwrap_or_default();
+    if let Some(arr) = p.get("position_addresses").and_then(|v| v.as_array()) {
+        let addrs: Vec<String> = arr
+            .iter()
+            .filter_map(|x| x.as_str().map(std::string::ToString::to_string))
+            .collect();
+        if !addrs.is_empty() {
+            params.position_addresses = Some(addrs);
+        }
+    }
+    if let Some(arr) = p
+        .get("executor_disabled_position_addresses")
+        .and_then(|v| v.as_array())
+    {
+        let addrs: Vec<String> = arr
+            .iter()
+            .filter_map(|x| x.as_str().map(std::string::ToString::to_string))
+            .collect();
+        if !addrs.is_empty() {
+            params.executor_disabled_position_addresses = Some(addrs);
+        }
+    }
+    params
+}
 
 /// List all strategies.
 #[utoipa::path(
@@ -44,11 +78,7 @@ pub async fn list_strategies(
     let responses: Vec<StrategyResponse> = strategies
         .values()
         .map(|s| {
-            let params: StrategyParameters = s
-                .config
-                .get("parameters")
-                .and_then(|p| serde_json::from_value(p.clone()).ok())
-                .unwrap_or_default();
+            let params = strategy_parameters_from_stored_config(s.config.get("parameters"));
 
             StrategyResponse {
                 id: s.id.clone(),
@@ -110,11 +140,7 @@ pub async fn get_strategy(
         .get(&id)
         .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
 
-    let params: StrategyParameters = strategy
-        .config
-        .get("parameters")
-        .and_then(|p| serde_json::from_value(p.clone()).ok())
-        .unwrap_or_default();
+    let params = strategy_parameters_from_stored_config(strategy.config.get("parameters"));
 
     let response = StrategyResponse {
         id: strategy.id.clone(),
@@ -307,11 +333,7 @@ pub async fn update_strategy(
 
         info!(id = %id, "Strategy updated");
 
-        let params: StrategyParameters = strategy
-            .config
-            .get("parameters")
-            .and_then(|p| serde_json::from_value(p.clone()).ok())
-            .unwrap_or_default();
+        let params = strategy_parameters_from_stored_config(strategy.config.get("parameters"));
 
         StrategyResponse {
             id: id.clone(),
@@ -378,11 +400,7 @@ pub async fn apply_optimize_result(
                     .to_string(),
             ));
         }
-        let params: StrategyParameters = strategy
-            .config
-            .get("parameters")
-            .and_then(|p| serde_json::from_value(p.clone()).ok())
-            .unwrap_or_default();
+        let params = strategy_parameters_from_stored_config(strategy.config.get("parameters"));
         let max_delta = params.agent_max_width_pct_delta;
         (params, max_delta)
     };
@@ -547,11 +565,15 @@ pub(crate) async fn sync_executor_disabled_from_config(
 }
 
 /// Starts the executor loop (caller must set `strategy.running = true` and pass current `config` JSON).
+///
+/// Returns `Ok(Some(warning))` when one or more `position_addresses` could not be added to the
+/// in-memory monitor (typically RPC `get_account` failure); the executor still starts so the
+/// strategy link in config is not blocked by transient RPC issues.
 async fn start_strategy_executor_core(
     state: &AppState,
     id: &str,
     strategy_config: serde_json::Value,
-) -> ApiResult<()> {
+) -> ApiResult<Option<String>> {
     let dry_run = strategy_config
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -568,6 +590,7 @@ async fn start_strategy_executor_core(
         .and_then(|v| v.as_u64())
         .unwrap_or(300);
 
+    let mut monitor_failures: Vec<String> = Vec::new();
     if let Some(addrs) = strategy_config
         .get("parameters")
         .and_then(|p| p.get("position_addresses"))
@@ -576,9 +599,12 @@ async fn start_strategy_executor_core(
         for a in addrs {
             if let Some(s) = a.as_str() {
                 if let Err(e) = state.monitor.add_position(s).await {
-                    return Err(ApiError::bad_request(format!(
-                        "Failed to add position to monitor ({s}): {e}"
-                    )));
+                    warn!(
+                        position = %s,
+                        error = %e,
+                        "start_strategy: monitor.add_position failed (RPC); continuing without this PDA in monitor"
+                    );
+                    monitor_failures.push(format!("{s}: {e}"));
                 }
             } else {
                 return Err(ApiError::bad_request(
@@ -587,6 +613,16 @@ async fn start_strategy_executor_core(
             }
         }
     }
+
+    let monitor_note = if monitor_failures.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Monitor could not load {} position(s) from RPC (strategy still started): {}",
+            monitor_failures.len(),
+            monitor_failures.join("; ")
+        ))
+    };
 
     let executor_config = ExecutorConfig {
         eval_interval_secs,
@@ -704,15 +740,18 @@ async fn start_strategy_executor_core(
         "Strategy started"
     );
 
-    Ok(())
+    Ok(monitor_note)
 }
 
 /// After linking a position to a strategy, ensure the strategy executor is running and the PDA is monitored.
+///
+/// On RPC failure while adding the position to the monitor, returns `Ok(Some(warning))` so callers
+/// can surface a success response with a note (link is already persisted).
 pub async fn ensure_strategy_running_after_position_link(
     state: &AppState,
     strategy_id: &str,
     position_pda: &str,
-) -> ApiResult<()> {
+) -> ApiResult<Option<String>> {
     let need_full_start = {
         let mut strategies = state.strategies.write().await;
         let strategy = strategies
@@ -728,15 +767,19 @@ pub async fn ensure_strategy_running_after_position_link(
     };
 
     if !need_full_start {
-        state
-            .monitor
-            .add_position(position_pda)
-            .await
-            .map_err(|e| {
-                ApiError::bad_request(format!("Failed to add position to monitor: {e}"))
-            })?;
+        let mut note = None;
+        if let Err(e) = state.monitor.add_position(position_pda).await {
+            warn!(
+                position = %position_pda,
+                error = %e,
+                "ensure_strategy_running_after_position_link: monitor.add_position failed (RPC); link is already saved"
+            );
+            note = Some(format!(
+                "Monitor could not load this position from RPC: {e}"
+            ));
+        }
         sync_executor_disabled_from_config(state, strategy_id).await?;
-        return Ok(());
+        return Ok(note);
     }
 
     let strategy_config = {
@@ -793,12 +836,17 @@ pub async fn start_strategy(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    start_strategy_executor_core(&state, &id, strategy_config).await?;
+    let note = start_strategy_executor_core(&state, &id, strategy_config).await?;
 
-    Ok(Json(MessageResponse::new(format!(
+    let mut msg = format!(
         "Strategy started (dry_run={}, auto_execute={})",
         dry_run, auto_execute
-    ))))
+    );
+    if let Some(w) = note {
+        msg.push_str(". ");
+        msg.push_str(&w);
+    }
+    Ok(Json(MessageResponse::new(msg)))
 }
 
 /// Enable or disable strategy automation for a single linked position.

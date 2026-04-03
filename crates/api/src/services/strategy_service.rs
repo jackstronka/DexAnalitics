@@ -539,3 +539,55 @@ pub async fn append_position_address_to_strategy(
     crate::state::try_persist_strategies_best_effort(&snapshot);
     Ok(())
 }
+
+/// Remove a position PDA from every strategy's `position_addresses` and
+/// `executor_disabled_position_addresses` so a position can be **moved** to another strategy or fully unlinked.
+pub async fn remove_position_address_from_all_strategies(
+    state: &AppState,
+    position_address: &str,
+) -> Result<(), ApiError> {
+    let pos = position_address.trim();
+    if pos.is_empty() {
+        return Err(ApiError::bad_request("position address empty"));
+    }
+
+    let mut strategies = state.strategies.write().await;
+    let mut changed = false;
+    for strategy in strategies.values_mut() {
+        let Some(config_obj) = strategy.config.as_object_mut() else {
+            continue;
+        };
+        let Some(params_val) = config_obj.get_mut("parameters") else {
+            continue;
+        };
+        if !params_val.is_object() {
+            continue;
+        }
+        let params_obj = params_val.as_object_mut().unwrap();
+        for key in ["position_addresses", "executor_disabled_position_addresses"] {
+            if let Some(arr_val) = params_obj.get_mut(key) {
+                if let Some(arr) = arr_val.as_array_mut() {
+                    let before = arr.len();
+                    arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(pos));
+                    if arr.len() != before {
+                        changed = true;
+                        strategy.updated_at = chrono::Utc::now();
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        let snapshot = strategies.clone();
+        drop(strategies);
+        crate::state::try_persist_strategies_best_effort(&snapshot);
+        info!(
+            position = %pos,
+            "Removed position from all strategy parameter lists"
+        );
+    } else {
+        drop(strategies);
+    }
+    Ok(())
+}

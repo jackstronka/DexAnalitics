@@ -89,6 +89,14 @@ fn default_slippage() -> u16 {
     50
 }
 
+/// Link or move a position to a strategy (`parameters.position_addresses`), or unlink from all.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LinkPositionStrategyRequest {
+    /// Target strategy id. When `null` or omitted, removes this position PDA from every strategy.
+    #[serde(default)]
+    pub strategy_id: Option<String>,
+}
+
 /// How the API should choose the new tick range for `POST /positions/{address}/rebalance`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -161,6 +169,9 @@ pub struct PositionResponse {
     /// e.g. `per 1 SOL` — only set when `range_*_usdc` are present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_usdc_quote: Option<String>,
+    /// Per-token uncollected fees (on-chain), when pool + mint decimals could be resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncollected_fees: Option<UncollectedFeesInfo>,
     /// Liquidity amount.
     pub liquidity: String,
     /// Whether position is in range.
@@ -175,6 +186,19 @@ pub struct PositionResponse {
     /// Created timestamp.
     #[schema(value_type = Option<String>)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Uncollected LP fees from the Whirlpool position account (`fee_owed_a` / `fee_owed_b`), in human
+/// token units — same semantics as the Orca app “uncollected fees” before a collect transaction.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UncollectedFeesInfo {
+    /// Short label for pool token A (e.g. SOL, USDC, or truncated mint).
+    pub token_a_label: String,
+    pub token_b_label: String,
+    #[schema(value_type = String)]
+    pub amount_a: Decimal,
+    #[schema(value_type = String)]
+    pub amount_b: Decimal,
 }
 
 /// PnL response.

@@ -3,11 +3,13 @@
 use crate::error::{ApiError, ApiResult};
 use crate::handlers::strategies::ensure_strategy_running_after_position_link;
 use crate::models::{
-    DecreaseLiquidityRequest, ListPositionsResponse, MessageResponse, OpenPositionRequest,
-    PnLResponse, PositionOpenResponse, PositionResponse, PositionStatus, RebalanceRequest,
-    SwapBeforeOpenRequest, SwapBeforeOpenResponse,
+    DecreaseLiquidityRequest, LinkPositionStrategyRequest, ListPositionsResponse, MessageResponse,
+    OpenPositionRequest, PnLResponse, PositionOpenResponse, PositionResponse, PositionStatus,
+    RebalanceRequest, SwapBeforeOpenRequest, SwapBeforeOpenResponse, UncollectedFeesInfo,
 };
-use crate::services::strategy_service::append_position_address_to_strategy;
+use crate::services::strategy_service::{
+    append_position_address_to_strategy, remove_position_address_from_all_strategies,
+};
 use crate::state::{AppState, PositionUpdate};
 use axum::{
     Json,
@@ -22,7 +24,8 @@ use crate::services::PositionService;
 use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
-    tick_range_usdc_for_position,
+    refresh_position_fees_from_chain, tick_range_usdc_for_position,
+    uncollected_fees_info_for_position,
 };
 use std::collections::HashSet;
 
@@ -94,6 +97,16 @@ pub async fn list_positions(
             tick_range_usdc_for_position(state.provider.clone(), p).await
         };
 
+        let uncollected_fees = match valuation.as_ref() {
+            Some(v) => Some(UncollectedFeesInfo {
+                token_a_label: v.token_a_label.clone(),
+                token_b_label: v.token_b_label.clone(),
+                amount_a: v.fees_owed_a_ui,
+                amount_b: v.fees_owed_b_ui,
+            }),
+            None => uncollected_fees_info_for_position(state.provider.clone(), p).await,
+        };
+
         responses.push(PositionResponse {
             address: p.address.to_string(),
             pool_address: p.pool.to_string(),
@@ -103,6 +116,7 @@ pub async fn list_positions(
             range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
             range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
             range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+            uncollected_fees,
             liquidity: p.on_chain.liquidity.to_string(),
             in_range: p.in_range,
             value_usd,
@@ -152,7 +166,7 @@ pub async fn get_position(
         .map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
     let positions = state.monitor.get_positions().await;
-    let position = if let Some(p) = positions.iter().find(|p| p.address == pubkey) {
+    let mut position = if let Some(p) = positions.iter().find(|p| p.address == pubkey) {
         p.clone()
     } else {
         let p = monitored_position_from_chain(state.provider.clone(), &pubkey).await?;
@@ -169,6 +183,8 @@ pub async fn get_position(
         });
         p
     };
+
+    refresh_position_fees_from_chain(state.provider.clone(), &mut position).await;
 
     let prices =
         fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&position)).await;
@@ -190,6 +206,16 @@ pub async fn get_position(
         tick_range_usdc_for_position(state.provider.clone(), &position).await
     };
 
+    let uncollected_fees = match valuation.as_ref() {
+        Some(v) => Some(UncollectedFeesInfo {
+            token_a_label: v.token_a_label.clone(),
+            token_b_label: v.token_b_label.clone(),
+            amount_a: v.fees_owed_a_ui,
+            amount_b: v.fees_owed_b_ui,
+        }),
+        None => uncollected_fees_info_for_position(state.provider.clone(), &position).await,
+    };
+
     let response = PositionResponse {
         address: position.address.to_string(),
         pool_address: position.pool.to_string(),
@@ -199,6 +225,7 @@ pub async fn get_position(
         range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
         range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
         range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+        uncollected_fees,
         liquidity: position.on_chain.liquidity.to_string(),
         in_range: position.in_range,
         value_usd,
@@ -383,9 +410,20 @@ pub async fn open_position(
             if let Some(ref sid) = strategy_id {
                 append_position_address_to_strategy(&state, sid, pda).await?;
                 match ensure_strategy_running_after_position_link(&state, sid, pda).await {
-                    Ok(()) => {
+                    Ok(None) => {
                         let mut msg = format!("Position opened. PDA: {pda}");
                         msg.push_str(" — linked to strategy; automation started.");
+                        return Ok(Json(PositionOpenResponse {
+                            message: msg,
+                            position_pda: Some(pda.to_string()),
+                            swap_signature,
+                            cost_session_id: resp_cost_session,
+                        }));
+                    }
+                    Ok(Some(w)) => {
+                        let mut msg = format!("Position opened. PDA: {pda}");
+                        msg.push_str(" — linked to strategy; automation started. Note: ");
+                        msg.push_str(&w);
                         return Ok(Json(PositionOpenResponse {
                             message: msg,
                             position_pda: Some(pda.to_string()),
@@ -732,4 +770,58 @@ pub async fn get_position_pnl(
     };
 
     Ok(Json(response))
+}
+
+/// Link this position to a strategy (or change strategy), or unlink from all strategies.
+#[utoipa::path(
+    post,
+    path = "/positions/{address}/strategy",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    request_body = LinkPositionStrategyRequest,
+    responses(
+        (status = 200, description = "Link updated", body = MessageResponse),
+        (status = 400, description = "Invalid address"),
+        (status = 404, description = "Strategy not found when strategy_id set")
+    )
+)]
+pub async fn link_position_strategy(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+    Json(body): Json<LinkPositionStrategyRequest>,
+) -> ApiResult<Json<MessageResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    let target = body
+        .strategy_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if let Some(ref sid) = target {
+        let strategies = state.strategies.read().await;
+        if !strategies.contains_key(sid) {
+            return Err(ApiError::not_found("Strategy not found"));
+        }
+    }
+
+    remove_position_address_from_all_strategies(&state, pos).await?;
+
+    if let Some(ref sid) = target {
+        append_position_address_to_strategy(&state, sid, pos).await?;
+        let note = ensure_strategy_running_after_position_link(&state, sid, pos).await?;
+        let mut msg = format!("Position linked to strategy {sid}");
+        if let Some(w) = note {
+            msg.push_str(". ");
+            msg.push_str(&w);
+        }
+        Ok(Json(MessageResponse::new(msg)))
+    } else {
+        Ok(Json(MessageResponse::new(
+            "Position unlinked from all strategies".to_string(),
+        )))
+    }
 }

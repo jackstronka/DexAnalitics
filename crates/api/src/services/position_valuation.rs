@@ -7,6 +7,7 @@
 //! - free USD prices (Jupiter v2 + fallbacks — see `price_fetch`)
 
 use crate::error::ApiError;
+use crate::models::UncollectedFeesInfo;
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use anyhow::Context;
 use clmm_lp_execution::monitor::{MonitoredPosition, PositionPnL};
@@ -37,6 +38,11 @@ pub struct PositionUsdValuation {
     pub amount_a_raw: u64,
     pub amount_b_raw: u64,
     pub range_usdc: Option<TickRangeUsdc>,
+    /// Human-token uncollected fees (Whirlpool `fee_owed_*` × 10^-decimals).
+    pub fees_owed_a_ui: Decimal,
+    pub fees_owed_b_ui: Decimal,
+    pub token_a_label: String,
+    pub token_b_label: String,
 }
 
 fn is_usdc_mint(mint: &Pubkey) -> bool {
@@ -171,6 +177,36 @@ pub async fn tick_range_usdc_for_position(
     .await
 }
 
+/// Per-token `fee_owed` in human units (pool + mint decimals only — no liquidity math, no USD prices).
+///
+/// Use when [`compute_position_usd_valuation`] fails: the dashboard can still show Orca-style rows
+/// while USDC range often comes from [`tick_range_usdc_for_position`], which tolerates the same
+/// RPC calls with `.ok()` and may succeed on a fresh fetch.
+pub async fn uncollected_fees_info_for_position(
+    provider: Arc<RpcProvider>,
+    position: &MonitoredPosition,
+) -> Option<UncollectedFeesInfo> {
+    let pool_reader = WhirlpoolReader::new(provider.clone());
+    let pool_state = pool_reader
+        .get_pool_state(&position.pool.to_string())
+        .await
+        .ok()?;
+    let dec_a = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_a)
+        .await
+        .ok()?;
+    let dec_b = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_b)
+        .await
+        .ok()?;
+    let fees_a_ui = ui_amount(position.on_chain.fees_owed_a, dec_a);
+    let fees_b_ui = ui_amount(position.on_chain.fees_owed_b, dec_b);
+    Some(UncollectedFeesInfo {
+        token_a_label: token_short_label(&pool_state.token_mint_a),
+        token_b_label: token_short_label(&pool_state.token_mint_b),
+        amount_a: Decimal::from_f64_retain(fees_a_ui).unwrap_or(Decimal::ZERO),
+        amount_b: Decimal::from_f64_retain(fees_b_ui).unwrap_or(Decimal::ZERO),
+    })
+}
+
 async fn fetch_mint_decimals(provider: &RpcProvider, mint: &Pubkey) -> anyhow::Result<u8> {
     let account = provider
         .get_account(mint)
@@ -186,6 +222,22 @@ fn ui_amount(raw: u64, decimals: u8) -> f64 {
     }
     let denom = 10f64.powi(i32::from(decimals));
     (raw as f64) / denom
+}
+
+/// Refresh `fee_owed_*` from one RPC read so `GET /positions/:addr` matches Orca / wallet UIs without
+/// waiting for the monitor poll (stale fees were a common source of `$0.000` vs tiny real balances).
+pub async fn refresh_position_fees_from_chain(
+    provider: Arc<RpcProvider>,
+    position: &mut MonitoredPosition,
+) {
+    let reader = PositionReader::new(provider);
+    let Ok(fresh) = reader.get_position(&position.address.to_string()).await else {
+        return;
+    };
+    position.on_chain.fees_owed_a = fresh.fees_owed_a;
+    position.on_chain.fees_owed_b = fresh.fees_owed_b;
+    position.pnl.fees_earned_a = fresh.fees_owed_a;
+    position.pnl.fees_earned_b = fresh.fees_owed_b;
 }
 
 /// Build a [`MonitoredPosition`] from RPC when the address is **not** in the in-memory monitor
@@ -265,7 +317,13 @@ pub async fn compute_position_usd_valuation(
     let fees_b_ui = ui_amount(position.on_chain.fees_owed_b, dec_b);
 
     let value_usd_f = a_ui * pa + b_ui * pb;
-    let fees_usd_f = fees_a_ui * pa + fees_b_ui * pb;
+
+    let fees_owed_a_ui = Decimal::from_f64_retain(fees_a_ui).unwrap_or(Decimal::ZERO);
+    let fees_owed_b_ui = Decimal::from_f64_retain(fees_b_ui).unwrap_or(Decimal::ZERO);
+    let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
+    let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
+    // Decimal end-to-end (avoid f64 underflow on tiny fee × price).
+    let fees_usd = fees_owed_a_ui * pa_d + fees_owed_b_ui * pb_d;
 
     let range_usdc = compute_tick_range_usdc(
         position.on_chain.tick_lower,
@@ -276,12 +334,31 @@ pub async fn compute_position_usd_valuation(
         dec_b,
     );
 
+    let token_a_label = token_short_label(&pool_state.token_mint_a);
+    let token_b_label = token_short_label(&pool_state.token_mint_b);
+
+    if (position.on_chain.fees_owed_a > 0 || position.on_chain.fees_owed_b > 0) && fees_usd.is_zero() {
+        tracing::warn!(
+            mint_a = %pool_state.token_mint_a,
+            mint_b = %pool_state.token_mint_b,
+            pa,
+            pb,
+            fee_owed_a = position.on_chain.fees_owed_a,
+            fee_owed_b = position.on_chain.fees_owed_b,
+            "non-zero fee_owed but USD fees 0 — check price feed for pool mints (unwrap_or 0.0 if missing)"
+        );
+    }
+
     Ok(PositionUsdValuation {
         value_usd: Decimal::from_f64(value_usd_f).unwrap_or(Decimal::ZERO),
-        fees_usd: Decimal::from_f64(fees_usd_f).unwrap_or(Decimal::ZERO),
+        fees_usd,
         amount_a_raw,
         amount_b_raw,
         range_usdc,
+        fees_owed_a_ui,
+        fees_owed_b_ui,
+        token_a_label,
+        token_b_label,
     })
 }
 

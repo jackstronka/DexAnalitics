@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
@@ -16,12 +16,13 @@ import {
   getStrategies,
   setStrategyPositionExecutor,
   getJupiterPricesUsd,
+  linkPositionStrategy,
 } from '@/lib/api'
 import type { Strategy } from '@/lib/api'
 import {
-  formatUSD,
   formatUsdFixed,
-  formatPercent,
+  formatUsdUncollectedFees,
+  formatPercentFixed,
   shortenAddress,
   formatDate,
   formatUsdcPriceRange,
@@ -127,18 +128,46 @@ export default function PositionDetail() {
     if (!address) {
       return []
     }
+    const needle = address.trim()
     const list = strategiesData?.strategies ?? []
     return list.filter((s) =>
-      (s.parameters.position_addresses ?? []).some((a) => a.trim() === address.trim()),
+      (s.parameters.position_addresses ?? []).some((a) => {
+        const x = typeof a === 'string' ? a.trim() : String(a).trim()
+        return x.length > 0 && x === needle
+      }),
     )
   }, [address, strategiesData?.strategies])
+
+  const allStrategies = strategiesData?.strategies ?? []
+  const [strategyPick, setStrategyPick] = useState<string>('')
+  useEffect(() => {
+    setStrategyPick(linkedStrategies[0]?.id ?? '')
+  }, [linkedStrategies])
+
+  const linkStrategyMutation = useMutation({
+    mutationFn: (strategy_id: string | null) => linkPositionStrategy(address!, { strategy_id }),
+    onSuccess: (data) => {
+      setActionError(null)
+      setActionInfo(data?.message ?? 'Strategy link updated.')
+      void queryClient.invalidateQueries({ queryKey: ['strategies'] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setActionInfo(null)
+      setActionError(`Strategy link failed: ${msg}`)
+    },
+  })
 
   function isAutomationOnForPosition(s: Strategy): boolean {
     if (!address) {
       return true
     }
     const disabled = s.parameters.executor_disabled_position_addresses ?? []
-    return !disabled.some((a) => a.trim() === address.trim())
+    const needle = address.trim()
+    return !disabled.some((a) => {
+      const x = typeof a === 'string' ? a.trim() : String(a).trim()
+      return x === needle
+    })
   }
 
   const automationMutation = useMutation({
@@ -322,6 +351,78 @@ export default function PositionDetail() {
                   <span className="text-muted-foreground">Pool</span>
                   <span className="font-mono">{shortenAddress(position.pool_address, 8)}</span>
                 </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
+                  <span className="text-muted-foreground shrink-0 pt-0.5">Strategy</span>
+                  <div className="flex flex-col items-stretch sm:items-end gap-3 w-full sm:max-w-md">
+                    <div className="text-right sm:text-right w-full">
+                      {linkedStrategies.length === 0 ? (
+                        <span className="text-muted-foreground text-sm">None linked</span>
+                      ) : (
+                        <ul className="space-y-1">
+                          {linkedStrategies.map((s) => (
+                            <li key={s.id}>
+                              <Link
+                                to={`/strategies/${s.id}`}
+                                className="font-medium text-primary hover:underline"
+                              >
+                                {s.name}
+                              </Link>
+                              <span className="text-xs text-muted-foreground ml-1">({s.strategy_type})</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-2 w-full border-t border-border/60 pt-3">
+                      <p className="text-xs text-muted-foreground text-left sm:text-right">
+                        Link, switch, or remove strategy for this position (updates{' '}
+                        <code className="text-[10px]">parameters.position_addresses</code>).
+                      </p>
+                      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 items-stretch sm:items-center">
+                        <select
+                          className="rounded-md border border-input bg-background px-2 py-2 text-sm min-w-0 flex-1 sm:max-w-xs"
+                          value={strategyPick}
+                          onChange={(e) => setStrategyPick(e.target.value)}
+                          disabled={linkStrategyMutation.isPending || allStrategies.length === 0}
+                        >
+                          <option value="">— None (unlink) —</option>
+                          {allStrategies.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name} ({s.strategy_type.replace(/_/g, ' ')})
+                            </option>
+                          ))}
+                        </select>
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={linkStrategyMutation.isPending || !address}
+                          onClick={() =>
+                            linkStrategyMutation.mutate(strategyPick.trim() ? strategyPick.trim() : null)
+                          }
+                        >
+                          {linkStrategyMutation.isPending ? 'Saving…' : 'Apply'}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={linkStrategyMutation.isPending || !address}
+                          onClick={() => {
+                            setStrategyPick('')
+                            linkStrategyMutation.mutate(null)
+                          }}
+                        >
+                          Remove link
+                        </Button>
+                      </div>
+                      {allStrategies.length === 0 && (
+                        <p className="text-xs text-amber-600 text-left sm:text-right">
+                          No strategies yet — create one under Strategies first.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
                 <div className="flex justify-between gap-4">
                   <span className="text-muted-foreground shrink-0">Range</span>
                   <span className="text-right">
@@ -366,7 +467,7 @@ export default function PositionDetail() {
               <CardContent className="space-y-4">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Value</span>
-                  <span className="font-bold">{formatUSD(position.value_usd)}</span>
+                  <span className="font-bold">{formatUsdFixed(position.value_usd, 3)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Net PnL</span>
@@ -375,17 +476,34 @@ export default function PositionDetail() {
                       parseFloat(position.pnl.net_pnl_pct) >= 0 ? 'text-green-500' : 'text-red-500'
                     }
                   >
-                    {formatUSD(position.pnl.net_pnl_usd)} ({formatPercent(position.pnl.net_pnl_pct)})
+                    {formatUsdFixed(position.pnl.net_pnl_usd, 3)} (
+                    {formatPercentFixed(position.pnl.net_pnl_pct, 3)})
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Fees Earned</span>
-                  <span className="text-green-500">{formatUSD(position.pnl.fees_earned_usd)}</span>
+                  <span className="text-muted-foreground">Uncollected fees (USD)</span>
+                  <span className="text-green-500">
+                    {formatUsdUncollectedFees(position.pnl.fees_earned_usd)}
+                  </span>
                 </div>
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  On-chain <code className="text-[10px]">fee_owed</code> raw: token A{' '}
+                  <span className="font-mono tabular-nums">{position.pnl.fees_earned_a}</span> · token B{' '}
+                  <span className="font-mono tabular-nums">{position.pnl.fees_earned_b}</span> (smallest
+                  units). If both are 0, nothing has accrued in the position account yet. If non-zero but
+                  USD stays $0, the price service did not return a USD rate for a pool mint.
+                </p>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Impermanent Loss</span>
-                  <span className="text-yellow-500">{formatPercent(position.pnl.il_pct)}</span>
+                  <span className="text-yellow-500">{formatPercentFixed(position.pnl.il_pct, 3)}</span>
                 </div>
+                <p className="text-xs text-muted-foreground border-t border-border/60 pt-3 leading-relaxed">
+                  <span className="font-medium text-foreground/90">Why zeros?</span> Net PnL and IL% come from
+                  the API process monitor (entry baseline vs current mark). Uncollected fees (USD) are an
+                  estimate: on-chain <code className="text-[10px]">fees_owed</code> × token USD prices;
+                  sub-cent amounts use 6 decimal places so they are not rounded to $0.000. Values refresh
+                  from RPC on each position load. Compare the raw line above with Orca if in doubt.
+                </p>
               </CardContent>
             </Card>
           </div>

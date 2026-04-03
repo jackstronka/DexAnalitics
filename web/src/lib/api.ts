@@ -424,6 +424,16 @@ export const decreaseLiquidity = (address: string, liquidity_amount: string) =>
     body: JSON.stringify({ liquidity_amount }),
   })
 
+/** Link, move, or unlink this position from strategies (`parameters.position_addresses`). */
+export const linkPositionStrategy = (address: string, body: { strategy_id: string | null }) =>
+  fetchJsonLong<{ message: string }>(
+    `/positions/${encodeURIComponent(address)}/strategy`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+
 // Strategies
 export const getStrategies = () => fetchJson<{ strategies: Strategy[] }>('/strategies')
 export const getStrategy = (id: string) => fetchJson<Strategy>(`/strategies/${id}`)

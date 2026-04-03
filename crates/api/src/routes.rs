@@ -27,6 +27,10 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::swap_before_open),
         )
         .route("/positions/{address}", get(handlers::get_position))
+        .route(
+            "/positions/{address}/strategy",
+            post(handlers::link_position_strategy),
+        )
         .route("/positions/{address}", delete(handlers::close_position))
         .route("/positions/{address}/collect", post(handlers::collect_fees))
         .route(
