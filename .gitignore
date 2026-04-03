@@ -41,3 +41,7 @@ src/.DS_Store
 /web/package-lock.json
 /web/node_modules/
 /web/dist/
+
+# Local logs (may contain secrets like RPC URLs)
+/tools/logs/
+*.log

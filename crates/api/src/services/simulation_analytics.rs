@@ -24,7 +24,10 @@ pub async fn run_dashboard_simulation(
         ));
     }
 
-    let days_i64 = req.end_date.signed_duration_since(req.start_date).num_days();
+    let days_i64 = req
+        .end_date
+        .signed_duration_since(req.start_date)
+        .num_days();
     if days_i64 <= 0 {
         return Err(ApiError::Validation(
             "end_date must be after start_date".to_string(),
@@ -66,8 +69,8 @@ pub async fn run_dashboard_simulation(
     let dt = 1.0_f64 / 365.0_f64;
     let mut gbm = GeometricBrownianMotion::new(entry_price, drift, vol, dt);
 
-    let daily_volume_notional = (req.initial_capital_usd * Decimal::new(5, 1))
-        .max(Decimal::new(1_000, 0));
+    let daily_volume_notional =
+        (req.initial_capital_usd * Decimal::new(5, 1)).max(Decimal::new(1_000, 0));
     let mut volume_model = ConstantVolume::new(daily_volume_notional);
     let liquidity_model = ConstantLiquidity::new(global_liq);
 
@@ -78,9 +81,7 @@ pub async fn run_dashboard_simulation(
         .with_steps(days)
         .with_step_duration(86_400);
 
-    let threshold_pct = req
-        .threshold_pct
-        .unwrap_or_else(|| Decimal::new(5, 2));
+    let threshold_pct = req.threshold_pct.unwrap_or_else(|| Decimal::new(5, 2));
     let il_lim = req.il_limit_pct.unwrap_or_else(|| Decimal::new(8, 2));
     let periodic_interval = req.periodic_interval_steps.unwrap_or(7).max(1);
 
@@ -98,7 +99,8 @@ pub async fn run_dashboard_simulation(
             simulate_with_strategy(&config, &mut gbm, &mut volume_model, &liquidity_model, &s)
         }
         StrategyType::OorRecenter => {
-            let s = ThresholdRebalance::new(Decimal::ONE, range_width_pct).rebalance_on_out_of_range(true);
+            let s = ThresholdRebalance::new(Decimal::ONE, range_width_pct)
+                .rebalance_on_out_of_range(true);
             simulate_with_strategy(&config, &mut gbm, &mut volume_model, &liquidity_model, &s)
         }
         StrategyType::IlLimit => {
@@ -126,12 +128,7 @@ pub async fn run_dashboard_simulation(
         "Synthetic daily GBM path (vol={:.2}, drift={:.2}) over {} days from {:?} to {:?}; \
          pool fee from on-chain Whirlpool; strategy={:?}. \
          Not a replay of historical candles — for snapshot-accurate backtests use CLI `backtest` / `backtest-optimize`.",
-        vol,
-        drift,
-        days,
-        req.start_date,
-        req.end_date,
-        req.strategy_type
+        vol, drift, days, req.start_date, req.end_date, req.strategy_type
     );
 
     Ok(SimulationResponse {

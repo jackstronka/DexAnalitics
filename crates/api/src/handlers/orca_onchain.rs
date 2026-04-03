@@ -5,7 +5,8 @@ use crate::models::{OrcaOwnerPositionEntry, OrcaOwnerPositionsResponse};
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use orca_whirlpools::{
-    PositionOrBundle, WhirlpoolsConfigInput, fetch_positions_for_owner, set_whirlpools_config_address,
+    PositionOrBundle, WhirlpoolsConfigInput, fetch_positions_for_owner,
+    set_whirlpools_config_address,
 };
 use serde::Deserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -48,7 +49,8 @@ pub async fn orca_positions_by_owner(
     } else {
         WhirlpoolsConfigInput::SolanaMainnet
     };
-    set_whirlpools_config_address(config).map_err(|e| ApiError::internal(format!("orca config: {e}")))?;
+    set_whirlpools_config_address(config)
+        .map_err(|e| ApiError::internal(format!("orca config: {e}")))?;
 
     let rpc = RpcClient::new(endpoint.clone());
     let raw = fetch_positions_for_owner(&rpc, owner_pk)

@@ -1017,8 +1017,8 @@ enum Commands {
         position: String,
         #[arg(long)]
         keypair: Option<std::path::PathBuf>,
-        /// Slippage for Orca close (min token amounts out). Default 100 bps (1%). Too low can fail with
-        /// Whirlpool `TokenMinSubceeded` (6018), especially on tiny positions or right after open.
+        /// Slippage for Orca close (min token amounts out). If omitted: **100 bps** unless `WHIRLPOOL_CLOSE_SLIPPAGE_BPS` is set.
+        /// Keep as low as possible; raise only if you hit 6018 (`TokenMinSubceeded`).
         #[arg(long)]
         slippage_bps: Option<u16>,
         #[arg(long, default_value_t = false)]
@@ -1400,45 +1400,45 @@ async fn main() -> Result<()> {
                 .map(|s| s.trim().trim_start_matches('_'))
                 .filter(|s| !s.is_empty());
 
-            let orca_snapshot_jsonl_override: Option<std::path::PathBuf> =
-                if let Some(label) = prepared_snapshot_window.as_ref() {
-                    if !snapshots_only {
-                        anyhow::bail!(
-                            "--prepared-snapshot-window requires --price-path-source snapshots"
-                        );
-                    }
-                    if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
-                        anyhow::bail!(
-                            "--prepared-snapshot-window is only supported for --snapshot-protocol orca"
-                        );
-                    }
-                    let pool = snapshot_pool_address.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--prepared-snapshot-window requires --snapshot-pool-address"
-                        )
-                    })?;
-                    let p = crate::commands::snapshot_backtest_prep::orca_prepared_jsonl_path_with_suffix(
+            let orca_snapshot_jsonl_override: Option<std::path::PathBuf> = if let Some(label) =
+                prepared_snapshot_window.as_ref()
+            {
+                if !snapshots_only {
+                    anyhow::bail!(
+                        "--prepared-snapshot-window requires --price-path-source snapshots"
+                    );
+                }
+                if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                    anyhow::bail!(
+                        "--prepared-snapshot-window is only supported for --snapshot-protocol orca"
+                    );
+                }
+                let pool = snapshot_pool_address.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("--prepared-snapshot-window requires --snapshot-pool-address")
+                })?;
+                let p =
+                    crate::commands::snapshot_backtest_prep::orca_prepared_jsonl_path_with_suffix(
                         pool,
                         label,
                         snapshot_suffix_clean,
                     );
-                    if !p.exists() {
-                        anyhow::bail!(
-                            "Prepared snapshot file missing: {}. Run: cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep",
-                            p.display()
-                        );
-                    }
-                    println!("Using prepared snapshot cache: {}", p.display());
-                    Some(p)
-                } else {
-                    snapshot_suffix_clean.map(|s| {
-                        std::path::Path::new("data")
-                            .join("pool-snapshots")
-                            .join("orca")
-                            .join(snapshot_pool_address.as_ref().unwrap())
-                            .join(format!("snapshots_{}.jsonl", s))
-                    })
-                };
+                if !p.exists() {
+                    anyhow::bail!(
+                        "Prepared snapshot file missing: {}. Run: cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep",
+                        p.display()
+                    );
+                }
+                println!("Using prepared snapshot cache: {}", p.display());
+                Some(p)
+            } else {
+                snapshot_suffix_clean.map(|s| {
+                    std::path::Path::new("data")
+                        .join("pool-snapshots")
+                        .join("orca")
+                        .join(snapshot_pool_address.as_ref().unwrap())
+                        .join(format!("snapshots_{}.jsonl", s))
+                })
+            };
 
             let mut step_data: Vec<crate::backtest_engine::StepDataPoint> = if snapshots_only {
                 println!(
@@ -1702,21 +1702,20 @@ async fn main() -> Result<()> {
                     Ok(Some(s)) => {
                         // In snapshot-only mode with snapshot fees we should not require any
                         // Orca on-chain pool metadata; filter swaps by mint addresses instead.
-                        let (_pool_l, _eff, _da, _db, vault_a, vault_b) = if snapshots_only
-                            && matches!(fee_source, FeeSourceArg::Snapshots)
-                        {
-                            (None, None, token_a_decimals, token_b_decimals, None, None)
-                        } else if let Some(pool) = whirlpool_address.as_ref() {
-                            crate::commands::backtest_optimize::fetch_pool_state(
-                                pool,
-                                token_a_decimals,
-                                token_b_decimals,
-                                use_cross_pair,
-                            )
-                            .await?
-                        } else {
-                            (None, None, token_a_decimals, token_b_decimals, None, None)
-                        };
+                        let (_pool_l, _eff, _da, _db, vault_a, vault_b) =
+                            if snapshots_only && matches!(fee_source, FeeSourceArg::Snapshots) {
+                                (None, None, token_a_decimals, token_b_decimals, None, None)
+                            } else if let Some(pool) = whirlpool_address.as_ref() {
+                                crate::commands::backtest_optimize::fetch_pool_state(
+                                    pool,
+                                    token_a_decimals,
+                                    token_b_decimals,
+                                    use_cross_pair,
+                                )
+                                .await?
+                            } else {
+                                (None, None, token_a_decimals, token_b_decimals, None, None)
+                            };
                         Some(crate::commands::backtest_optimize::filter_swaps_for_pool(
                             s,
                             vault_a.as_deref(),
@@ -2426,18 +2425,18 @@ async fn main() -> Result<()> {
                     let snapshot_pool_fees: Decimal = idx_map.values().cloned().sum();
                     let candle_pool_fees: Decimal =
                         step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
-                        if candle_pool_fees > Decimal::ZERO {
-                            let ratio = snapshot_pool_fees / candle_pool_fees;
-                            // Guardrail is useful for production defaults, but when comparing
-                            // snapshot-fee index vs Birdeye volume without Dune scaling,
-                            // `step_volume_usd` may be in a different unit scale.
-                            // Allow override for experiments/debug runs.
-                            let max_ratio = std::env::var("CLMM_SNAPSHOT_FEE_SANITY_MAX_RATIO")
-                                .ok()
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .and_then(Decimal::from_f64)
-                                .unwrap_or_else(|| Decimal::from(10u32));
-                            if ratio > max_ratio {
+                    if candle_pool_fees > Decimal::ZERO {
+                        let ratio = snapshot_pool_fees / candle_pool_fees;
+                        // Guardrail is useful for production defaults, but when comparing
+                        // snapshot-fee index vs Birdeye volume without Dune scaling,
+                        // `step_volume_usd` may be in a different unit scale.
+                        // Allow override for experiments/debug runs.
+                        let max_ratio = std::env::var("CLMM_SNAPSHOT_FEE_SANITY_MAX_RATIO")
+                            .ok()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .and_then(Decimal::from_f64)
+                            .unwrap_or_else(|| Decimal::from(10u32));
+                        if ratio > max_ratio {
                             println!(
                                 "âš ď¸Ź Snapshot fee sanity check failed: snapshot pool fees {:.2} vs candle baseline {:.2} (ratio {:.2}x > {:.2}x). Falling back from snapshot fees.",
                                 snapshot_pool_fees, candle_pool_fees, ratio, max_ratio
@@ -2792,54 +2791,55 @@ async fn main() -> Result<()> {
             // TODO(E2.6): wire these calibration params into optimize path as well.
             let _ = (range_share_k, range_share_cap_mult);
             let snapshots_only = matches!(price_path_source, PricePathSourceArg::Snapshots);
-            let maybe_orca_pool_meta: Option<crate::commands::snapshot_backtest_prep::OrcaPoolMeta> =
-                if snapshots_only
-                    && matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca))
-                    && snapshot_pool_address.is_some()
-                {
-                    let pool = snapshot_pool_address.as_ref().unwrap();
+            let maybe_orca_pool_meta: Option<
+                crate::commands::snapshot_backtest_prep::OrcaPoolMeta,
+            > = if snapshots_only
+                && matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca))
+                && snapshot_pool_address.is_some()
+            {
+                let pool = snapshot_pool_address.as_ref().unwrap();
 
-                    // Prefer the exact suffix directory (if provided), but fall back to the legacy `orca/` layout.
-                    let suffix_clean = snapshot_jsonl_suffix
-                        .as_ref()
-                        .map(|s| s.trim().trim_start_matches('_'))
-                        .filter(|s| !s.is_empty());
+                // Prefer the exact suffix directory (if provided), but fall back to the legacy `orca/` layout.
+                let suffix_clean = snapshot_jsonl_suffix
+                    .as_ref()
+                    .map(|s| s.trim().trim_start_matches('_'))
+                    .filter(|s| !s.is_empty());
 
-                    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-                    if let Some(s) = suffix_clean.as_ref() {
-                        candidates.push(
-                            std::path::Path::new("data")
-                                .join("backtest-snapshot-cache")
-                                .join(format!("orca_{}", s))
-                                .join(pool.trim())
-                                .join("pool_meta.json"),
-                        );
-                    }
+                let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+                if let Some(s) = suffix_clean.as_ref() {
                     candidates.push(
                         std::path::Path::new("data")
                             .join("backtest-snapshot-cache")
-                            .join("orca")
+                            .join(format!("orca_{}", s))
                             .join(pool.trim())
                             .join("pool_meta.json"),
                     );
+                }
+                candidates.push(
+                    std::path::Path::new("data")
+                        .join("backtest-snapshot-cache")
+                        .join("orca")
+                        .join(pool.trim())
+                        .join("pool_meta.json"),
+                );
 
-                    let mut out: Option<crate::commands::snapshot_backtest_prep::OrcaPoolMeta> = None;
-                    for c in candidates {
-                        if !c.exists() {
-                            continue;
-                        }
-                        let raw = std::fs::read_to_string(&c).with_context(|| {
-                            format!("read pool meta cache: {}", c.display())
-                        })?;
-                        out = Some(serde_json::from_str(&raw).with_context(|| {
-                            format!("parse pool meta cache: {}", c.display())
-                        })?);
-                        break;
+                let mut out: Option<crate::commands::snapshot_backtest_prep::OrcaPoolMeta> = None;
+                for c in candidates {
+                    if !c.exists() {
+                        continue;
                     }
-                    out
-                } else {
-                    None
-                };
+                    let raw = std::fs::read_to_string(&c)
+                        .with_context(|| format!("read pool meta cache: {}", c.display()))?;
+                    out = Some(
+                        serde_json::from_str(&raw)
+                            .with_context(|| format!("parse pool meta cache: {}", c.display()))?,
+                    );
+                    break;
+                }
+                out
+            } else {
+                None
+            };
 
             let (token_a_decimals_guess, token_b_decimals_guess): (u8, u8) = {
                 match maybe_orca_pool_meta.as_ref() {
@@ -3038,39 +3038,39 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let orca_snapshot_jsonl_override: Option<std::path::PathBuf> =
-                if let Some(label) = prepared_snapshot_window.as_ref() {
-                    if !snapshots_only {
-                        anyhow::bail!(
-                            "--prepared-snapshot-window requires --price-path-source snapshots"
-                        );
-                    }
-                    if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
-                        anyhow::bail!(
-                            "--prepared-snapshot-window is only supported for --snapshot-protocol orca"
-                        );
-                    }
-                    let pool = snapshot_pool_address.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--prepared-snapshot-window requires --snapshot-pool-address"
-                        )
-                    })?;
-                    let p = crate::commands::snapshot_backtest_prep::orca_prepared_jsonl_path_with_suffix(
+            let orca_snapshot_jsonl_override: Option<std::path::PathBuf> = if let Some(label) =
+                prepared_snapshot_window.as_ref()
+            {
+                if !snapshots_only {
+                    anyhow::bail!(
+                        "--prepared-snapshot-window requires --price-path-source snapshots"
+                    );
+                }
+                if !matches!(snapshot_protocol, Some(SnapshotProtocolArg::Orca)) {
+                    anyhow::bail!(
+                        "--prepared-snapshot-window is only supported for --snapshot-protocol orca"
+                    );
+                }
+                let pool = snapshot_pool_address.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("--prepared-snapshot-window requires --snapshot-pool-address")
+                })?;
+                let p =
+                    crate::commands::snapshot_backtest_prep::orca_prepared_jsonl_path_with_suffix(
                         pool,
                         label,
                         snapshot_suffix_clean,
                     );
-                    if !p.exists() {
-                        anyhow::bail!(
-                            "Prepared snapshot file missing: {}. Run: cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep",
-                            p.display()
-                        );
-                    }
-                    println!("Using prepared snapshot cache: {}", p.display());
-                    Some(p)
-                } else {
-                    None
-                };
+                if !p.exists() {
+                    anyhow::bail!(
+                        "Prepared snapshot file missing: {}. Run: cargo run -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-backtest-prep",
+                        p.display()
+                    );
+                }
+                println!("Using prepared snapshot cache: {}", p.display());
+                Some(p)
+            } else {
+                None
+            };
 
             if snapshots_only {
                 println!(
@@ -3082,13 +3082,14 @@ async fn main() -> Result<()> {
                 let pool = snapshot_pool_address.as_ref().unwrap();
                 let prep = match snapshot_protocol.unwrap() {
                     SnapshotProtocolArg::Orca => {
-                        let raw_override: Option<std::path::PathBuf> = snapshot_suffix_clean.map(|s| {
-                            std::path::Path::new("data")
-                                .join("pool-snapshots")
-                                .join("orca")
-                                .join(pool)
-                                .join(format!("snapshots_{}.jsonl", s))
-                        });
+                        let raw_override: Option<std::path::PathBuf> =
+                            snapshot_suffix_clean.map(|s| {
+                                std::path::Path::new("data")
+                                    .join("pool-snapshots")
+                                    .join("orca")
+                                    .join(pool)
+                                    .join(format!("snapshots_{}.jsonl", s))
+                            });
                         crate::commands::snapshot_price_path::build_from_orca_snapshots(
                             pool,
                             orca_snapshot_jsonl_override
@@ -3110,13 +3111,14 @@ async fn main() -> Result<()> {
                         .await?
                     }
                     SnapshotProtocolArg::Raydium => {
-                        let raw_override: Option<std::path::PathBuf> = snapshot_suffix_clean.map(|s| {
-                            std::path::Path::new("data")
-                                .join("pool-snapshots")
-                                .join("raydium")
-                                .join(pool)
-                                .join(format!("snapshots_{}.jsonl", s))
-                        });
+                        let raw_override: Option<std::path::PathBuf> =
+                            snapshot_suffix_clean.map(|s| {
+                                std::path::Path::new("data")
+                                    .join("pool-snapshots")
+                                    .join("raydium")
+                                    .join(pool)
+                                    .join(format!("snapshots_{}.jsonl", s))
+                            });
                         crate::commands::snapshot_price_path::build_from_raydium_snapshots(
                             pool,
                             raw_override.as_deref(),
@@ -3130,13 +3132,14 @@ async fn main() -> Result<()> {
                         .await?
                     }
                     SnapshotProtocolArg::Meteora => {
-                        let raw_override: Option<std::path::PathBuf> = snapshot_suffix_clean.map(|s| {
-                            std::path::Path::new("data")
-                                .join("pool-snapshots")
-                                .join("meteora")
-                                .join(pool)
-                                .join(format!("snapshots_{}.jsonl", s))
-                        });
+                        let raw_override: Option<std::path::PathBuf> =
+                            snapshot_suffix_clean.map(|s| {
+                                std::path::Path::new("data")
+                                    .join("pool-snapshots")
+                                    .join("meteora")
+                                    .join(pool)
+                                    .join(format!("snapshots_{}.jsonl", s))
+                            });
                         crate::commands::snapshot_price_path::build_from_meteora_snapshots(
                             pool,
                             raw_override.as_deref(),
@@ -3223,38 +3226,38 @@ async fn main() -> Result<()> {
                         None,
                     )
                 } else {
-                // Snapshot-only simulation for Raydium/Meteora should not depend on Orca-specific
-                // on-chain layout parsing. For Orca we still prefer on-chain pool state.
-                if snapshots_only
-                    && matches!(
-                        snapshot_protocol,
-                        Some(SnapshotProtocolArg::Raydium) | Some(SnapshotProtocolArg::Meteora)
-                    )
-                {
-                    // Per-step pool active L was removed from `StepDataPoint`; use on-chain fetch for Orca
-                    // or leave unset for snapshot-only Raydium/Meteora (legacy LP share model).
-                    let liq = None;
-                    (
-                        liq,
-                        None,
-                        token_a_decimals_guess,
-                        if use_cross_pair {
-                            token_b_decimals_guess
-                        } else {
-                            6u8
-                        },
-                        None,
-                        None,
-                    )
-                } else {
-                    crate::commands::backtest_optimize::fetch_pool_state(
-                        pool,
-                        token_a_decimals_guess,
-                        token_b_decimals_guess,
-                        use_cross_pair,
-                    )
-                    .await?
-                }
+                    // Snapshot-only simulation for Raydium/Meteora should not depend on Orca-specific
+                    // on-chain layout parsing. For Orca we still prefer on-chain pool state.
+                    if snapshots_only
+                        && matches!(
+                            snapshot_protocol,
+                            Some(SnapshotProtocolArg::Raydium) | Some(SnapshotProtocolArg::Meteora)
+                        )
+                    {
+                        // Per-step pool active L was removed from `StepDataPoint`; use on-chain fetch for Orca
+                        // or leave unset for snapshot-only Raydium/Meteora (legacy LP share model).
+                        let liq = None;
+                        (
+                            liq,
+                            None,
+                            token_a_decimals_guess,
+                            if use_cross_pair {
+                                token_b_decimals_guess
+                            } else {
+                                6u8
+                            },
+                            None,
+                            None,
+                        )
+                    } else {
+                        crate::commands::backtest_optimize::fetch_pool_state(
+                            pool,
+                            token_a_decimals_guess,
+                            token_b_decimals_guess,
+                            use_cross_pair,
+                        )
+                        .await?
+                    }
                 }
             } else {
                 (

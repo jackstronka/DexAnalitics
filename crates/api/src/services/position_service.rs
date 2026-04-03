@@ -4,8 +4,12 @@ use crate::error::ApiError;
 use crate::models::{OpenPositionRequest, RebalanceRequest, SwapBeforeOpenRequest};
 use crate::state::{AlertUpdate, AppState, PositionUpdate};
 use clmm_lp_execution::prelude::{RebalanceParams, RebalanceReason, StrategyExecutor};
+use clmm_lp_protocols::ledger::position_registry::registry_path;
+use clmm_lp_protocols::orca::position_reader::PositionReader;
 use clmm_lp_protocols::prelude::WhirlpoolReader;
 use solana_sdk::pubkey::Pubkey;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -124,9 +128,7 @@ impl PositionService {
             .map_err(|_| ApiError::bad_request("Invalid pool address"))?;
         let amount_in = request.amount_in;
         if amount_in == 0 {
-            return Err(ApiError::bad_request(
-                "amount_in must be greater than 0",
-            ));
+            return Err(ApiError::bad_request("amount_in must be greater than 0"));
         }
 
         let specified_mint = Pubkey::from_str(request.specified_mint.trim())
@@ -146,7 +148,14 @@ impl PositionService {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // Fetch pool state to validate that mint is either token A or token B.
+        if self.dry_run {
+            return Ok(OperationResult::dry_run(format!(
+                "Would swap_exact_in amount_in={} mint={} in pool {} (no open)",
+                request.amount_in, request.specified_mint, request.pool_address
+            )));
+        }
+
+        // Non-dry-run: fetch pool state to validate that mint is either token A or token B.
         let pool_state = self
             .pool_reader
             .get_pool_state(&request.pool_address)
@@ -156,13 +165,6 @@ impl PositionService {
             return Err(ApiError::Validation(
                 "specified_mint must be the pool's token A or B mint".to_string(),
             ));
-        }
-
-        if self.dry_run {
-            return Ok(OperationResult::dry_run(format!(
-                "Would swap_exact_in amount_in={} mint={} in pool {} (no open)",
-                request.amount_in, request.specified_mint, request.pool_address
-            )));
         }
 
         let Some(executor) = &self.executor else {
@@ -184,7 +186,9 @@ impl PositionService {
             .map_err(|e| ApiError::internal(format!("swap before open failed: {e}")))?;
 
         let swap_signature = sig_opt.ok_or_else(|| {
-            ApiError::internal("swap_exact_in returned no signature (unexpected dry-run)".to_string())
+            ApiError::internal(
+                "swap_exact_in returned no signature (unexpected dry-run)".to_string(),
+            )
         })?;
 
         let mut data = serde_json::json!({
@@ -220,6 +224,36 @@ impl PositionService {
                     "tick_lower must be less than tick_upper".to_string(),
                 ));
             }
+        }
+
+        if self.dry_run {
+            info!("Dry-run mode: would open position");
+            if let Some(ref sw) = request.swap_before_open {
+                if request.full_range {
+                    return Ok(OperationResult::dry_run(format!(
+                        "Would swap {} raw units (mint {}) then open full-range in pool {}",
+                        sw.amount_in, sw.specified_mint, request.pool_address
+                    )));
+                }
+                return Ok(OperationResult::dry_run(format!(
+                    "Would swap {} raw units (mint {}) then open position in pool {} with range [{}, {}]",
+                    sw.amount_in,
+                    sw.specified_mint,
+                    request.pool_address,
+                    request.tick_lower,
+                    request.tick_upper
+                )));
+            }
+            if request.full_range {
+                return Ok(OperationResult::dry_run(format!(
+                    "Would open full-range position in pool {}",
+                    request.pool_address
+                )));
+            }
+            return Ok(OperationResult::dry_run(format!(
+                "Would open position in pool {} with range [{}, {}]",
+                request.pool_address, request.tick_lower, request.tick_upper
+            )));
         }
 
         let need_pool_state = request.swap_before_open.is_some() || !request.full_range;
@@ -266,34 +300,24 @@ impl PositionService {
             }
         }
 
-        if self.dry_run {
-            info!("Dry-run mode: would open position");
-            if let Some(ref sw) = request.swap_before_open {
-                if request.full_range {
-                    return Ok(OperationResult::dry_run(format!(
-                        "Would swap {} raw units (mint {}) then open full-range in pool {}",
-                        sw.amount_in, sw.specified_mint, request.pool_address
-                    )));
-                }
-                return Ok(OperationResult::dry_run(format!(
-                    "Would swap {} raw units (mint {}) then open position in pool {} with range [{}, {}]",
-                    sw.amount_in,
-                    sw.specified_mint,
-                    request.pool_address,
-                    request.tick_lower,
-                    request.tick_upper
-                )));
+        // Idempotency: if `cost_session_id` is present, treat it as a request id.
+        // If we already have a `registry_open` row with the same session id, return it
+        // instead of opening a second position (covers client retries / double-clicks).
+        if let Some(sid) = request
+            .cost_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(existing) = find_registry_open_position_by_session_id(&sid) {
+                return Ok(OperationResult::success_with_data(serde_json::json!({
+                    "message": "Position already opened for this request (idempotent replay)",
+                    "position_pda": existing.position_pubkey,
+                    "open_signature": existing.signature,
+                    "opened_ts_utc": existing.ts_utc,
+                    "cost_session_id": sid,
+                })));
             }
-            if request.full_range {
-                return Ok(OperationResult::dry_run(format!(
-                    "Would open full-range position in pool {}",
-                    request.pool_address
-                )));
-            }
-            return Ok(OperationResult::dry_run(format!(
-                "Would open position in pool {} with range [{}, {}]",
-                request.pool_address, request.tick_lower, request.tick_upper
-            )));
         }
 
         let Some(executor) = &self.executor else {
@@ -364,16 +388,25 @@ impl PositionService {
 
         // Verify position exists
         let positions = self.state.monitor.get_positions().await;
-        let position = positions
-            .iter()
-            .find(|p| p.address == position_pubkey)
-            .ok_or_else(|| ApiError::not_found("Position not found"))?;
+        let (pool_pubkey, liquidity_for_message) =
+            if let Some(p) = positions.iter().find(|p| p.address == position_pubkey) {
+                (p.pool, p.on_chain.liquidity)
+            } else {
+                // Fallback: position might not be in the in-memory monitor (e.g. after API restart).
+                // Fetch on-chain position state to learn the pool, then proceed.
+                let reader = PositionReader::new(self.state.provider.clone());
+                let on_chain = reader
+                    .get_position(address)
+                    .await
+                    .map_err(|e| ApiError::not_found(format!("Position not found: {e}")))?;
+                (on_chain.pool, on_chain.liquidity)
+            };
 
         if self.dry_run {
             info!("Dry-run mode: would close position");
             return Ok(OperationResult::dry_run(format!(
                 "Would close position {} with liquidity {}",
-                address, position.on_chain.liquidity
+                address, liquidity_for_message
             )));
         }
 
@@ -385,7 +418,7 @@ impl PositionService {
 
         let guard = executor.read().await;
         guard
-            .execute_full_close_only(&position_pubkey, &position.pool)
+            .execute_full_close_only(&position_pubkey, &pool_pubkey)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -459,23 +492,6 @@ impl PositionService {
             .find(|p| p.address == position_pubkey)
             .ok_or_else(|| ApiError::not_found("Position not found"))?;
 
-        // Fetch pool state
-        let pool_state = self
-            .pool_reader
-            .get_pool_state(&position.pool.to_string())
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to fetch pool state: {}", e)))?;
-
-        // Validate tick spacing
-        let tick_spacing = pool_state.tick_spacing as i32;
-        if request.new_tick_lower % tick_spacing != 0 || request.new_tick_upper % tick_spacing != 0
-        {
-            return Err(ApiError::Validation(format!(
-                "Tick bounds must be multiples of tick spacing ({})",
-                tick_spacing
-            )));
-        }
-
         if self.dry_run {
             info!("Dry-run mode: would rebalance position");
 
@@ -500,6 +516,23 @@ impl PositionService {
                 position.on_chain.tick_upper,
                 request.new_tick_lower,
                 request.new_tick_upper
+            )));
+        }
+
+        // Fetch pool state
+        let pool_state = self
+            .pool_reader
+            .get_pool_state(&position.pool.to_string())
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to fetch pool state: {}", e)))?;
+
+        // Validate tick spacing
+        let tick_spacing = pool_state.tick_spacing as i32;
+        if request.new_tick_lower % tick_spacing != 0 || request.new_tick_upper % tick_spacing != 0
+        {
+            return Err(ApiError::Validation(format!(
+                "Tick bounds must be multiples of tick spacing ({})",
+                tick_spacing
             )));
         }
 
@@ -682,6 +715,49 @@ impl PositionService {
             Err(e) => Ok(OperationResult::failure(e.to_string())),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct RegistryOpenMatch {
+    position_pubkey: String,
+    signature: String,
+    ts_utc: String,
+}
+
+fn find_registry_open_position_by_session_id(session_id: &str) -> Option<RegistryOpenMatch> {
+    let path = registry_path();
+    let file = File::open(&path).ok()?;
+    let reader = BufReader::new(file);
+
+    // Scan from the end would be ideal, but keep it simple and safe:
+    // the registry is append-only and typically small; this is only used on `Open Position`.
+    for line in reader.lines().filter_map(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("event").and_then(|x| x.as_str()) != Some("registry_open") {
+            continue;
+        }
+        if v.get("rebalance_session_id").and_then(|x| x.as_str()) != Some(session_id) {
+            continue;
+        }
+        let position_pubkey = v
+            .get("position_pubkey")
+            .and_then(|x| x.as_str())?
+            .to_string();
+        let signature = v.get("signature").and_then(|x| x.as_str())?.to_string();
+        let ts_utc = v
+            .get("ts_utc")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Some(RegistryOpenMatch {
+            position_pubkey,
+            signature,
+            ts_utc,
+        });
+    }
+    None
 }
 
 #[cfg(test)]

@@ -3,10 +3,10 @@
 //! This binary starts the REST API server with WebSocket support.
 
 use anyhow::Result;
-use dotenv::dotenv;
 use clmm_lp_api::server::{ApiServer, ServerConfig, shutdown_signal};
 use clmm_lp_api::state::ApiConfig;
 use clmm_lp_protocols::prelude::RpcConfig;
+use dotenv::dotenv;
 use std::env;
 use tracing::info;
 

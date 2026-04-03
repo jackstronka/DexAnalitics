@@ -70,12 +70,7 @@ fn position_truth_report_stdout(pool: &str, position: &str, ledger_jsonl: &str) 
     // Need snapshot file too? No, this is separate bin.
     let exe = env!("CARGO_BIN_EXE_position_truth_report");
     let out = Command::new(exe)
-        .args([
-            "--pool-address",
-            pool,
-            "--position-address",
-            position,
-        ])
+        .args(["--pool-address", pool, "--position-address", position])
         .current_dir(&root)
         .output()
         .expect("failed to execute position_truth_report");
@@ -96,7 +91,10 @@ fn position_truth_report_prints_summary() {
         "{{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:00Z\",\"position\":\"P1\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":5,\"collected_b\":7,\"source\":\"derived\"}}\n"
     );
     let stdout = position_truth_report_stdout(pool, "P1", &ledger);
-    assert!(stdout.contains("Position-truth report (MVP):"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("Position-truth report (MVP):"),
+        "stdout:\n{stdout}"
+    );
     assert!(stdout.contains("checkpoints: 1"), "stdout:\n{stdout}");
     assert!(stdout.contains("collected_a_sum: 5"), "stdout:\n{stdout}");
     assert!(stdout.contains("collected_b_sum: 7"), "stdout:\n{stdout}");
@@ -130,7 +128,9 @@ fn tier3_position_truth_ready_for_minimal_checkpoint_fixture() {
     ));
 
     // Merge: copy ledger file into the snapshot temp cwd under data/.
-    let ledger_src = ledger_root.join("data").join("position-fee-checkpoints.jsonl");
+    let ledger_src = ledger_root
+        .join("data")
+        .join("position-fee-checkpoints.jsonl");
     let ledger_dst = cwd.join("data").join("position-fee-checkpoints.jsonl");
     std::fs::copy(&ledger_src, &ledger_dst).expect("copy ledger");
 
@@ -175,7 +175,9 @@ fn tier3_position_truth_autodetects_single_position_when_omitted() {
         "{{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:00Z\",\"position\":\"P_ONLY\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"derived\"}}\n\
 {{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:01:00Z\",\"position\":\"P_ONLY\",\"pool\":\"{pool}\",\"event_type\":\"collect_fees\",\"tick_lower\":0,\"tick_upper\":0,\"liquidity\":\"0\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"missing\"}}\n"
     ));
-    let ledger_src = ledger_root.join("data").join("position-fee-checkpoints.jsonl");
+    let ledger_src = ledger_root
+        .join("data")
+        .join("position-fee-checkpoints.jsonl");
     let ledger_dst = cwd.join("data").join("position-fee-checkpoints.jsonl");
     std::fs::copy(&ledger_src, &ledger_dst).expect("copy ledger");
 
@@ -218,7 +220,9 @@ fn tier3_position_truth_prints_suggested_commands_when_multiple_positions() {
         "{{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:00Z\",\"position\":\"P1\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"derived\"}}\n\
 {{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:10Z\",\"position\":\"P2\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"derived\"}}\n"
     ));
-    let ledger_src = ledger_root.join("data").join("position-fee-checkpoints.jsonl");
+    let ledger_src = ledger_root
+        .join("data")
+        .join("position-fee-checkpoints.jsonl");
     let ledger_dst = cwd.join("data").join("position-fee-checkpoints.jsonl");
     std::fs::copy(&ledger_src, &ledger_dst).expect("copy ledger");
 
@@ -250,8 +254,14 @@ fn tier3_position_truth_prints_suggested_commands_when_multiple_positions() {
         stdout.contains("suggested commands (pick one position):"),
         "unexpected output:\n{stdout}"
     );
-    assert!(stdout.contains("--position-address P1"), "stdout:\n{stdout}");
-    assert!(stdout.contains("--position-address P2"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("--position-address P1"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--position-address P2"),
+        "stdout:\n{stdout}"
+    );
 }
 
 #[test]
@@ -264,7 +274,9 @@ fn tier3_position_truth_all_positions_flag_prints_batch_lines() {
 {{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:10Z\",\"position\":\"P1\",\"pool\":\"{pool}\",\"event_type\":\"collect_fees\",\"tick_lower\":0,\"tick_upper\":0,\"liquidity\":\"0\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"missing\"}}\n\
 {{\"schema_version\":1,\"ts_utc\":\"2026-01-01T00:00:20Z\",\"position\":\"P2\",\"pool\":\"{pool}\",\"event_type\":\"open_position\",\"tick_lower\":-10,\"tick_upper\":10,\"liquidity\":\"1\",\"fees_owed_a\":0,\"fees_owed_b\":0,\"collected_a\":0,\"collected_b\":0,\"source\":\"derived\"}}\n"
     ));
-    let ledger_src = ledger_root.join("data").join("position-fee-checkpoints.jsonl");
+    let ledger_src = ledger_root
+        .join("data")
+        .join("position-fee-checkpoints.jsonl");
     let ledger_dst = cwd.join("data").join("position-fee-checkpoints.jsonl");
     std::fs::copy(&ledger_src, &ledger_dst).expect("copy ledger");
 
@@ -293,7 +305,10 @@ fn tier3_position_truth_all_positions_flag_prints_batch_lines() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(stdout.contains("Tier3 batch (all positions for pool):"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("Tier3 batch (all positions for pool):"),
+        "stdout:\n{stdout}"
+    );
     assert!(stdout.contains("- P1: READY"), "stdout:\n{stdout}");
     assert!(stdout.contains("- P2: NOT READY"), "stdout:\n{stdout}");
 }

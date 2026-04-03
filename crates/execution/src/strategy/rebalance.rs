@@ -812,10 +812,18 @@ fn validate_execution_result(
     result: &clmm_lp_protocols::orca::executor::ExecutionResult,
 ) -> anyhow::Result<()> {
     if !result.success {
-        let msg = result
+        let mut msg = result
             .error
             .clone()
             .unwrap_or_else(|| "unknown execution error".to_string());
+        if op_name == "close_position" && (msg.contains("6018") || msg.contains("0x1782")) {
+            msg.push_str(
+                " | Hint: Whirlpool 6018 (TokenMinSubceeded) — min-out too tight vs. pool move. \
+                 Prefer low slippage: retry once, collect fees first, then if needed raise only for that close \
+                 (CLI `--slippage-bps 500`…`1000`, or `WHIRLPOOL_CLOSE_SLIPPAGE_BPS` on the API host). \
+                 Default remains 100 bps unless env overrides.",
+            );
+        }
         return Err(anyhow::anyhow!("{} failed: {}", op_name, msg));
     }
     Ok(())

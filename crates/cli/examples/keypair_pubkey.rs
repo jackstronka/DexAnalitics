@@ -15,7 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arr: [u8; 64] = vec
         .try_into()
         .map_err(|_| "expected a JSON array of exactly 64 bytes")?;
-    let kp = Keypair::from_bytes(&arr)?;
+    let secret: [u8; 32] = arr[..32]
+        .try_into()
+        .map_err(|_| "expected the first 32 bytes to be the secret key")?;
+    let kp = Keypair::new_from_array(secret);
     println!("{}", kp.pubkey());
     Ok(())
 }

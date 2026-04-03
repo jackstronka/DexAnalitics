@@ -9,6 +9,10 @@ homepage = { workspace = true }
 documentation = { workspace = true }
 description = { workspace = true }
 
+[features]
+# Helpers useful for integration tests in downstream crates (API).
+test-utils = []
+
 [dependencies]
 clmm-lp-domain = { workspace = true }
 clmm-lp-protocols = { workspace = true }

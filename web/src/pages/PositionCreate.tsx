@@ -27,7 +27,7 @@ import {
   formatPriceRatio,
 } from '@/lib/whirlpoolTicks'
 import { getDevWalletPubkey } from '@/lib/devWallet'
-import { shortenAddress } from '@/lib/utils'
+import { formatUSD, shortenAddress } from '@/lib/utils'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -631,10 +631,14 @@ export default function PositionCreate() {
 
   const mutation = useMutation({
     mutationFn: openPosition,
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['positions'] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
-      navigate('/positions')
+      if (data.position_pda?.trim()) {
+        navigate(`/positions/${data.position_pda.trim()}`)
+      } else {
+        navigate('/positions')
+      }
     },
   })
 
@@ -669,7 +673,10 @@ export default function PositionCreate() {
 
     // Send the same bookkeeping id across SWAP and OPEN even if the swap plan
     // becomes null after balances update.
-    const openCostSessionId = swapCostSessionId ?? undefined
+    const openCostSessionId = swapCostSessionId ?? makeCostSessionId()
+    if (!swapCostSessionId) {
+      setSwapCostSessionId(openCostSessionId)
+    }
 
     mutation.mutate({
       pool_address: poolAddress.trim(),
@@ -678,7 +685,7 @@ export default function PositionCreate() {
       amount_a: aRaw,
       amount_b: bRaw,
       ...(strategyId.trim() ? { strategy_id: strategyId.trim() } : {}),
-      ...(openCostSessionId ? { cost_session_id: openCostSessionId } : {}),
+      cost_session_id: openCostSessionId,
     })
   }
 
@@ -1032,6 +1039,11 @@ export default function PositionCreate() {
                       className="w-full"
                     />
                   </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed md:col-span-3">
+                    <strong>Split %</strong> dzieli <strong>łączny budżet w USD</strong> (ceny mintów z Jupiter / API), a nie
+                    „po równo” w jednostkach tokenów. Przy 50/50 i $5: ok. połowa wartości w {tokenA?.symbol ?? 'A'}, połowa
+                    w {tokenB?.symbol ?? 'B'} — np. ~2,5 USDC i ~0,03 SOL przy cenie SOL ~$80 (liczby przeliczane na bieżąco).
+                  </p>
                 </div>
               )}
 
@@ -1078,7 +1090,16 @@ export default function PositionCreate() {
                   />
                   {tokenA && (
                     <div className="text-[11px] text-muted-foreground mt-1">
-                      raw u64 = round(amount × 10^{tokenA.decimals})
+                      {mode === 'budget' &&
+                      pricesQ.data?.[tokenA.mint] != null &&
+                      amountAUi !== '' &&
+                      Number.isFinite(Number(amountAUi)) ? (
+                        <>
+                          ≈ {formatUSD(Number(amountAUi) * pricesQ.data[tokenA.mint])} USD (szac. wg ceny Jupiter)
+                        </>
+                      ) : (
+                        <>raw u64 = round(amount × 10^{tokenA.decimals})</>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1116,7 +1137,16 @@ export default function PositionCreate() {
                   />
                   {tokenB && (
                     <div className="text-[11px] text-muted-foreground mt-1">
-                      raw u64 = round(amount × 10^{tokenB.decimals})
+                      {mode === 'budget' &&
+                      pricesQ.data?.[tokenB.mint] != null &&
+                      amountBUi !== '' &&
+                      Number.isFinite(Number(amountBUi)) ? (
+                        <>
+                          ≈ {formatUSD(Number(amountBUi) * pricesQ.data[tokenB.mint])} USD (szac. wg ceny Jupiter)
+                        </>
+                      ) : (
+                        <>raw u64 = round(amount × 10^{tokenB.decimals})</>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1271,22 +1301,28 @@ export default function PositionCreate() {
               ) : null}
             </div>
 
+            {(swapSignature || swapStepError) && (
+              <div className="pt-2 space-y-2">
+                {swapSignature ? (
+                  <div className="rounded-md border border-emerald-600/40 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-200 break-all">
+                    <span className="font-medium">Swap potwierdzony:</span>{' '}
+                    <code className="text-[11px] bg-muted/50 px-1 rounded">{swapSignature}</code>
+                  </div>
+                ) : null}
+                {swapStepError ? (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive break-words">
+                    {swapStepError}
+                  </div>
+                ) : null}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-2">
               <Link to="/positions">
                 <Button variant="outline" type="button">
                   Cancel
                 </Button>
               </Link>
-              {swapSignature ? (
-                <span className="text-xs text-foreground/80 self-center">
-                  Swap ok: {shortenAddress(swapSignature, 6)}
-                </span>
-              ) : null}
-              {swapStepError ? (
-                <span className="text-xs text-destructive self-center max-w-[420px] truncate">
-                  {swapStepError}
-                </span>
-              ) : null}
               {swapBeforeOpen && swapBeforeOpenPlan && !swapSignature ? (
                 <Button
                   type="button"

@@ -102,4 +102,3 @@ fn main_inner() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     main_inner()
 }
-

@@ -25,16 +25,18 @@ pub mod middleware;
 pub mod models;
 /// OpenAPI documentation.
 pub mod openapi;
+/// Startup seeding helpers (registry -> monitor).
+pub mod position_registry_seed;
 /// Route definitions.
 pub mod routes;
-/// Persistence layer for strategies.
-pub mod strategy_store;
 /// Server configuration and startup.
 pub mod server;
 /// Service layer for API operations.
 pub mod services;
 /// Application state.
 pub mod state;
+/// Persistence layer for strategies.
+pub mod strategy_store;
 /// WebSocket handlers.
 pub mod websocket;
 

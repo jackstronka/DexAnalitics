@@ -10,10 +10,11 @@ use crate::rpc::RpcProvider;
 use anyhow::{Context, Result};
 use borsh::BorshDeserialize;
 use orca_whirlpools::{
-    DecreaseLiquidityParam, IncreaseLiquidityParam, SwapInstructions, SwapType, WhirlpoolsConfigInput,
-    close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
-    increase_liquidity_instructions, open_full_range_position_instructions,
-    open_position_instructions_with_tick_bounds, set_whirlpools_config_address, swap_instructions,
+    DecreaseLiquidityParam, IncreaseLiquidityParam, SwapInstructions, SwapType,
+    WhirlpoolsConfigInput, close_position_instructions, decrease_liquidity_instructions,
+    harvest_position_instructions, increase_liquidity_instructions,
+    open_full_range_position_instructions, open_position_instructions_with_tick_bounds,
+    set_whirlpools_config_address, swap_instructions,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -23,6 +24,22 @@ use solana_sdk::{
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+/// Default min-out slippage for `close_position` when the caller passes `None` (basis points).
+/// Prefer keeping this **low** to limit worse-than-quoted token amounts; if Whirlpool returns
+/// **6018** (`TokenMinSubceeded`), retry with a higher value or set `WHIRLPOOL_CLOSE_SLIPPAGE_BPS`.
+fn default_close_slippage_bps() -> u16 {
+    const FALLBACK: u16 = 100;
+    match std::env::var("WHIRLPOOL_CLOSE_SLIPPAGE_BPS") {
+        Ok(s) => s
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|&n| n <= 10_000)
+            .unwrap_or(FALLBACK),
+        Err(_) => FALLBACK,
+    }
+}
 
 /// Orca Whirlpool program ID (mainnet).
 pub const WHIRLPOOL_PROGRAM_ID: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
@@ -463,9 +480,10 @@ impl WhirlpoolExecutor {
 
     /// Closes a position.
     ///
-    /// `slippage_bps`: passed to Orca `close_position_instructions` (min token amounts). `None`
-    /// uses **100** bps (1%). Tight slippage can fail with Whirlpool `TokenMinSubceeded` (6018) on
-    /// small positions or volatile pools.
+    /// `slippage_bps`: passed to Orca `close_position_instructions` (min token amounts out). `None`
+    /// uses **`WHIRLPOOL_CLOSE_SLIPPAGE_BPS`** env if set (valid `0..=10000`), otherwise **100** bps (1%).
+    /// Keep slippage **as low as confirms**; if you see **6018** (`TokenMinSubceeded`), raise only for
+    /// that attempt (CLI `--slippage-bps`, or env on the API host).
     pub async fn close_position(
         &self,
         position: &Pubkey,
@@ -492,15 +510,11 @@ impl WhirlpoolExecutor {
         let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
             .context("parse WhirlpoolPosition (borsh)")?;
 
-        let slip = slippage_bps.or(Some(100));
-        let closed = close_position_instructions(
-            &rpc,
-            parsed.position_mint,
-            slip,
-            Some(payer.pubkey()),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
+        let slip = slippage_bps.or(Some(default_close_slippage_bps()));
+        let closed =
+            close_position_instructions(&rpc, parsed.position_mint, slip, Some(payer.pubkey()))
+                .await
+                .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
 
         self.send_transaction_with_signers(&closed.instructions, payer, &closed.additional_signers)
             .await

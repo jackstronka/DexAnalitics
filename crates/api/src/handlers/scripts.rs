@@ -1,16 +1,14 @@
 //! Tools scripts manifest, `script_runs.jsonl` tail index, and proxy to localhost runner.
 
 use crate::error::{ApiError, ApiResult};
-use crate::models::{
-    RunScriptRequest, ScriptCatalogItem, ScriptRunRecord, ScriptsListResponse,
-};
+use crate::models::{RunScriptRequest, ScriptCatalogItem, ScriptRunRecord, ScriptsListResponse};
 use crate::state::AppState;
 use axum::{
     Json,
     extract::{Path, State},
 };
-use serde::Deserialize;
 use reqwest::header;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::LazyLock;
@@ -165,8 +163,7 @@ fn merge_manifest_with_disk(repo: &StdPath, mf: ManifestFile) -> Vec<(ManifestSc
     let mut manifest_ids: std::collections::HashSet<String> =
         mf.scripts.iter().map(|s| s.id.clone()).collect();
 
-    let mut out: Vec<(ManifestScript, bool)> =
-        mf.scripts.into_iter().map(|s| (s, false)).collect();
+    let mut out: Vec<(ManifestScript, bool)> = mf.scripts.into_iter().map(|s| (s, false)).collect();
 
     for (stem, rel) in discover_top_level_ps1(repo) {
         let norm = normalize_repo_path(&rel);
@@ -207,7 +204,9 @@ fn catalog_disk_only(repo: &StdPath) -> Vec<ManifestScript> {
             id: stem.clone(),
             path: rel,
             summary: "Brak scripts-manifest.json — skrypt wykryty tylko z nazwy pliku.".to_string(),
-            when_to_use: Some("Utwórz tools/scripts-manifest.json z opisami (zalecane).".to_string()),
+            when_to_use: Some(
+                "Utwórz tools/scripts-manifest.json z opisami (zalecane).".to_string(),
+            ),
             risk: Some("unknown".to_string()),
             runnable: true,
             actions: vec!["run".to_string(), "copy_command".to_string()],
@@ -307,7 +306,11 @@ pub async fn list_scripts(State(state): State<AppState>) -> ApiResult<Json<Scrip
     let manifest_missing = !manifest_path.exists();
     let runs_missing = !runs_path.exists();
 
-    let runner_configured = state.config.script_runner_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+    let runner_configured = state
+        .config
+        .script_runner_url
+        .as_ref()
+        .is_some_and(|u| !u.trim().is_empty())
         && state
             .config
             .script_runner_token
@@ -361,16 +364,14 @@ pub async fn run_script(
     Path(id): Path<String>,
     body: Option<Json<RunScriptRequest>>,
 ) -> ApiResult<Json<ScriptRunRecord>> {
-    let derived = std::env::var("CLMM_SCRIPT_RUNNER_PORT")
-        .ok()
-        .and_then(|p| {
-            let t = p.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(format!("http://127.0.0.1:{t}"))
-            }
-        });
+    let derived = std::env::var("CLMM_SCRIPT_RUNNER_PORT").ok().and_then(|p| {
+        let t = p.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(format!("http://127.0.0.1:{t}"))
+        }
+    });
     let base = derived
         .as_ref()
         .map(|s| s.as_str())
@@ -424,10 +425,7 @@ pub async fn run_script(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "api".to_string());
 
-    let url = format!(
-        "{}/run",
-        base.trim_end_matches('/')
-    );
+    let url = format!("{}/run", base.trim_end_matches('/'));
     let resp = HTTP
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -460,8 +458,8 @@ pub async fn run_script(
         )));
     }
 
-    let record: ScriptRunRecord =
-        serde_json::from_str(&text).map_err(|e| ApiError::internal(format!("runner JSON: {e}: {text}")))?;
+    let record: ScriptRunRecord = serde_json::from_str(&text)
+        .map_err(|e| ApiError::internal(format!("runner JSON: {e}: {text}")))?;
 
     Ok(Json(record))
 }

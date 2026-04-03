@@ -89,13 +89,42 @@ fn default_slippage() -> u16 {
     50
 }
 
+/// How the API should choose the new tick range for `POST /positions/{address}/rebalance`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RebalanceInput {
+    /// Explicit tick bounds (legacy / advanced).
+    #[default]
+    Ticks,
+    /// Center on current pool tick; width from linked strategy and/or `range_width_pct`.
+    StrategyRange,
+    /// Center on `center_price` (token B per token A, same convention as pool price); width from `range_width_pct`.
+    PriceBand,
+}
+
 /// Request to rebalance a position.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebalanceRequest {
-    /// New lower tick.
+    /// How to derive `new_tick_lower` / `new_tick_upper`. Defaults to `ticks` for backward compatibility.
+    #[serde(default)]
+    pub input: RebalanceInput,
+    /// New lower tick when `input` is `ticks`.
+    #[serde(default)]
     pub new_tick_lower: i32,
-    /// New upper tick.
+    /// New upper tick when `input` is `ticks`.
+    #[serde(default)]
     pub new_tick_upper: i32,
+    /// When `input` is `strategy_range`: load `parameters.range_width_pct` from this strategy (optional if `range_width_pct` is set).
+    #[serde(default)]
+    pub strategy_id: Option<String>,
+    /// When `input` is `strategy_range` or `price_band`: range width in percent (e.g. `1.0` = 1%). Overrides strategy when both are set.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub range_width_pct: Option<Decimal>,
+    /// When `input` is `price_band`: center price (B per A) for the new range.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub center_price: Option<Decimal>,
     /// Slippage tolerance in basis points.
     #[serde(default = "default_slippage")]
     pub slippage_tolerance_bps: u16,
@@ -670,6 +699,21 @@ pub struct SwapCostEstimateResponse {
 // Analytics Models
 // ============================================================================
 
+/// Cumulative fee collection credits from lifecycle JSONL (`bot_collect_fees` rows).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FeesCollectedFromLedger {
+    /// True when the ledger file is missing or unreadable on the API host.
+    pub file_missing: bool,
+    /// Number of `bot_collect_fees` events in the file.
+    pub collect_events: u32,
+    /// Sum of `fee_payer_token_a_delta_ui` when present on rows.
+    #[schema(value_type = Option<String>)]
+    pub sum_token_a_ui: Option<Decimal>,
+    /// Sum of `fee_payer_token_b_delta_ui` when present on rows.
+    #[schema(value_type = Option<String>)]
+    pub sum_token_b_ui: Option<Decimal>,
+}
+
 /// Portfolio analytics response.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PortfolioAnalyticsResponse {
@@ -698,6 +742,8 @@ pub struct PortfolioAnalyticsResponse {
     /// Worst performing position.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worst_position: Option<String>,
+    /// Sums from `orca_position_lifecycle.jsonl` collect events (all positions).
+    pub fees_collected_from_ledger: FeesCollectedFromLedger,
 }
 
 /// Simulation request.
@@ -755,10 +801,8 @@ impl Default for SimulationRequest {
             tick_lower: -100,
             tick_upper: 100,
             initial_capital_usd: Decimal::new(1_000, 0),
-            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
-                .expect("valid date"),
-            end_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10)
-                .expect("valid date"),
+            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            end_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).expect("valid date"),
             strategy_type: StrategyType::StaticRange,
             gbm_volatility: default_gbm_vol(),
             gbm_drift: 0.0,
@@ -1080,9 +1124,7 @@ pub struct RunScriptRequest {
 
 impl Default for RunScriptRequest {
     fn default() -> Self {
-        Self {
-            triggered_by: None,
-        }
+        Self { triggered_by: None }
     }
 }
 
@@ -1133,7 +1175,7 @@ pub struct WalletBalancesResponse {
 /// `GET /prices/jupiter` — server-side Jupiter price map (avoids browser CORS/adblock).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JupiterPricesResponse {
-    /// Source identifier (currently "jupiter").
+    /// How prices were resolved (e.g. `stable+geckoterminal+jupiter_v2+dexscreener`).
     pub source: String,
     /// Requested ids count (unique, non-empty).
     pub requested: usize,

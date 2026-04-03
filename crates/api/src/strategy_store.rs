@@ -30,16 +30,14 @@ struct StrategyStoreFile {
 }
 
 fn repo_root() -> Option<PathBuf> {
-    std::env::var("CLMM_REPO_ROOT")
-        .ok()
-        .and_then(|s| {
-            let s = s.trim();
-            if s.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(s))
-            }
-        })
+    std::env::var("CLMM_REPO_ROOT").ok().and_then(|s| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(s))
+        }
+    })
 }
 
 /// Returns whether persistence is enabled.
@@ -101,9 +99,7 @@ pub fn try_load_persisted_strategies() -> io::Result<Vec<PersistedStrategy>> {
 }
 
 /// Saves persisted strategies to disk (atomic best-effort).
-pub fn try_save_persisted_strategies(
-    strategies: &[PersistedStrategy],
-) -> io::Result<()> {
+pub fn try_save_persisted_strategies(strategies: &[PersistedStrategy]) -> io::Result<()> {
     if !enabled() {
         return Ok(());
     }
@@ -150,4 +146,3 @@ pub fn try_save_persisted_strategies(
     fs::rename(&tmp_path, &path)?;
     Ok(())
 }
-

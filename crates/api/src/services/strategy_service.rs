@@ -524,10 +524,7 @@ pub async fn append_position_address_to_strategy(
     let arr = arr_val.as_array_mut().ok_or_else(|| {
         ApiError::bad_request("parameters.position_addresses must be a JSON array")
     })?;
-    if !arr
-        .iter()
-        .any(|v| v.as_str() == Some(position_address))
-    {
+    if !arr.iter().any(|v| v.as_str() == Some(position_address)) {
         arr.push(serde_json::json!(position_address));
     }
     strategy.updated_at = chrono::Utc::now();

@@ -26,8 +26,8 @@ use serde::Serialize;
 use serde_json::Value;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
+use tokio::time::{Duration, sleep};
 use tracing::warn;
-use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Serialize)]
 pub struct PositionLifecycleRecord {
@@ -198,10 +198,7 @@ async fn token_net_deltas_for_fee_payer_close(
             let pre_i = u128_to_i128(pre).ok_or_else(|| anyhow::anyhow!("pre_a over i128"))?;
             let post_i = u128_to_i128(post).ok_or_else(|| anyhow::anyhow!("post_a over i128"))?;
             let delta = post_i - pre_i;
-            (
-                Some(delta.to_string()),
-                Some(raw_i128_to_ui(delta, dec_a)),
-            )
+            (Some(delta.to_string()), Some(raw_i128_to_ui(delta, dec_a)))
         }
     };
 
@@ -215,10 +212,7 @@ async fn token_net_deltas_for_fee_payer_close(
             let pre_i = u128_to_i128(pre).ok_or_else(|| anyhow::anyhow!("pre_b over i128"))?;
             let post_i = u128_to_i128(post).ok_or_else(|| anyhow::anyhow!("post_b over i128"))?;
             let delta = post_i - pre_i;
-            (
-                Some(delta.to_string()),
-                Some(raw_i128_to_ui(delta, dec_b)),
-            )
+            (Some(delta.to_string()), Some(raw_i128_to_ui(delta, dec_b)))
         }
     };
 
@@ -306,8 +300,7 @@ async fn append_open_inner(
             0
         });
 
-    let (tx_fee, slot, pre, post, delta) =
-        enrich_tx_costs(provider, signature, fee_payer).await;
+    let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
     let rpc_url = provider.current_endpoint().await;
 
     let rec = PositionLifecycleRecord {
@@ -357,7 +350,8 @@ pub async fn try_append_position_close_ledger(
     fee_payer: &Pubkey,
     signature: &Signature,
 ) {
-    if let Err(e) = append_close_inner(provider, pool_state, position_pda, fee_payer, signature).await
+    if let Err(e) =
+        append_close_inner(provider, pool_state, position_pda, fee_payer, signature).await
     {
         warn!(error = %e, "position lifecycle ledger (close): append failed");
     }
@@ -377,34 +371,29 @@ async fn append_close_inner(
         .await
         .unwrap_or(0);
 
-    let (tx_fee, slot, pre, post, delta) =
-        enrich_tx_costs(provider, signature, fee_payer).await;
+    let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
     let rpc_url = provider.current_endpoint().await;
 
     // Best-effort: token balances are not part of SOL fee delta, so compute token "refunds" from
     // parsed tx meta. This makes token inflow/outflow visible for close.
-    let (
-        token_a_net_delta_raw,
-        token_a_net_delta_ui,
-        token_b_net_delta_raw,
-        token_b_net_delta_ui,
-    ) = match token_net_deltas_for_fee_payer_close(
-        provider,
-        signature,
-        fee_payer,
-        &pool_state.token_mint_a,
-        &pool_state.token_mint_b,
-        dec_a,
-        dec_b,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(err = %e, "position lifecycle ledger (close): token delta extraction failed");
-            (None, None, None, None)
-        }
-    };
+    let (token_a_net_delta_raw, token_a_net_delta_ui, token_b_net_delta_raw, token_b_net_delta_ui) =
+        match token_net_deltas_for_fee_payer_close(
+            provider,
+            signature,
+            fee_payer,
+            &pool_state.token_mint_a,
+            &pool_state.token_mint_b,
+            dec_a,
+            dec_b,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(err = %e, "position lifecycle ledger (close): token delta extraction failed");
+                (None, None, None, None)
+            }
+        };
 
     let rec = PositionLifecycleRecord {
         schema_version: 2,

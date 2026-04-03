@@ -10,6 +10,8 @@ pub mod prelude;
 
 /// Event fetching and parsing.
 pub mod events;
+/// Append-only JSONL ledgers (tx costs, lifecycle rows).
+pub mod ledger;
 /// Meteora DLMM protocol adapter (bin-based).
 pub mod meteora;
 /// Orca protocol adapter.
@@ -22,8 +24,6 @@ pub mod raydium;
 pub mod rpc;
 /// Solana client wrapper.
 pub mod solana_client;
-/// Append-only JSONL ledgers (tx costs, lifecycle rows).
-pub mod ledger;
 
 use anyhow::Result;
 use async_trait::async_trait;

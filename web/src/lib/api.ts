@@ -119,6 +119,14 @@ export interface OrcaTokenResponse {
   price_usdc?: string | null
 }
 
+/** Sums `bot_collect_fees` rows in lifecycle JSONL (API host). */
+export interface FeesCollectedFromLedger {
+  file_missing: boolean
+  collect_events: number
+  sum_token_a_ui: string | number | null
+  sum_token_b_ui: string | number | null
+}
+
 /** Matches API `PortfolioAnalyticsResponse` (IL is average % across monitored positions). */
 export interface PortfolioAnalytics {
   total_value_usd: string
@@ -130,6 +138,7 @@ export interface PortfolioAnalytics {
   positions_in_range?: number
   best_position: string | null
   worst_position: string | null
+  fees_collected_from_ledger: FeesCollectedFromLedger
 }
 
 /** Matches API `SimulationRequest` — strategy defaults to `static_range` if omitted (serde default). */
@@ -262,16 +271,6 @@ async function fetchJsonLong<T>(url: string, options?: RequestInit): Promise<T> 
 // External (free) price sources
 // ============================================================================
 
-export interface JupiterPriceResponse {
-  data: Record<
-    string,
-    {
-      id: string
-      price: number
-    }
-  >
-}
-
 export async function getJupiterPricesUsd(mints: string[]): Promise<Record<string, number>> {
   const ids = [...new Set(mints.map((m) => m.trim()).filter(Boolean))]
   if (ids.length === 0) return {}
@@ -285,18 +284,8 @@ export async function getJupiterPricesUsd(mints: string[]): Promise<Record<strin
     }>(`/prices/jupiter?${new URLSearchParams({ ids: ids.join(',') })}`)
     return r.prices ?? {}
   } catch {
-    // Fallback to direct Jupiter fetch (best effort).
-    const qs = new URLSearchParams({ ids: ids.join(',') }).toString()
-    const resp = await fetch(`https://price.jup.ag/v4/price?${qs}`)
-    if (!resp.ok) {
-      throw new Error(`Jupiter price HTTP ${resp.status}`)
-    }
-    const j = (await resp.json()) as JupiterPriceResponse
-    const out: Record<string, number> = {}
-    for (const [mint, row] of Object.entries(j.data ?? {})) {
-      if (typeof row?.price === 'number' && Number.isFinite(row.price)) out[mint] = row.price
-    }
-    return out
+    // Legacy public `price.jup.ag/v4` is often down; pricing is resolved server-side in `/prices/jupiter`.
+    return {}
   }
 }
 
@@ -399,10 +388,25 @@ export const closePosition = (address: string) =>
   fetchJsonLong<{ message: string }>(`/positions/${address}`, { method: 'DELETE' })
 export const collectFees = (address: string) => 
   fetchJsonLong<{ message: string }>(`/positions/${address}/collect`, { method: 'POST' })
-export const rebalancePosition = (address: string, data: { new_tick_lower: number; new_tick_upper: number }) =>
+export type RebalanceInputKind = 'ticks' | 'strategy_range' | 'price_band'
+
+/** POST /positions/:address/rebalance — tick bounds or auto range from strategy / price. */
+export type RebalancePayload = {
+  input?: RebalanceInputKind
+  new_tick_lower?: number
+  new_tick_upper?: number
+  strategy_id?: string
+  /** Decimal string, e.g. `"1.0"` for 1% width */
+  range_width_pct?: string
+  /** Decimal string, B per A (same convention as pool price) */
+  center_price?: string
+  slippage_tolerance_bps?: number
+}
+
+export const rebalancePosition = (address: string, data: RebalancePayload) =>
   fetchJsonLong<{ message: string }>(`/positions/${address}/rebalance`, {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: JSON.stringify({ slippage_tolerance_bps: 50, ...data }),
   })
 
 /** `liquidity_amount`: base units as decimal string (matches API u128 as string). */

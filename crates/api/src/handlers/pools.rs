@@ -1,9 +1,7 @@
 //! Pool handlers.
 
 use crate::error::{ApiError, ApiResult};
-use crate::models::{
-    ListPoolsResponse, PoolResponse, PoolStateResponse, SwapCostEstimateResponse,
-};
+use crate::models::{ListPoolsResponse, PoolResponse, PoolStateResponse, SwapCostEstimateResponse};
 use crate::state::AppState;
 use axum::{
     Json,
@@ -171,7 +169,8 @@ pub async fn get_swap_cost_estimate(
     State(state): State<AppState>,
     Path(address): Path<String>,
 ) -> ApiResult<Json<SwapCostEstimateResponse>> {
-    let _ = Pubkey::from_str(address.trim()).map_err(|_| ApiError::bad_request("Invalid pool address"))?;
+    let _ = Pubkey::from_str(address.trim())
+        .map_err(|_| ApiError::bad_request("Invalid pool address"))?;
 
     let reader = WhirlpoolReader::new(state.provider.clone());
     reader

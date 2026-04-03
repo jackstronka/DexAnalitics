@@ -14,6 +14,67 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-03 — `GET /positions/:address`: fallback RPC gdy brak wpisu w monitorze
+
+**keywords:** get_position, list_positions, monitored_position_from_chain, registry.jsonl, lifecycle_ledger_aggregates
+**paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_valuation.rs`, `crates/api/src/position_registry_seed.rs`, `crates/api/src/services/lifecycle_ledger_aggregates.rs`, `crates/api/src/handlers/analytics.rs`
+
+- Gdy adresu nie ma w `PositionMonitor`, API buduje stan z RPC (`PositionReader` + `WhirlpoolReader`) zamiast zwracać 404; w tle `tokio::spawn` próbuje `monitor.add_position` (healing listy).
+- `GET /positions` (lista): dla każdego `registry_open` w `data/positions/registry.jsonl`, którego nie ma w monitorze, dokładany jest ten sam fallback RPC — **górna tabela** nie jest już pusta tylko przez „tylko RAM”.
+- Przywrócono moduł `lifecycle_ledger_aggregates` + pole `fees_collected_from_ledger` w `GET /analytics/portfolio`.
+
+## 2026-04-03 — `POST /positions`: `monitor.add_position` po open (szczegóły od razu)
+
+**keywords:** open_position, PositionMonitor, add_position, GET /positions/:address, PositionCreate
+**paths:** `crates/api/src/handlers/positions.rs`, `web/src/pages/PositionCreate.tsx`
+
+- Po udanym open API woła `monitor.add_position(position_pda)`, żeby `GET /positions/:addr` działał od razu (wcześniej tylko rejestr / restart).
+- Gałąź z samym `message` bez PDA bez zmian; idempotent replay (`message` + `position_pda`) nie jest już ucinany na początku.
+- Web: po sukcesie nawigacja do `/positions/{position_pda}` gdy jest w odpowiedzi.
+
+## 2026-04-03 — Whirlpool close: domyślnie niski slippage (100 bps) + opcjonalnie `WHIRLPOOL_CLOSE_SLIPPAGE_BPS`
+
+**keywords:** close_position, WhirlpoolExecutor, TokenMinSubceeded, 6018, WHIRLPOOL_CLOSE_SLIPPAGE_BPS, RebalanceExecutor
+**paths:** `crates/protocols/src/orca/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `.env.example`
+
+- Domyślnie z powrotem **100 bps** (niski min-out); opcjonalnie env **`WHIRLPOOL_CLOSE_SLIPPAGE_BPS`** (`0..=10000`) na hoście API/CLI gdy trzeba obejść 6018 bez zmiany zasady „jak najniżej”.
+- Hint przy `6018` doprecyzowany: podnieś slippage tylko przy retry / wyższy tymczasowy env.
+
+## 2026-04-03 — API: ceny USD — GeckoTerminal przed Jupiterem (więcej źródeł bez klucza)
+
+**keywords:** clmm-lp-api, price_fetch, GeckoTerminal, Jupiter, Dexscreener, DexPaprika
+**paths:** `crates/api/src/services/price_fetch.rs`
+
+- Do łańcucha cen dopisano **GeckoTerminal** `GET .../networks/solana/token_price/{mints}` (batch w chunkach), **przed** Jupiter v2 — darmowe, bez klucza, typowo wystarcza na dashboard bez `JUPITER_API_KEY`.
+- Kolejność: stable → GeckoTerminal → Jupiter v2 → legacy v4 → DexPaprika → Dexscreener.
+
+## 2026-04-03 — Rebalance API + UI: `strategy_range` / `price_band` / `ticks` (bez samego promptu na ticki)
+
+**keywords:** RebalanceRequest, RebalanceInput, calculate_tick_range, PositionDetail, POST /positions/rebalance
+**paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_service.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+- `POST /positions/{address}/rebalance`: pole `input`: `ticks` (domyślnie), `strategy_range` (szerokość z `strategy_id` i/lub `range_width_pct`, środek = `tick_current`), `price_band` (`center_price` + `range_width_pct`).
+- Dry-run z samymi tickami nadal bez odczytu puli z RPC (zgodność z testami offline).
+- Web: panel wyboru trybu zamiast `prompt` na ticki.
+
+## 2026-04-03 — Lifecycle ledger: kwoty tokenów przy `collect_fees` + sumy na szczegółach pozycji
+
+**keywords:** bot_collect_fees, orca_position_lifecycle.jsonl, tx_lifecycle, PositionDetail, fee_payer_token_a_delta_ui, clmm-lp-protocols, clmm-lp-execution
+**paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/pages/PositionDetail.tsx`
+
+- Wiersze `event: bot_collect_fees` dopisują opcjonalnie `pool_mint_*` oraz `fee_payer_token_*_delta_*` (post−pre z `meta.pre/postTokenBalances` dla fee payer + mintów puli), żeby UI mógł sumować realnie skredytowane fee w portfelu API po wielu collectach.
+- `try_append_rebalance_executor_tx_cost` przyjmuje `Arc<RpcProvider>` (jedno pobranie tx na wiersz).
+- Web: karta „Fees collected (cumulative, from ledger)” + kolumny ΔA/ΔB w tabeli ledgera; etykieta „Unclaimed fees (USD est.)” wyjaśnia różnicę względem niewypłaconych fee na pozycji.
+
+## 2026-04-03 — API: USD dla pozycji / portfela — Jupiter v2 + fallback (koniec zer z powodu martwego `price.jup.ag/v4`)
+
+**keywords:** clmm-lp-api, price_fetch, position_valuation, Jupiter, Dexscreener, DexPaprika, wallet, analytics
+**paths:** `crates/api/src/services/price_fetch.rs`, `crates/api/src/services/position_valuation.rs`, `crates/api/src/handlers/prices.rs`, `web/src/lib/api.ts`, `.env.example`
+
+- Publiczny endpoint `https://price.jup.ag/v4/price` bywa niedostępny; `https://api.jup.ag/price/v2` często wymaga `JUPITER_API_KEY` (`x-api-key`).
+- Wspólne `fetch_mint_prices_usd`: stable USDC/USDT → Jupiter v2 → (best-effort) legacy v4 → DexPaprika SSE → Dexscreener `token-pairs` (jak w CLI snapshot).
+- `GET /prices/jupiter` i wycena pozycji (`value_usd`, fees USD, dashboard) korzystają z tej samej ścieżki. Frontend: usunięto bezużyteczny fallback do v4 w przeglądarce.
+
 ## 2026-04-03 — Web: dłuższy timeout dla operacji on-chain (`/positions/*`)
 
 **keywords:** web, timeout, fetch abort, open position, swap-before-open, api.ts

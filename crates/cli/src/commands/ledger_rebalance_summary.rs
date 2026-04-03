@@ -93,7 +93,9 @@ pub fn run_ledger_rebalance_summary(
                 .get("rebalance_session_id")
                 .and_then(|s| s.as_str())
                 .unwrap_or("-");
-            println!("{ts} | {old_p} -> {new_p} | pool={pool} | {reason} | tx_lamports={txc} | session={sid}");
+            println!(
+                "{ts} | {old_p} -> {new_p} | pool={pool} | {reason} | tx_lamports={txc} | session={sid}"
+            );
         }
         println!();
     } else {
@@ -127,7 +129,10 @@ pub fn run_ledger_rebalance_summary(
             .and_then(|s| s.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let fee = v.get("tx_fee_lamports").and_then(|x| x.as_u64()).unwrap_or(0);
+        let fee = v
+            .get("tx_fee_lamports")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
         let net = v
             .get("fee_payer_net_lamports_delta")
             .and_then(|x| x.as_i64())
@@ -144,7 +149,9 @@ pub fn run_ledger_rebalance_summary(
     }
 
     if !by_session.is_empty() {
-        println!("\n-- By CLMM_REBALANCE_SESSION_ID (sum tx_fee_lamports, sum fee_payer_net_lamports_delta) --");
+        println!(
+            "\n-- By CLMM_REBALANCE_SESSION_ID (sum tx_fee_lamports, sum fee_payer_net_lamports_delta) --"
+        );
         for (sid, a) in &by_session {
             println!(
                 "session={sid} | rows={} | tx_fee_lamports={} | net_lamports_delta={}",

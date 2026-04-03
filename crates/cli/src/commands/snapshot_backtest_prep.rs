@@ -142,7 +142,10 @@ pub async fn run_snapshot_backtest_prep(
 ) -> Result<()> {
     let pool_list: Vec<String> = match pools {
         Some(v) if !v.is_empty() => v.into_iter().map(|s| s.trim().to_string()).collect(),
-        _ => DEFAULT_ORCA_POOLS.iter().map(|s| (*s).to_string()).collect(),
+        _ => DEFAULT_ORCA_POOLS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
     };
 
     let hours = parse_u64_list(windows_hours)?;
@@ -162,17 +165,17 @@ pub async fn run_snapshot_backtest_prep(
     for pool in &pool_list {
         let src = source_jsonl_resolved(pool, snapshots_suffix);
         if !src.exists() {
-            eprintln!(
-                "skip {} — source snapshot missing: {}",
-                pool,
-                src.display()
-            );
+            eprintln!("skip {} — source snapshot missing: {}", pool, src.display());
             continue;
         }
 
-        let txt = std::fs::read_to_string(&src)
-            .with_context(|| format!("read {}", src.display()))?;
-        let lines: Vec<&str> = txt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let txt =
+            std::fs::read_to_string(&src).with_context(|| format!("read {}", src.display()))?;
+        let lines: Vec<&str> = txt
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
 
         let suffix_clean = snapshots_suffix
             .map(|s| s.trim().trim_start_matches('_'))
@@ -199,12 +202,8 @@ pub async fn run_snapshot_backtest_prep(
         let token_mint_a = state.token_mint_a.to_string();
         let token_mint_b = state.token_mint_b.to_string();
 
-        let token_mint_a_decimals = fetch_mint_decimals(&rpc, &token_mint_a)
-            .await
-            .unwrap_or(9);
-        let token_mint_b_decimals = fetch_mint_decimals(&rpc, &token_mint_b)
-            .await
-            .unwrap_or(9);
+        let token_mint_a_decimals = fetch_mint_decimals(&rpc, &token_mint_a).await.unwrap_or(9);
+        let token_mint_b_decimals = fetch_mint_decimals(&rpc, &token_mint_b).await.unwrap_or(9);
 
         let meta = OrcaPoolMeta {
             pool_address: pool.trim().to_string(),
@@ -276,7 +275,8 @@ fn write_window(
     end_ts: i64,
 ) -> Result<WindowMeta> {
     let path = out_dir.join(format!("window_{}.jsonl", label));
-    let mut file = std::fs::File::create(&path).with_context(|| format!("create {}", path.display()))?;
+    let mut file =
+        std::fs::File::create(&path).with_context(|| format!("create {}", path.display()))?;
     let mut count = 0usize;
     let mut min_ts: Option<i64> = None;
     let mut max_ts: Option<i64> = None;

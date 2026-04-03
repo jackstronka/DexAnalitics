@@ -3,8 +3,8 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     ApplyOptimizeResultRequest, CreateStrategyRequest, ListStrategiesResponse, MessageResponse,
-    OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse, StrategyPositionExecutorRequest,
-    StrategyResponse, StrategyType,
+    OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse,
+    StrategyPositionExecutorRequest, StrategyResponse, StrategyType,
 };
 use crate::services::optimization_runner::{
     apply_optimize_result_parsed, end_optimize_busy, try_begin_optimize_busy,
@@ -278,9 +278,7 @@ pub async fn update_strategy(
                     );
                 }
             }
-            Some(_) => {
-                /* clear legacy pool — do not copy old */
-            }
+            Some(_) => { /* clear legacy pool — do not copy old */ }
             None => {
                 if let Some(p) = old_pool_addr {
                     if let Some(obj) = config.as_object_mut() {
@@ -634,7 +632,9 @@ async fn start_strategy_executor_core(
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(5, 2));
         }
 
-        if let Some(max_il) = params.get("max_il_pct") && let Some(val) = max_il.as_f64() {
+        if let Some(max_il) = params.get("max_il_pct")
+            && let Some(val) = max_il.as_f64()
+        {
             decision_config.il_close_threshold =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
         }
@@ -732,7 +732,9 @@ pub async fn ensure_strategy_running_after_position_link(
             .monitor
             .add_position(position_pda)
             .await
-            .map_err(|e| ApiError::bad_request(format!("Failed to add position to monitor: {e}")))?;
+            .map_err(|e| {
+                ApiError::bad_request(format!("Failed to add position to monitor: {e}"))
+            })?;
         sync_executor_disabled_from_config(state, strategy_id).await?;
         return Ok(());
     }
@@ -857,13 +859,11 @@ pub async fn set_strategy_position_executor(
     let snapshot = state.strategies.read().await.clone();
     crate::state::try_persist_strategies_best_effort(&snapshot);
 
-    Ok(Json(MessageResponse::new(
-        if body.enabled {
-            "Automation enabled for this position".to_string()
-        } else {
-            "Automation disabled for this position".to_string()
-        },
-    )))
+    Ok(Json(MessageResponse::new(if body.enabled {
+        "Automation enabled for this position".to_string()
+    } else {
+        "Automation disabled for this position".to_string()
+    })))
 }
 
 /// Stop a strategy.

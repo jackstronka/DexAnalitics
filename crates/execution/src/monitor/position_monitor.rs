@@ -359,8 +359,7 @@ fn rpc_error_suggests_missing_account(err: &anyhow::Error) -> bool {
         combined.push_str(&cause.to_string());
     }
     let lower = combined.to_lowercase();
-    lower.contains("accountnotfound")
-        || lower.contains("could not find account")
+    lower.contains("accountnotfound") || lower.contains("could not find account")
 }
 
 #[cfg(test)]
@@ -375,7 +374,7 @@ mod rpc_err_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl PositionMonitor {
     /// Inserts a monitored position without RPC (for unit tests).
     pub async fn insert_test_monitored_position(&self, pos: MonitoredPosition) {

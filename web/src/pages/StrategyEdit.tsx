@@ -363,32 +363,39 @@ export default function StrategyEdit() {
                 </div>
               </div>
 
-              <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/20 px-3 py-3 sm:flex-row sm:items-center sm:gap-8">
-                <div className="flex items-center gap-2">
-                  <input
-                    id="edit-dry-run"
-                    type="checkbox"
-                    checked={dryRun}
-                    onChange={(e) => setDryRun(e.target.checked)}
-                    className="rounded border-input"
-                  />
-                  <FieldLabel htmlFor="edit-dry-run" label="Dry run" tooltip={TOOLTIPS.dryRun} />
+              <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-8">
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="edit-dry-run"
+                      type="checkbox"
+                      checked={dryRun}
+                      onChange={(e) => setDryRun(e.target.checked)}
+                      className="rounded border-input"
+                    />
+                    <FieldLabel htmlFor="edit-dry-run" label="Dry run" tooltip={TOOLTIPS.dryRun} />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="edit-auto-exec"
+                      type="checkbox"
+                      checked={autoExecute}
+                      onChange={(e) => setAutoExecute(e.target.checked)}
+                      className="rounded border-input"
+                    />
+                    <FieldLabel
+                      htmlFor="edit-auto-exec"
+                      label="Auto-execute"
+                      tooltip={TOOLTIPS.autoExecute}
+                    />
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="edit-auto-exec"
-                    type="checkbox"
-                    checked={autoExecute}
-                    onChange={(e) => setAutoExecute(e.target.checked)}
-                    disabled={dryRun}
-                    className="rounded border-input"
-                  />
-                  <FieldLabel
-                    htmlFor="edit-auto-exec"
-                    label="Auto-execute"
-                    tooltip={TOOLTIPS.autoExecute}
-                  />
-                </div>
+                {dryRun && autoExecute && (
+                  <p className="text-xs text-muted-foreground pl-6 sm:pl-0">
+                    Dry run is on — rebalance steps are simulated only; turn off Dry run for real
+                    on-chain transactions (requires API wallet).
+                  </p>
+                )}
               </div>
 
               {mutation.isError && (

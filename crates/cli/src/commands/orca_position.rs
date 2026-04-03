@@ -190,8 +190,14 @@ pub async fn run_position_open(
             "cli",
         )
         .await;
-        maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, res.created_position)
-            .await;
+        maybe_registry_open_cli(
+            &provider,
+            pool,
+            &fee_payer,
+            &res.signature,
+            res.created_position,
+        )
+        .await;
         return Ok(());
     }
 
@@ -280,8 +286,14 @@ pub async fn run_position_open(
         "cli",
     )
     .await;
-    maybe_registry_open_cli(&provider, pool, &fee_payer, &res.signature, res.created_position)
-        .await;
+    maybe_registry_open_cli(
+        &provider,
+        pool,
+        &fee_payer,
+        &res.signature,
+        res.created_position,
+    )
+    .await;
     Ok(())
 }
 

@@ -3,12 +3,15 @@
 //! This module provides services that bridge API handlers with
 //! the execution layer.
 
+pub mod lifecycle_ledger_aggregates;
 pub mod optimization_runner;
-pub mod position_executor;
-pub mod simulation_analytics;
 pub mod orca_read_service;
 pub mod orca_tx_service;
+pub mod position_executor;
 pub mod position_service;
+pub mod position_valuation;
+pub mod price_fetch;
+pub mod simulation_analytics;
 pub mod strategy_service;
 
 pub use orca_read_service::OrcaReadService;

@@ -31,8 +31,7 @@ pub fn load_wallet_from_env() -> Result<Option<Arc<Wallet>>, ApiError> {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .map(|p| ("WALLET_KEYPAIR_PATH", p))
-        })
-    {
+        }) {
         Some(v) => v,
         None => return Ok(None),
     };
@@ -122,10 +121,7 @@ pub async fn resolve_executor_for_position_ops(
     )));
     executor.set_wallet(wallet);
     let executor = Arc::new(RwLock::new(executor));
-    executors.insert(
-        API_POSITION_OPS_EXECUTOR_ID.to_string(),
-        executor.clone(),
-    );
+    executors.insert(API_POSITION_OPS_EXECUTOR_ID.to_string(), executor.clone());
     tracing::info!(
         executor_id = API_POSITION_OPS_EXECUTOR_ID,
         "registered StrategyExecutor for position ops (KEYPAIR_PATH / SOLANA_KEYPAIR_PATH)"

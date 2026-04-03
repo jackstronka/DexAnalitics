@@ -62,10 +62,8 @@ pub async fn get_bot_ledger(
     let limit = clamp_limit(q.limit);
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-    let (file_missing, total_matching, rows) =
-        read_jsonl_tail(path.as_path(), limit, filter).map_err(|e| {
-            ApiError::internal(format!("read ledger file: {e}"))
-        })?;
+    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, filter)
+        .map_err(|e| ApiError::internal(format!("read ledger file: {e}")))?;
     let path_s = path.display().to_string();
 
     Ok(Json(BotActivityJsonlResponse {
@@ -101,7 +99,8 @@ pub async fn get_bot_il_ledger(
 
     let Some(path) = il_ledger_path_from_env() else {
         return Ok(Json(BotActivityJsonlResponse {
-            path: "(unset: CLMM_IL_LEDGER_PATH — same file as orca-bot-run --il-ledger-path)".to_string(),
+            path: "(unset: CLMM_IL_LEDGER_PATH — same file as orca-bot-run --il-ledger-path)"
+                .to_string(),
             file_missing: true,
             total_matching_lines: 0,
             rows_returned: 0,
@@ -110,10 +109,8 @@ pub async fn get_bot_il_ledger(
     };
 
     let path_s = path.display().to_string();
-    let (file_missing, total_matching, rows) =
-        read_jsonl_tail(path.as_path(), limit, filter).map_err(|e| {
-            ApiError::internal(format!("read IL ledger file: {e}"))
-        })?;
+    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, filter)
+        .map_err(|e| ApiError::internal(format!("read IL ledger file: {e}")))?;
 
     Ok(Json(BotActivityJsonlResponse {
         path: path_s,
@@ -145,10 +142,8 @@ pub async fn get_bot_registry(
     let limit = clamp_limit(q.limit);
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-    let (file_missing, total_matching, rows) =
-        read_jsonl_tail(path.as_path(), limit, filter).map_err(|e| {
-            ApiError::internal(format!("read registry file: {e}"))
-        })?;
+    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, filter)
+        .map_err(|e| ApiError::internal(format!("read registry file: {e}")))?;
     let path_s = path.display().to_string();
 
     Ok(Json(BotRegistryJsonlResponse {
@@ -193,9 +188,8 @@ pub async fn post_bot_slack_summary(
 
     let lim = body.limit.clamp(1, 80);
     let path = ledger_path();
-    let (file_missing, _total, rows) = read_jsonl_tail(path.as_path(), lim, None).map_err(|e| {
-        ApiError::internal(format!("read ledger: {e}"))
-    })?;
+    let (file_missing, _total, rows) = read_jsonl_tail(path.as_path(), lim, None)
+        .map_err(|e| ApiError::internal(format!("read ledger: {e}")))?;
 
     if file_missing {
         return Ok(Json(SlackActivitySummaryResponse {
@@ -293,18 +287,9 @@ fn format_slack_digest(ledger_path: &str, rows: &[serde_json::Value]) -> String 
     }
 
     for v in rows {
-        let ts = v
-            .get("ts_utc")
-            .and_then(|x| x.as_str())
-            .unwrap_or("?");
-        let source = v
-            .get("source")
-            .and_then(|x| x.as_str())
-            .unwrap_or("?");
-        let event = v
-            .get("event")
-            .and_then(|x| x.as_str())
-            .unwrap_or("?");
+        let ts = v.get("ts_utc").and_then(|x| x.as_str()).unwrap_or("?");
+        let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("?");
+        let event = v.get("event").and_then(|x| x.as_str()).unwrap_or("?");
         let sig = v
             .get("signature")
             .and_then(|x| x.as_str())

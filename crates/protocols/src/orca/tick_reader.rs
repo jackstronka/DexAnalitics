@@ -19,11 +19,14 @@ impl WhirlpoolTickReader {
     }
 
     pub fn derive_tick_array_address(whirlpool: &Pubkey, start_tick_index: i32) -> Result<Pubkey> {
-        let program_id = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID).context("invalid whirlpool program id")?;
+        let program_id =
+            Pubkey::from_str(WHIRLPOOL_PROGRAM_ID).context("invalid whirlpool program id")?;
         let seed_prefix = b"tick_array";
         let start_bytes = start_tick_index.to_le_bytes();
-        let (pda, _bump) =
-            Pubkey::find_program_address(&[seed_prefix, whirlpool.as_ref(), &start_bytes], &program_id);
+        let (pda, _bump) = Pubkey::find_program_address(
+            &[seed_prefix, whirlpool.as_ref(), &start_bytes],
+            &program_id,
+        );
         Ok(pda)
     }
 
@@ -46,7 +49,10 @@ impl WhirlpoolTickReader {
 
         if parsed.start_tick_index != start {
             // This should never happen if PDA derivation matches program; keep explicit for audit.
-            anyhow::bail!("tick array start mismatch: expected {start}, got {}", parsed.start_tick_index);
+            anyhow::bail!(
+                "tick array start mismatch: expected {start}, got {}",
+                parsed.start_tick_index
+            );
         }
 
         let off = tick_array_offset(tick_index, parsed.start_tick_index, tick_spacing)
@@ -59,4 +65,3 @@ impl WhirlpoolTickReader {
         })
     }
 }
-

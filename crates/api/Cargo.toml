@@ -23,7 +23,7 @@ broker-event-bus = []
 
 [dependencies]
 clmm-lp-domain = { workspace = true }
-clmm-lp-execution = { workspace = true }
+clmm-lp-execution = { workspace = true, features = ["test-utils"] }
 clmm-lp-protocols = { workspace = true }
 clmm-lp-data = { workspace = true }
 clmm-lp-simulation = { workspace = true }
@@ -55,6 +55,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 orca_whirlpools = "7.0.2"
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2.1"
+spl-token = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.8.3"

@@ -3,6 +3,7 @@
 use crate::handlers::health::init_start_time;
 use crate::middleware::{RateLimiter, request_logging};
 use crate::openapi::ApiDoc;
+use crate::position_registry_seed::seed_monitor_from_registry;
 use crate::routes::create_versioned_router;
 use crate::state::{ApiConfig, AppState};
 use axum::{Router, middleware};
@@ -115,6 +116,9 @@ impl ApiServer {
 
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
 
+        // Best-effort: re-add open positions into monitor after restart.
+        seed_monitor_from_registry(self.state.monitor.clone()).await;
+
         let router = self.build_router();
 
         info!(address = %addr, "Starting API server");
@@ -133,6 +137,9 @@ impl ApiServer {
         init_start_time();
 
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
+
+        // Best-effort: re-add open positions into monitor after restart.
+        seed_monitor_from_registry(self.state.monitor.clone()).await;
 
         let router = self.build_router();
 

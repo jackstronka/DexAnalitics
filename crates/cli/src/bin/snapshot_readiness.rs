@@ -228,7 +228,10 @@ fn main_inner() -> anyhow::Result<()> {
                         if !rows.iter().any(|r| {
                             matches!(
                                 r.event_type.as_str(),
-                                "collect_fees" | "close_position" | "rebalance_out" | "rebalance_in"
+                                "collect_fees"
+                                    | "close_position"
+                                    | "rebalance_out"
+                                    | "rebalance_in"
                             )
                         }) {
                             missing.push("collect/close/rebalance");
@@ -243,74 +246,83 @@ fn main_inner() -> anyhow::Result<()> {
                     true
                 }
             } else {
-            let pos = if let Some(p) = pos_arg.clone() && !p.is_empty() {
-                Some(p)
-            } else if positions_for_pool.len() == 1 {
-                positions_for_pool.iter().next().cloned()
-            } else {
-                None
-            };
+                let pos = if let Some(p) = pos_arg.clone()
+                    && !p.is_empty()
+                {
+                    Some(p)
+                } else if positions_for_pool.len() == 1 {
+                    positions_for_pool.iter().next().cloned()
+                } else {
+                    None
+                };
 
-            let rows_opt: Option<Vec<PositionFeeCheckpointRow>> = pos.map(|pos| {
-                all_rows_for_pool
-                    .into_iter()
-                    .filter(|r| r.position == pos)
-                    .collect::<Vec<_>>()
-            });
+                let rows_opt: Option<Vec<PositionFeeCheckpointRow>> = pos.map(|pos| {
+                    all_rows_for_pool
+                        .into_iter()
+                        .filter(|r| r.position == pos)
+                        .collect::<Vec<_>>()
+                });
 
-            match rows_opt {
-                None => {
-                    tier3_missing.push(
-                        "missing --position-address for per-position Tier3 readiness".to_string(),
-                    );
-                    if positions_for_pool.is_empty() {
-                        tier3_missing.push("no positions found in ledger for this pool".to_string());
-                    } else {
-                        let positions_list = positions_for_pool
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        tier3_missing.push(format!(
-                            "positions in ledger for this pool: {}",
-                            positions_list
-                        ));
-                        tier3_missing.push("suggested commands (pick one position):".to_string());
-                        for p in positions_for_pool {
+                match rows_opt {
+                    None => {
+                        tier3_missing.push(
+                            "missing --position-address for per-position Tier3 readiness"
+                                .to_string(),
+                        );
+                        if positions_for_pool.is_empty() {
+                            tier3_missing
+                                .push("no positions found in ledger for this pool".to_string());
+                        } else {
+                            let positions_list = positions_for_pool
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             tier3_missing.push(format!(
+                                "positions in ledger for this pool: {}",
+                                positions_list
+                            ));
+                            tier3_missing
+                                .push("suggested commands (pick one position):".to_string());
+                            for p in positions_for_pool {
+                                tier3_missing.push(format!(
                                 "cargo run --bin clmm-lp-cli -- snapshot-readiness --protocol {:?} --pool-address {} --fee-mode position-truth --position-address {}",
                                 args.protocol, args.pool_address, p
                             ));
+                            }
                         }
+                        false
                     }
-                    false
-                }
-                Some(rows) => {
-                    if rows.len() < 2 {
-                        tier3_missing.push("need >=2 checkpoints for this pool+position".to_string());
-                    }
+                    Some(rows) => {
+                        if rows.len() < 2 {
+                            tier3_missing
+                                .push("need >=2 checkpoints for this pool+position".to_string());
+                        }
 
-                    let has_open = rows.iter().any(|r| r.event_type == "open_position");
-                    if !has_open {
-                        tier3_missing.push("missing open_position checkpoint".to_string());
-                    }
+                        let has_open = rows.iter().any(|r| r.event_type == "open_position");
+                        if !has_open {
+                            tier3_missing.push("missing open_position checkpoint".to_string());
+                        }
 
-                    let has_progress = rows.iter().any(|r| {
-                        matches!(
-                            r.event_type.as_str(),
-                            "collect_fees" | "close_position" | "rebalance_out" | "rebalance_in"
-                        )
-                    });
-                    if !has_progress {
-                        tier3_missing.push(
+                        let has_progress = rows.iter().any(|r| {
+                            matches!(
+                                r.event_type.as_str(),
+                                "collect_fees"
+                                    | "close_position"
+                                    | "rebalance_out"
+                                    | "rebalance_in"
+                            )
+                        });
+                        if !has_progress {
+                            tier3_missing.push(
                             "missing one of: collect_fees | close_position | rebalance_* checkpoint"
                                 .to_string(),
                         );
-                    }
+                        }
 
-                    tier3_missing.is_empty()
+                        tier3_missing.is_empty()
+                    }
                 }
-            }
             }
         }
     } else {

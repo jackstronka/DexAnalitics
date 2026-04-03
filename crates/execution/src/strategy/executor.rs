@@ -160,12 +160,20 @@ impl StrategyExecutor {
         // Tier3: fetch tick boundary feeGrowthOutside and compute feeGrowthInside.
         let lower = self
             .tick_reader
-            .get_tick_boundary_state(&monitored.pool, monitored.on_chain.tick_lower, pool_state.tick_spacing)
+            .get_tick_boundary_state(
+                &monitored.pool,
+                monitored.on_chain.tick_lower,
+                pool_state.tick_spacing,
+            )
             .await
             .ok();
         let upper = self
             .tick_reader
-            .get_tick_boundary_state(&monitored.pool, monitored.on_chain.tick_upper, pool_state.tick_spacing)
+            .get_tick_boundary_state(
+                &monitored.pool,
+                monitored.on_chain.tick_upper,
+                pool_state.tick_spacing,
+            )
             .await
             .ok();
 
@@ -284,7 +292,11 @@ impl StrategyExecutor {
     ) -> anyhow::Result<()> {
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             if let Some(cp) = self
-                .capture_position_fee_checkpoint(position, "decrease_liquidity_pre", CheckpointSource::Onchain)
+                .capture_position_fee_checkpoint(
+                    position,
+                    "decrease_liquidity_pre",
+                    CheckpointSource::Onchain,
+                )
                 .await
             {
                 self.lifecycle.record_fee_checkpoint(cp).await;
@@ -296,7 +308,11 @@ impl StrategyExecutor {
 
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             if let Some(cp) = self
-                .capture_position_fee_checkpoint(position, "decrease_liquidity_post", CheckpointSource::Onchain)
+                .capture_position_fee_checkpoint(
+                    position,
+                    "decrease_liquidity_post",
+                    CheckpointSource::Onchain,
+                )
                 .await
             {
                 self.lifecycle.record_fee_checkpoint(cp).await;
@@ -417,7 +433,11 @@ impl StrategyExecutor {
             .await?;
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             if let Some(cp) = self
-                .capture_position_fee_checkpoint(position, "collect_post", CheckpointSource::Onchain)
+                .capture_position_fee_checkpoint(
+                    position,
+                    "collect_post",
+                    CheckpointSource::Onchain,
+                )
                 .await
             {
                 self.lifecycle.record_fee_checkpoint(cp).await;
@@ -518,7 +538,11 @@ impl StrategyExecutor {
             }
             if self.config.fee_mode == PositionTruthMode::PositionTruth {
                 if let Some(cp) = self
-                    .capture_position_fee_checkpoint(&position.address, "poll", CheckpointSource::Onchain)
+                    .capture_position_fee_checkpoint(
+                        &position.address,
+                        "poll",
+                        CheckpointSource::Onchain,
+                    )
                     .await
                 {
                     self.lifecycle.record_fee_checkpoint(cp).await;
@@ -713,7 +737,8 @@ impl StrategyExecutor {
                         );
                         let old_addr = position.address;
                         self.monitor.remove_position(&old_addr).await;
-                        if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift {
+                        if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift
+                        {
                             let mut m = self.retouch_armed.write().await;
                             m.remove(&old_addr);
                         }
@@ -739,8 +764,12 @@ impl StrategyExecutor {
                             liquidity: position.on_chain.liquidity.to_string(),
                             fees_owed_a: position.on_chain.fees_owed_a,
                             fees_owed_b: position.on_chain.fees_owed_b,
-                            fee_growth_checkpoint_a: Some(position.on_chain.fee_growth_inside_a.to_string()),
-                            fee_growth_checkpoint_b: Some(position.on_chain.fee_growth_inside_b.to_string()),
+                            fee_growth_checkpoint_a: Some(
+                                position.on_chain.fee_growth_inside_a.to_string(),
+                            ),
+                            fee_growth_checkpoint_b: Some(
+                                position.on_chain.fee_growth_inside_b.to_string(),
+                            ),
                             fee_growth_global_a: Some(pool.fee_growth_global_a.to_string()),
                             fee_growth_global_b: Some(pool.fee_growth_global_b.to_string()),
                             fee_growth_outside_lower_a: None,

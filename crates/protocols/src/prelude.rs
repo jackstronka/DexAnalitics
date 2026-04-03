@@ -33,9 +33,9 @@ pub use crate::orca::pool_reader::{
     liquidity_amount_from_pct, price_to_tick, tick_to_price,
 };
 pub use crate::orca::position_reader::{PositionReader, WhirlpoolPosition};
+pub use crate::orca::provider::OrcaPoolProvider;
 pub use crate::orca::tick_array::compute_fee_growth_inside_single;
 pub use crate::orca::tick_reader::WhirlpoolTickReader;
-pub use crate::orca::provider::OrcaPoolProvider;
 pub use crate::orca::whirlpool::Whirlpool;
 
 // Solana client

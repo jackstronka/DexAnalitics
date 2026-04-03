@@ -5,8 +5,8 @@
 use crate::engine::{fees as fee_engine, hodl, liquidity};
 use clmm_lp_data::swaps::SwapEvent;
 use clmm_lp_domain::prelude::{Amount, Price, PriceCandle};
-use clmm_lp_simulation::prelude::*;
 use clmm_lp_protocols::prelude::price_to_tick;
+use clmm_lp_simulation::prelude::*;
 use primitive_types::U256;
 use rayon::prelude::*;
 use rust_decimal::Decimal;
@@ -395,8 +395,7 @@ pub fn run_single(
                         // Dynamic LiquidityShare for snapshot-fees:
                         // share = position_liquidity / pool_active_liquidity_at_step
                         let pos_l_dec = Decimal::from_u128(liquidity_l).unwrap_or(Decimal::ZERO);
-                        let liq_dec =
-                            Decimal::from_u128(liq_active_raw).unwrap_or(Decimal::ONE);
+                        let liq_dec = Decimal::from_u128(liq_active_raw).unwrap_or(Decimal::ONE);
                         if liq_dec > Decimal::ZERO {
                             pos_l_dec / liq_dec
                         } else {
@@ -437,18 +436,11 @@ pub fn run_single(
         total_fees += step_fees;
 
         // Current position valuation (excluding fees)
-        let sqrt_l = sqrt_q64_from_price_ab_human(
-            current_lower_ab,
-            token_a_decimals,
-            token_b_decimals,
-        );
-        let sqrt_u = sqrt_q64_from_price_ab_human(
-            current_upper_ab,
-            token_a_decimals,
-            token_b_decimals,
-        );
-        let sqrt_p =
-            sqrt_q64_from_price_ab_human(price_ab, token_a_decimals, token_b_decimals);
+        let sqrt_l =
+            sqrt_q64_from_price_ab_human(current_lower_ab, token_a_decimals, token_b_decimals);
+        let sqrt_u =
+            sqrt_q64_from_price_ab_human(current_upper_ab, token_a_decimals, token_b_decimals);
+        let sqrt_p = sqrt_q64_from_price_ab_human(price_ab, token_a_decimals, token_b_decimals);
         let (amt_a_base, amt_b_base) =
             liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
         let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
@@ -529,21 +521,10 @@ pub fn run_single(
     };
 
     let last = step_data.last().unwrap();
-    let sqrt_l = sqrt_q64_from_price_ab_human(
-        current_lower_ab,
-        token_a_decimals,
-        token_b_decimals,
-    );
-    let sqrt_u = sqrt_q64_from_price_ab_human(
-        current_upper_ab,
-        token_a_decimals,
-        token_b_decimals,
-    );
-    let sqrt_p = sqrt_q64_from_price_ab_human(
-        last.price_ab.value,
-        token_a_decimals,
-        token_b_decimals,
-    );
+    let sqrt_l = sqrt_q64_from_price_ab_human(current_lower_ab, token_a_decimals, token_b_decimals);
+    let sqrt_u = sqrt_q64_from_price_ab_human(current_upper_ab, token_a_decimals, token_b_decimals);
+    let sqrt_p =
+        sqrt_q64_from_price_ab_human(last.price_ab.value, token_a_decimals, token_b_decimals);
     let (amt_a_base, amt_b_base) =
         liquidity::amounts_from_liquidity_at_price(liquidity_l, sqrt_l, sqrt_p, sqrt_u);
     let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
@@ -607,8 +588,7 @@ pub fn run_grid(
 ) -> Vec<(f64, f64, f64, String, TrackerSummary)> {
     let step_data = Arc::new(step_data.to_vec());
     let swaps_arc: Option<Arc<Vec<SwapEvent>>> = swaps.map(|s| Arc::new(s.to_vec()));
-    let snap_arc: Option<Arc<BTreeMap<usize, Decimal>>> =
-        snapshot_pool_fees_usd.map(Arc::new);
+    let snap_arc: Option<Arc<BTreeMap<usize, Decimal>>> = snapshot_pool_fees_usd.map(Arc::new);
     let jobs: Vec<(f64, StratConfig)> = width_pcts
         .iter()
         .flat_map(|&wp| strategies.iter().copied().map(move |s| (wp, s)))

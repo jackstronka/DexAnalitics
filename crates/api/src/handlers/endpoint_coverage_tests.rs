@@ -7,6 +7,7 @@ use clmm_lp_protocols::prelude::RpcConfig;
 use httpmock::Method::GET;
 use httpmock::MockServer;
 use rust_decimal::Decimal;
+use solana_sdk::pubkey::Pubkey;
 use tower::util::ServiceExt;
 
 fn test_state() -> AppState {
@@ -51,6 +52,25 @@ async fn request(
         .unwrap_or_else(Body::empty);
     let resp = router.oneshot(req.body(body).unwrap()).await.unwrap();
     resp.status()
+}
+
+async fn request_body(
+    router: axum::Router,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let mut req = Request::builder().method(method).uri(path);
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    let body = body
+        .map(|v| Body::from(v.to_string()))
+        .unwrap_or_else(Body::empty);
+    let resp = router.oneshot(req.body(body).unwrap()).await.unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tokio::test]
@@ -144,6 +164,151 @@ async fn all_position_endpoints_are_reachable() {
     assert_eq!(
         request(router, Method::GET, "/api/v1/positions/invalid/pnl", None).await,
         StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn position_action_buttons_have_dry_run_path() {
+    let mut state = test_state();
+    state.set_dry_run(true);
+
+    // Seed one fake position in the monitor so collect/close/decrease/rebalance paths can validate existence.
+    let position_pk = Pubkey::new_unique();
+    let pool_pk = Pubkey::new_unique();
+
+    let monitored = clmm_lp_execution::monitor::MonitoredPosition {
+        address: position_pk,
+        pool: pool_pk,
+        on_chain: clmm_lp_protocols::events::OnChainPosition {
+            address: position_pk,
+            pool: pool_pk,
+            owner: Pubkey::new_unique(),
+            tick_lower: -128,
+            tick_upper: 128,
+            liquidity: 10_000u128,
+            fee_growth_inside_a: 0,
+            fee_growth_inside_b: 0,
+            fees_owed_a: 123,
+            fees_owed_b: 456,
+        },
+        pnl: clmm_lp_execution::monitor::PositionPnL::default(),
+        in_range: true,
+        last_updated: chrono::Utc::now(),
+    };
+    state
+        .monitor
+        .insert_test_monitored_position(monitored)
+        .await;
+
+    let router = create_versioned_router(state);
+
+    // 1) Swap (dry-run)
+    let (st, body) = request_body(
+        router.clone(),
+        Method::POST,
+        "/api/v1/positions/swap-before-open",
+        Some(serde_json::json!({
+            "pool_address": pool_pk.to_string(),
+            "specified_mint": Pubkey::new_unique().to_string(),
+            "amount_in": 1,
+            "slippage_tolerance_bps": 50,
+            "cost_session_id": "test-session-1"
+        })),
+    )
+    .await;
+    // Pool validation will fail on dummy pool (no RPC) -> 404/503 is acceptable; this test focuses on action endpoints below.
+    assert!(
+        st == StatusCode::OK
+            || st == StatusCode::NOT_FOUND
+            || st == StatusCode::SERVICE_UNAVAILABLE
+            || st == StatusCode::UNPROCESSABLE_ENTITY,
+        "unexpected status for swap-before-open dry-run: {st} body={body}"
+    );
+
+    // 2) Open (dry-run) - should not require executor.
+    let (st, body) = request_body(
+        router.clone(),
+        Method::POST,
+        "/api/v1/positions",
+        Some(serde_json::json!({
+          "pool_address": pool_pk.to_string(),
+          "tick_lower": -128,
+          "tick_upper": 128,
+          "amount_a": 1,
+          "amount_b": 1,
+          "slippage_tolerance_bps": 50,
+          "full_range": false,
+          "swap_before_open": null,
+          "strategy_id": null,
+          "cost_session_id": "test-open-1"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "open dry-run failed: body={body}");
+    assert!(
+        body.contains("Would open") || body.contains("DRY-RUN") || body.contains("dry_run"),
+        "open response does not look like dry-run: {body}"
+    );
+
+    // 3) Collect fees (dry-run)
+    let (st, body) = request_body(
+        router.clone(),
+        Method::POST,
+        &format!("/api/v1/positions/{}/collect", position_pk),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "collect dry-run failed: body={body}");
+    assert!(
+        body.contains("DRY-RUN") || body.contains("Would collect"),
+        "collect not dry-run: {body}"
+    );
+
+    // 4) Decrease liquidity (dry-run)
+    let (st, body) = request_body(
+        router.clone(),
+        Method::POST,
+        &format!("/api/v1/positions/{}/decrease", position_pk),
+        Some(serde_json::json!({"liquidity_amount":"1"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "decrease dry-run failed: body={body}");
+    assert!(
+        body.contains("Would decrease") || body.contains("dry_run"),
+        "decrease not dry-run: {body}"
+    );
+
+    // 5) Rebalance (dry-run)
+    let (st, body) = request_body(
+        router.clone(),
+        Method::POST,
+        &format!("/api/v1/positions/{}/rebalance", position_pk),
+        Some(serde_json::json!({
+          "new_tick_lower": -64,
+          "new_tick_upper": 64,
+          "slippage_tolerance_bps": 50,
+          "reason": "manual"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "rebalance dry-run failed: body={body}");
+    assert!(
+        body.contains("DRY-RUN") || body.contains("Would") || body.contains("dry_run"),
+        "rebalance not dry-run: {body}"
+    );
+
+    // 6) Close (dry-run)
+    let (st, body) = request_body(
+        router,
+        Method::DELETE,
+        &format!("/api/v1/positions/{}", position_pk),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "close dry-run failed: body={body}");
+    assert!(
+        body.contains("DRY-RUN") || body.contains("Would close"),
+        "close not dry-run: {body}"
     );
 }
 
@@ -561,13 +726,7 @@ async fn bot_activity_il_ledger_endpoint_is_reachable() {
     let state = test_state();
     let router = create_versioned_router(state);
     assert_eq!(
-        request(
-            router,
-            Method::GET,
-            "/api/v1/bot-activity/il-ledger",
-            None,
-        )
-        .await,
+        request(router, Method::GET, "/api/v1/bot-activity/il-ledger", None,).await,
         StatusCode::OK
     );
 }

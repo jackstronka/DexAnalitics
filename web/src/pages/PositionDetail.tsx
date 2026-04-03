@@ -1,6 +1,6 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
 import { ArrowLeft, RefreshCw, X, DollarSign } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -58,11 +58,15 @@ function rowTs(r: LedgerRow): string {
 export default function PositionDetail() {
   const { address } = useParams<{ address: string }>()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [actionInfo, setActionInfo] = useState<string | null>(null)
 
-  const { data: position, isLoading } = useQuery({
+  const { data: position, isLoading, isError, error } = useQuery({
     queryKey: ['position', address],
     queryFn: () => getPosition(address!),
     enabled: !!address,
+    retry: 1,
   })
 
   const { data: ledgerData } = useQuery({
@@ -115,19 +119,38 @@ export default function PositionDetail() {
 
   const closeMutation = useMutation({
     mutationFn: () => closePosition(address!),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      setActionError(null)
+      setActionInfo(data?.message ?? 'Close requested.')
+      void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+      // If it was a real close (not dry-run), go back to list.
+      if (!(data?.message ?? '').toLowerCase().includes('dry-run')) {
+        navigate('/positions')
+      }
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setActionInfo(null)
+      setActionError(`Close Position failed: ${msg}`)
     },
   })
 
   const collectMutation = useMutation({
     mutationFn: () => collectFees(address!),
     onSuccess: () => {
+      setActionError(null)
+      setActionInfo('Collect requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setActionInfo(null)
+      setActionError(`Collect Fees failed: ${msg}`)
     },
   })
 
@@ -145,9 +168,17 @@ export default function PositionDetail() {
       })
     },
     onSuccess: () => {
+      setActionError(null)
+      setActionInfo('Rebalance requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg === 'Cancelled') return
+      setActionInfo(null)
+      setActionError(`Rebalance failed: ${msg}`)
     },
   })
 
@@ -160,15 +191,42 @@ export default function PositionDetail() {
       return decreaseLiquidity(address!, trimmed)
     },
     onSuccess: () => {
+      setActionError(null)
+      setActionInfo('Decrease requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
     },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg === 'Cancelled') return
+      setActionInfo(null)
+      setActionError(`Decrease liquidity failed: ${msg}`)
+    },
   })
 
   if (isLoading) {
     return <div className="text-center py-8">Loading...</div>
+  }
+
+  if (isError) {
+    const msg = error instanceof Error ? error.message : String(error)
+    return (
+      <div className="text-center py-8 space-y-3 max-w-lg mx-auto px-4">
+        <p className="text-destructive font-medium">Nie udało się pobrać pozycji z API</p>
+        <p className="text-sm text-muted-foreground break-words font-mono">{msg}</p>
+        <p className="text-xs text-muted-foreground">
+          Przy HTTP 502 / braku odpowiedzi backend nie działa albo Vite proxy (`API_UPSTREAM`) nie trafia w port API —
+          to <strong className="text-foreground">nie</strong> znaczy, że pozycji nie ma on-chain.
+        </p>
+        <Link to="/positions">
+          <Button variant="outline" size="sm">
+            Wróć do listy
+          </Button>
+        </Link>
+      </div>
+    )
   }
 
   if (!position) {
@@ -337,7 +395,18 @@ export default function PositionDetail() {
             <CardHeader>
               <CardTitle>Actions</CardTitle>
             </CardHeader>
-            <CardContent className="flex flex-wrap gap-4">
+            <CardContent className="space-y-3">
+              {actionError ? (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive break-words">
+                  {actionError}
+                </div>
+              ) : null}
+              {actionInfo ? (
+                <div className="rounded-md border border-emerald-600/40 bg-emerald-950/20 px-3 py-2 text-sm text-emerald-200 break-words">
+                  {actionInfo}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-4">
               <Button onClick={() => collectMutation.mutate()} disabled={collectMutation.isPending}>
                 <DollarSign className="h-4 w-4 mr-2" />
                 {collectMutation.isPending ? 'Collecting...' : 'Collect Fees'}
@@ -374,6 +443,7 @@ export default function PositionDetail() {
                 <X className="h-4 w-4 mr-2" />
                 {closeMutation.isPending ? 'Closing...' : 'Close Position'}
               </Button>
+              </div>
             </CardContent>
           </Card>
         </Tabs.Content>

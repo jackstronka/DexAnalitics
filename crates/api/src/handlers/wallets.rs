@@ -47,7 +47,8 @@ pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<Walle
 
     let mut wallets = Vec::new();
     if dir.exists() {
-        let rd = std::fs::read_dir(&dir).map_err(|e| ApiError::internal(format!("read_dir {dir_s}: {e}")))?;
+        let rd = std::fs::read_dir(&dir)
+            .map_err(|e| ApiError::internal(format!("read_dir {dir_s}: {e}")))?;
         for e in rd.flatten() {
             let p = e.path();
             if p.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -61,7 +62,11 @@ pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<Walle
             if filename.is_empty() {
                 continue;
             }
-            let id = p.file_stem().and_then(|x| x.to_str()).unwrap_or("").to_string();
+            let id = p
+                .file_stem()
+                .and_then(|x| x.to_str())
+                .unwrap_or("")
+                .to_string();
             if id.is_empty() {
                 continue;
             }
@@ -73,12 +78,19 @@ pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<Walle
                 continue;
             }
 
-            wallets.push(WalletEntry { id, filename, pubkey });
+            wallets.push(WalletEntry {
+                id,
+                filename,
+                pubkey,
+            });
         }
     }
 
     wallets.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(Json(WalletsListResponse { wallets_dir: dir_s, wallets }))
+    Ok(Json(WalletsListResponse {
+        wallets_dir: dir_s,
+        wallets,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,15 +237,16 @@ pub async fn get_wallet_balances(
                     continue;
                 }
                 // Prefer uiAmountString; fallback to uiAmount.
-                let ui_amount = entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
-                            .as_f64()
-                            .map(|x| x.to_string())
-                    })
-                    .unwrap_or_else(|| "0".to_string());
+                let ui_amount =
+                    entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
+                                .as_f64()
+                                .map(|x| x.to_string())
+                        })
+                        .unwrap_or_else(|| "0".to_string());
                 tokens.push(WalletTokenBalance { mint, ui_amount });
             }
         }
@@ -248,4 +261,3 @@ pub async fn get_wallet_balances(
         tokens,
     }))
 }
-

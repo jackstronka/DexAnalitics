@@ -6,13 +6,13 @@ pub mod health;
 pub mod orca;
 pub mod orca_onchain;
 pub mod phantom_auth;
-pub mod prices;
 pub mod pools;
 pub mod positions;
+pub mod prices;
 pub mod scripts;
-pub mod wallets;
 pub mod strategies;
 pub mod tx;
+pub mod wallets;
 
 #[cfg(test)]
 mod devnet_e2e_tests;
@@ -33,10 +33,10 @@ pub use health::*;
 pub use orca::*;
 pub use orca_onchain::*;
 pub use phantom_auth::*;
-pub use prices::*;
 pub use pools::*;
 pub use positions::*;
+pub use prices::*;
 pub use scripts::*;
-pub use wallets::*;
 pub use strategies::*;
 pub use tx::*;
+pub use wallets::*;

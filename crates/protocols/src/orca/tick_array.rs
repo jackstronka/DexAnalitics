@@ -48,7 +48,11 @@ pub fn tick_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
 
 /// Returns the position inside the tick array (0..88) for `tick_index`.
 #[must_use]
-pub fn tick_array_offset(tick_index: i32, start_tick_index: i32, tick_spacing: u16) -> Option<usize> {
+pub fn tick_array_offset(
+    tick_index: i32,
+    start_tick_index: i32,
+    tick_spacing: u16,
+) -> Option<usize> {
     let spacing = tick_spacing as i32;
     if spacing <= 0 {
         return None;
@@ -93,4 +97,3 @@ pub fn compute_fee_growth_inside_single(
         .wrapping_sub(fee_growth_below)
         .wrapping_sub(fee_growth_above)
 }
-

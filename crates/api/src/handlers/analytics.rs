@@ -2,10 +2,15 @@
 
 use crate::error::ApiResult;
 use crate::models::{PortfolioAnalyticsResponse, SimulationRequest, SimulationResponse};
+use crate::services::lifecycle_ledger_aggregates::aggregate_bot_collect_fees_totals;
+use crate::services::position_valuation::{
+    compute_position_usd_valuation, fetch_prices_for_positions,
+};
 use crate::services::simulation_analytics::run_dashboard_simulation;
 use crate::state::AppState;
 use axum::{Json, extract::State};
 use rust_decimal::Decimal;
+use tracing::warn;
 
 /// Get portfolio analytics.
 #[utoipa::path(
@@ -31,10 +36,34 @@ pub async fn get_portfolio_analytics(
     let mut best_position = None;
     let mut worst_position = None;
 
+    let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
+
     for position in &positions {
-        total_value += position.pnl.current_value_usd;
+        let valuation =
+            match compute_position_usd_valuation(state.provider.clone(), position, &prices).await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!(
+                        position = %position.address,
+                        pool = %position.pool,
+                        error = %e,
+                        "USD valuation failed in analytics; using monitor zeros"
+                    );
+                    None
+                }
+            };
+        let value_usd = valuation
+            .as_ref()
+            .map(|v| v.value_usd)
+            .unwrap_or(position.pnl.current_value_usd);
+        let fees_usd = valuation
+            .as_ref()
+            .map(|v| v.fees_usd)
+            .unwrap_or(position.pnl.fees_usd);
+
+        total_value += value_usd;
         total_pnl += position.pnl.net_pnl_usd;
-        total_fees += position.pnl.fees_usd;
+        total_fees += fees_usd;
         total_il += position.pnl.il_pct;
 
         if position.in_range {
@@ -65,6 +94,8 @@ pub async fn get_portfolio_analytics(
         Decimal::ZERO
     };
 
+    let fees_collected_from_ledger = aggregate_bot_collect_fees_totals();
+
     let response = PortfolioAnalyticsResponse {
         total_value_usd: total_value,
         total_pnl_usd: total_pnl,
@@ -75,6 +106,7 @@ pub async fn get_portfolio_analytics(
         positions_in_range: in_range_count,
         best_position,
         worst_position,
+        fees_collected_from_ledger,
     };
 
     Ok(Json(response))

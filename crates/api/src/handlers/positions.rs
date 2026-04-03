@@ -2,12 +2,12 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::handlers::strategies::ensure_strategy_running_after_position_link;
-use crate::services::strategy_service::append_position_address_to_strategy;
 use crate::models::{
     DecreaseLiquidityRequest, ListPositionsResponse, MessageResponse, OpenPositionRequest,
     PnLResponse, PositionOpenResponse, PositionResponse, PositionStatus, RebalanceRequest,
     SwapBeforeOpenRequest, SwapBeforeOpenResponse,
 };
+use crate::services::strategy_service::append_position_address_to_strategy;
 use crate::state::{AppState, PositionUpdate};
 use axum::{
     Json,
@@ -17,8 +17,13 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use tracing::{info, warn};
 
-use crate::services::position_executor::resolve_executor_for_position_ops;
+use crate::position_registry_seed::registry_open_position_pubkeys;
 use crate::services::PositionService;
+use crate::services::position_executor::resolve_executor_for_position_ops;
+use crate::services::position_valuation::{
+    compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
+};
+use std::collections::HashSet;
 
 /// List all positions.
 #[utoipa::path(
@@ -32,11 +37,57 @@ use crate::services::PositionService;
 pub async fn list_positions(
     State(state): State<AppState>,
 ) -> ApiResult<Json<ListPositionsResponse>> {
-    let positions = state.monitor.get_positions().await;
+    let mut positions = state.monitor.get_positions().await;
+    let monitored: HashSet<Pubkey> = positions.iter().map(|p| p.address).collect();
 
-    let responses: Vec<PositionResponse> = positions
-        .iter()
-        .map(|p| PositionResponse {
+    // Registry remembers opens across restarts; monitor can be empty or miss a PDA. Merge chain state
+    // for registry opens not yet in monitor so `GET /positions` matches what users see on-chain.
+    for pk in registry_open_position_pubkeys() {
+        if monitored.contains(&pk) {
+            continue;
+        }
+        match monitored_position_from_chain(state.provider.clone(), &pk).await {
+            Ok(p) => {
+                positions.push(p);
+            }
+            Err(e) => {
+                warn!(
+                    position = %pk,
+                    error = %e,
+                    "list_positions: registry open but not on-chain or RPC error; skipping"
+                );
+            }
+        }
+    }
+
+    let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
+
+    let mut responses: Vec<PositionResponse> = Vec::with_capacity(positions.len());
+    for p in &positions {
+        let valuation =
+            match compute_position_usd_valuation(state.provider.clone(), p, &prices).await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!(
+                        position = %p.address,
+                        pool = %p.pool,
+                        error = %e,
+                        "USD valuation failed; falling back to monitor zeros"
+                    );
+                    None
+                }
+            };
+
+        let value_usd = valuation
+            .as_ref()
+            .map(|v| v.value_usd)
+            .unwrap_or(p.pnl.current_value_usd);
+        let fees_usd = valuation
+            .as_ref()
+            .map(|v| v.fees_usd)
+            .unwrap_or(p.pnl.fees_usd);
+
+        responses.push(PositionResponse {
             address: p.address.to_string(),
             pool_address: p.pool.to_string(),
             owner: p.on_chain.owner.to_string(),
@@ -44,13 +95,13 @@ pub async fn list_positions(
             tick_upper: p.on_chain.tick_upper,
             liquidity: p.on_chain.liquidity.to_string(),
             in_range: p.in_range,
-            value_usd: p.pnl.current_value_usd,
+            value_usd,
             pnl: PnLResponse {
                 unrealized_pnl_usd: p.pnl.net_pnl_usd,
                 unrealized_pnl_pct: p.pnl.net_pnl_pct,
                 fees_earned_a: p.pnl.fees_earned_a,
                 fees_earned_b: p.pnl.fees_earned_b,
-                fees_earned_usd: p.pnl.fees_usd,
+                fees_earned_usd: fees_usd,
                 il_pct: p.pnl.il_pct,
                 net_pnl_usd: p.pnl.net_pnl_usd,
                 net_pnl_pct: p.pnl.net_pnl_pct,
@@ -61,8 +112,8 @@ pub async fn list_positions(
                 PositionStatus::OutOfRange
             },
             created_at: None,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(ListPositionsResponse {
         total: responses.len(),
@@ -91,10 +142,37 @@ pub async fn get_position(
         .map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
     let positions = state.monitor.get_positions().await;
-    let position = positions
-        .iter()
-        .find(|p| p.address == pubkey)
-        .ok_or_else(|| ApiError::not_found("Position not found"))?;
+    let position = if let Some(p) = positions.iter().find(|p| p.address == pubkey) {
+        p.clone()
+    } else {
+        let p = monitored_position_from_chain(state.provider.clone(), &pubkey).await?;
+        let st = state.clone();
+        let addr = address.clone();
+        tokio::spawn(async move {
+            if let Err(e) = st.monitor.add_position(&addr).await {
+                warn!(
+                    error = %e,
+                    position = %addr,
+                    "get_position fallback: monitor.add_position failed (detail still returned)"
+                );
+            }
+        });
+        p
+    };
+
+    let prices =
+        fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&position)).await;
+    let valuation = compute_position_usd_valuation(state.provider.clone(), &position, &prices)
+        .await
+        .ok();
+    let value_usd = valuation
+        .as_ref()
+        .map(|v| v.value_usd)
+        .unwrap_or(position.pnl.current_value_usd);
+    let fees_usd = valuation
+        .as_ref()
+        .map(|v| v.fees_usd)
+        .unwrap_or(position.pnl.fees_usd);
 
     let response = PositionResponse {
         address: position.address.to_string(),
@@ -104,13 +182,13 @@ pub async fn get_position(
         tick_upper: position.on_chain.tick_upper,
         liquidity: position.on_chain.liquidity.to_string(),
         in_range: position.in_range,
-        value_usd: position.pnl.current_value_usd,
+        value_usd,
         pnl: PnLResponse {
             unrealized_pnl_usd: position.pnl.net_pnl_usd,
             unrealized_pnl_pct: position.pnl.net_pnl_pct,
             fees_earned_a: position.pnl.fees_earned_a,
             fees_earned_b: position.pnl.fees_earned_b,
-            fees_earned_usd: position.pnl.fees_usd,
+            fees_earned_usd: fees_usd,
             il_pct: position.pnl.il_pct,
             net_pnl_usd: position.pnl.net_pnl_usd,
             net_pnl_pct: position.pnl.net_pnl_pct,
@@ -242,20 +320,36 @@ pub async fn open_position(
     let op = svc.open_position(&request).await?;
     if op.success {
         let data = op.data.as_ref();
-        if let Some(m) = data
-            .and_then(|d| d.get("message"))
-            .and_then(|v| v.as_str())
-        {
-            return Ok(Json(PositionOpenResponse {
-                message: m.to_string(),
-                position_pda: None,
-                swap_signature: None,
-                cost_session_id,
-            }));
-        }
-        if let Some(pda) = data
+        let position_pda_opt = data
             .and_then(|d| d.get("position_pda"))
-            .and_then(|v| v.as_str())
+            .and_then(|v| v.as_str());
+
+        // New positions exist on-chain but `GET /positions/:addr` reads the in-memory monitor first.
+        // Without this, the dashboard shows "Position not found" until API restart + registry seed.
+        if !state.dry_run {
+            if let Some(pda) = position_pda_opt {
+                if let Err(e) = state.monitor.add_position(pda).await {
+                    warn!(
+                        error = %e,
+                        position = %pda,
+                        "open_position: monitor.add_position failed (detail may 404 until retry)"
+                    );
+                }
+            }
+        }
+
+        // Legacy: response with only `message` and no PDA (avoid swallowing idempotent replay which has both).
+        if let Some(m) = data.and_then(|d| d.get("message")).and_then(|v| v.as_str()) {
+            if position_pda_opt.is_none() {
+                return Ok(Json(PositionOpenResponse {
+                    message: m.to_string(),
+                    position_pda: None,
+                    swap_signature: None,
+                    cost_session_id,
+                }));
+            }
+        }
+        if let Some(pda) = position_pda_opt
         {
             let swap_signature = data
                 .and_then(|d| d.get("swap_signature"))
@@ -300,7 +394,11 @@ pub async fn open_position(
                     }
                 }
             }
-            let msg = format!("Position opened. PDA: {pda}");
+            let msg = data
+                .and_then(|d| d.get("message"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Position opened. PDA: {pda}"));
             return Ok(Json(PositionOpenResponse {
                 message: msg,
                 position_pda: Some(pda.to_string()),
@@ -381,6 +479,17 @@ pub async fn close_position(
 
     let op = svc.close_position(&address).await?;
     if op.success {
+        // Remove immediately so UI doesn't keep showing stale monitored entry.
+        state.monitor.remove_position(&pubkey).await;
+        state
+            .broadcast_position_update(PositionUpdate {
+                update_type: "closed".to_string(),
+                position_address: address.clone(),
+                timestamp: chrono::Utc::now(),
+                data: serde_json::json!({}),
+            })
+            .await;
+
         Ok(Json(MessageResponse::new(format!(
             "Position closed: {address}"
         ))))
@@ -491,18 +600,21 @@ pub async fn decrease_liquidity(
         }
     }
 
-    let liquidity_amount: u128 = request
-        .liquidity_amount
-        .trim()
-        .parse()
-        .map_err(|_| {
-            ApiError::bad_request("liquidity_amount must be a non-negative decimal integer string")
-        })?;
+    let liquidity_amount: u128 = request.liquidity_amount.trim().parse().map_err(|_| {
+        ApiError::bad_request("liquidity_amount must be a non-negative decimal integer string")
+    })?;
 
-    let op = svc
-        .decrease_liquidity(&address, liquidity_amount)
-        .await?;
+    let op = svc.decrease_liquidity(&address, liquidity_amount).await?;
     if op.success {
+        if state.dry_run {
+            let msg = op
+                .data
+                .as_ref()
+                .and_then(|d| d.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Dry-run: liquidity decrease simulated");
+            return Ok(Json(MessageResponse::new(format!("[DRY-RUN] {msg}"))));
+        }
         Ok(Json(MessageResponse::new(format!(
             "Liquidity decreased for position: {address}"
         ))))
@@ -544,6 +656,15 @@ pub async fn rebalance_position(
 
     let op = svc.rebalance_position(&address, &request).await?;
     if op.success {
+        if state.dry_run {
+            let msg = op
+                .data
+                .as_ref()
+                .and_then(|d| d.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Dry-run: rebalance simulated");
+            return Ok(Json(MessageResponse::new(format!("[DRY-RUN] {msg}"))));
+        }
         Ok(Json(MessageResponse::new(
             "Rebalance requested".to_string(),
         )))
