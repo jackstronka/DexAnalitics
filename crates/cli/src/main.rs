@@ -51,7 +51,7 @@ fn parse_utc_datetime_or_date(s: &str) -> anyhow::Result<i64> {
 
 #[derive(Parser)]
 #[command(name = "clmm-lp-cli")]
-#[command(about = "Bociarz LP Strategy Lab — Strategy Optimizer CLI", long_about = None)]
+#[command(about = "Bociarz LP — strategy optimizer CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

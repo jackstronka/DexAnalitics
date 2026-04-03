@@ -1,4 +1,4 @@
-//! Domain models and logic for the Bociarz LP Strategy Lab (derived from CLMM Liquidity Provider).
+//! Domain models and logic for Bociarz LP (derived from CLMM Liquidity Provider).
 
 /// Prelude module for convenient imports.
 pub mod prelude;

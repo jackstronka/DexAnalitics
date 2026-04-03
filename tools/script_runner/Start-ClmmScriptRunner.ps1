@@ -205,7 +205,20 @@ if ($env:CLMM_SCRIPT_RUNNER_PORT -and $env:CLMM_SCRIPT_RUNNER_PORT -match '^\d+$
 $prefix = "http://127.0.0.1:$port/"
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($prefix)
-$listener.Start()
+try {
+  $listener.Start()
+} catch {
+  $err = $_.Exception.Message
+  $altPort = if ($port -eq 9847) { 9857 } else { 9847 }
+  $altPrefix = "http://127.0.0.1:$altPort/"
+  Write-Warning "Failed to listen on $prefix ($err). Retrying on $altPrefix ..."
+
+  $port = $altPort
+  $prefix = $altPrefix
+  $listener = New-Object System.Net.HttpListener
+  $listener.Prefixes.Add($prefix)
+  $listener.Start()
+}
 Write-Host "CLMM script runner listening on $prefix (repo: $repoRoot)"
 
 while ($listener.IsListening) {

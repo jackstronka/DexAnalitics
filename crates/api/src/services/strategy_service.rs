@@ -170,7 +170,7 @@ impl StrategyService {
         };
 
         // Create strategy executor
-        let executor = StrategyExecutor::new(
+        let mut executor = StrategyExecutor::new(
             self.state.provider.clone(),
             self.state.monitor.clone(),
             self.state.tx_manager.clone(),
@@ -181,6 +181,14 @@ impl StrategyService {
         executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
             "data/position-fee-checkpoints.jsonl",
         )));
+
+        if !dry_run {
+            match crate::services::position_executor::load_wallet_from_env() {
+                Ok(Some(wallet)) => executor.set_wallet(wallet),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
 
         // Configure decision engine from stored strategy config.
         let strategy_type = strategy
@@ -482,4 +490,55 @@ impl StrategyService {
             }))
         }
     }
+}
+
+/// Append a position PDA to `parameters.position_addresses` for an existing strategy.
+pub async fn append_position_address_to_strategy(
+    state: &AppState,
+    strategy_id: &str,
+    position_address: &str,
+) -> Result<(), ApiError> {
+    let mut strategies = state.strategies.write().await;
+    let strategy = strategies
+        .get_mut(strategy_id)
+        .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+
+    let config_obj = strategy
+        .config
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("strategy config must be a JSON object"))?;
+
+    let params = config_obj
+        .entry("parameters".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !params.is_object() {
+        *params = serde_json::json!({});
+    }
+    let params_obj = params
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("parameters must be a JSON object"))?;
+
+    let arr_val = params_obj
+        .entry("position_addresses".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = arr_val.as_array_mut().ok_or_else(|| {
+        ApiError::bad_request("parameters.position_addresses must be a JSON array")
+    })?;
+    if !arr
+        .iter()
+        .any(|v| v.as_str() == Some(position_address))
+    {
+        arr.push(serde_json::json!(position_address));
+    }
+    strategy.updated_at = chrono::Utc::now();
+    info!(
+        strategy_id = %strategy_id,
+        position = %position_address,
+        "Linked position to strategy (parameters.position_addresses)"
+    );
+
+    let snapshot = strategies.clone();
+    drop(strategies);
+    crate::state::try_persist_strategies_best_effort(&snapshot);
+    Ok(())
 }

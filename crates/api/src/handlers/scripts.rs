@@ -361,11 +361,27 @@ pub async fn run_script(
     Path(id): Path<String>,
     body: Option<Json<RunScriptRequest>>,
 ) -> ApiResult<Json<ScriptRunRecord>> {
-    let base = state
-        .config
-        .script_runner_url
+    let derived = std::env::var("CLMM_SCRIPT_RUNNER_PORT")
+        .ok()
+        .and_then(|p| {
+            let t = p.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(format!("http://127.0.0.1:{t}"))
+            }
+        });
+    let base = derived
         .as_ref()
-        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.as_str())
+        .or_else(|| {
+            state
+                .config
+                .script_runner_url
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.as_str())
+        })
         .ok_or_else(|| {
             ApiError::service_unavailable(
                 "SCRIPT_RUNNER_URL is not set (start tools/script_runner/Start-ClmmScriptRunner.ps1)",

@@ -19,7 +19,8 @@ pub use crate::events::{
 pub use crate::models::{
     CircuitBreakerStatus, ComponentHealth, CreateStrategyRequest, HealthResponse,
     ListPoolsResponse, ListPositionsResponse, ListStrategiesResponse, MessageResponse,
-    MetricsResponse, OpenPositionRequest, PnLResponse, PoolResponse, PoolStateResponse,
+    MetricsResponse, OpenPositionRequest, SwapInPoolBeforeOpen, PnLResponse, PoolResponse,
+    PoolStateResponse,
     PortfolioAnalyticsResponse, PositionResponse, PositionStatus, RebalanceRequest, ServiceStatus,
     SimulationRequest, SimulationResponse, StrategyParameters, StrategyPerformanceResponse,
     StrategyResponse, StrategyType, SuccessResponse,

@@ -36,7 +36,7 @@ groups:
           severity: critical
         annotations:
           summary: "API server is down"
-          description: "CLMM LP API server has been down for more than 1 minute"
+          description: "Bociarz LP API server has been down for more than 1 minute"
 
   # -------------------------------------------------------------------------
   # Database Alerts

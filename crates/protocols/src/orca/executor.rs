@@ -10,10 +10,10 @@ use crate::rpc::RpcProvider;
 use anyhow::{Context, Result};
 use borsh::BorshDeserialize;
 use orca_whirlpools::{
-    DecreaseLiquidityParam, IncreaseLiquidityParam, WhirlpoolsConfigInput,
+    DecreaseLiquidityParam, IncreaseLiquidityParam, SwapInstructions, SwapType, WhirlpoolsConfigInput,
     close_position_instructions, decrease_liquidity_instructions, harvest_position_instructions,
     increase_liquidity_instructions, open_full_range_position_instructions,
-    open_position_instructions_with_tick_bounds, set_whirlpools_config_address,
+    open_position_instructions_with_tick_bounds, set_whirlpools_config_address, swap_instructions,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -280,6 +280,56 @@ impl WhirlpoolExecutor {
             res.created_position = Some(position_pda);
         }
         Ok(res)
+    }
+
+    /// Single-pool Orca swap (**ExactIn**) — same pool you will add liquidity to (e.g. rebalance token mix before open).
+    pub async fn swap_exact_in(
+        &self,
+        pool: Pubkey,
+        specified_mint: Pubkey,
+        amount: u64,
+        slippage_bps: u16,
+        payer: &Keypair,
+    ) -> Result<ExecutionResult> {
+        if amount == 0 {
+            anyhow::bail!("swap amount must be > 0");
+        }
+        info!(
+            pool = %pool,
+            specified_mint = %specified_mint,
+            amount = amount,
+            slippage_bps = slippage_bps,
+            "Orca swap ExactIn in pool"
+        );
+
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
+
+        let swap_ix: SwapInstructions = swap_instructions(
+            &rpc,
+            pool,
+            amount,
+            specified_mint,
+            SwapType::ExactIn,
+            Some(slippage_bps),
+            Some(payer.pubkey()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("orca swap_instructions failed: {e}"))?;
+
+        self.send_transaction_with_signers(
+            &swap_ix.instructions,
+            payer,
+            &swap_ix.additional_signers,
+        )
+        .await
     }
 
     /// Increases liquidity in an existing position.

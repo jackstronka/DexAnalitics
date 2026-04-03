@@ -282,7 +282,7 @@ fn format_slack_digest(ledger_path: &str, rows: &[serde_json::Value]) -> String 
     let mut s = String::new();
     let _ = writeln!(
         &mut s,
-        "CLMM LP — Orca lifecycle ledger (last {} rows)\n{}",
+        "Bociarz LP — Orca lifecycle ledger (last {} rows)\n{}",
         rows.len(),
         ledger_path
     );

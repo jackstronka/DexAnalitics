@@ -86,7 +86,7 @@ W praktyce **główny nośnik zachowania** nie musi być klasycznym treningiem m
 
 ## Backlog (do odhaczania)
 
-- [ ] **P14** (Content) “Bociarz LP Strategy Lab” — pipeline narracji do filmów: generuj segmenty (`studio-stream-plan`) → TTS “moim głosem” (voice clone) → montaż/wrzutka na YouTube. Założenie budżetu startowego: **~100 min/mies** głosu wystarczy do regularnych filmów (np. ~10×10 min albo ~20×5 min narracji).
+- [ ] **P14** (Content) “Bociarz LP” — pipeline narracji do filmów: generuj segmenty (`studio-stream-plan`) → TTS “moim głosem” (voice clone) → montaż/wrzutka na YouTube. Założenie budżetu startowego: **~100 min/mies** głosu wystarczy do regularnych filmów (np. ~10×10 min albo ~20×5 min narracji).
 - [ ] **P15** (Cost) Ustalić plan TTS dla voice clone: na start sensowny jest próg ~100 min/mies (np. ElevenLabs Creator, rzędu **$22/mies** wg cennika), a live 24/7 liczyć osobno po minutach.
 
 - [ ] **P1** Opisać w repo **wersjonowany** szablon polityki agenta (`version`, **reguły jako główny „trening”**, rubryki, few-shot, format wyjścia).
@@ -114,4 +114,4 @@ W praktyce **główny nośnik zachowania** nie musi być klasycznym treningiem m
 | 2026-03-26 | Plan | Tryb **konsensusu**: wspólny blackboard/transcript, jedna decyzja wyjściowa, koszty/limit rund/fallback; P9–P10. |
 | 2026-03-26 | Plan | Sekcja **reguły jako trening**: rulebook, rubryki, few-shot, ewaluacja offline; P11–P12; fine-tuning opcjonalnie później. |
 | 2026-03-26 | Plan | **Osobny profil/tryb** (`agent_layer_profile`), domyślnie wyłączone; P13. |
-| 2026-03-26 | Plan | Content: “Bociarz LP Strategy Lab” — voice clone (TTS) do filmów; startowy budżet ~100 min/mies; P14–P15. |
+| 2026-03-26 | Plan | Content: “Bociarz LP” — voice clone (TTS) do filmów; startowy budżet ~100 min/mies; P14–P15. |

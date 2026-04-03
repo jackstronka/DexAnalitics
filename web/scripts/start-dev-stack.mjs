@@ -62,7 +62,7 @@ const apiPort = Number.parseInt(process.env.API_PORT || '8080', 10)
 console.log()
 console.log(
   p.cyan('▶ ') +
-    p.bold('CLMM LP') +
+    p.bold('Bociarz LP') +
     p.dim(`  http://localhost:3000  ·  API :${apiPort}  ·  Ctrl+C → stop`) +
     (openBrowser ? p.dim('  ·  --open') : ''),
 )

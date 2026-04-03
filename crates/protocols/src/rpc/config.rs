@@ -63,9 +63,12 @@ impl Default for RpcConfig {
             // requiring API keys (leading to "Unauthorized" failures during rotation).
             // If you want fallbacks, provide them explicitly via `SOLANA_RPC_FALLBACK_URLS`.
         } else {
+            // Free public fallbacks (no API key).
+            // Keep the list short and avoid endpoints that commonly return 401/402/403.
             fallback_urls.extend(vec![
-                "https://solana-api.projectserum.com".to_string(),
-                "https://rpc.ankr.com/solana".to_string(),
+                // PublicNode (no key)
+                "https://solana.publicnode.com".to_string(),
+                "https://solana-rpc.publicnode.com".to_string(),
             ]);
         }
 

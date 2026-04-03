@@ -54,6 +54,7 @@ utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 orca_whirlpools = "7.0.2"
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2.1"
 
 [dev-dependencies]
 httpmock = "0.8.3"

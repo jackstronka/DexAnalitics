@@ -8,6 +8,7 @@ import PositionDetail from '@/pages/PositionDetail'
 import Strategies from '@/pages/Strategies'
 import StrategyDetail from '@/pages/StrategyDetail'
 import StrategyCreate from '@/pages/StrategyCreate'
+import StrategyEdit from '@/pages/StrategyEdit'
 import Pools from '@/pages/Pools'
 import PoolDetail from '@/pages/PoolDetail'
 import Settings from '@/pages/Settings'
@@ -18,7 +19,7 @@ import Wallet from '@/pages/Wallet'
 function App() {
   return (
     <BrowserRouter>
-      <div className="dark min-h-screen bg-background">
+      <div className="min-h-screen bg-background">
         <Routes>
           <Route path="/" element={<Layout />}>
             <Route index element={<Navigate to="/dashboard" replace />} />
@@ -30,6 +31,7 @@ function App() {
             <Route path="positions/:address" element={<PositionDetail />} />
             <Route path="strategies" element={<Strategies />} />
             <Route path="strategies/new" element={<StrategyCreate />} />
+            <Route path="strategies/:id/edit" element={<StrategyEdit />} />
             <Route path="strategies/:id" element={<StrategyDetail />} />
             <Route path="pools" element={<Pools />} />
             <Route path="pools/:address" element={<PoolDetail />} />

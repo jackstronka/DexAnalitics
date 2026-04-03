@@ -1,4 +1,4 @@
-# Bociarz LP Strategy Lab — Startup Guide
+# Bociarz LP — Startup Guide
 
 This guide explains how to start all services in the correct order to have the complete solution running.
 

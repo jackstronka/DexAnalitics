@@ -84,6 +84,16 @@ async fn all_position_endpoints_are_reachable() {
     assert_eq!(
         request(
             router.clone(),
+            Method::POST,
+            "/api/v1/positions/swap-before-open",
+            Some(serde_json::json!({}))
+        )
+        .await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        request(
+            router.clone(),
             Method::GET,
             "/api/v1/positions/invalid",
             None
@@ -157,9 +167,9 @@ async fn all_strategy_endpoints_are_reachable() {
             "/api/v1/strategies/s1",
             Some(serde_json::json!(CreateStrategyRequest {
                 name: "u".to_string(),
-                pool_address: "pool".to_string(),
                 strategy_type: StrategyType::StaticRange,
                 parameters: StrategyParameters::default(),
+                pool_address: None,
                 auto_execute: false,
                 dry_run: true
             })),
@@ -174,9 +184,9 @@ async fn all_strategy_endpoints_are_reachable() {
             "/api/v1/strategies",
             Some(serde_json::json!(CreateStrategyRequest {
                 name: "c".to_string(),
-                pool_address: "pool".to_string(),
                 strategy_type: StrategyType::StaticRange,
                 parameters: StrategyParameters::default(),
+                pool_address: None,
                 auto_execute: false,
                 dry_run: true
             })),
@@ -245,6 +255,16 @@ async fn all_pool_and_analytics_endpoints_are_reachable() {
             router.clone(),
             Method::GET,
             "/api/v1/pools/invalid/state",
+            None
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/pools/invalid/estimate-swap-cost",
             None
         )
         .await,

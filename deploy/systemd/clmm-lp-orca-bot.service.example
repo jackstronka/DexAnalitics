@@ -6,7 +6,7 @@
 # Doc: doc/OPERATIONAL_CONTINUITY.md
 
 [Unit]
-Description=CLMM LP Orca bot (clmm-lp-cli orca-bot-run)
+Description=Bociarz LP Orca bot (clmm-lp-cli orca-bot-run)
 After=network-online.target
 Wants=network-online.target
 

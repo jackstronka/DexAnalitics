@@ -130,7 +130,7 @@ pub async fn run_orca_swap(
     println!("quote: {:?}", swap_ix.quote);
 
     let fee_payer = wallet.pubkey();
-    try_append_cli_swap_tx_cost(provider.as_ref(), &fee_payer, &sig, &pool_pk).await;
+    try_append_cli_swap_tx_cost(provider.as_ref(), &fee_payer, &sig, &pool_pk, None).await;
 
     Ok(())
 }

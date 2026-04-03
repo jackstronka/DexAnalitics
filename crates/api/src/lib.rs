@@ -1,6 +1,6 @@
 //! REST API server and endpoints.
 //!
-//! This crate provides a REST API for the CLMM LP Strategy Optimizer:
+//! This crate provides a REST API for Bociarz LP:
 //! - Position management endpoints
 //! - Strategy configuration and execution
 //! - Pool information and analytics
@@ -27,6 +27,8 @@ pub mod models;
 pub mod openapi;
 /// Route definitions.
 pub mod routes;
+/// Persistence layer for strategies.
+pub mod strategy_store;
 /// Server configuration and startup.
 pub mod server;
 /// Service layer for API operations.

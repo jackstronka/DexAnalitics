@@ -1,4 +1,4 @@
--- Initial database schema for CLMM LP Strategy Optimizer
+-- Initial database schema for Bociarz LP
 -- Migration: 001_initial_schema
 
 -- Pools table: stores CLMM pool configurations

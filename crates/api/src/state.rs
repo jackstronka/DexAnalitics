@@ -11,6 +11,7 @@ use clmm_lp_execution::prelude::{
 };
 use clmm_lp_protocols::prelude::{RpcConfig, RpcProvider};
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{RwLock, broadcast};
@@ -57,6 +58,17 @@ pub struct AppState {
 impl AppState {
     /// Creates a new application state.
     pub fn new(rpc_config: RpcConfig, api_config: ApiConfig) -> Self {
+        // For safety, default to dry-run when DRY_RUN is not set.
+        let dry_run = env::var("DRY_RUN")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "y"
+                )
+            })
+            .unwrap_or(true);
+
         let provider = Arc::new(RpcProvider::new(rpc_config));
         let monitor = Arc::new(PositionMonitor::new(
             provider.clone(),
@@ -91,19 +103,38 @@ impl AppState {
             _ => Arc::new(InProcessEventBus::new()),
         };
 
+        // Load persisted strategies (best-effort). If the store is missing or invalid, start empty.
+        let persisted_strategies =
+            crate::strategy_store::try_load_persisted_strategies().unwrap_or_default();
+        let persisted_map: HashMap<String, StrategyState> = persisted_strategies
+            .into_iter()
+            .map(|p| {
+                let id = p.id.clone();
+                let strategy = StrategyState {
+                    id: id.clone(),
+                    name: p.name,
+                    running: false, // Do not auto-start after API restart.
+                    config: p.config,
+                    created_at: p.created_at,
+                    updated_at: p.updated_at,
+                };
+                (id, strategy)
+            })
+            .collect();
+
         Self {
             provider,
             monitor,
             tx_manager,
             circuit_breaker,
             lifecycle,
-            strategies: Arc::new(RwLock::new(HashMap::new())),
+            strategies: Arc::new(RwLock::new(persisted_map)),
             position_updates: position_tx,
             alert_updates: alert_tx,
             config: api_config,
             executors: Arc::new(RwLock::new(HashMap::new())),
             optimization_busy: Arc::new(RwLock::new(HashMap::new())),
-            dry_run: true, // Default to dry-run for safety
+            dry_run,
             phantom_nonces: Arc::new(RwLock::new(HashMap::new())),
             event_bus,
         }
@@ -245,6 +276,28 @@ pub struct StrategyState {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Last updated timestamp.
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Persist strategies to disk (best-effort; never fails the request).
+pub(crate) fn try_persist_strategies_best_effort(strategies: &HashMap<String, StrategyState>) {
+    if !crate::strategy_store::enabled() {
+        return;
+    }
+
+    let persisted: Vec<crate::strategy_store::PersistedStrategy> = strategies
+        .values()
+        .map(|s| crate::strategy_store::PersistedStrategy {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            config: s.config.clone(),
+            created_at: s.created_at.clone(),
+            updated_at: s.updated_at.clone(),
+        })
+        .collect();
+
+    if let Err(e) = crate::strategy_store::try_save_persisted_strategies(&persisted) {
+        tracing::warn!(error = %e, "Failed to persist strategies store");
+    }
 }
 
 /// Position update for WebSocket broadcast.

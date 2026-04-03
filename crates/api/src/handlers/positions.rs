@@ -1,9 +1,12 @@
 //! Position handlers.
 
 use crate::error::{ApiError, ApiResult};
+use crate::handlers::strategies::ensure_strategy_running_after_position_link;
+use crate::services::strategy_service::append_position_address_to_strategy;
 use crate::models::{
     DecreaseLiquidityRequest, ListPositionsResponse, MessageResponse, OpenPositionRequest,
-    PnLResponse, PositionResponse, PositionStatus, RebalanceRequest,
+    PnLResponse, PositionOpenResponse, PositionResponse, PositionStatus, RebalanceRequest,
+    SwapBeforeOpenRequest, SwapBeforeOpenResponse,
 };
 use crate::state::{AppState, PositionUpdate};
 use axum::{
@@ -12,8 +15,9 @@ use axum::{
 };
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::PositionService;
 
 /// List all positions.
@@ -122,6 +126,71 @@ pub async fn get_position(
     Ok(Json(response))
 }
 
+/// Executes an Orca Whirlpool swap (ExactIn) inside the same pool (SWAP-only step).
+#[utoipa::path(
+    post,
+    path = "/positions/swap-before-open",
+    tag = "Positions",
+    request_body = SwapBeforeOpenRequest,
+    responses(
+        (status = 200, description = "Swap executed", body = SwapBeforeOpenResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
+pub async fn swap_before_open(
+    State(state): State<AppState>,
+    Json(request): Json<SwapBeforeOpenRequest>,
+) -> ApiResult<Json<SwapBeforeOpenResponse>> {
+    info!(
+        pool = %request.pool_address,
+        specified_mint = %request.specified_mint,
+        amount_in = request.amount_in,
+        dry_run = state.dry_run,
+        "Swapping before open (swap-only step)"
+    );
+
+    let mut svc = PositionService::new(state.clone());
+    svc.set_dry_run(state.dry_run);
+
+    if !state.dry_run {
+        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
+            svc.set_executor(exec);
+        }
+    }
+
+    let op = svc.swap_before_open_exact_in(&request).await?;
+
+    if op.success {
+        let data = op.data.as_ref();
+        let message = data
+            .and_then(|d| d.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Swap executed")
+            .to_string();
+
+        let swap_signature = data
+            .and_then(|d| d.get("swap_signature"))
+            .and_then(|v| v.as_str())
+            .map(std::string::ToString::to_string);
+
+        let cost_session_id = request
+            .cost_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        Ok(Json(SwapBeforeOpenResponse {
+            message,
+            swap_signature,
+            cost_session_id,
+        }))
+    } else {
+        Err(ApiError::ServiceUnavailable(
+            op.error.unwrap_or_else(|| "Swap failed".to_string()),
+        ))
+    }
+}
+
 /// Open a new position.
 #[utoipa::path(
     post,
@@ -129,53 +198,122 @@ pub async fn get_position(
     tag = "Positions",
     request_body = OpenPositionRequest,
     responses(
-        (status = 201, description = "Position opened", body = PositionResponse),
+        (status = 201, description = "Position opened", body = PositionOpenResponse),
         (status = 400, description = "Invalid request")
     )
 )]
 pub async fn open_position(
     State(state): State<AppState>,
     Json(request): Json<OpenPositionRequest>,
-) -> ApiResult<Json<MessageResponse>> {
+) -> ApiResult<Json<PositionOpenResponse>> {
+    let strategy_id = request.strategy_id.clone();
     info!(
         pool = %request.pool_address,
         tick_lower = request.tick_lower,
         tick_upper = request.tick_upper,
         dry_run = state.dry_run,
+        strategy_id = ?strategy_id.as_deref(),
         "Opening position"
     );
+
+    if let Some(ref sid) = strategy_id {
+        let strategies = state.strategies.read().await;
+        strategies
+            .get(sid)
+            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+    }
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
-    // Non-dry-run: use any available strategy executor (if present).
+    // Non-dry-run: strategy executor or lazy KEYPAIR_PATH executor (swap/open work without a running strategy).
     if !state.dry_run {
-        if let Some(exec) = state.executors.read().await.values().next().cloned() {
+        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
             svc.set_executor(exec);
         }
     }
 
+    let cost_session_id = request
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let op = svc.open_position(&request).await?;
     if op.success {
-        if let Some(m) = op
-            .data
-            .as_ref()
+        let data = op.data.as_ref();
+        if let Some(m) = data
             .and_then(|d| d.get("message"))
             .and_then(|v| v.as_str())
         {
-            return Ok(Json(MessageResponse::new(m.to_string())));
+            return Ok(Json(PositionOpenResponse {
+                message: m.to_string(),
+                position_pda: None,
+                swap_signature: None,
+                cost_session_id,
+            }));
         }
-        if let Some(pda) = op
-            .data
-            .as_ref()
+        if let Some(pda) = data
             .and_then(|d| d.get("position_pda"))
             .and_then(|v| v.as_str())
         {
-            return Ok(Json(MessageResponse::new(format!(
-                "Position opened. PDA: {pda}"
-            ))));
+            let swap_signature = data
+                .and_then(|d| d.get("swap_signature"))
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string);
+            let resp_cost_session = data
+                .and_then(|d| d.get("cost_session_id"))
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string)
+                .or_else(|| cost_session_id.clone());
+
+            if let Some(ref sid) = strategy_id {
+                append_position_address_to_strategy(&state, sid, pda).await?;
+                match ensure_strategy_running_after_position_link(&state, sid, pda).await {
+                    Ok(()) => {
+                        let mut msg = format!("Position opened. PDA: {pda}");
+                        msg.push_str(" — linked to strategy; automation started.");
+                        return Ok(Json(PositionOpenResponse {
+                            message: msg,
+                            position_pda: Some(pda.to_string()),
+                            swap_signature,
+                            cost_session_id: resp_cost_session,
+                        }));
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            strategy_id = %sid,
+                            "Could not start strategy automation after position link"
+                        );
+                        let mut msg = format!("Position opened. PDA: {pda}");
+                        msg.push_str(&format!(
+                            " — linked to strategy; automation could not start: {}.",
+                            e
+                        ));
+                        return Ok(Json(PositionOpenResponse {
+                            message: msg,
+                            position_pda: Some(pda.to_string()),
+                            swap_signature,
+                            cost_session_id: resp_cost_session,
+                        }));
+                    }
+                }
+            }
+            let msg = format!("Position opened. PDA: {pda}");
+            return Ok(Json(PositionOpenResponse {
+                message: msg,
+                position_pda: Some(pda.to_string()),
+                swap_signature,
+                cost_session_id: resp_cost_session,
+            }));
         }
-        return Ok(Json(MessageResponse::new("Position opened".to_string())));
+        return Ok(Json(PositionOpenResponse {
+            message: "Position opened".to_string(),
+            position_pda: None,
+            swap_signature: None,
+            cost_session_id,
+        }));
     }
 
     Err(ApiError::ServiceUnavailable(
@@ -237,7 +375,7 @@ pub async fn close_position(
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(false);
-    if let Some(exec) = state.executors.read().await.values().next().cloned() {
+    if let Some(exec) = resolve_executor_for_position_ops(&state).await {
         svc.set_executor(exec);
     }
 
@@ -308,7 +446,7 @@ pub async fn collect_fees(
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(false);
-    if let Some(exec) = state.executors.read().await.values().next().cloned() {
+    if let Some(exec) = resolve_executor_for_position_ops(&state).await {
         svc.set_executor(exec);
     }
 
@@ -348,7 +486,7 @@ pub async fn decrease_liquidity(
     svc.set_dry_run(state.dry_run);
 
     if !state.dry_run {
-        if let Some(exec) = state.executors.read().await.values().next().cloned() {
+        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
             svc.set_executor(exec);
         }
     }
@@ -399,7 +537,7 @@ pub async fn rebalance_position(
     svc.set_dry_run(state.dry_run);
 
     if !state.dry_run {
-        if let Some(exec) = state.executors.read().await.values().next().cloned() {
+        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
             svc.set_executor(exec);
         }
     }

@@ -72,6 +72,7 @@ fn row(
     owner: &Pubkey,
     signature: &Signature,
     note: &'static str,
+    rebalance_session_id: Option<String>,
 ) -> RegistryRow<'static> {
     RegistryRow {
         schema_version: 1,
@@ -82,7 +83,7 @@ fn row(
         pool_address: pool.to_string(),
         owner_pubkey: owner.to_string(),
         signature: signature.to_string(),
-        rebalance_session_id: rebalance_session_id_from_env(),
+        rebalance_session_id: rebalance_session_id.or_else(rebalance_session_id_from_env),
         rpc_url: String::new(),
         accounting_note: note,
     }
@@ -96,8 +97,19 @@ pub async fn try_append_registry_open(
     pool: &Pubkey,
     owner: &Pubkey,
     signature: &Signature,
+    rebalance_session_id_override: Option<String>,
 ) {
-    if let Err(e) = append_open_inner(provider, source, position, pool, owner, signature).await {
+    if let Err(e) = append_open_inner(
+        provider,
+        source,
+        position,
+        pool,
+        owner,
+        signature,
+        rebalance_session_id_override,
+    )
+    .await
+    {
         warn!(error = %e, "position registry: append registry_open failed");
     }
 }
@@ -109,6 +121,7 @@ async fn append_open_inner(
     pool: &Pubkey,
     owner: &Pubkey,
     signature: &Signature,
+    rebalance_session_id_override: Option<String>,
 ) -> Result<()> {
     let mut r = row(
         "registry_open",
@@ -118,6 +131,7 @@ async fn append_open_inner(
         owner,
         signature,
         "Append-only; collectors may attach per-position jobs until registry_close for this position_pubkey.",
+        rebalance_session_id_override,
     );
     r.rpc_url = provider.current_endpoint().await;
     append_jsonl(&r).context("registry_open jsonl")
@@ -131,8 +145,19 @@ pub async fn try_append_registry_close(
     pool: &Pubkey,
     owner: &Pubkey,
     signature: &Signature,
+    rebalance_session_id_override: Option<String>,
 ) {
-    if let Err(e) = append_close_inner(provider, source, position, pool, owner, signature).await {
+    if let Err(e) = append_close_inner(
+        provider,
+        source,
+        position,
+        pool,
+        owner,
+        signature,
+        rebalance_session_id_override,
+    )
+    .await
+    {
         warn!(error = %e, "position registry: append registry_close failed");
     }
 }
@@ -144,6 +169,7 @@ async fn append_close_inner(
     pool: &Pubkey,
     owner: &Pubkey,
     signature: &Signature,
+    rebalance_session_id_override: Option<String>,
 ) -> Result<()> {
     let mut r = row(
         "registry_close",
@@ -153,6 +179,7 @@ async fn append_close_inner(
         owner,
         signature,
         "Append-only; last registry_close vs registry_open per position_pubkey defines whether position is active.",
+        rebalance_session_id_override,
     );
     r.rpc_url = provider.current_endpoint().await;
     append_jsonl(&r).context("registry_close jsonl")

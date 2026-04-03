@@ -1,7 +1,7 @@
 //! Position service for executing position operations.
 
 use crate::error::ApiError;
-use crate::models::{OpenPositionRequest, RebalanceRequest};
+use crate::models::{OpenPositionRequest, RebalanceRequest, SwapBeforeOpenRequest};
 use crate::state::{AlertUpdate, AppState, PositionUpdate};
 use clmm_lp_execution::prelude::{RebalanceParams, RebalanceReason, StrategyExecutor};
 use clmm_lp_protocols::prelude::WhirlpoolReader;
@@ -113,6 +113,90 @@ impl PositionService {
         self.dry_run = dry_run;
     }
 
+    /// Executes an Orca Whirlpool swap (ExactIn) **only** inside a pool.
+    ///
+    /// This is a building block for a 2-step UI flow: SWAP first, then OPEN.
+    pub async fn swap_before_open_exact_in(
+        &self,
+        request: &SwapBeforeOpenRequest,
+    ) -> Result<OperationResult, ApiError> {
+        let pool_pubkey = Pubkey::from_str(&request.pool_address)
+            .map_err(|_| ApiError::bad_request("Invalid pool address"))?;
+        let amount_in = request.amount_in;
+        if amount_in == 0 {
+            return Err(ApiError::bad_request(
+                "amount_in must be greater than 0",
+            ));
+        }
+
+        let specified_mint = Pubkey::from_str(request.specified_mint.trim())
+            .map_err(|_| ApiError::bad_request("Invalid specified_mint"))?;
+
+        info!(
+            pool = %request.pool_address,
+            specified_mint = %request.specified_mint,
+            amount_in = %amount_in,
+            dry_run = self.dry_run,
+            "Swap before open (ExactIn, swap only)"
+        );
+
+        let ledger_session = request
+            .cost_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // Fetch pool state to validate that mint is either token A or token B.
+        let pool_state = self
+            .pool_reader
+            .get_pool_state(&request.pool_address)
+            .await
+            .map_err(|e| ApiError::not_found(format!("Pool not found: {e}")))?;
+        if specified_mint != pool_state.token_mint_a && specified_mint != pool_state.token_mint_b {
+            return Err(ApiError::Validation(
+                "specified_mint must be the pool's token A or B mint".to_string(),
+            ));
+        }
+
+        if self.dry_run {
+            return Ok(OperationResult::dry_run(format!(
+                "Would swap_exact_in amount_in={} mint={} in pool {} (no open)",
+                request.amount_in, request.specified_mint, request.pool_address
+            )));
+        }
+
+        let Some(executor) = &self.executor else {
+            return Ok(OperationResult::failure(
+                "Swap requires executor and wallet configuration",
+            ));
+        };
+
+        let guard = executor.read().await;
+        let sig_opt = guard
+            .execute_swap_exact_in(
+                &pool_pubkey,
+                &specified_mint,
+                request.amount_in,
+                request.slippage_tolerance_bps,
+                ledger_session.clone(),
+            )
+            .await
+            .map_err(|e| ApiError::internal(format!("swap before open failed: {e}")))?;
+
+        let swap_signature = sig_opt.ok_or_else(|| {
+            ApiError::internal("swap_exact_in returned no signature (unexpected dry-run)".to_string())
+        })?;
+
+        let mut data = serde_json::json!({
+            "swap_signature": swap_signature.to_string(),
+        });
+        if let Some(ref sid) = ledger_session {
+            data["cost_session_id"] = serde_json::json!(sid);
+        }
+
+        Ok(OperationResult::success_with_data(data))
+    }
+
     /// Opens a new position.
     pub async fn open_position(
         &self,
@@ -138,8 +222,68 @@ impl PositionService {
             }
         }
 
+        let need_pool_state = request.swap_before_open.is_some() || !request.full_range;
+        let pool_state = if need_pool_state {
+            Some(
+                self.pool_reader
+                    .get_pool_state(&request.pool_address)
+                    .await
+                    .map_err(|e| ApiError::not_found(format!("Pool not found: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        if let Some(ref sw) = request.swap_before_open {
+            if sw.amount_in == 0 {
+                return Err(ApiError::bad_request(
+                    "swap_before_open.amount_in must be greater than 0",
+                ));
+            }
+            let mint = Pubkey::from_str(sw.specified_mint.trim())
+                .map_err(|_| ApiError::bad_request("Invalid swap_before_open.specified_mint"))?;
+            let ps = pool_state.as_ref().ok_or_else(|| {
+                ApiError::internal("pool state required for swap validation".to_string())
+            })?;
+            if mint != ps.token_mint_a && mint != ps.token_mint_b {
+                return Err(ApiError::Validation(
+                    "swap_before_open.specified_mint must be the pool's token A or B mint"
+                        .to_string(),
+                ));
+            }
+        }
+
+        if !request.full_range {
+            let pool_state = pool_state.as_ref().ok_or_else(|| {
+                ApiError::internal("pool state required for tick validation".to_string())
+            })?;
+            let tick_spacing = pool_state.tick_spacing as i32;
+            if request.tick_lower % tick_spacing != 0 || request.tick_upper % tick_spacing != 0 {
+                return Err(ApiError::Validation(format!(
+                    "Tick bounds must be multiples of tick spacing ({})",
+                    tick_spacing
+                )));
+            }
+        }
+
         if self.dry_run {
             info!("Dry-run mode: would open position");
+            if let Some(ref sw) = request.swap_before_open {
+                if request.full_range {
+                    return Ok(OperationResult::dry_run(format!(
+                        "Would swap {} raw units (mint {}) then open full-range in pool {}",
+                        sw.amount_in, sw.specified_mint, request.pool_address
+                    )));
+                }
+                return Ok(OperationResult::dry_run(format!(
+                    "Would swap {} raw units (mint {}) then open position in pool {} with range [{}, {}]",
+                    sw.amount_in,
+                    sw.specified_mint,
+                    request.pool_address,
+                    request.tick_lower,
+                    request.tick_upper
+                )));
+            }
             if request.full_range {
                 return Ok(OperationResult::dry_run(format!(
                     "Would open full-range position in pool {}",
@@ -158,24 +302,33 @@ impl PositionService {
             ));
         };
 
-        if !request.full_range {
-            // Fetch pool state to validate tick spacing.
-            let pool_state = self
-                .pool_reader
-                .get_pool_state(&request.pool_address)
-                .await
-                .map_err(|e| ApiError::not_found(format!("Pool not found: {}", e)))?;
+        let ledger_session = request
+            .cost_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
-            let tick_spacing = pool_state.tick_spacing as i32;
-            if request.tick_lower % tick_spacing != 0 || request.tick_upper % tick_spacing != 0 {
-                return Err(ApiError::Validation(format!(
-                    "Tick bounds must be multiples of tick spacing ({})",
-                    tick_spacing
-                )));
+        let guard = executor.read().await;
+
+        let mut swap_signature: Option<String> = None;
+        if let Some(ref sw) = request.swap_before_open {
+            let mint = Pubkey::from_str(sw.specified_mint.trim())
+                .map_err(|_| ApiError::bad_request("Invalid swap_before_open.specified_mint"))?;
+            let sig_opt = guard
+                .execute_swap_exact_in(
+                    &pool_pubkey,
+                    &mint,
+                    sw.amount_in,
+                    request.slippage_tolerance_bps,
+                    ledger_session.clone(),
+                )
+                .await
+                .map_err(|e| ApiError::internal(format!("swap before open failed: {e}")))?;
+            if let Some(s) = sig_opt {
+                swap_signature = Some(s.to_string());
             }
         }
 
-        let guard = executor.read().await;
         let opened_position = guard
             .execute_open_position(
                 &pool_pubkey,
@@ -185,11 +338,21 @@ impl PositionService {
                 request.amount_b,
                 request.slippage_tolerance_bps,
                 request.full_range,
+                ledger_session.clone(),
             )
             .await?;
-        Ok(OperationResult::success_with_data(
-            serde_json::json!({ "position_pda": opened_position.to_string() }),
-        ))
+
+        let mut data = serde_json::json!({
+            "position_pda": opened_position.to_string(),
+        });
+        if let Some(ref sid) = ledger_session {
+            data["cost_session_id"] = serde_json::json!(sid);
+        }
+        if let Some(ref s) = swap_signature {
+            data["swap_signature"] = serde_json::json!(s);
+        }
+
+        Ok(OperationResult::success_with_data(data))
     }
 
     /// Closes a position.
@@ -536,6 +699,9 @@ mod tests {
             amount_b: 2,
             slippage_tolerance_bps: 50,
             full_range: false,
+            strategy_id: None,
+            swap_before_open: None,
+            cost_session_id: None,
         }
     }
 

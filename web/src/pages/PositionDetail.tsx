@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, Link } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
@@ -12,7 +13,10 @@ import {
   decreaseLiquidity,
   getBotLedger,
   getBotIlLedger,
+  getStrategies,
+  setStrategyPositionExecutor,
 } from '@/lib/api'
+import type { Strategy } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress, formatDate } from '@/lib/utils'
 
 type LedgerRow = Record<string, unknown>
@@ -71,6 +75,42 @@ export default function PositionDetail() {
     queryKey: ['bot-il-ledger', address],
     queryFn: () => getBotIlLedger(200, address),
     enabled: !!address,
+  })
+
+  const { data: strategiesData } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: getStrategies,
+  })
+
+  const linkedStrategies = useMemo(() => {
+    if (!address) {
+      return []
+    }
+    const list = strategiesData?.strategies ?? []
+    return list.filter((s) =>
+      (s.parameters.position_addresses ?? []).some((a) => a.trim() === address.trim()),
+    )
+  }, [address, strategiesData?.strategies])
+
+  function isAutomationOnForPosition(s: Strategy): boolean {
+    if (!address) {
+      return true
+    }
+    const disabled = s.parameters.executor_disabled_position_addresses ?? []
+    return !disabled.some((a) => a.trim() === address.trim())
+  }
+
+  const automationMutation = useMutation({
+    mutationFn: ({
+      strategyId,
+      enabled,
+    }: {
+      strategyId: string
+      enabled: boolean
+    }) => setStrategyPositionExecutor(strategyId, address!, enabled),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['strategies'] })
+    },
   })
 
   const closeMutation = useMutation({
@@ -236,6 +276,62 @@ export default function PositionDetail() {
               </CardContent>
             </Card>
           </div>
+
+          {linkedStrategies.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Strategy automation (this position)</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  This position is linked to {linkedStrategies.length === 1 ? 'a strategy' : 'strategies'}.
+                  Turn automation off to stop this executor from acting on this PDA only (other linked
+                  positions are unchanged).
+                </p>
+                <ul className="space-y-3">
+                  {linkedStrategies.map((s) => (
+                    <li
+                      key={s.id}
+                      className="flex flex-col gap-2 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div>
+                        <Link
+                          to={`/strategies/${s.id}`}
+                          className="font-medium text-primary hover:underline"
+                        >
+                          {s.name}
+                        </Link>
+                        <div className="text-xs text-muted-foreground">
+                          Strategy {s.running ? 'running' : 'stopped'} · this position:{' '}
+                          {isAutomationOnForPosition(s) ? (
+                            <span className="text-foreground">automation on</span>
+                          ) : (
+                            <span className="text-amber-600">automation paused</span>
+                          )}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={isAutomationOnForPosition(s) ? 'outline' : 'default'}
+                        disabled={automationMutation.isPending}
+                        onClick={() =>
+                          automationMutation.mutate({
+                            strategyId: s.id,
+                            enabled: !isAutomationOnForPosition(s),
+                          })
+                        }
+                      >
+                        {isAutomationOnForPosition(s)
+                          ? 'Pause automation for this position'
+                          : 'Resume automation for this position'}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardHeader>

@@ -10,6 +10,48 @@ use utoipa::ToSchema;
 // Position Models
 // ============================================================================
 
+/// Optional **Orca Whirlpool swap in the same pool** before opening liquidity (ExactIn).
+///
+/// Use the pool's token A or B mint as `specified_mint` (same semantics as `orca swap` / `swap_instructions`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SwapInPoolBeforeOpen {
+    /// SPL mint for ExactIn direction (must equal pool `token_mint_a` or `token_mint_b`).
+    pub specified_mint: String,
+    /// Raw amount (smallest units) of `specified_mint` to swap before the open-position tx.
+    pub amount_in: u64,
+}
+
+/// Request to execute **only** an Orca Whirlpool swap (ExactIn) inside a pool.
+///
+/// Intended for a 2-step UI flow:
+/// 1) SWAP to cover token mix
+/// 2) later OPEN a position (optionally with the same `cost_session_id` for bookkeeping).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SwapBeforeOpenRequest {
+    /// Pool address.
+    pub pool_address: String,
+    /// SPL mint for ExactIn direction (must equal pool `token_mint_a` or `token_mint_b`).
+    pub specified_mint: String,
+    /// Raw amount (smallest units) of `specified_mint` to swap.
+    pub amount_in: u64,
+    /// Swap slippage tolerance in basis points.
+    #[serde(default = "default_slippage")]
+    pub slippage_tolerance_bps: u16,
+    /// Optional bookkeeping id; same value groups swap + open rows in `orca_position_lifecycle.jsonl`.
+    #[serde(default)]
+    pub cost_session_id: Option<String>,
+}
+
+/// Response for `POST /positions/swap-before-open`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SwapBeforeOpenResponse {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_session_id: Option<String>,
+}
+
 /// Request to open a new position.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct OpenPositionRequest {
@@ -29,6 +71,18 @@ pub struct OpenPositionRequest {
     /// Open a **full-range** (Splash-style) position; on-chain tick bounds come from pool spacing.
     #[serde(default)]
     pub full_range: bool,
+    /// If set, after a successful open the new position PDA is appended to this strategy's
+    /// `parameters.position_addresses`.
+    #[serde(default)]
+    pub strategy_id: Option<String>,
+    /// When set, API executes an Orca **swap in this pool** first (server wallet), then opens the position.
+    /// Useful to rebalance token mix; same primitive will be reused for automated rebalance flows.
+    #[serde(default)]
+    pub swap_before_open: Option<SwapInPoolBeforeOpen>,
+    /// Optional id for **bookkeeping**: same value groups swap + open rows in `orca_position_lifecycle.jsonl`
+    /// (`rebalance_session_id`) so costs can be summed **per opened position** after the fact.
+    #[serde(default)]
+    pub cost_session_id: Option<String>,
 }
 
 fn default_slippage() -> u16 {
@@ -289,17 +343,27 @@ pub enum OptimizeApplyPolicy {
     Combined,
 }
 
+/// Toggle per-position automation for a running strategy (`executor_disabled_position_addresses`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StrategyPositionExecutorRequest {
+    /// Position PDA (same string as in `parameters.position_addresses`).
+    pub position_address: String,
+    /// When `false`, append to `executor_disabled_position_addresses`; when `true`, remove.
+    pub enabled: bool,
+}
+
 /// Request to create a strategy.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateStrategyRequest {
     /// Strategy name.
     pub name: String,
-    /// Pool address.
-    pub pool_address: String,
     /// Strategy type.
     pub strategy_type: StrategyType,
     /// Strategy parameters.
     pub parameters: StrategyParameters,
+    /// Legacy pool on strategy (optional). New flows use pool on **Open Position**; omit or leave empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
     /// Whether to auto-execute.
     #[serde(default)]
     pub auto_execute: bool,
@@ -350,6 +414,14 @@ pub struct StrategyParameters {
     /// Minimum rebalance interval in hours.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rebalance_interval_hours: Option<u64>,
+
+    /// Position PDAs linked via Open Position (`strategy_id`) or API; seeded when the strategy starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_addresses: Option<Vec<String>>,
+
+    /// Position PDAs for which this strategy's executor skips automation (decisions / txs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_disabled_position_addresses: Option<Vec<String>>,
 
     /// Run `clmm-lp-cli backtest-optimize` once when the strategy starts (before the executor loop).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,8 +475,10 @@ pub struct StrategyResponse {
     pub id: String,
     /// Strategy name.
     pub name: String,
-    /// Pool address.
-    pub pool_address: String,
+    /// Legacy: pool was previously stored on the strategy. New strategies use per-position pools;
+    /// this is `None` unless present in stored config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
     /// Strategy type.
     pub strategy_type: StrategyType,
     /// Strategy parameters.
@@ -413,6 +487,9 @@ pub struct StrategyResponse {
     pub running: bool,
     /// Whether in dry-run mode.
     pub dry_run: bool,
+    /// Whether the executor may submit transactions without manual confirmation (requires wallet when not dry-run).
+    #[serde(default)]
+    pub auto_execute: bool,
     /// Created timestamp.
     #[schema(value_type = String)]
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -570,6 +647,23 @@ pub struct PoolStateResponse {
     /// Timestamp.
     #[schema(value_type = String)]
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Rough **network fee** estimate for an Orca swap in a pool (`meta.fee` band), from local ledger history + default.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SwapCostEstimateResponse {
+    pub pool_address: String,
+    /// Median `tx_fee_lamports` from prior `swap_exact_in` rows for this pool (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_median_network_fee_lamports: Option<u64>,
+    /// Rows used for the median (same pool).
+    pub historical_sample_count: u32,
+    /// Fallback when there is no history (typical base + small priority band).
+    pub default_network_fee_lamports: u64,
+    /// Value to display: `max(default, median)` when median is present, else default.
+    pub estimated_network_fee_lamports: u64,
+    /// Explains that full wallet delta is logged after confirmation in `orca_position_lifecycle.jsonl`.
+    pub note: String,
 }
 
 // ============================================================================
@@ -840,6 +934,18 @@ impl MessageResponse {
     }
 }
 
+/// Response for `POST /positions` (open position), including optional swap / session metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionOpenResponse {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_pda: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_session_id: Option<String>,
+}
+
 // ============================================================================
 // Bot activity (JSONL ledger / registry → web + Slack)
 // ============================================================================
@@ -1018,6 +1124,23 @@ pub struct WalletBalancesResponse {
     pub lamports: u64,
     pub sol: String,
     pub tokens: Vec<WalletTokenBalance>,
+}
+
+// ============================================================================
+// Prices (free external sources)
+// ============================================================================
+
+/// `GET /prices/jupiter` — server-side Jupiter price map (avoids browser CORS/adblock).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct JupiterPricesResponse {
+    /// Source identifier (currently "jupiter").
+    pub source: String,
+    /// Requested ids count (unique, non-empty).
+    pub requested: usize,
+    /// Returned prices count.
+    pub returned: usize,
+    /// Map: mint -> USD price.
+    pub prices: std::collections::BTreeMap<String, f64>,
 }
 
 #[cfg(test)]

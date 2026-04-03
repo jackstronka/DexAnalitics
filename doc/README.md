@@ -8,6 +8,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
 
+**Roadmap produktowa (strategie ↔ pozycja, shadow / historia):** [`ROADMAP.md`](ROADMAP.md) — wiele strategii na jednej pozycji (1 live + N shadow), odświeżanie co kilka minut, **zachowanie historii przypisań** przy zmianach.
+
 **Roadmap strategii (Jupiter / multi-venue / CLMM):** [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) — hipoteza routingu i fee; przenoszenie zakresów pod wolumen skierowany przez agregator; co zweryfikować danymi.
 
 ## Architecture and product
@@ -15,6 +17,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | Document | Purpose |
 | -------- | ------- |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
+| [`PROJECT_END_TO_END.md`](PROJECT_END_TO_END.md) | End-to-end: ingest danych -> analytics -> decyzje bota -> wykonanie i UI |
+| [`ROADMAP.md`](ROADMAP.md) | Roadmap produktowy: shadow strategies per position, historia przypisań strategia ↔ pozycja |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | Async event bus v2: decision matrix, event contract, rollout |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | Solana indexing concepts (RPC vs WebSocket vs Geyser), “token” misconception, relation to swap sync |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | **Append-only log of non-trivial code changes** — each entry has `keywords:` for grep / AI search |
@@ -107,6 +111,8 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) | Orca, operations |
 | [`ORCA_EXTERNAL_IMPLEMENTATIONS.md`](ORCA_EXTERNAL_IMPLEMENTATIONS.md) | orca, hummingbot, examples, rent, token-2022, tx-builders |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | architecture, crates, pipeline, CLI names, data paths |
+| [`PROJECT_END_TO_END.md`](PROJECT_END_TO_END.md) | end-to-end pipeline: data -> analytics -> bot -> UI |
+| [`ROADMAP.md`](ROADMAP.md) | roadmap, position, strategy, shadow, counterfactual, live, history, assignment |
 | [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) | Jupiter, multi-venue, routing, fee hypothesis, CLMM roadmap |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | rpc, solana, mainnet, fallback, free tier, orca bot |
 | [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | tools, powershell, snapshot-health, slack, monitoring, keywords |

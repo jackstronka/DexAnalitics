@@ -1,4 +1,4 @@
-# Bociarz LP Strategy Lab — Project Overview
+# Bociarz LP — Project Overview
 
 ## Decision and Worklog Docs
 

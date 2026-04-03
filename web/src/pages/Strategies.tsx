@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, Play, Square, RefreshCw } from 'lucide-react'
+import { Plus, Play, Square, RefreshCw, Pencil } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { getStrategies, startStrategy, stopStrategy } from '@/lib/api'
@@ -76,6 +76,12 @@ export default function Strategies() {
                   <span className="capitalize">{strategy.strategy_type.replace('_', ' ')}</span>
                 </div>
                 <div className="flex gap-2">
+                  <Link to={`/strategies/${strategy.id}/edit`} className="flex-1">
+                    <Button variant="secondary" size="sm" className="w-full">
+                      <Pencil className="h-4 w-4 mr-2" />
+                      Edit
+                    </Button>
+                  </Link>
                   <Link to={`/strategies/${strategy.id}`} className="flex-1">
                     <Button variant="outline" size="sm" className="w-full">
                       View Details

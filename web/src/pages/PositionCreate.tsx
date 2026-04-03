@@ -4,7 +4,122 @@ import { useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { getJupiterPricesUsd, getPool, openPosition } from '@/lib/api'
+import {
+  getJupiterPricesUsd,
+  getOrcaToken,
+  getPool,
+  getPoolState,
+  getSwapCostEstimate,
+  getStrategies,
+  getWalletBalances,
+  getWallets,
+  openPosition,
+  swapBeforeOpen as swapBeforeOpenTx,
+  type WalletBalancesResponse,
+} from '@/lib/api'
+import {
+  alignPriceRatioToTicks,
+  calculateTickRangeFromWidthPct,
+  priceRatioToInputString,
+  tickToPriceRatio,
+  uiPriceFromRawPriceRatio,
+  rawPriceRatioFromUiPrice,
+  formatPriceRatio,
+} from '@/lib/whirlpoolTicks'
+import { getDevWalletPubkey } from '@/lib/devWallet'
+import { shortenAddress } from '@/lib/utils'
+
+const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
+const WSOL_MINT = 'So11111111111111111111111111111111111111112'
+
+/** Porównanie UI: mała tolerancja na błąd zaokrągleń float. */
+const BALANCE_EPS = 1e-8
+
+/**
+ * Łączne saldo w jednostkach UI dla mintu (dla WSOL: native SOL + ewentualne konto WSOL).
+ */
+function getAvailableUiAmount(
+  mint: string,
+  balances: WalletBalancesResponse | undefined,
+): number | null {
+  if (!balances) return null
+  if (mint === WSOL_MINT) {
+    let n = parseFloat(balances.sol)
+    if (!Number.isFinite(n)) n = 0
+    const row = balances.tokens.find((t) => t.mint === mint)
+    if (row) {
+      const w = parseFloat(row.ui_amount)
+      if (Number.isFinite(w)) n += w
+    }
+    return n
+  }
+  const row = balances.tokens.find((t) => t.mint === mint)
+  if (!row) return 0
+  const v = parseFloat(row.ui_amount)
+  return Number.isFinite(v) ? v : 0
+}
+
+function isInsufficientBalance(needUi: number, haveUi: number): boolean {
+  return needUi > haveUi + BALANCE_EPS
+}
+
+/**
+ * Szacunek kwoty wejściowej (raw, atomic) przy swapie z tokena `fund` do pokrycia niedoboru `deficitUi` tokena `short`.
+ * Używa cen USD z Jupitera; +5% bufor na slippage.
+ */
+function estimateSwapInputRawExactIn(
+  fundMint: string,
+  fundDecimals: number,
+  shortMint: string,
+  deficitUi: number,
+  pricesUsd: Record<string, number> | undefined,
+): number | null {
+  if (!pricesUsd || deficitUi <= 0) return null
+  const pShort = pricesUsd[shortMint]
+  const pFund = pricesUsd[fundMint]
+  if (!pShort || !pFund || pShort <= 0 || pFund <= 0) return null
+  const usdNeed = deficitUi * pShort
+  const fundUi = (usdNeed / pFund) * 1.05
+  if (!Number.isFinite(fundUi) || fundUi <= 0) return null
+  const raw = Math.round(fundUi * 10 ** fundDecimals)
+  if (raw <= 0 || raw > Number.MAX_SAFE_INTEGER) return null
+  return raw
+}
+
+function buildJupiterSwapUrl(inputMint: string, outputMint: string, amountRaw?: number | null): string {
+  const u = new URL('https://jup.ag/swap')
+  u.searchParams.set('inputMint', inputMint)
+  u.searchParams.set('outputMint', outputMint)
+  if (amountRaw != null && amountRaw > 0) {
+    u.searchParams.set('amount', String(Math.floor(amountRaw)))
+  }
+  return u.toString()
+}
+
+/** SPL balance for mint; for WSOL mint falls back to native `sol` if brak konta tokenowego w liście. */
+function formatBalanceLine(
+  mint: string,
+  balances: WalletBalancesResponse | undefined,
+): { amount: string; note?: string } {
+  if (!balances) {
+    return { amount: '—' }
+  }
+  const row = balances.tokens.find((t) => t.mint === mint)
+  if (row) {
+    const v = parseFloat(row.ui_amount)
+    if (Number.isFinite(v)) {
+      return { amount: v.toLocaleString(undefined, { maximumFractionDigits: 8 }) }
+    }
+    return { amount: row.ui_amount || '0' }
+  }
+  if (mint === WSOL_MINT) {
+    const s = parseFloat(balances.sol)
+    if (Number.isFinite(s) && s > 0) {
+      return { amount: s.toLocaleString(undefined, { maximumFractionDigits: 6 }), note: 'native SOL' }
+    }
+  }
+  return { amount: '0' }
+}
 
 export default function PositionCreate() {
   const navigate = useNavigate()
@@ -29,8 +144,11 @@ export default function PositionCreate() {
   )
 
   const [poolAddress, setPoolAddress] = useState('')
+  const [strategyId, setStrategyId] = useState('')
   const [tickLower, setTickLower] = useState<number | ''>('')
   const [tickUpper, setTickUpper] = useState<number | ''>('')
+  /** When true, tick lower/upper follow pool price + strategy Range Width % (refetch ~10s). */
+  const [tickAutoSync, setTickAutoSync] = useState(true)
 
   // Human units in the UI
   const [amountAUi, setAmountAUi] = useState<number | ''>('')
@@ -40,6 +158,21 @@ export default function PositionCreate() {
   const [mode, setMode] = useState<'tokens' | 'budget'>('tokens')
   const [totalUsd, setTotalUsd] = useState<number | ''>('')
   const [splitPctA, setSplitPctA] = useState<number>(50)
+  /** API-side Orca swap in pool before open (requires server KEYPAIR / executor). */
+  const [swapBeforeOpen, setSwapBeforeOpen] = useState(false)
+
+  // 2-step SWAP then OPEN state
+  const [swapCostSessionId, setSwapCostSessionId] = useState<string | null>(null)
+  const [swapSignature, setSwapSignature] = useState<string | null>(null)
+  const [swapStepError, setSwapStepError] = useState<string | null>(null)
+
+  /** Editable price range (mint B per 1 mint A); when `syncPriceInputsFromTicks`, fields mirror ticks. */
+  const [priceRangeLo, setPriceRangeLo] = useState('')
+  const [priceRangeHi, setPriceRangeHi] = useState('')
+  const [syncPriceInputsFromTicks, setSyncPriceInputsFromTicks] = useState(true)
+  const [priceRangeError, setPriceRangeError] = useState<string | null>(null)
+  /** Advanced UI: show raw tick inputs (internally required by API). */
+  const [showAdvancedTicks, setShowAdvancedTicks] = useState(false)
 
   const poolQ = useQuery({
     queryKey: ['pool', poolAddress],
@@ -48,8 +181,180 @@ export default function PositionCreate() {
     staleTime: 60_000,
   })
 
-  const tokenA = poolQ.data?.token_a
-  const tokenB = poolQ.data?.token_b
+  const poolStateQ = useQuery({
+    queryKey: ['pool-state', poolAddress],
+    queryFn: () => getPoolState(poolAddress.trim()),
+    enabled: poolAddress.trim().length > 0,
+    staleTime: 0,
+    refetchInterval: 10_000,
+  })
+
+  const strategiesQ = useQuery({
+    queryKey: ['strategies'],
+    queryFn: getStrategies,
+    staleTime: 30_000,
+  })
+
+  const devPk = getDevWalletPubkey()
+  const walletsQ = useQuery({
+    queryKey: ['wallets'],
+    queryFn: getWallets,
+    staleTime: 30_000,
+  })
+
+  const ownerPk = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return null
+    }
+    const id = window.localStorage.getItem(LS_SELECTED_WALLET_ID) || ''
+    const picked = walletsQ.data?.wallets.find((w) => w.id === id)
+    return picked?.pubkey ?? devPk ?? walletsQ.data?.wallets[0]?.pubkey ?? null
+  }, [walletsQ.data?.wallets, devPk])
+
+  const balancesQ = useQuery({
+    queryKey: ['wallet-balances', ownerPk ?? ''],
+    queryFn: () => getWalletBalances(ownerPk!),
+    enabled: !!ownerPk,
+    staleTime: 20_000,
+  })
+
+  const strategyOptions = useMemo(
+    () => strategiesQ.data?.strategies ?? [],
+    [strategiesQ.data?.strategies],
+  )
+
+  const selectedStrategy = useMemo(
+    () => strategyOptions.find((s) => s.id === strategyId.trim()),
+    [strategyOptions, strategyId],
+  )
+
+  const strategyRangeWidthPct = selectedStrategy?.parameters.range_width_pct
+
+  useEffect(() => {
+    setTickAutoSync(true)
+  }, [strategyId, poolAddress])
+
+  const priceAtTickBounds = useMemo(() => {
+    if (tickLower === '' || tickUpper === '') {
+      return null
+    }
+    const tl = Number(tickLower)
+    const tu = Number(tickUpper)
+    if (!Number.isFinite(tl) || !Number.isFinite(tu)) {
+      return null
+    }
+    return {
+      lower: tickToPriceRatio(tl),
+      upper: tickToPriceRatio(tu),
+    }
+  }, [tickLower, tickUpper])
+
+  // Price inputs sync from ticks depends on token decimals; the actual conversion effect is
+  // defined below where `tokenA` / `tokenB` are available.
+  useEffect(() => {
+    if (!syncPriceInputsFromTicks) return
+    if (tickLower === '' || tickUpper === '') {
+      setPriceRangeLo('')
+      setPriceRangeHi('')
+    }
+  }, [tickLower, tickUpper, syncPriceInputsFromTicks])
+
+  useEffect(() => {
+    if (!tickAutoSync) {
+      return
+    }
+    if (!strategyId.trim() || strategyRangeWidthPct == null || strategyRangeWidthPct <= 0 || !poolQ.data) {
+      return
+    }
+    const tickCurrent = poolStateQ.data?.current_tick ?? poolQ.data.current_tick
+    const spacing = poolQ.data.tick_spacing
+    const { tickLower: tl, tickUpper: tu } = calculateTickRangeFromWidthPct(
+      tickCurrent,
+      strategyRangeWidthPct,
+      spacing,
+    )
+    setTickLower(tl)
+    setTickUpper(tu)
+    setSyncPriceInputsFromTicks(true)
+  }, [
+    tickAutoSync,
+    strategyId,
+    strategyRangeWidthPct,
+    poolStateQ.data?.current_tick,
+    poolQ.data?.current_tick,
+    poolQ.data?.tick_spacing,
+  ])
+
+  useEffect(() => {
+    setStrategyId('')
+  }, [poolAddress])
+
+  const mintA = poolQ.data?.token_mint_a
+  const mintB = poolQ.data?.token_mint_b
+
+  const orcaAQ = useQuery({
+    queryKey: ['orca-token', mintA],
+    queryFn: () => getOrcaToken(mintA!),
+    enabled: !!mintA,
+    staleTime: 60 * 60 * 1000,
+  })
+
+  const orcaBQ = useQuery({
+    queryKey: ['orca-token', mintB],
+    queryFn: () => getOrcaToken(mintB!),
+    enabled: !!mintB,
+    staleTime: 60 * 60 * 1000,
+  })
+
+  const tokenA = useMemo(() => {
+    if (!mintA) return undefined
+    return {
+      mint: mintA,
+      symbol: orcaAQ.data?.symbol ?? shortenAddress(mintA, 4),
+      decimals: orcaAQ.data?.decimals ?? 9,
+    }
+  }, [mintA, orcaAQ.data])
+
+  const tokenB = useMemo(() => {
+    if (!mintB) return undefined
+    return {
+      mint: mintB,
+      symbol: orcaBQ.data?.symbol ?? shortenAddress(mintB, 4),
+      decimals: orcaBQ.data?.decimals ?? 9,
+    }
+  }, [mintB, orcaBQ.data])
+
+  useEffect(() => {
+    if (!syncPriceInputsFromTicks) return
+    if (!tokenA || !tokenB) return
+    if (tickLower === '' || tickUpper === '') return
+
+    const tl = Number(tickLower)
+    const tu = Number(tickUpper)
+    if (!Number.isFinite(tl) || !Number.isFinite(tu)) return
+
+    const rawLo = tickToPriceRatio(tl)
+    const rawHi = tickToPriceRatio(tu)
+    const uiLo = uiPriceFromRawPriceRatio(rawLo, tokenA.decimals, tokenB.decimals)
+    const uiHi = uiPriceFromRawPriceRatio(rawHi, tokenA.decimals, tokenB.decimals)
+    setPriceRangeLo(priceRatioToInputString(uiLo ?? Number.NaN))
+    setPriceRangeHi(priceRatioToInputString(uiHi ?? Number.NaN))
+  }, [
+    tickLower,
+    tickUpper,
+    syncPriceInputsFromTicks,
+    tokenA?.decimals,
+    tokenB?.decimals,
+  ])
+
+  const walletLineA = useMemo(
+    () => (mintA ? formatBalanceLine(mintA, balancesQ.data) : null),
+    [mintA, balancesQ.data],
+  )
+  const walletLineB = useMemo(
+    () => (mintB ? formatBalanceLine(mintB, balancesQ.data) : null),
+    [mintB, balancesQ.data],
+  )
 
   const pricesQ = useQuery({
     queryKey: ['jupiter-prices', tokenA?.mint, tokenB?.mint],
@@ -57,7 +362,8 @@ export default function PositionCreate() {
       const mints = [tokenA?.mint, tokenB?.mint].filter(Boolean) as string[]
       return await getJupiterPricesUsd(mints)
     },
-    enabled: mode === 'budget' && !!tokenA?.mint && !!tokenB?.mint,
+    // Ceny także poza trybem „budget” — linki Jupiter z wstępnie szacowaną kwotą swapu.
+    enabled: !!tokenA?.mint && !!tokenB?.mint,
     staleTime: 60_000,
   })
 
@@ -77,6 +383,223 @@ export default function PositionCreate() {
     setAmountBUi(Number.isFinite(b) ? Number(b.toFixed(8)) : '')
   }, [mode, tokenA, tokenB, totalUsd, splitPctA, pricesQ.data])
 
+  /** Wymagane kwoty vs saldo + linki Jupiter (prefill mintów i szacunkowa kwota wejścia). */
+  const fundingCheck = useMemo(() => {
+    const empty = {
+      ready: false,
+      blocked: false,
+      shortA: false,
+      shortB: false,
+      deficitA: 0,
+      deficitB: 0,
+      haveA: null as number | null,
+      haveB: null as number | null,
+      jupiterSwapToCoverA: null as string | null,
+      jupiterSwapToCoverB: null as string | null,
+      jupiterGeneric: 'https://jup.ag/swap' as string,
+    }
+    if (!ownerPk || !tokenA || !tokenB || !balancesQ.data) {
+      return empty
+    }
+    if (
+      amountAUi === '' ||
+      amountBUi === '' ||
+      !Number.isFinite(Number(amountAUi)) ||
+      !Number.isFinite(Number(amountBUi))
+    ) {
+      return empty
+    }
+    const needA = Number(amountAUi)
+    const needB = Number(amountBUi)
+    const haveA = getAvailableUiAmount(tokenA.mint, balancesQ.data)
+    const haveB = getAvailableUiAmount(tokenB.mint, balancesQ.data)
+    if (haveA === null || haveB === null) {
+      return empty
+    }
+    const shortA = isInsufficientBalance(needA, haveA)
+    const shortB = isInsufficientBalance(needB, haveB)
+    const deficitA = shortA ? Math.max(0, needA - haveA) : 0
+    const deficitB = shortB ? Math.max(0, needB - haveB) : 0
+    const px = pricesQ.data
+
+    let jupiterSwapToCoverA: string | null = null
+    let jupiterSwapToCoverB: string | null = null
+
+    if (shortA && shortB) {
+      // Brak obu tokenów — nie da się zbudować sensownego ExactIn bez trzeciej nogi; ogólny link.
+      return {
+        ready: true,
+        blocked: true,
+        shortA,
+        shortB,
+        deficitA,
+        deficitB,
+        haveA,
+        haveB,
+        jupiterSwapToCoverA: null,
+        jupiterSwapToCoverB: null,
+        jupiterGeneric: 'https://jup.ag/swap',
+      }
+    }
+    if (shortA && !shortB) {
+      const raw = estimateSwapInputRawExactIn(
+        tokenB.mint,
+        tokenB.decimals,
+        tokenA.mint,
+        deficitA,
+        px,
+      )
+      jupiterSwapToCoverA = buildJupiterSwapUrl(tokenB.mint, tokenA.mint, raw)
+    }
+    if (shortB && !shortA) {
+      const raw = estimateSwapInputRawExactIn(
+        tokenA.mint,
+        tokenA.decimals,
+        tokenB.mint,
+        deficitB,
+        px,
+      )
+      jupiterSwapToCoverB = buildJupiterSwapUrl(tokenA.mint, tokenB.mint, raw)
+    }
+
+    return {
+      ready: true,
+      blocked: shortA || shortB,
+      shortA,
+      shortB,
+      deficitA,
+      deficitB,
+      haveA,
+      haveB,
+      jupiterSwapToCoverA,
+      jupiterSwapToCoverB,
+      jupiterGeneric: 'https://jup.ag/swap',
+    }
+  }, [
+    ownerPk,
+    tokenA,
+    tokenB,
+    balancesQ.data,
+    amountAUi,
+    amountBUi,
+    pricesQ.data,
+  ])
+
+  /** Single-sided deficit: ExactIn swap in **this** pool (mint + raw amount) for `swap_before_open`. */
+  const swapBeforeOpenPlan = useMemo(() => {
+    if (!fundingCheck.ready || !tokenA || !tokenB || !pricesQ.data || !balancesQ.data) {
+      return null
+    }
+    if (fundingCheck.shortA && fundingCheck.shortB) {
+      return null
+    }
+    if (!fundingCheck.shortA && !fundingCheck.shortB) {
+      return null
+    }
+    const px = pricesQ.data
+    const capPct = 0.92
+
+    if (fundingCheck.shortB && !fundingCheck.shortA) {
+      const rawEst = estimateSwapInputRawExactIn(
+        tokenA.mint,
+        tokenA.decimals,
+        tokenB.mint,
+        fundingCheck.deficitB,
+        px,
+      )
+      if (rawEst == null) {
+        return null
+      }
+      const haveA = getAvailableUiAmount(tokenA.mint, balancesQ.data)
+      if (haveA == null) {
+        return null
+      }
+      const maxRaw = Math.floor(haveA * 10 ** tokenA.decimals * capPct)
+      const amount_in = Math.min(Math.floor(rawEst), maxRaw)
+      if (amount_in <= 0) {
+        return null
+      }
+      return {
+        specified_mint: tokenA.mint,
+        amount_in,
+        label: `${tokenA.symbol} → ${tokenB.symbol} (w puli Orca)`,
+      }
+    }
+
+    if (fundingCheck.shortA && !fundingCheck.shortB) {
+      const rawEst = estimateSwapInputRawExactIn(
+        tokenB.mint,
+        tokenB.decimals,
+        tokenA.mint,
+        fundingCheck.deficitA,
+        px,
+      )
+      if (rawEst == null) {
+        return null
+      }
+      const haveB = getAvailableUiAmount(tokenB.mint, balancesQ.data)
+      if (haveB == null) {
+        return null
+      }
+      const maxRaw = Math.floor(haveB * 10 ** tokenB.decimals * capPct)
+      const amount_in = Math.min(Math.floor(rawEst), maxRaw)
+      if (amount_in <= 0) {
+        return null
+      }
+      return {
+        specified_mint: tokenB.mint,
+        amount_in,
+        label: `${tokenB.symbol} → ${tokenA.symbol} (w puli Orca)`,
+      }
+    }
+
+    return null
+  }, [fundingCheck, tokenA, tokenB, pricesQ.data, balancesQ.data])
+
+  const swapBeforeOpenInputMeta = useMemo(() => {
+    if (!swapBeforeOpenPlan || !tokenA || !tokenB) return null
+    if (swapBeforeOpenPlan.specified_mint === tokenA.mint) {
+      return { symbol: tokenA.symbol, decimals: tokenA.decimals }
+    }
+    if (swapBeforeOpenPlan.specified_mint === tokenB.mint) {
+      return { symbol: tokenB.symbol, decimals: tokenB.decimals }
+    }
+    return null
+  }, [swapBeforeOpenPlan, tokenA, tokenB])
+
+  const swapBeforeOpenAmountUi = useMemo(() => {
+    if (!swapBeforeOpenPlan || !swapBeforeOpenInputMeta) return null
+    const mul = 10 ** swapBeforeOpenInputMeta.decimals
+    return swapBeforeOpenPlan.amount_in / mul
+  }, [swapBeforeOpenPlan, swapBeforeOpenInputMeta])
+
+  const swapCostEstimateQ = useQuery({
+    queryKey: ['swap-cost-estimate', poolAddress.trim()],
+    queryFn: () => getSwapCostEstimate(poolAddress.trim()),
+    enabled: poolAddress.trim().length > 0 && !!swapBeforeOpenPlan,
+    staleTime: 60_000,
+  })
+
+  useEffect(() => {
+    if (!swapBeforeOpenPlan && !swapSignature) {
+      setSwapBeforeOpen(false)
+      setSwapCostSessionId(null)
+      setSwapSignature(null)
+    }
+  }, [swapBeforeOpenPlan, swapSignature])
+
+  useEffect(() => {
+    setSwapCostSessionId(null)
+    setSwapSignature(null)
+  }, [poolAddress])
+
+  useEffect(() => {
+    if (!swapBeforeOpen) {
+      setSwapCostSessionId(null)
+      setSwapSignature(null)
+    }
+  }, [swapBeforeOpen])
+
   const toBaseUnitsU64 = (ui: number, decimals: number): number | null => {
     if (!Number.isFinite(ui) || ui < 0) return null
     const mul = 10 ** decimals
@@ -86,10 +609,31 @@ export default function PositionCreate() {
     return raw
   }
 
+  const makeCostSessionId = () => {
+    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+      return crypto.randomUUID()
+    }
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  }
+
+  const swapMutation = useMutation({
+    mutationFn: swapBeforeOpenTx,
+    onSuccess: (data) => {
+      setSwapSignature(data.swap_signature ?? null)
+      setSwapCostSessionId(data.cost_session_id ?? swapCostSessionId)
+      queryClient.invalidateQueries({ queryKey: ['wallet-balances', ownerPk ?? ''] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setSwapStepError(`POST /api/v1/positions/swap-before-open failed: ${msg}`)
+    },
+  })
+
   const mutation = useMutation({
     mutationFn: openPosition,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['positions'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies'] })
       navigate('/positions')
     },
   })
@@ -108,11 +652,24 @@ export default function PositionCreate() {
       return
     }
 
-    const aRaw = toBaseUnitsU64(Number(amountAUi), pool.token_a.decimals)
-    const bRaw = toBaseUnitsU64(Number(amountBUi), pool.token_b.decimals)
+    if (fundingCheck.ready && fundingCheck.blocked) {
+      if (swapBeforeOpen) {
+        // Two-step flow: open is allowed only after swap succeeded.
+        if (!swapSignature) return
+      } else {
+        return
+      }
+    }
+
+    const aRaw = toBaseUnitsU64(Number(amountAUi), tokenA!.decimals)
+    const bRaw = toBaseUnitsU64(Number(amountBUi), tokenB!.decimals)
     if (aRaw === null || bRaw === null) {
       return
     }
+
+    // Send the same bookkeeping id across SWAP and OPEN even if the swap plan
+    // becomes null after balances update.
+    const openCostSessionId = swapCostSessionId ?? undefined
 
     mutation.mutate({
       pool_address: poolAddress.trim(),
@@ -120,6 +677,24 @@ export default function PositionCreate() {
       tick_upper: Number(tickUpper),
       amount_a: aRaw,
       amount_b: bRaw,
+      ...(strategyId.trim() ? { strategy_id: strategyId.trim() } : {}),
+      ...(openCostSessionId ? { cost_session_id: openCostSessionId } : {}),
+    })
+  }
+
+  const handleSwapOnly = () => {
+    if (!swapBeforeOpenPlan) return
+    if (!poolAddress.trim()) return
+    const id = makeCostSessionId()
+    setSwapCostSessionId(id)
+    setSwapSignature(null)
+    setSwapStepError(null)
+
+    swapMutation.mutate({
+      pool_address: poolAddress.trim(),
+      specified_mint: swapBeforeOpenPlan.specified_mint,
+      amount_in: swapBeforeOpenPlan.amount_in,
+      cost_session_id: id,
     })
   }
 
@@ -172,35 +747,231 @@ export default function PositionCreate() {
                 </div>
               ) : poolQ.data ? (
                 <div className="text-xs text-muted-foreground mt-2">
-                  {poolQ.data.protocol.toUpperCase()} · {poolQ.data.token_a.symbol}/
-                  {poolQ.data.token_b.symbol} · tick_spacing {poolQ.data.tick_spacing} · fee tier{' '}
-                  {poolQ.data.fee_tier}%
+                  {poolQ.data.protocol.toUpperCase()} · {tokenA?.symbol ?? '…'}/
+                  {tokenB?.symbol ?? '…'} · tick_spacing {poolQ.data.tick_spacing} · fee{' '}
+                  {((poolQ.data.fee_rate_bps ?? 0) / 100).toFixed(2)}%
+                  {orcaAQ.isLoading || orcaBQ.isLoading ? ' · Orca token meta…' : ''}
                 </div>
               ) : null}
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <div>
-                <label className="block text-sm font-medium mb-1">Tick Lower</label>
-                <input
-                  type="number"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                  value={tickLower}
-                  onChange={(e) => setTickLower(e.target.value === '' ? '' : Number(e.target.value))}
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Tick Upper</label>
-                <input
-                  type="number"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                  value={tickUpper}
-                  onChange={(e) => setTickUpper(e.target.value === '' ? '' : Number(e.target.value))}
-                  required
-                />
-              </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">Strategy (optional)</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={strategyId}
+                onChange={(e) => setStrategyId(e.target.value)}
+                disabled={strategyOptions.length === 0}
+              >
+                <option value="">
+                  {strategyOptions.length === 0
+                    ? 'No strategies yet — create one under Strategies'
+                    : 'None (manual only)'}
+                </option>
+                {strategyOptions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.strategy_type.replace(/_/g, ' ')})
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                Pool is set above; strategy stores automation parameters. After a successful open,
+                this position is linked and strategy automation starts by default. You can pause
+                automation for this position later on the position detail page.
+              </p>
+              {strategyId.trim() && strategyRangeWidthPct != null && strategyRangeWidthPct > 0 ? (
+                <p className="text-xs text-foreground/90 mt-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
+                  Strategia ma <strong>Range Width {strategyRangeWidthPct}%</strong> — ticki niżej
+                  można wyliczyć wokół <strong>bieżącej ceny z puli</strong> (odświeżane ~co 10 s).
+                </p>
+              ) : null}
             </div>
+
+            <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-muted-foreground">
+                  Zakres ustalasz po cenach. Ticki są wyliczane automatycznie z pól „Cena dolna / Cena
+                  górna”.
+                </p>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setShowAdvancedTicks((v) => !v)}
+                >
+                  {showAdvancedTicks ? 'Ukryj ticki' : 'Pokaż ticki (advanced)'}
+                </Button>
+              </div>
+
+              {showAdvancedTicks ? (
+                <div className="grid gap-4 md:grid-cols-2 mt-3">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Tick Lower</label>
+                    <input
+                      type="number"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={tickLower}
+                      onChange={(e) => {
+                        setTickAutoSync(false)
+                        setSyncPriceInputsFromTicks(true)
+                        setTickLower(e.target.value === '' ? '' : Number(e.target.value))
+                      }}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Tick Upper</label>
+                    <input
+                      type="number"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={tickUpper}
+                      onChange={(e) => {
+                        setTickAutoSync(false)
+                        setSyncPriceInputsFromTicks(true)
+                        setTickUpper(e.target.value === '' ? '' : Number(e.target.value))
+                      }}
+                      required
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            {poolQ.data && tokenA && tokenB ? (
+              <div className="rounded-md border border-border bg-muted/10 px-3 py-3 space-y-2">
+                <p className="text-xs font-medium text-foreground">
+                  Zakres według ceny (stosunek {tokenB.symbol} za 1 {tokenA.symbol}, jak pole „price” / tick w puli)
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="block text-xs text-muted-foreground mb-1">Cena dolna (granica zakresu)</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      autoComplete="off"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      value={priceRangeLo}
+                      onChange={(e) => {
+                        setSyncPriceInputsFromTicks(false)
+                        setPriceRangeError(null)
+                        setPriceRangeLo(e.target.value)
+                      }}
+                      placeholder={
+                        poolStateQ.data?.price != null && tokenA && tokenB
+                          ? (() => {
+                              const raw = Number(poolStateQ.data!.price)
+                              const ui = uiPriceFromRawPriceRatio(raw, tokenA.decimals, tokenB.decimals)
+                              return ui != null ? `np. ${String(ui)}` : 'np. —'
+                            })()
+                          : 'np. 0.0142'
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-muted-foreground mb-1">Cena górna (granica zakresu)</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      autoComplete="off"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      value={priceRangeHi}
+                      onChange={(e) => {
+                        setSyncPriceInputsFromTicks(false)
+                        setPriceRangeError(null)
+                        setPriceRangeHi(e.target.value)
+                      }}
+                      placeholder="wyższa niż dolna"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      const parseP = (s: string) => {
+                        const t = s.trim().replace(/,/g, '.')
+                        if (!t) return null
+                        const n = Number(t)
+                        return Number.isFinite(n) && n > 0 ? n : null
+                      }
+                      const pl = parseP(priceRangeLo)
+                      const ph = parseP(priceRangeHi)
+                      const spacing = poolQ.data?.tick_spacing
+                      if (pl == null || ph == null) {
+                        setPriceRangeError('Podaj dwie dodatnie liczby (kropka lub przecinek jako separator).')
+                        return
+                      }
+                      if (spacing == null) {
+                        setPriceRangeError('Brak tick_spacing puli.')
+                        return
+                      }
+                      const rawPl = rawPriceRatioFromUiPrice(pl, tokenA.decimals, tokenB.decimals)
+                      const rawPh = rawPriceRatioFromUiPrice(ph, tokenA.decimals, tokenB.decimals)
+                      if (rawPl == null || rawPh == null) {
+                        setPriceRangeError('Nie udało się przeliczyć (sprawdź format i wartość cen).')
+                        return
+                      }
+                      const r = alignPriceRatioToTicks(rawPl, rawPh, spacing)
+                      if (!r) {
+                        setPriceRangeError('Nie udało się przeliczyć — sprawdź wartości.')
+                        return
+                      }
+                      setTickLower(r.tickLower)
+                      setTickUpper(r.tickUpper)
+                      setTickAutoSync(false)
+                      setSyncPriceInputsFromTicks(true)
+                      setPriceRangeError(null)
+                    }}
+                  >
+                    Ustaw ticki z tych cen
+                  </Button>
+                  {priceRangeError ? (
+                    <span className="text-xs text-destructive">{priceRangeError}</span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      Ticki są wyrównane do tick spacing ({poolQ.data.tick_spacing}). Możesz też edytować ticki
+                      powyżej — pola cenowe zaktualizują się automatycznie.
+                    </span>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            
+            {strategyId.trim() && strategyRangeWidthPct != null && strategyRangeWidthPct > 0 && poolQ.data ? (
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1 rounded border-input"
+                  checked={tickAutoSync}
+                  onChange={(e) => setTickAutoSync(e.target.checked)}
+                />
+                <span className="text-muted-foreground leading-snug">
+                  Automatycznie aktualizuj zakres (ceny / ticki) wg aktualnego ticku puli i szerokości
+                  strategii (ok. co 10 s). Wyłącz, jeśli chcesz ustawić zakres ręcznie po cenach.
+                </span>
+              </label>
+            ) : null}
+
+            {!priceAtTickBounds && poolAddress.trim() && poolQ.data ? (
+              <p className="text-xs text-muted-foreground font-mono tabular-nums">
+                Pula: price ref.{' '}
+                {poolStateQ.data?.price != null && tokenA && tokenB
+                  ? formatPriceRatio(
+                      uiPriceFromRawPriceRatio(
+                        Number(poolStateQ.data.price),
+                        tokenA.decimals,
+                        tokenB.decimals,
+                      ) ?? Number.NaN,
+                    )
+                  : poolStateQ.data?.price ?? poolQ.data.price}{' '}
+                · tick{' '}
+                {poolStateQ.data?.current_tick ?? poolQ.data.current_tick}
+                {poolStateQ.isFetching ? ' · odświeżanie…' : ''}
+              </p>
+            ) : null}
 
             <div className="rounded-md border border-border p-3 space-y-3">
               <div className="flex flex-wrap gap-3 items-center">
@@ -264,11 +1035,39 @@ export default function PositionCreate() {
                 </div>
               )}
 
+              {poolQ.data && mintA && mintB && !ownerPk && (
+                <p className="text-xs text-amber-600/90">
+                  Brak adresu portfela — salda nie będą widoczne. Ustaw{' '}
+                  <code className="text-[11px]">VITE_DEV_WALLET_PUBKEY</code> albo wybierz portfel na stronie
+                  Wallet.
+                </p>
+              )}
+
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <label className="block text-sm font-medium mb-1">
                     Amount {tokenA?.symbol ?? 'Token A'}
                   </label>
+                  {mintA && ownerPk && (
+                    <div className="text-xs text-muted-foreground mb-1.5">
+                      Stan portfela:{' '}
+                      {balancesQ.isLoading ? (
+                        <span>…</span>
+                      ) : balancesQ.isError ? (
+                        <span className="text-destructive">nie udało się odczytać</span>
+                      ) : (
+                        <>
+                          <span className="font-medium text-foreground tabular-nums">
+                            {walletLineA?.amount}
+                          </span>{' '}
+                          {tokenA?.symbol ?? 'A'}
+                          {walletLineA?.note ? (
+                            <span className="opacity-80"> ({walletLineA.note})</span>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  )}
                   <input
                     type="number"
                     step="0.000001"
@@ -287,6 +1086,26 @@ export default function PositionCreate() {
                   <label className="block text-sm font-medium mb-1">
                     Amount {tokenB?.symbol ?? 'Token B'}
                   </label>
+                  {mintB && ownerPk && (
+                    <div className="text-xs text-muted-foreground mb-1.5">
+                      Stan portfela:{' '}
+                      {balancesQ.isLoading ? (
+                        <span>…</span>
+                      ) : balancesQ.isError ? (
+                        <span className="text-destructive">nie udało się odczytać</span>
+                      ) : (
+                        <>
+                          <span className="font-medium text-foreground tabular-nums">
+                            {walletLineB?.amount}
+                          </span>{' '}
+                          {tokenB?.symbol ?? 'B'}
+                          {walletLineB?.note ? (
+                            <span className="opacity-80"> ({walletLineB.note})</span>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  )}
                   <input
                     type="number"
                     step="0.000001"
@@ -309,6 +1128,147 @@ export default function PositionCreate() {
                   Kwota jest nieprawidłowa albo za duża (przekracza limit bezpiecznych liczb JS dla u64).
                 </div>
               ) : null}
+
+              {fundingCheck.ready && fundingCheck.blocked && (
+                <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2.5 space-y-2 text-sm">
+                  <p className="font-medium text-destructive">Za mało tokenów na portfelu względem kwot powyżej</p>
+                  {fundingCheck.shortA && fundingCheck.shortB ? (
+                    <p className="text-muted-foreground">
+                      Brakuje{' '}
+                      <span className="font-mono tabular-nums">{fundingCheck.deficitA.toFixed(8)}</span> {tokenA?.symbol}{' '}
+                      i{' '}
+                      <span className="font-mono tabular-nums">{fundingCheck.deficitB.toFixed(8)}</span> {tokenB?.symbol}.
+                      Doładuj portfel albo wykonaj swapy (np. z SOL), potem wróć tutaj.
+                    </p>
+                  ) : (
+                    <>
+                      {fundingCheck.shortA ? (
+                        <p className="text-muted-foreground">
+                          Brakuje ok.{' '}
+                          <span className="font-mono tabular-nums">{fundingCheck.deficitA.toFixed(8)}</span> {tokenA?.symbol}{' '}
+                          (masz {fundingCheck.haveA?.toLocaleString(undefined, { maximumFractionDigits: 8 })}, potrzeba{' '}
+                          {Number(amountAUi).toLocaleString(undefined, { maximumFractionDigits: 8 })}). Zswapuj najpierw z{' '}
+                          {tokenB?.symbol} → {tokenA?.symbol}, potem otwórz pozycję.
+                        </p>
+                      ) : null}
+                      {fundingCheck.shortB ? (
+                        <p className="text-muted-foreground">
+                          Brakuje ok.{' '}
+                          <span className="font-mono tabular-nums">{fundingCheck.deficitB.toFixed(8)}</span> {tokenB?.symbol}{' '}
+                          (masz {fundingCheck.haveB?.toLocaleString(undefined, { maximumFractionDigits: 8 })}, potrzeba{' '}
+                          {Number(amountBUi).toLocaleString(undefined, { maximumFractionDigits: 8 })}). Zswapuj najpierw z{' '}
+                          {tokenA?.symbol} → {tokenB?.symbol}, potem otwórz pozycję.
+                        </p>
+                      ) : null}
+                    </>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Link otwiera Jupiter z ustawionymi mintami{pricesQ.data ? ' i szacunkową kwotą wejścia (ExactIn, +5% bufor)' : ''}.
+                    Rozszerzenie portfela w tej samej przeglądarce zwykle łączy się z Jupiterem automatycznie — zostaje potwierdzić swap.
+                  </p>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {fundingCheck.shortA && fundingCheck.shortB ? (
+                      <a
+                        href={fundingCheck.jupiterGeneric}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                      >
+                        Jupiter — swap
+                      </a>
+                    ) : (
+                      <>
+                        {fundingCheck.jupiterSwapToCoverA ? (
+                          <a
+                            href={fundingCheck.jupiterSwapToCoverA}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                          >
+                            Jupiter: {tokenB?.symbol} → {tokenA?.symbol}
+                          </a>
+                        ) : null}
+                        {fundingCheck.jupiterSwapToCoverB ? (
+                          <a
+                            href={fundingCheck.jupiterSwapToCoverB}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                          >
+                            Jupiter: {tokenA?.symbol} → {tokenB?.symbol}
+                          </a>
+                        ) : null}
+                      </>
+                    )}
+                    <a
+                      href="https://www.orca.so/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted/60"
+                    >
+                      Orca
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              {swapBeforeOpenPlan &&
+              !(fundingCheck.shortA && fundingCheck.shortB) &&
+              fundingCheck.ready &&
+              fundingCheck.blocked ? (
+                <div className="rounded-md border border-amber-500/35 bg-amber-500/5 px-3 py-2.5 text-sm space-y-2">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-1 rounded border-input"
+                      checked={swapBeforeOpen}
+                      onChange={(e) => setSwapBeforeOpen(e.target.checked)}
+                    />
+                    <span className="text-muted-foreground leading-snug">
+                      <span className="font-medium text-foreground">Swap w puli Orca przed dodaniem płynności</span>{' '}
+                      ({swapBeforeOpenPlan.label}). Szacowana kwota wejścia:{' '}
+                      {swapBeforeOpenAmountUi != null && swapBeforeOpenInputMeta != null ? (
+                        <span className="font-medium tabular-nums">
+                          ~
+                          {swapBeforeOpenAmountUi.toLocaleString(undefined, {
+                            maximumFractionDigits: Math.min(8, swapBeforeOpenInputMeta.decimals),
+                          })}
+                          {' '}
+                          {swapBeforeOpenInputMeta.symbol}
+                        </span>
+                      ) : (
+                        <span>—</span>
+                      )}{' '}
+                      (limit: do ~92% dostępnego salda).
+                    </span>
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Ten krok wykona transakcję swapu w tej samej puli Orca na sieci Solana (backend).
+                    Dopiero po potwierdzeniu będzie można otworzyć pozycję.
+                  </p>
+                  {swapCostEstimateQ.isLoading ? (
+                    <p className="text-xs text-muted-foreground">Szacowanie opłaty sieciowej swapu…</p>
+                  ) : null}
+                  {swapCostEstimateQ.data ? (
+                    <p className="text-xs text-foreground/90">
+                      Szacowany koszt sieciowy swapu (Solana <code className="text-[11px]">meta.fee</code>): ~{' '}
+                      {(swapCostEstimateQ.data.estimated_network_fee_lamports / 1e9).toLocaleString(undefined, {
+                        maximumFractionDigits: 6,
+                      })}{' '}
+                      SOL ({swapCostEstimateQ.data.estimated_network_fee_lamports.toLocaleString()} lamportów
+                      {swapCostEstimateQ.data.historical_sample_count > 0
+                        ? ` — mediana z ${swapCostEstimateQ.data.historical_sample_count} wcześniejszych swapów w tej puli`
+                        : ' — brak historii lokalnej, wartość ostrożna domyślna'}
+                      ).
+                    </p>
+                  ) : null}
+                  {swapSignature ? (
+                    <p className="text-xs text-foreground/90">
+                      Swap potwierdzony: <code className="text-[11px] bg-muted px-1 rounded">{shortenAddress(swapSignature, 6)}</code>
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
@@ -317,9 +1277,38 @@ export default function PositionCreate() {
                   Cancel
                 </Button>
               </Link>
-              <Button type="submit" disabled={mutation.isPending}>
-                {mutation.isPending ? 'Opening...' : 'Open Position'}
-              </Button>
+              {swapSignature ? (
+                <span className="text-xs text-foreground/80 self-center">
+                  Swap ok: {shortenAddress(swapSignature, 6)}
+                </span>
+              ) : null}
+              {swapStepError ? (
+                <span className="text-xs text-destructive self-center max-w-[420px] truncate">
+                  {swapStepError}
+                </span>
+              ) : null}
+              {swapBeforeOpen && swapBeforeOpenPlan && !swapSignature ? (
+                <Button
+                  type="button"
+                  disabled={swapMutation.isPending}
+                  onClick={handleSwapOnly}
+                >
+                  {swapMutation.isPending ? 'Swapping...' : 'Swap'}
+                </Button>
+              ) : (
+                <Button
+                  type="submit"
+                  disabled={
+                    mutation.isPending ||
+                    (fundingCheck.ready &&
+                      fundingCheck.blocked &&
+                      swapBeforeOpen &&
+                      !swapSignature)
+                  }
+                >
+                  {mutation.isPending ? 'Opening...' : 'Open Position'}
+                </Button>
+              )}
             </div>
           </form>
         </CardContent>

@@ -4,7 +4,7 @@
 
 ### Project overview
 
-CLMM Liquidity Provider Strategy Optimizer — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScript web dashboard. See `README.md` and `STARTUP.md` for full details.
+Bociarz LP — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScript web dashboard. See `README.md` and `STARTUP.md` for full details.
 
 ### Required system dependencies
 

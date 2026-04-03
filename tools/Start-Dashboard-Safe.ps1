@@ -22,21 +22,44 @@ if (-not (Test-Path (Join-Path $WebDir "node_modules"))) {
 }
 
 # Start API in a separate window, always :8081
-& (Join-Path $RepoRoot "tools\\Start-ClmmApi-8081.ps1")
-
 # Optionally start script runner in a separate window.
 if ($WithRunner.IsPresent) {
   $runner = Join-Path $RepoRoot "tools\\Start-ClmmScriptRunner.ps1"
   if (Test-Path -LiteralPath $runner) {
-    Write-Host "[Start-Dashboard-Safe] Starting script runner (:9847)..." -ForegroundColor Cyan
+    # If 9847 is taken (commonly by HTTP.sys / PID 4), pick a stable alternate port.
+    try {
+      # Netstat can show HTTP.sys reservations (PID 4) even when the runner is healthy.
+      # Use /health instead of LISTENING detection.
+      $runnerHealthy = $false
+      try {
+        $resp = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:9847/health" -TimeoutSec 1 -ErrorAction Stop
+        if ($null -ne $resp -and $resp.ok -eq $true) { $runnerHealthy = $true }
+      } catch {
+        # best effort only
+      }
+
+      if (-not $runnerHealthy) {
+        $env:CLMM_SCRIPT_RUNNER_PORT = "9857"
+        $env:SCRIPT_RUNNER_URL = "http://127.0.0.1:9857"
+        Write-Warning "[Start-Dashboard-Safe] Runner on :9847 not responding; runner will use :9857 and API will use SCRIPT_RUNNER_URL=$env:SCRIPT_RUNNER_URL"
+      }
+    } catch {
+      # best effort
+    }
+
+    Write-Host "[Start-Dashboard-Safe] Starting script runner (default :9847)..." -ForegroundColor Cyan
+    # Keep window open on errors, so failures are visible.
     Start-Process -FilePath "pwsh" `
-      -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runner) `
+      -ArgumentList @("-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", $runner) `
       -WorkingDirectory $RepoRoot `
       -WindowStyle Normal
   } else {
     Write-Warning "[Start-Dashboard-Safe] Missing tools/Start-ClmmScriptRunner.ps1; runner not started."
   }
 }
+
+# Start API in a separate window, always :8081 (inherits any SCRIPT_RUNNER_URL override from this process).
+& (Join-Path $RepoRoot "tools\\Start-ClmmApi-8081.ps1")
 
 # Start Vite in this window (no kill-port, no touching API ports)
 Set-Location $WebDir

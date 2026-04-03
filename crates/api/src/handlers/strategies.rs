@@ -3,12 +3,13 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     ApplyOptimizeResultRequest, CreateStrategyRequest, ListStrategiesResponse, MessageResponse,
-    OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse, StrategyResponse,
-    StrategyType,
+    OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse, StrategyPositionExecutorRequest,
+    StrategyResponse, StrategyType,
 };
 use crate::services::optimization_runner::{
     apply_optimize_result_parsed, end_optimize_busy, try_begin_optimize_busy,
 };
+use crate::services::position_executor::load_wallet_from_env;
 use crate::state::{AlertUpdate, AppState, StrategyState};
 use axum::{
     Json,
@@ -19,6 +20,8 @@ use clmm_lp_execution::prelude::{
     DecisionConfig, ExecutorConfig, StrategyExecutor, validate_agent_decision,
 };
 use rust_decimal::Decimal;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
@@ -54,8 +57,8 @@ pub async fn list_strategies(
                     .config
                     .get("pool_address")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
                 strategy_type: s
                     .config
                     .get("strategy_type")
@@ -66,6 +69,11 @@ pub async fn list_strategies(
                 dry_run: s
                     .config
                     .get("dry_run")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                auto_execute: s
+                    .config
+                    .get("auto_execute")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 created_at: s.created_at,
@@ -115,8 +123,8 @@ pub async fn get_strategy(
             .config
             .get("pool_address")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+            .filter(|p| !p.is_empty())
+            .map(str::to_string),
         strategy_type: strategy
             .config
             .get("strategy_type")
@@ -127,6 +135,11 @@ pub async fn get_strategy(
         dry_run: strategy
             .config
             .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        auto_execute: strategy
+            .config
+            .get("auto_execute")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         created_at: strategy.created_at,
@@ -154,13 +167,23 @@ pub async fn create_strategy(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
 
-    let config = serde_json::json!({
-        "pool_address": request.pool_address,
+    let mut config = serde_json::json!({
         "strategy_type": request.strategy_type,
         "parameters": request.parameters,
         "auto_execute": request.auto_execute,
         "dry_run": request.dry_run,
     });
+    if let Some(ref p) = request.pool_address {
+        let t = p.trim();
+        if !t.is_empty() {
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert(
+                    "pool_address".to_string(),
+                    serde_json::Value::String(t.to_string()),
+                );
+            }
+        }
+    }
 
     let strategy_state = StrategyState {
         id: id.clone(),
@@ -177,16 +200,21 @@ pub async fn create_strategy(
         .await
         .insert(id.clone(), strategy_state);
 
+    // Persist strategy config so it survives API restarts.
+    let snapshot = state.strategies.read().await.clone();
+    crate::state::try_persist_strategies_best_effort(&snapshot);
+
     info!(id = %id, name = %request.name, "Strategy created");
 
     let response = StrategyResponse {
         id,
         name: request.name,
-        pool_address: request.pool_address,
+        pool_address: None,
         strategy_type: request.strategy_type,
         parameters: request.parameters,
         running: false,
         dry_run: request.dry_run,
+        auto_execute: request.auto_execute,
         created_at: now,
         updated_at: now,
     };
@@ -213,38 +241,104 @@ pub async fn update_strategy(
     Path(id): Path<String>,
     Json(request): Json<CreateStrategyRequest>,
 ) -> ApiResult<Json<StrategyResponse>> {
-    let mut strategies = state.strategies.write().await;
-    let strategy = strategies
-        .get_mut(&id)
-        .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+    let response = {
+        let mut strategies = state.strategies.write().await;
+        let strategy = match strategies.get_mut(&id) {
+            Some(s) => s,
+            None => return Err(ApiError::not_found("Strategy not found")),
+        };
 
-    let now = chrono::Utc::now();
+        let now = chrono::Utc::now();
 
-    let config = serde_json::json!({
-        "pool_address": request.pool_address,
-        "strategy_type": request.strategy_type,
-        "parameters": request.parameters,
-        "auto_execute": request.auto_execute,
-        "dry_run": request.dry_run,
-    });
+        let old_position_addrs = strategy
+            .config
+            .get("parameters")
+            .and_then(|p| p.get("position_addresses"))
+            .cloned();
+        let old_executor_disabled = strategy
+            .config
+            .get("parameters")
+            .and_then(|p| p.get("executor_disabled_position_addresses"))
+            .cloned();
+        let old_pool_addr = strategy.config.get("pool_address").cloned();
 
-    strategy.name = request.name.clone();
-    strategy.config = config;
-    strategy.updated_at = now;
+        let mut config = serde_json::json!({
+            "strategy_type": request.strategy_type,
+            "parameters": request.parameters,
+            "auto_execute": request.auto_execute,
+            "dry_run": request.dry_run,
+        });
 
-    info!(id = %id, "Strategy updated");
+        match &request.pool_address {
+            Some(p) if !p.trim().is_empty() => {
+                if let Some(obj) = config.as_object_mut() {
+                    obj.insert(
+                        "pool_address".to_string(),
+                        serde_json::Value::String(p.trim().to_string()),
+                    );
+                }
+            }
+            Some(_) => {
+                /* clear legacy pool — do not copy old */
+            }
+            None => {
+                if let Some(p) = old_pool_addr {
+                    if let Some(obj) = config.as_object_mut() {
+                        obj.insert("pool_address".to_string(), p);
+                    }
+                }
+            }
+        }
 
-    let response = StrategyResponse {
-        id,
-        name: request.name,
-        pool_address: request.pool_address,
-        strategy_type: request.strategy_type,
-        parameters: request.parameters,
-        running: strategy.running,
-        dry_run: request.dry_run,
-        created_at: strategy.created_at,
-        updated_at: now,
+        if let Some(addrs) = old_position_addrs {
+            if let Some(params) = config.get_mut("parameters").and_then(|p| p.as_object_mut()) {
+                params.insert("position_addresses".to_string(), addrs);
+            }
+        }
+        if let Some(disabled) = old_executor_disabled {
+            if let Some(params) = config.get_mut("parameters").and_then(|p| p.as_object_mut()) {
+                if !params.contains_key("executor_disabled_position_addresses") {
+                    params.insert("executor_disabled_position_addresses".to_string(), disabled);
+                }
+            }
+        }
+
+        strategy.name = request.name.clone();
+        strategy.config = config;
+        strategy.updated_at = now;
+
+        info!(id = %id, "Strategy updated");
+
+        let params: StrategyParameters = strategy
+            .config
+            .get("parameters")
+            .and_then(|p| serde_json::from_value(p.clone()).ok())
+            .unwrap_or_default();
+
+        StrategyResponse {
+            id: id.clone(),
+            name: request.name,
+            pool_address: strategy
+                .config
+                .get("pool_address")
+                .and_then(|v| v.as_str())
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
+            strategy_type: request.strategy_type,
+            parameters: params,
+            running: strategy.running,
+            dry_run: request.dry_run,
+            auto_execute: request.auto_execute,
+            created_at: strategy.created_at,
+            updated_at: now,
+        }
     };
+
+    sync_executor_disabled_from_config(&state, &id).await?;
+
+    // Persist strategy config so it survives API restarts.
+    let snapshot = state.strategies.read().await.clone();
+    crate::state::try_persist_strategies_best_effort(&snapshot);
 
     Ok(Json(response))
 }
@@ -379,58 +473,87 @@ pub async fn delete_strategy(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<MessageResponse>> {
-    let mut strategies = state.strategies.write().await;
-
-    if strategies.remove(&id).is_none() {
-        return Err(ApiError::not_found("Strategy not found"));
+    {
+        let mut strategies = state.strategies.write().await;
+        let Some(strategy) = strategies.get_mut(&id) else {
+            return Err(ApiError::not_found("Strategy not found"));
+        };
+        if strategy.running {
+            strategy.running = false;
+            strategy.updated_at = chrono::Utc::now();
+        }
     }
 
+    {
+        let executors = state.executors.read().await;
+        if let Some(executor) = executors.get(&id) {
+            let executor_guard = executor.read().await;
+            executor_guard.stop();
+            info!(strategy_id = %id, "Strategy executor stopped before delete");
+        }
+    }
+    {
+        let mut executors = state.executors.write().await;
+        executors.remove(&id);
+    }
     {
         let mut busy = state.optimization_busy.write().await;
         busy.remove(&id);
     }
+
+    {
+        let mut strategies = state.strategies.write().await;
+        if strategies.remove(&id).is_none() {
+            return Err(ApiError::not_found("Strategy not found"));
+        }
+    }
+
+    // Persist strategies store (deleted strategy must disappear after restart).
+    let snapshot = state.strategies.read().await.clone();
+    crate::state::try_persist_strategies_best_effort(&snapshot);
 
     info!(id = %id, "Strategy deleted");
 
     Ok(Json(MessageResponse::new("Strategy deleted")))
 }
 
-/// Start a strategy.
-#[utoipa::path(
-    post,
-    path = "/strategies/{id}/start",
-    tag = "Strategies",
-    params(
-        ("id" = String, Path, description = "Strategy ID")
-    ),
-    responses(
-        (status = 200, description = "Strategy started", body = MessageResponse),
-        (status = 404, description = "Strategy not found")
-    )
-)]
-pub async fn start_strategy(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<MessageResponse>> {
-    // Get strategy configuration
-    let strategy_config = {
-        let mut strategies = state.strategies.write().await;
-        let strategy = strategies
-            .get_mut(&id)
-            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
-
-        if strategy.running {
-            return Err(ApiError::Conflict(
-                "Strategy is already running".to_string(),
-            ));
-        }
-
-        strategy.running = true;
-        strategy.updated_at = chrono::Utc::now();
-        strategy.config.clone()
+/// Push `executor_disabled_position_addresses` from config into the running executor (if any).
+pub(crate) async fn sync_executor_disabled_from_config(
+    state: &AppState,
+    strategy_id: &str,
+) -> ApiResult<()> {
+    let addrs: Vec<String> = {
+        let strategies = state.strategies.read().await;
+        let Some(strategy) = strategies.get(strategy_id) else {
+            return Ok(());
+        };
+        strategy
+            .config
+            .get("parameters")
+            .and_then(|p| p.get("executor_disabled_position_addresses"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(std::string::ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
+    let executors = state.executors.read().await;
+    let Some(exec) = executors.get(strategy_id) else {
+        return Ok(());
+    };
+    let g = exec.read().await;
+    g.set_skip_evaluation_for_addresses(&addrs).await;
+    Ok(())
+}
 
-    // Parse configuration
+/// Starts the executor loop (caller must set `strategy.running = true` and pass current `config` JSON).
+async fn start_strategy_executor_core(
+    state: &AppState,
+    id: &str,
+    strategy_config: serde_json::Value,
+) -> ApiResult<()> {
     let dry_run = strategy_config
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -447,7 +570,6 @@ pub async fn start_strategy(
         .and_then(|v| v.as_u64())
         .unwrap_or(300);
 
-    // Seed monitor positions (so strategy has something to evaluate).
     if let Some(addrs) = strategy_config
         .get("parameters")
         .and_then(|p| p.get("position_addresses"))
@@ -468,7 +590,6 @@ pub async fn start_strategy(
         }
     }
 
-    // Create executor configuration
     let executor_config = ExecutorConfig {
         eval_interval_secs,
         auto_execute,
@@ -478,7 +599,6 @@ pub async fn start_strategy(
         fee_mode: PositionTruthMode::Heuristic,
     };
 
-    // Create strategy executor
     let mut executor = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
@@ -486,30 +606,24 @@ pub async fn start_strategy(
         executor_config,
     );
 
-    // Always enable Tier3 checkpoint ledger by default (append-only JSONL).
     executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
         "data/position-fee-checkpoints.jsonl",
     )));
 
-    // If auto_execute is enabled, we need a signing wallet (unless dry_run).
-    if auto_execute && !dry_run {
-        let keypair_path = std::env::var("KEYPAIR_PATH")
-            .ok()
-            .or_else(|| std::env::var("SOLANA_KEYPAIR_PATH").ok())
-            .ok_or_else(|| {
-                ApiError::bad_request(
-                    "auto_execute=true requires KEYPAIR_PATH or SOLANA_KEYPAIR_PATH",
-                )
-            })?;
-
-        let wallet = Arc::new(
-            clmm_lp_execution::prelude::Wallet::from_file(keypair_path, "api-strategy")
-                .map_err(|e| ApiError::internal(format!("Failed to load wallet: {e}")))?,
-        );
-        executor.set_wallet(wallet);
+    if !dry_run {
+        match load_wallet_from_env() {
+            Ok(Some(wallet)) => executor.set_wallet(wallet),
+            Ok(None) => {
+                if auto_execute {
+                    return Err(ApiError::bad_request(
+                        "auto_execute=true requires KEYPAIR_PATH or SOLANA_KEYPAIR_PATH",
+                    ));
+                }
+            }
+            Err(e) => return Err(e),
+        }
     }
 
-    // Configure decision engine if parameters provided
     if let Some(params) = strategy_config.get("parameters") {
         let mut decision_config = DecisionConfig::default();
 
@@ -520,9 +634,7 @@ pub async fn start_strategy(
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(5, 2));
         }
 
-        if let Some(max_il) = params.get("max_il_pct")
-            && let Some(val) = max_il.as_f64()
-        {
+        if let Some(max_il) = params.get("max_il_pct") && let Some(val) = max_il.as_f64() {
             decision_config.il_close_threshold =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
         }
@@ -538,33 +650,44 @@ pub async fn start_strategy(
 
     let executor = Arc::new(RwLock::new(executor));
 
-    // Store executor
+    let disabled_addrs: Vec<String> = strategy_config
+        .get("parameters")
+        .and_then(|p| p.get("executor_disabled_position_addresses"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(std::string::ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     {
-        let mut executors = state.executors.write().await;
-        executors.insert(id.clone(), executor.clone());
+        let g = executor.read().await;
+        g.set_skip_evaluation_for_addresses(&disabled_addrs).await;
     }
 
-    // Start executor in background task
+    {
+        let mut executors = state.executors.write().await;
+        executors.insert(id.to_string(), executor.clone());
+    }
+
     let executor_clone = executor.clone();
-    let id_clone = id.clone();
+    let id_owned = id.to_string();
     let alert_sender = state.alert_updates.clone();
 
     tokio::spawn(async move {
-        info!(strategy_id = %id_clone, "Strategy executor task started");
+        info!(strategy_id = %id_owned, "Strategy executor task started");
 
         let executor_guard = executor_clone.read().await;
         executor_guard.start().await;
 
-        // Notify when stopped
         let _ = alert_sender.send(AlertUpdate {
             level: "info".to_string(),
-            message: format!("Strategy {} stopped", id_clone),
+            message: format!("Strategy {} stopped", id_owned),
             timestamp: chrono::Utc::now(),
             position_address: None,
         });
     });
 
-    // Broadcast alert
     state
         .broadcast_alert(AlertUpdate {
             level: "info".to_string(),
@@ -574,12 +697,173 @@ pub async fn start_strategy(
         })
         .await;
 
-    info!(id = %id, dry_run = dry_run, auto_execute = auto_execute, "Strategy started");
+    info!(
+        id = %id,
+        dry_run = dry_run,
+        auto_execute = auto_execute,
+        "Strategy started"
+    );
+
+    Ok(())
+}
+
+/// After linking a position to a strategy, ensure the strategy executor is running and the PDA is monitored.
+pub async fn ensure_strategy_running_after_position_link(
+    state: &AppState,
+    strategy_id: &str,
+    position_pda: &str,
+) -> ApiResult<()> {
+    let need_full_start = {
+        let mut strategies = state.strategies.write().await;
+        let strategy = strategies
+            .get_mut(strategy_id)
+            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+        if strategy.running {
+            false
+        } else {
+            strategy.running = true;
+            strategy.updated_at = chrono::Utc::now();
+            true
+        }
+    };
+
+    if !need_full_start {
+        state
+            .monitor
+            .add_position(position_pda)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("Failed to add position to monitor: {e}")))?;
+        sync_executor_disabled_from_config(state, strategy_id).await?;
+        return Ok(());
+    }
+
+    let strategy_config = {
+        let strategies = state.strategies.read().await;
+        let strategy = strategies
+            .get(strategy_id)
+            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+        strategy.config.clone()
+    };
+
+    start_strategy_executor_core(state, strategy_id, strategy_config).await
+}
+
+/// Start a strategy.
+#[utoipa::path(
+    post,
+    path = "/strategies/{id}/start",
+    tag = "Strategies",
+    params(
+        ("id" = String, Path, description = "Strategy ID")
+    ),
+    responses(
+        (status = 200, description = "Strategy started", body = MessageResponse),
+        (status = 404, description = "Strategy not found")
+    )
+)]
+pub async fn start_strategy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<MessageResponse>> {
+    let strategy_config = {
+        let mut strategies = state.strategies.write().await;
+        let strategy = strategies
+            .get_mut(&id)
+            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+
+        if strategy.running {
+            return Err(ApiError::Conflict(
+                "Strategy is already running".to_string(),
+            ));
+        }
+
+        strategy.running = true;
+        strategy.updated_at = chrono::Utc::now();
+        strategy.config.clone()
+    };
+
+    let dry_run = strategy_config
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let auto_execute = strategy_config
+        .get("auto_execute")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    start_strategy_executor_core(&state, &id, strategy_config).await?;
 
     Ok(Json(MessageResponse::new(format!(
         "Strategy started (dry_run={}, auto_execute={})",
         dry_run, auto_execute
     ))))
+}
+
+/// Enable or disable strategy automation for a single linked position.
+#[utoipa::path(
+    post,
+    path = "/strategies/{id}/position-executor",
+    tag = "Strategies",
+    params(
+        ("id" = String, Path, description = "Strategy ID")
+    ),
+    request_body = StrategyPositionExecutorRequest,
+    responses(
+        (status = 200, description = "Updated", body = MessageResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Strategy not found")
+    )
+)]
+pub async fn set_strategy_position_executor(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<StrategyPositionExecutorRequest>,
+) -> ApiResult<Json<MessageResponse>> {
+    Pubkey::from_str(body.position_address.trim())
+        .map_err(|_| ApiError::bad_request("Invalid position_address"))?;
+
+    {
+        let mut strategies = state.strategies.write().await;
+        let strategy = strategies
+            .get_mut(&id)
+            .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+
+        let params = strategy
+            .config
+            .get_mut("parameters")
+            .and_then(|p| p.as_object_mut())
+            .ok_or_else(|| ApiError::bad_request("strategy parameters missing"))?;
+
+        let arr_val = params
+            .entry("executor_disabled_position_addresses".to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        let list = arr_val.as_array_mut().ok_or_else(|| {
+            ApiError::bad_request("executor_disabled_position_addresses must be a JSON array")
+        })?;
+
+        let addr = body.position_address.trim().to_string();
+        if body.enabled {
+            list.retain(|v| v.as_str() != Some(addr.as_str()));
+        } else if !list.iter().any(|v| v.as_str() == Some(addr.as_str())) {
+            list.push(serde_json::Value::String(addr));
+        }
+
+        strategy.updated_at = chrono::Utc::now();
+    }
+
+    sync_executor_disabled_from_config(&state, &id).await?;
+
+    // Persist updated strategy parameters.
+    let snapshot = state.strategies.read().await.clone();
+    crate::state::try_persist_strategies_best_effort(&snapshot);
+
+    Ok(Json(MessageResponse::new(
+        if body.enabled {
+            "Automation enabled for this position".to_string()
+        } else {
+            "Automation disabled for this position".to_string()
+        },
+    )))
 }
 
 /// Stop a strategy.

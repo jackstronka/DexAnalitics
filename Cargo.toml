@@ -18,7 +18,7 @@ license = "MIT"
 repository = "TBD"
 homepage = "TBD"
 documentation = "TBD"
-description = "Bociarz LP Strategy Lab — strategy backtesting, optimization, and execution for Solana CLMMs"
+description = "Bociarz LP — strategy backtesting, optimization, and execution for Solana CLMMs"
 
 [workspace.dependencies]
 # Internal crates

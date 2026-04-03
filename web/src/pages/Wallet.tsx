@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useQuery, useQueries } from '@tanstack/react-query'
+import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { DollarSign, TrendingDown, TrendingUp, Wallet as WalletIcon, ArrowRight, Copy } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -12,11 +12,18 @@ import {
   getJupiterPricesUsd,
   getWalletBalances,
   getWallets,
+  getOrcaToken,
 } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
+
+/** Round to whole cents so table rows + SOL line always add up to the footer total. */
+function usdToCents(n: number): number {
+  if (!Number.isFinite(n)) return 0
+  return Math.round(n * 100)
+}
 
 function copyText(text: string) {
   void navigator.clipboard.writeText(text)
@@ -84,6 +91,33 @@ export default function Wallet() {
   const solUsd = prices[WSOL_MINT] ?? 0
   const solUi = balances ? parseFloat(balances.sol) || 0 : 0
   const solValueUsd = solUsd > 0 ? solUi * solUsd : 0
+  const solValueCents = solUsd > 0 ? usdToCents(solValueUsd) : 0
+
+  const tokensTotalCents =
+    balances?.tokens.reduce((acc, t) => {
+      const p = prices[t.mint]
+      if (p == null) return acc
+      return acc + usdToCents((parseFloat(t.ui_amount) || 0) * p)
+    }, 0) ?? 0
+
+  const onChainTotalCents = solValueCents + tokensTotalCents
+
+  const tokenRows = useMemo(() => {
+    if (!balances) return []
+    const list = showZeroTokens
+      ? balances.tokens
+      : balances.tokens.filter((t) => t.ui_amount !== '0' && t.ui_amount !== '0.0')
+    return list.slice(0, 50)
+  }, [balances, showZeroTokens])
+
+  const orcaTokenQueries = useQueries({
+    queries: tokenRows.map((t) => ({
+      queryKey: ['orca-token', t.mint] as const,
+      queryFn: () => getOrcaToken(t.mint),
+      enabled: tokenRows.length > 0,
+      staleTime: 60 * 60 * 1000,
+    })),
+  })
 
   const positions = positionsData?.positions ?? []
   const active = positions.filter((p) => p.status === 'active')
@@ -191,14 +225,20 @@ export default function Wallet() {
                     <div className="font-mono text-lg">{balances.sol}</div>
                     <div className="text-[11px] text-muted-foreground">lamports: {balances.lamports}</div>
                     <div className="text-[11px] text-muted-foreground">
-                      USD (estimate): {solUsd > 0 ? formatUSD(solValueUsd.toFixed(2)) : '—'}
+                      USD (estimate):{' '}
+                      {solUsd > 0 ? formatUSD(solValueCents / 100) : '—'}
                     </div>
                   </div>
                   <div className="rounded-md border bg-muted/20 px-3 py-2">
                     <div className="text-xs text-muted-foreground">RPC</div>
                     <div className="font-mono text-xs break-all">{balances.rpc_url}</div>
                     <div className="text-[11px] text-muted-foreground">
-                      Ceny: {pricesQuery.isLoading ? 'loading…' : pricesQuery.isError ? 'error' : 'Jupiter'}
+                      Ceny:{' '}
+                      {pricesQuery.isLoading
+                        ? 'loading…'
+                        : pricesQuery.isError
+                          ? 'error'
+                          : 'API (Jupiter / fallback)'}
                     </div>
                   </div>
                 </div>
@@ -226,7 +266,7 @@ export default function Wallet() {
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="border-b text-left text-muted-foreground">
-                          <th className="py-2 pr-3">Mint</th>
+                          <th className="py-2 pr-3">Token</th>
                           <th className="py-2 pr-3 text-right">UI amount</th>
                           <th className="py-2 pr-3 text-right">Price USD</th>
                           <th className="py-2 pr-3 text-right">Value USD</th>
@@ -234,28 +274,32 @@ export default function Wallet() {
                         </tr>
                       </thead>
                       <tbody>
-                        {(showZeroTokens
-                          ? balances.tokens
-                          : balances.tokens.filter((t) => t.ui_amount !== '0' && t.ui_amount !== '0.0')
-                        )
-                          .slice(0, 50)
-                          .map((t) => (
+                        {tokenRows.map((t, rowIdx) => {
+                            const orca = orcaTokenQueries[rowIdx]?.data
+                            const orcaPending = orcaTokenQueries[rowIdx]?.isPending
+                            const primary =
+                              orca?.symbol?.trim() ||
+                              orca?.name?.trim() ||
+                              (orcaPending ? '…' : shortenAddress(t.mint, 8))
+                            const p = prices[t.mint]
+                            const lineCents =
+                              p != null
+                                ? usdToCents((parseFloat(t.ui_amount) || 0) * p)
+                                : null
+                            return (
                             <tr key={t.mint} className="border-b border-border/60">
-                              <td className="py-2 pr-3 font-mono" title={t.mint}>
-                                {shortenAddress(t.mint, 10)}
+                              <td className="py-2 pr-3 align-top" title={t.mint}>
+                                <div className="font-medium text-foreground leading-tight">{primary}</div>
+                                <div className="text-[10px] text-muted-foreground font-mono mt-0.5 break-all">
+                                  {t.mint}
+                                </div>
                               </td>
                               <td className="py-2 pr-3 text-right font-mono">{t.ui_amount}</td>
                               <td className="py-2 pr-3 text-right font-mono">
-                                {prices[t.mint] != null ? prices[t.mint].toFixed(4) : '—'}
+                                {p != null ? p.toFixed(4) : '—'}
                               </td>
                               <td className="py-2 pr-3 text-right font-mono">
-                                {prices[t.mint] != null
-                                  ? formatUSD(
-                                      (
-                                        (parseFloat(t.ui_amount) || 0) * (prices[t.mint] || 0)
-                                      ).toFixed(2),
-                                    )
-                                  : '—'}
+                                {lineCents != null ? formatUSD(lineCents / 100) : '—'}
                               </td>
                               <td className="py-2">
                                 <Button
@@ -271,7 +315,8 @@ export default function Wallet() {
                                 </Button>
                               </td>
                             </tr>
-                          ))}
+                            )
+                          })}
                       </tbody>
                     </table>
                     {balances.tokens.length > 50 && (
@@ -279,20 +324,31 @@ export default function Wallet() {
                         Pokazano 50 pierwszych. Reszta: {balances.tokens.length - 50}.
                       </div>
                     )}
-                    <div className="text-xs text-muted-foreground mt-2">
-                      Suma on-chain USD (estimate):{' '}
-                      <strong className="text-foreground">
-                        {formatUSD(
-                          (
-                            solValueUsd +
-                            balances.tokens.reduce((acc, t) => {
-                              const p = prices[t.mint]
-                              if (p == null) return acc
-                              return acc + (parseFloat(t.ui_amount) || 0) * p
-                            }, 0)
-                          ).toFixed(2),
-                        )}
-                      </strong>
+                    <div className="text-xs text-muted-foreground mt-2 space-y-1">
+                      <div>
+                        Suma on-chain USD (estimate):{' '}
+                        <strong className="text-foreground">
+                          {formatUSD(onChainTotalCents / 100)}
+                        </strong>
+                      </div>
+                      <div className="text-[11px] pl-2 border-l border-border/60 space-y-0.5">
+                        <div>
+                          — SOL:{' '}
+                          <span className="text-foreground font-medium">
+                            {solUsd > 0 ? formatUSD(solValueCents / 100) : '—'}
+                          </span>
+                        </div>
+                        <div>
+                          — Tokeny SPL (wszystkie):{' '}
+                          <span className="text-foreground font-medium">
+                            {formatUSD(tokensTotalCents / 100)}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="block text-[10px] mt-1 opacity-80 leading-relaxed">
+                        Razem = SOL (pole powyżej) + wszystkie tokeny z listy RPC. Kolumna „Value USD” w tabeli to
+                        tylko tokeny; nie zawiera SOL. Ukryte wiersze / limit 50 wierszy nie zmieniają sumy.
+                      </span>
                     </div>
                   </div>
                 )}

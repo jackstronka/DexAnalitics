@@ -81,6 +81,7 @@ async fn maybe_registry_open_cli(
             &pool,
             owner,
             sig,
+            None,
         )
         .await;
     }
@@ -570,6 +571,7 @@ pub async fn run_position_close(
         &pool_pk,
         &fee_payer,
         &res.signature,
+        None,
     )
     .await;
 

@@ -7,6 +7,7 @@ use anyhow::Context;
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signature;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -421,7 +422,13 @@ impl RebalanceExecutor {
 
         let payer = wallet.keypair();
         let res = orca.collect_fees(position, pool, payer).await?;
-        self.ensure_execution_success("collect_fees", &res, Some(*pool), Some(*position))
+        self.ensure_execution_success(
+            "collect_fees",
+            &res,
+            Some(*pool),
+            Some(*position),
+            None,
+        )
             .await?;
 
         // We currently don't parse fee amounts from on-chain state in this executor.
@@ -450,7 +457,13 @@ impl RebalanceExecutor {
             token_min_b: 0,
         };
         let res = orca.decrease_liquidity(&params, payer).await?;
-        self.ensure_execution_success("decrease_liquidity", &res, Some(*pool), Some(*position))
+        self.ensure_execution_success(
+            "decrease_liquidity",
+            &res,
+            Some(*pool),
+            Some(*position),
+            None,
+        )
             .await?;
         debug!(
             position = %position,
@@ -469,7 +482,13 @@ impl RebalanceExecutor {
 
         let payer = wallet.keypair();
         let res = orca.close_position(position, pool, payer, None).await?;
-        self.ensure_execution_success("close_position", &res, Some(*pool), Some(*position))
+        self.ensure_execution_success(
+            "close_position",
+            &res,
+            Some(*pool),
+            Some(*position),
+            None,
+        )
             .await?;
         debug!(position = %position, "Close position submitted");
         Ok(())
@@ -490,9 +509,50 @@ impl RebalanceExecutor {
                 u64::MAX,
                 u64::MAX,
                 self.config.max_slippage_bps,
+                None,
             )
             .await?;
         Ok(p)
+    }
+
+    /// Orca swap **ExactIn** in the given Whirlpool (same pool as subsequent open / rebalance).
+    ///
+    /// Returns `None` in dry-run mode; otherwise the swap transaction signature.
+    pub async fn execute_swap_exact_in(
+        &self,
+        pool: &Pubkey,
+        specified_mint: &Pubkey,
+        amount_in: u64,
+        slippage_bps: u16,
+        ledger_session_id: Option<String>,
+    ) -> anyhow::Result<Option<Signature>> {
+        if self.dry_run {
+            info!(
+                pool = %pool,
+                specified_mint = %specified_mint,
+                amount_in = amount_in,
+                "Dry run: would swap in pool before next step"
+            );
+            return Ok(None);
+        }
+        let wallet = self.wallet.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot swap")
+        })?;
+        let orca = WhirlpoolExecutor::new(self.provider.clone());
+        let payer = wallet.keypair();
+        let res = orca
+            .swap_exact_in(*pool, *specified_mint, amount_in, slippage_bps, payer)
+            .await?;
+        let sig = res.signature;
+        self.ensure_execution_success(
+            "swap_exact_in",
+            &res,
+            Some(*pool),
+            None,
+            ledger_session_id,
+        )
+        .await?;
+        Ok(Some(sig))
     }
 
     /// Opens a new position with explicit token caps and slippage.
@@ -508,6 +568,7 @@ impl RebalanceExecutor {
         amount_b: u64,
         slippage_bps: u16,
         full_range: bool,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
         if self.dry_run {
             if full_range {
@@ -527,7 +588,13 @@ impl RebalanceExecutor {
         }
         if full_range {
             return self
-                .open_full_range_position_with_caps(pool, amount_a, amount_b, slippage_bps)
+                .open_full_range_position_with_caps(
+                    pool,
+                    amount_a,
+                    amount_b,
+                    slippage_bps,
+                    ledger_session_id,
+                )
                 .await;
         }
         self.open_position_with_caps(
@@ -537,6 +604,7 @@ impl RebalanceExecutor {
             amount_a,
             amount_b,
             slippage_bps,
+            ledger_session_id,
         )
         .await
     }
@@ -547,6 +615,7 @@ impl RebalanceExecutor {
         amount_a: u64,
         amount_b: u64,
         slippage_bps: u16,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
         let wallet = self.wallet.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot open position")
@@ -560,8 +629,14 @@ impl RebalanceExecutor {
             slippage_bps,
         };
         let res = orca.open_full_range_position(&params, payer).await?;
-        self.ensure_execution_success("open_full_range_position", &res, Some(*pool), None)
-            .await?;
+        self.ensure_execution_success(
+            "open_full_range_position",
+            &res,
+            Some(*pool),
+            None,
+            ledger_session_id,
+        )
+        .await?;
         let new_position = res.created_position.ok_or_else(|| {
             anyhow::anyhow!(
                 "open_full_range_position succeeded but did not return created_position; cannot continue safely"
@@ -590,6 +665,7 @@ impl RebalanceExecutor {
         amount_a: u64,
         amount_b: u64,
         slippage_bps: u16,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
         let wallet = self.wallet.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Wallet not set on RebalanceExecutor; cannot open position")
@@ -609,8 +685,14 @@ impl RebalanceExecutor {
         };
 
         let res = orca.open_position(&params, payer).await?;
-        self.ensure_execution_success("open_position", &res, Some(*pool), None)
-            .await?;
+        self.ensure_execution_success(
+            "open_position",
+            &res,
+            Some(*pool),
+            None,
+            ledger_session_id,
+        )
+        .await?;
         let new_position = res.created_position.ok_or_else(|| {
             anyhow::anyhow!(
                 "open_position succeeded but did not return created_position; cannot continue safely"
@@ -643,6 +725,7 @@ impl RebalanceExecutor {
         result: &clmm_lp_protocols::orca::executor::ExecutionResult,
         pool: Option<Pubkey>,
         position: Option<Pubkey>,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<()> {
         validate_execution_result(op_name, result)?;
 
@@ -657,6 +740,7 @@ impl RebalanceExecutor {
                     pool,
                     position,
                     result.created_position,
+                    ledger_session_id.clone(),
                 )
                 .await;
 
@@ -669,6 +753,7 @@ impl RebalanceExecutor {
                             &pool_pk,
                             &fee_payer,
                             &result.signature,
+                            ledger_session_id.clone(),
                         )
                         .await;
                     }
@@ -685,6 +770,7 @@ impl RebalanceExecutor {
                         &pool_pk,
                         &fee_payer,
                         &result.signature,
+                        ledger_session_id,
                     )
                     .await;
                 }
@@ -693,17 +779,28 @@ impl RebalanceExecutor {
 
         // Best-effort post-check through the common transaction manager path.
         // Some providers may not return status immediately for very fresh signatures.
-        if let Err(e) = self
-            .tx_manager
-            .wait_for_confirmation(&result.signature)
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.tx_manager.wait_for_confirmation(&result.signature),
+        )
+        .await
         {
-            warn!(
-                operation = op_name,
-                signature = %result.signature,
-                error = %e,
-                "Post-confirmation check failed; continuing because executor already reported success"
-            );
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                warn!(
+                    operation = op_name,
+                    signature = %result.signature,
+                    error = %e,
+                    "Post-confirmation check failed; continuing because executor already reported success"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    operation = op_name,
+                    signature = %result.signature,
+                    "Post-confirmation check timed out; continuing because executor already reported success"
+                );
+            }
         }
 
         Ok(())

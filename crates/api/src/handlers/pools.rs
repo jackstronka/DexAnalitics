@@ -1,13 +1,18 @@
 //! Pool handlers.
 
 use crate::error::{ApiError, ApiResult};
-use crate::models::{ListPoolsResponse, PoolResponse, PoolStateResponse};
+use crate::models::{
+    ListPoolsResponse, PoolResponse, PoolStateResponse, SwapCostEstimateResponse,
+};
 use crate::state::AppState;
 use axum::{
     Json,
     extract::{Path, State},
 };
 use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaRestClient};
+use clmm_lp_protocols::ledger::swap_cost_estimate::{
+    DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS, median_historical_swap_network_fee_lamports,
+};
 use clmm_lp_protocols::prelude::WhirlpoolReader;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
@@ -147,4 +152,43 @@ pub async fn get_pool_state(
     };
 
     Ok(Json(response))
+}
+
+/// Rough **network fee** estimate for an in-pool Orca swap (from local lifecycle JSONL + default).
+#[utoipa::path(
+    get,
+    path = "/pools/{address}/estimate-swap-cost",
+    tag = "Pools",
+    params(
+        ("address" = String, Path, description = "Whirlpool pool address")
+    ),
+    responses(
+        (status = 200, description = "Swap cost estimate", body = SwapCostEstimateResponse),
+        (status = 404, description = "Pool not found")
+    )
+)]
+pub async fn get_swap_cost_estimate(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<SwapCostEstimateResponse>> {
+    let _ = Pubkey::from_str(address.trim()).map_err(|_| ApiError::bad_request("Invalid pool address"))?;
+
+    let reader = WhirlpoolReader::new(state.provider.clone());
+    reader
+        .get_pool_state(address.trim())
+        .await
+        .map_err(|e| ApiError::not_found(format!("Pool not found: {}", e)))?;
+
+    let (median, n) = median_historical_swap_network_fee_lamports(Some(address.trim()));
+    let default = DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS;
+    let est = median.map(|m| m.max(default)).unwrap_or(default);
+
+    Ok(Json(SwapCostEstimateResponse {
+        pool_address: address.trim().to_string(),
+        historical_median_network_fee_lamports: median,
+        historical_sample_count: n as u32,
+        default_network_fee_lamports: default,
+        estimated_network_fee_lamports: est,
+        note: "Shows estimated Solana network fee (meta.fee) for Whirlpool swaps from local ledger history. Full wallet delta (tokens + rent) is recorded after execution in orca_position_lifecycle.jsonl. Send cost_session_id with POST /positions to group swap + open rows for per-position cost totals.".to_string(),
+    }))
 }

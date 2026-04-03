@@ -177,6 +177,7 @@ fn rebalance_event_name(operation: &str) -> &'static str {
         "close_position" => "bot_close_position",
         "open_full_range_position" => "bot_open_position_full_range",
         "open_position" => "bot_open_position",
+        "swap_exact_in" => "bot_swap_exact_in",
         _ => "bot_orca_tx",
     }
 }
@@ -184,6 +185,9 @@ fn rebalance_event_name(operation: &str) -> &'static str {
 /// Best-effort append after a successful Orca op from the execution-layer rebalance executor.
 ///
 /// `position` is the position PDA when known before the tx; `created_position` fills in open flows.
+///
+/// When `rebalance_session_id_override` is set, it is written as `rebalance_session_id` on the row
+/// (API / UI correlation for swap + open). Otherwise [`rebalance_session_id_from_env`] is used.
 pub async fn try_append_rebalance_executor_tx_cost(
     provider: &RpcProvider,
     fee_payer: &Pubkey,
@@ -192,6 +196,7 @@ pub async fn try_append_rebalance_executor_tx_cost(
     pool: Option<Pubkey>,
     position: Option<Pubkey>,
     created_position: Option<Pubkey>,
+    rebalance_session_id_override: Option<String>,
 ) {
     if let Err(e) = append_rebalance_inner(
         provider,
@@ -201,6 +206,7 @@ pub async fn try_append_rebalance_executor_tx_cost(
         pool,
         position,
         created_position,
+        rebalance_session_id_override,
     )
     .await
     {
@@ -216,6 +222,7 @@ async fn append_rebalance_inner(
     pool: Option<Pubkey>,
     position: Option<Pubkey>,
     created_position: Option<Pubkey>,
+    rebalance_session_id_override: Option<String>,
 ) -> Result<()> {
     let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
     let rpc_url = provider.current_endpoint().await;
@@ -252,7 +259,7 @@ async fn append_rebalance_inner(
         signature: signature.to_string(),
         pool_address: pool.map(|p| p.to_string()),
         position_pubkey: effective_position.map(|p| p.to_string()),
-        rebalance_session_id: rebalance_session_id_from_env(),
+        rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
         tx_fee_lamports: tx_fee,
         fee_payer_pubkey: fee_payer.to_string(),
         fee_payer_pre_lamports: pre,
@@ -272,8 +279,12 @@ pub async fn try_append_cli_swap_tx_cost(
     fee_payer: &Pubkey,
     signature: &Signature,
     pool: &Pubkey,
+    rebalance_session_id_override: Option<String>,
 ) {
-    if let Err(e) = append_cli_swap_inner(provider, fee_payer, signature, pool).await {
+    if let Err(e) =
+        append_cli_swap_inner(provider, fee_payer, signature, pool, rebalance_session_id_override)
+            .await
+    {
         warn!(error = %e, "cli swap tx lifecycle ledger: append failed");
     }
 }
@@ -283,6 +294,7 @@ async fn append_cli_swap_inner(
     fee_payer: &Pubkey,
     signature: &Signature,
     pool: &Pubkey,
+    rebalance_session_id_override: Option<String>,
 ) -> Result<()> {
     let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
     let rpc_url = provider.current_endpoint().await;
@@ -319,7 +331,7 @@ async fn append_cli_swap_inner(
         signature: signature.to_string(),
         pool_address: pool.to_string(),
         position_pubkey: None,
-        rebalance_session_id: rebalance_session_id_from_env(),
+        rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
         tx_fee_lamports: tx_fee,
         fee_payer_pubkey: fee_payer.to_string(),
         fee_payer_pre_lamports: pre,

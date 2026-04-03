@@ -1,4 +1,4 @@
-//! Bociarz LP Strategy Lab API Server.
+//! Bociarz LP API Server.
 //!
 //! This binary starts the REST API server with WebSocket support.
 
@@ -10,13 +10,25 @@ use clmm_lp_protocols::prelude::RpcConfig;
 use std::env;
 use tracing::info;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let stack_size = env::var("API_TOKIO_STACK_SIZE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(8 * 1024 * 1024);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_size)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Initialize logging
     dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    info!("Starting Bociarz LP Strategy Lab API Server");
+    info!("Starting Bociarz LP API Server");
 
     // Load configuration from environment
     let config = load_config_from_env();

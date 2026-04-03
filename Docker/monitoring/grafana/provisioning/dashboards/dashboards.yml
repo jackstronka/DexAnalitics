@@ -5,7 +5,7 @@
 apiVersion: 1
 
 providers:
-  - name: 'CLMM LP Dashboards'
+  - name: 'Bociarz LP Dashboards'
     orgId: 1
     folder: 'CLMM Liquidity Provider'
     folderUid: 'clmm-lp'

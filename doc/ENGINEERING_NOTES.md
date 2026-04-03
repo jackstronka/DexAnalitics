@@ -14,6 +14,236 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-03 — Web: dłuższy timeout dla operacji on-chain (`/positions/*`)
+
+**keywords:** web, timeout, fetch abort, open position, swap-before-open, api.ts
+**paths:** `web/src/lib/api.ts`
+
+- Domyślne `fetchJson` miało timeout 15s, co przy wolnym RPC powodowało abort requestu w UI mimo że transakcja mogła zostać wykonana po stronie backendu.
+- Dodano `fetchJsonLong` (90s) i podpięto pod cięższe endpointy `POST/DELETE /positions/*` (swap/open/close/collect/rebalance/decrease).
+
+## 2026-04-03 — Swap API: ograniczony czas post-confirmation (mniej abortów requestu)
+
+**keywords:** clmm-lp-execution, swap-before-open, wait_for_confirmation, timeout, abort signal
+**paths:** `crates/execution/src/strategy/rebalance.rs`
+
+- Po potwierdzeniu tx swap endpoint potrafił długo wisieć na dodatkowym `wait_for_confirmation` (niestabilne `getTransaction`), co kończyło się abortem requestu po stronie UI.
+- `ensure_execution_success` ma teraz timeout 15s dla post-confirmation check; przy timeout/err loguje ostrzeżenie i kontynuuje bez blokowania odpowiedzi API.
+
+## 2026-04-03 — Runner restart: przed startem ubijamy stare instancje
+
+**keywords:** script runner, Start-ClmmScriptRunner, Stop-ClmmScriptRunner, port reuse
+**paths:** `tools/Start-ClmmScriptRunner.ps1`
+
+- Wrapper runnera wywołuje `tools/Stop-ClmmScriptRunner.ps1` przed startem, żeby zwolnić “nasz” port przy restarcie zamiast mnożyć konflikty listenerów.
+
+## 2026-04-03 — API: większy stack Tokio workerów (fix crash `swap-before-open`)
+
+**keywords:** clmm-lp-api, tokio, stack overflow, swap-before-open, 502
+**paths:** `crates/api/src/main.rs`
+
+- `POST /positions/swap-before-open` potrafił crashować proces API (`thread 'tokio-rt-worker' has overflowed its stack`), a frontend widział `HTTP 502 (empty body)`.
+- API uruchamia teraz runtime Tokio z konfigurowalnym większym stackiem workerów (`API_TOKIO_STACK_SIZE_BYTES`, domyślnie 8 MiB), co stabilizuje ścieżkę swapu.
+
+## 2026-04-03 — Web dev proxy: domyślny API upstream na `:8081` (nie `:8080`)
+
+**keywords:** web, vite, API_UPSTREAM, API_PORT, 8081, dev proxy
+**paths:** `web/vite.config.ts`
+
+- Domyślny port backendu dla Vite proxy zmieniony z `8080` na `8081`, bo lokalny workflow dashboardu/API używa `:8081`, a `:8080` bywa zajęte przez inne usługi.
+- Ogranicza to przypadki, gdzie UI pokazuje “puste” dane po restarcie, mimo że właściwy API (`:8081`) ma już zapisane strategie.
+
+## 2026-04-03 — Runner: wrapper `Start-ClmmScriptRunner.ps1` używa `/health` zamiast `netstat`
+
+**keywords:** script runner, Start-ClmmScriptRunner, CLMM_SCRIPT_RUNNER_PORT, HTTP.sys, /health
+**paths:** `tools/Start-ClmmScriptRunner.ps1`
+
+- Poprawione wykrywanie zajętego portu: wrapper nie przełącza już na `9857`, jeśli `9847` jest zajęte przez HTTP.sys, ale runner odpowiada na `GET /health`.
+- Dzięki temu API i UI mniej tracą spójność portów przy wielokrotnych restartach.
+
+## 2026-04-03 — API: strategie persistują do `data/strategies.json` (do DELETE)
+
+**keywords:** clmm-lp-api, strategies, persistence, strategy_store, JSON store, restart
+**paths:** `crates/api/src/strategy_store.rs`, `crates/api/src/state.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/strategy_service.rs`
+
+- Dodano persistencję strategii na dysk, aby strategie nie znikały po restarcie API — dopóki ich nie usuniesz przez `DELETE /strategies/{id}`.
+- Zapis wykonuje się po `POST /strategies`, `PUT /strategies/{id}`, `DELETE /strategies/{id}`, po zmianie `executor_disabled_position_addresses` oraz po linkowaniu pozycji do strategii (`parameters.position_addresses`).
+
+## 2026-04-03 — API: DRY_RUN env steruje trybem live/symulacji (swap/open) + runner port
+
+**keywords:** clmm-lp-api, DRY_RUN, dry_run, swap-before-open, Start-Dashboard-Safe, script_runner
+**paths:** `crates/api/src/state.rs`, `tools/Start-Dashboard-Safe.ps1`, `tools/script_runner/Start-ClmmScriptRunner.ps1`
+
+- API przestaje mieć „zabetonowane” `dry_run=true` — teraz czyta `DRY_RUN` z `.env` (domyślnie nadal `true` dla bezpieczeństwa).
+- Skrypty startowe przestają mylnie przełączać runnera na `:9857` gdy `:9847` wygląda na zajęte przez HTTP.sys; decyzja jest oparta o `GET /health`, a runner ma fallback portu przy niepowodzeniu bind.
+
+## 2026-04-03 — API: obsługa WALLET_KEYPAIR_PATH dla operacji position (swap/open)
+
+**keywords:** clmm-lp-api, KEYPAIR_PATH, SOLANA_KEYPAIR_PATH, WALLET_KEYPAIR_PATH, wallet loading, position_executor
+**paths:** `crates/api/src/services/position_executor.rs`
+
+- `swap-before-open`/`open position` po przełączeniu na live wymaga `StrategyExecutor` z podpisującym walletem.
+- U Ciebie `.env` używa `WALLET_KEYPAIR_PATH`, a kod wcześniej czytał tylko `KEYPAIR_PATH`/`SOLANA_KEYPAIR_PATH` — dlatego executor nie był tworzony.
+- Dodano alias `WALLET_KEYPAIR_PATH` oraz rozwijanie `~/...` na Windows.
+
+## 2026-04-03 — UI: dwa kroki SWAP -> OPEN (endpoint `/positions/swap-before-open`)
+
+**keywords:** PositionCreate, swap-before-open, two-step flow, swapBeforeOpen endpoint, cost_session_id
+**paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionCreate.tsx`, `crates/api/src/services/position_service.rs`
+
+- Dodano endpoint **`POST /positions/swap-before-open`**: wykonuje tylko Orca swap `ExactIn` (bez open).
+- UI w `PositionCreate` teraz:
+  - najpierw wykonuje SWAP i pokazuje `swap_signature`,
+  - dopiero po powodzeniu umożliwia OPEN Position (bez `swap_before_open` w payload).
+- `cost_session_id` (księgowanie) jest generowane na kroku SWAP i przekazywane na krok OPEN, żeby sumować koszty per otwarta pozycja.
+
+## 2026-04-03 — UI: „Zakres według ceny” pokazuje złe wartości (raw vs UI decimals)
+
+**keywords:** PositionCreate, uiPriceFromRawPriceRatio, rawPriceRatioFromUiPrice, decimals, tickToPriceRatio
+**paths:** `web/src/lib/whirlpoolTicks.ts`, `web/src/pages/PositionCreate.tsx`
+
+- Poprawione mapowanie `tick <-> price` w sekcji „Zakres według ceny”: `tick_to_price` daje raw ratio, więc do UI (np. USDC za 1 SOL) trzeba uwzględnić różnicę `decimals`.
+- UI:
+  - synchronizacja cen z tickami jest przeliczana raw -> UI,
+  - przeliczenie „Ustaw ticki z tych cen” jest UI -> raw (przed wyrównaniem do `tick_spacing`).
+
+## 2026-04-02 — Swap + Open / position ops: portfel z `KEYPAIR_PATH` (nie tylko `auto_execute`)
+
+**keywords:** position_executor, resolve_executor_for_position_ops, set_wallet, KEYPAIR_PATH, start_strategy_executor_core, StrategyExecutor, swap_before_open
+**paths:** `crates/api/src/services/position_executor.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/strategy_service.rs`
+
+- **Problem:** `set_wallet` było wywoływane tylko przy `auto_execute && !dry_run`, więc przy `auto_execute=false` executor nie miał klucza — **swap i open** kończyły się „Wallet not set”.
+- **Fix:** przy `!dry_run` ładuj portfel z `KEYPAIR_PATH` / `SOLANA_KEYPAIR_PATH` zawsze, gdy plik jest ustawiony; `auto_execute=true` bez env nadal zwraca 400.
+- **`resolve_executor_for_position_ops`:** jeśli nie ma uruchomionej strategii, tworzy leniwy executor pod `__api_position_ops__` (ten sam keypair), żeby **POST /positions** działało bez **POST /strategies/…/start**.
+
+## 2026-04-02 — Open Position: zakres przez cenę (B/A) → ticki
+
+**keywords:** PositionCreate, whirlpoolTicks, alignPriceRatioToTicks, price ratio, tick spacing
+**paths:** `web/src/lib/whirlpoolTicks.ts`, `web/src/pages/PositionCreate.tsx`
+
+- Obok pól **Tick Lower / Upper**: sekcja **ceny graniczne** (ten sam stosunek co `price` puli: mint B za 1 mint A). Przycisk **„Ustaw ticki z tych cen”** wylicza ticki wyrównane do `tick_spacing` (`floor` dolnej ceny, `ceil` górnej; zamiana jeśli użytkownik poda odwrotnie).
+- Pola cenowe synchronizują się z tickami, gdy edytujesz ticki lub auto-sync strategii; ręczna edycja cen wyłącza sync do czasu „Ustaw ticki…”.
+
+## 2026-04-02 — Koszt swapu: szacunek (ledger) + `cost_session_id` (księgowanie per pozycja)
+
+**keywords:** swap cost, cost_session_id, rebalance_session_id, orca_position_lifecycle.jsonl, swap_cost_estimate, bot_swap_exact_in, PositionOpenResponse, GET estimate-swap-cost, position_registry, tx_lifecycle
+**paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/protocols/src/ledger/swap_cost_estimate.rs`, `crates/protocols/src/ledger/position_registry.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/pools.rs`, `crates/api/src/handlers/positions.rs`, `web/src/pages/PositionCreate.tsx`
+
+- **`GET /pools/{address}/estimate-swap-cost`**: mediana `tx_fee_lamports` z lokalnego JSONL dla `swap_exact_in` w tej puli (jeśli brak — `DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS` = 10_000); pokazuje **opłatę sieciową** (`meta.fee`), nie pełny delta SPL/SOL portfela.
+- **`OpenPositionRequest.cost_session_id`**: opcjonalnie; **PositionCreate** generuje UUID przy „Swap + Open”, żeby wiersze swap + open miały ten sam `rebalance_session_id` w ledgerze (suma kosztów sesji → przypisanie do nowej pozycji po `position_pda` w tym samym id).
+- **`try_append_rebalance_executor_tx_cost` / CLI swap / registry**: opcjonalny override sesji zamiast wyłącznie `CLMM_REBALANCE_SESSION_ID`; zdarzenie `swap_exact_in` → `event: bot_swap_exact_in`.
+- **`POST /positions`**: odpowiedź **`PositionOpenResponse`** (`message`, `position_pda`, `swap_signature`, `cost_session_id`).
+
+## 2026-04-02 — Open Position: swap w puli Orca przed `open` (`swap_before_open`)
+
+**keywords:** open position, swap_before_open, SwapInPoolBeforeOpen, swap_exact_in, Orca ExactIn, PositionService, PositionCreate, RebalanceExecutor
+**paths:** `crates/protocols/src/orca/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/models.rs`, `crates/api/src/services/position_service.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionCreate.tsx`
+
+- **`OpenPositionRequest.swap_before_open`**: opcjonalnie `{ specified_mint, amount_in }` — walidacja mintu A/B puli; najpierw swap ExactIn w tej puli, potem open (portfel API / executor).
+- **UI**: przy jednostronnym niedoborze — checkbox + szacunek `amount_in`; przycisk „Swap + Open Position”.
+- **Executor**: `WhirlpoolExecutor::swap_exact_in` + `RebalanceExecutor::execute_swap_exact_in` — do ponownego użycia przy rebalansowaniu.
+
+## 2026-04-02 — Branding: nazwa produktu „Bociarz LP” (UI, OpenAPI, logi, docs)
+
+**keywords:** branding, Bociarz LP, web, openapi, phantom_auth, README
+**paths:** `web/src/components/Layout.tsx`, `crates/api/src/openapi.rs`, `crates/api/src/main.rs`, `README.md`, `web/index.html`
+
+- User-facing teksty **„CLMM LP”** / **„Bociarz LP Strategy Lab”** ujednolicono do **„Bociarz LP”** (nagłówek dashboardu, tytuł strony, OpenAPI, komunikat Phantom sign-in, start API/CLI, monitoring Docker). Nazwy crate’ów (`clmm-lp-*`) i zmienne env (`CLMM_*`) bez zmian.
+
+## 2026-04-02 — Strategia: Range Width % wymagany; Open Position — ticki z puli + strategii
+
+**keywords:** web, StrategyCreate, StrategyEdit, PositionCreate, range_width_pct, calculate_tick_range, whirlpoolTicks, getPoolState
+**paths:** `web/src/lib/strategyFormShared.tsx`, `web/src/lib/whirlpoolTicks.ts`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/PositionCreate.tsx`
+
+- **`FIELD_ENABLED.static_range.rangeWidth`**: włączone — **Range Width %** jest wymagany dla wszystkich typów, które go używają (`isRangeWidthSatisfied` przy create/save).
+- **`calculateTickRangeFromWidthPct`**: TS odpowiednik `orca::pool_reader::calculate_tick_range` (szerokość % całego pasma ceny, tick spacing).
+- **`tickToPriceRatio` / `formatPriceRatio`**: pod polami ticków — **ceny mint B za 1 mint A** przy dolnym/górnym ticku + spot z puli (zgodnie z `1.0001^tick`).
+- **Open Position**: przy wybranej strategii z `parameters.range_width_pct` — tick lower/upper wyliczane z **`getPoolState`** (refetch ~10 s) + checkbox **auto-sync**; ręczna edycja ticków wyłącza sync.
+
+## 2026-04-02 — Open Position: walidacja sald vs kwoty + linki Jupiter (prefill)
+
+**keywords:** web, PositionCreate, WalletBalancesResponse, Jupiter, WSOL, swap UX
+**paths:** `web/src/pages/PositionCreate.tsx`
+
+- Porównanie **wymaganych kwot** (token A/B) z **saldem** (dla WSOL: native SOL + konto WSOL); przy niedoborze — **blokada** „Open Position”, komunikat PL i CTA.
+- **Jupiter** `https://jup.ag/swap?inputMint=&outputMint=` + opcjonalnie `amount` (szacunek ExactIn z cen USD API, +5% bufor). Portfel w przeglądarce zwykle łączy się z Jupiterem po otwarciu karty.
+- Link **Orca** (strona główna) jako alternatywa bez prefilla URL.
+- **Na później (nie wdrożone):** składanie swap tx w API / jedna transakcja swap+open; semi-auto z podpisem w aplikacji.
+
+## 2026-04-02 — `CreateStrategyRequest`: opcjonalne `pool_address` (deserialize + PUT)
+
+**keywords:** CreateStrategyRequest, pool_address, serde, PUT /strategies, StrategyEdit, clmm-lp-api
+**paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/lib/api.ts`, `web/src/pages/StrategyEdit.tsx`
+
+- Pole **`pool_address`** w body POST/PUT jest **opcjonalne** (`Option` + `serde(default)`), żeby klient bez tego pola nie dostawał błędu „missing field `pool_address`”.
+- **POST**: jeśli podano niepusty string — trafia do `config.pool_address`.
+- **PUT**: niepusty string ustawia pool; pusty string czyści legacy pool w configu; **brak pola / `null`** — merge: zostaje poprzedni `pool_address` z bazy.
+- **Web (edycja)**: jeśli strategia ma legacy `pool_address`, pole jest wysyłane przy zapisie.
+
+## 2026-04-02 — Open Position + strategia: auto-start executora; pauza per pozycja
+
+**keywords:** open_position, ensure_strategy_running_after_position_link, executor_disabled_position_addresses, StrategyExecutor, position-executor, PositionDetail
+**paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/strategies.rs`, `crates/execution/src/strategy/executor.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
+
+- Po udanym `open` z `strategy_id`: dopisek PDA do strategii, potem **automatyczny start** executora (`ensure_strategy_running_after_position_link`); jeśli strategia już działała — tylko `monitor.add_position` + sync listy wyłączeń.
+- **`parameters.executor_disabled_position_addresses`**: PDA pomijane w `evaluate_all` (automatyzacja wyłączona dla tej pozycji, bez zatrzymywania całej strategii).
+- **`POST /strategies/{id}/position-executor`** body `{ position_address, enabled }` — usuwa/dodaje PDA na liście wyłączeń; UI na szczegółach pozycji.
+
+## 2026-04-02 — Strategie: edycja, usuwanie, `auto_execute` w odpowiedzi API
+
+**keywords:** web, StrategyEdit, StrategyDetail, delete_strategy, StrategyResponse, auto_execute, clmm-lp-api
+**paths:** `crates/api/src/handlers/strategies.rs`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/StrategyDetail.tsx`, `web/src/App.tsx`, `web/src/lib/api.ts`
+
+- **`GET/POST/PUT /strategies`**: `StrategyResponse` zawiera **`auto_execute`** (spójnie z `dry_run` i configiem).
+- **`DELETE /strategies/{id}`**: przed usunięciem — zatrzymanie executora (`stop`), `running = false`, cleanup `executors` / `optimization_busy` (jak przy stop), potem usunięcie wpisu.
+- **Web**: trasa **`/strategies/:id/edit`**, formularz edycji (PUT), przyciski **Edit / Delete** na szczegółach; na liście skrót **Edit**.
+
+## 2026-04-02 — Strategia bez poolu: parametry zapis; pool przy Open Position
+
+**keywords:** web, StrategyCreate, CreateStrategyRequest, StrategyParameters, position_addresses, OpenPositionRequest
+**paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/positions.rs`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`
+
+- **`CreateStrategyRequest`**: głównie parametry (`strategy_type`, `parameters`, dry_run, `auto_execute`); opcjonalne legacy **`pool_address`** (patrz wpis wyżej). Pool przy nowych flow wybierany przy **otwarciu pozycji**.
+- **`StrategyResponse.pool_address`**: opcjonalne (legacy / stare wpisy); nowe strategie zwracają brak pola lub pusto.
+- **`PUT /strategies/{id}`**: przy aktualizacji **zachowywane** jest `parameters.position_addresses` ze starej konfiguracji (merge), żeby nie gubić powiązań z pozycjami.
+- **`append_position_address_to_strategy`**: bez walidacji poolu strategii vs pozycji — dopisek PDA po udanym `open`.
+- **`StrategyParameters`** (Rust): pole `position_addresses`; frontend: lista powiązanych adresów na **Strategy detail**.
+
+## 2026-04-02 — Open Position: opcjonalne przypisanie strategii (`strategy_id`)
+
+**keywords:** web, PositionCreate.tsx, OpenPositionRequest, position_addresses, strategies, clmm-lp-api
+**paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/strategy_service.rs`, `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`
+
+- `POST /positions` przyjmuje opcjonalne **`strategy_id`**. Przed otwarciem: walidacja, że strategia istnieje i **`pool_address` strategii = pool pozycji**.
+- Po sukcesie on-chain (pole `position_pda` w odpowiedzi serwisu) PDA jest dopisywane do **`parameters.position_addresses`** danej strategii (bez duplikatów).
+- **Dry-run** nie zwraca PDA — linkowanie nie następuje (brak adresu).
+- UI *Open Position*: lista strategii filtrowana po wybranym poolu.
+
+## 2026-04-02 — Web Strategy Create: pola zależne od typu, opisy, tooltips
+
+**keywords:** web, StrategyCreate.tsx, tooltip, StrategyType, StrategyParameters, execution, getPools
+**paths:** `web/src/pages/StrategyCreate.tsx`, `web/src/components/ui/tooltip.tsx`
+
+- Formularz tworzenia strategii **wyłącza** (disabled) parametry liczbowe nieużywane przez wybrany `strategy_type`; przy zmianie typu **czyści** wartości pól, które przestają obowiązywać.
+- Pod wyborem typu: **krótki opis** zachowania trybu; przy każdej etykiecie — **tooltip** (ikona) z wyjaśnieniem pola i wpływu wartości na executor.
+- Payload wysyła tylko **dozwolone** dla typu klucze w `parameters` (spójnie z backendem).
+- **Pool:** zamiast ręcznego wpisywania adresu — `<select>` z `GET /pools` (sort wg TVL), przycisk odświeżenia, komunikaty przy błędzie / pustej liście; **etykiety par** z `GET /orca/tokens/{mint}` (symbole jak SOL/USDC, fallback skrót mintu).
+
+## 2026-04-02 — Web Wallet: SPL jako token (Orca), nie sam skrót mintu
+
+**keywords:** web, Wallet.tsx, getOrcaToken, orca/tokens, SPL
+**paths:** `web/src/pages/Wallet.tsx`
+
+- Tabela „Saldo on-chain” pokazuje **symbol/nazwę** z `GET /api/v1/orca/tokens/{mint}` (pierwsza linia), **pełny mint** pod spodem; kolumna „Mint” → „Token”.
+
+## 2026-04-02 — Web: typy `Pool` / `PoolState` zgodne z API (`PoolResponse`)
+
+**keywords:** web, api.ts, Pools.tsx, PoolDetail.tsx, PositionCreate.tsx, PoolResponse, PoolStateResponse, orca/tokens
+**paths:** `web/src/lib/api.ts`, `web/src/pages/Pools.tsx`, `web/src/pages/PoolDetail.tsx`, `web/src/pages/PositionCreate.tsx`
+
+- Frontend używał legacy pól (`token_a`/`token_b`, `fee_tier`, rezerwy w stanie), podczas gdy backend zwraca `token_mint_a`/`token_mint_b`, `fee_rate_bps`, `apy_estimate` oraz stan z `sqrt_price` i `fee_growth_*` — przez to `/pools/:address` mogło rzucać przy renderze (biały ekran).
+- Dodano `getOrcaToken` (`GET /api/v1/orca/tokens/{mint}`) do symboli/decimals w szczegółach puli i w formularzu „Open Position”.
+
 ## 2026-04-02 — Runner skryptów: wygodniejszy start + stabilne HTTP/1.1
 
 **keywords:** scripts, runner, web, api, http1, dotenv, tools

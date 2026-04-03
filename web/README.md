@@ -1,6 +1,6 @@
-# Bociarz LP Strategy Lab Dashboard
+# Bociarz LP Dashboard
 
-A modern web dashboard for **Bociarz LP Strategy Lab**.
+A modern web dashboard for **Bociarz LP**.
 
 ## Features
 
@@ -53,7 +53,7 @@ The built files will be in the `dist` directory.
 
 ## Configuration
 
-The dashboard connects to the CLMM LP API server. Configure the API endpoint in the Settings page or via environment variables:
+The dashboard connects to the Bociarz LP API server. Configure the API endpoint in the Settings page or via environment variables:
 
 ```bash
 # .env.local
@@ -93,7 +93,7 @@ web/
 
 ## API Integration
 
-The dashboard communicates with the CLMM LP API server via:
+The dashboard communicates with the Bociarz LP API server via:
 
 - **REST API**: For CRUD operations on positions, strategies, and pools
 - **WebSocket**: For real-time position updates and alerts

@@ -6,7 +6,7 @@ import path from 'path'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   /** W Dockerze proxy musi iść do serwisu `api`, nie do localhost w kontenerze `web`. */
-  const apiPort = env.API_PORT || '8080'
+  const apiPort = env.API_PORT || '8081'
   const apiUpstream = env.API_UPSTREAM || `http://127.0.0.1:${apiPort}`
   const apiWs = apiUpstream.replace(/^http/, 'ws')
   const bindAll = env.VITE_DOCKER === '1' || env.VITE_BIND_ALL === '1'

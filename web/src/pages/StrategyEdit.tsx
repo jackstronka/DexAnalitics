@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, Link } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { cn } from '@/lib/utils'
 import { useToast } from '@/hooks/use-toast'
+import { cn } from '@/lib/utils'
 import {
   STRATEGY_COPY,
   TOOLTIPS,
@@ -16,10 +16,20 @@ import {
   isRangeWidthSatisfied,
 } from '@/lib/strategyFormShared'
 import {
-  createStrategy,
+  getStrategy,
+  updateStrategy,
   StrategyType,
   CreateStrategyRequest,
+  StrategyParameters,
 } from '@/lib/api'
+
+function numOrEmpty(v: number | undefined): number | '' {
+  if (v === undefined || v === null) {
+    return ''
+  }
+  const n = Number(v)
+  return Number.isFinite(n) ? n : ''
+}
 
 function readOptionalNumber(raw: string): number | '' {
   if (raw.trim() === '') {
@@ -29,22 +39,50 @@ function readOptionalNumber(raw: string): number | '' {
   return Number.isFinite(n) ? n : ''
 }
 
-export default function StrategyCreate() {
+export default function StrategyEdit() {
+  const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
+  const skipTypeResetOnce = useRef(true)
+
+  const { data: strategy, isLoading, isError } = useQuery({
+    queryKey: ['strategy', id],
+    queryFn: () => getStrategy(id!),
+    enabled: !!id,
+  })
+
   const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
   const [strategyType, setStrategyType] = useState<StrategyType>('static_range')
   const [rebalanceThresholdPct, setRebalanceThresholdPct] = useState<number | ''>('')
   const [maxIlPct, setMaxIlPct] = useState<number | ''>('')
   const [minRebalanceIntervalHours, setMinRebalanceIntervalHours] = useState<number | ''>('')
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
-
-  const enabled = FIELD_ENABLED[strategyType]
+  const [dryRun, setDryRun] = useState(true)
+  const [autoExecute, setAutoExecute] = useState(false)
 
   useEffect(() => {
+    if (!strategy) {
+      return
+    }
+    skipTypeResetOnce.current = true
+    setName(strategy.name)
+    setStrategyType(strategy.strategy_type)
+    const p = strategy.parameters
+    setRangeWidthPct(numOrEmpty(p.range_width_pct))
+    setMaxIlPct(numOrEmpty(p.max_il_pct))
+    setRebalanceThresholdPct(numOrEmpty(p.rebalance_threshold_pct))
+    setMinRebalanceIntervalHours(numOrEmpty(p.min_rebalance_interval_hours))
+    setDryRun(strategy.dry_run ?? true)
+    setAutoExecute(strategy.auto_execute ?? false)
+  }, [strategy])
+
+  useEffect(() => {
+    if (skipTypeResetOnce.current) {
+      skipTypeResetOnce.current = false
+      return
+    }
     switch (strategyType) {
       case 'static_range':
         setMaxIlPct('')
@@ -65,18 +103,19 @@ export default function StrategyCreate() {
     }
   }, [strategyType])
 
+  const enabled = FIELD_ENABLED[strategyType] ?? FIELD_ENABLED.static_range
+
   const mutation = useMutation({
-    mutationFn: (data: CreateStrategyRequest) => createStrategy(data),
-    onSuccess: (strategy) => {
+    mutationFn: (data: CreateStrategyRequest) => updateStrategy(id!, data),
+    onSuccess: (updated) => {
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
-      navigate(`/strategies/${strategy.id}`)
+      queryClient.invalidateQueries({ queryKey: ['strategy', updated.id] })
+      navigate(`/strategies/${updated.id}`)
     },
     onError: (err: Error) => {
       toast({
-        title: 'Could not create strategy',
-        description:
-          err.message ||
-          'Check that the API is running and reachable (e.g. clmm-lp-api on the port Vite proxies to).',
+        title: 'Could not save strategy',
+        description: err.message,
         variant: 'destructive',
       })
     },
@@ -84,10 +123,13 @@ export default function StrategyCreate() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (!strategy) {
+      return
+    }
     if (!name.trim()) {
       toast({
         title: 'Name required',
-        description: 'Enter a strategy name — pool is not required at this step.',
+        description: 'Enter a strategy name before saving.',
         variant: 'destructive',
       })
       return
@@ -101,19 +143,29 @@ export default function StrategyCreate() {
       return
     }
 
+    const built = buildParameters(strategyType, {
+      rangeWidthPct,
+      maxIlPct,
+      rebalanceThresholdPct,
+      minRebalanceIntervalHours,
+    })
+
+    const parameters: StrategyParameters = {
+      ...built,
+      ...(strategy.parameters.optimize_apply_policy
+        ? { optimize_apply_policy: strategy.parameters.optimize_apply_policy }
+        : {}),
+    }
+
     const payload: CreateStrategyRequest = {
       name: name.trim(),
       strategy_type: strategyType,
-      parameters: buildParameters(strategyType, {
-        rangeWidthPct,
-        maxIlPct,
-        rebalanceThresholdPct,
-        minRebalanceIntervalHours,
-      }),
-      // Zawsze wysyłaj pole — starsze API wymagały `pool_address` w body; pusty = brak puli (pool przy Open Position).
-      pool_address: '',
-      auto_execute: false,
-      dry_run: true,
+      parameters,
+      ...(strategy.pool_address
+        ? { pool_address: strategy.pool_address }
+        : {}),
+      auto_execute: autoExecute,
+      dry_run: dryRun,
     }
 
     mutation.mutate(payload)
@@ -144,16 +196,24 @@ export default function StrategyCreate() {
 
   const inputDisabled = 'disabled:cursor-not-allowed disabled:opacity-60'
 
+  if (isLoading || !id) {
+    return <div className="text-center py-8 text-muted-foreground">Loading...</div>
+  }
+
+  if (isError || !strategy) {
+    return <div className="text-center py-8">Strategy not found</div>
+  }
+
   return (
     <TooltipProvider delayDuration={200}>
       <div className="space-y-6">
         <div className="flex items-center gap-4">
-          <Link to="/strategies">
+          <Link to={`/strategies/${id}`}>
             <Button variant="ghost" size="icon">
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
-          <h1 className="text-3xl font-bold">Create Strategy</h1>
+          <h1 className="text-3xl font-bold">Edit Strategy</h1>
         </div>
 
         <Card>
@@ -163,9 +223,9 @@ export default function StrategyCreate() {
           <CardContent>
             <form className="space-y-4" onSubmit={handleSubmit} noValidate>
               <div>
-                <FieldLabel htmlFor="strategy-name" label="Name" tooltip={TOOLTIPS.name} />
+                <FieldLabel htmlFor="edit-strategy-name" label="Name" tooltip={TOOLTIPS.name} />
                 <input
-                  id="strategy-name"
+                  id="edit-strategy-name"
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -173,39 +233,22 @@ export default function StrategyCreate() {
                 />
               </div>
 
-              <div>
-                <FieldLabel
-                  htmlFor="strategy-desc"
-                  label="Description (optional)"
-                  tooltip={TOOLTIPS.description}
-                />
-                <textarea
-                  id="strategy-desc"
-                  className={cn(
-                    'w-full rounded-md border border-input bg-background px-3 py-2 text-sm min-h-[80px]',
-                  )}
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                />
-              </div>
-
               <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
-                <span className="text-foreground font-medium">No pool needed here</span> — pool is
-                chosen when you{' '}
+                Pool is chosen when you{' '}
                 <Link to="/positions/new" className="text-primary underline underline-offset-2">
                   open a position
                 </Link>
-                ; there you attach this strategy to that position.
+                ; linked position PDAs are kept on save.
               </p>
 
               <div>
                 <FieldLabel
-                  htmlFor="strategy-type"
+                  htmlFor="edit-strategy-type"
                   label="Strategy Type"
                   tooltip={TOOLTIPS.strategyType}
                 />
                 <select
-                  id="strategy-type"
+                  id="edit-strategy-type"
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   value={strategyType}
                   onChange={(e) => setStrategyType(e.target.value as StrategyType)}
@@ -230,14 +273,14 @@ export default function StrategyCreate() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <FieldLabel
-                    htmlFor="range-width"
+                    htmlFor="edit-range-width"
                     label={
                       enabled.rangeWidth ? 'Range Width % (required)' : 'Range Width % (n/a for this type)'
                     }
                     tooltip={TOOLTIPS.rangeWidth}
                   />
                   <input
-                    id="range-width"
+                    id="edit-range-width"
                     type="number"
                     step="0.1"
                     min={enabled.rangeWidth ? 0.01 : undefined}
@@ -250,17 +293,13 @@ export default function StrategyCreate() {
                     )}
                     value={rangeWidthPct}
                     onChange={(e) => setRangeWidthPct(readOptionalNumber(e.target.value))}
-                    placeholder={enabled.rangeWidth ? 'e.g. 1.0 for ~±0.5% price band' : '—'}
+                    placeholder={enabled.rangeWidth ? 'e.g. 1.0' : '—'}
                   />
                 </div>
                 <div>
-                  <FieldLabel
-                    htmlFor="max-il"
-                    label="Max IL % (optional)"
-                    tooltip={TOOLTIPS.maxIl}
-                  />
+                  <FieldLabel htmlFor="edit-max-il" label="Max IL % (optional)" tooltip={TOOLTIPS.maxIl} />
                   <input
-                    id="max-il"
+                    id="edit-max-il"
                     type="number"
                     step="0.1"
                     disabled={!enabled.maxIl}
@@ -278,7 +317,7 @@ export default function StrategyCreate() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <FieldLabel
-                    htmlFor="rebalance-threshold"
+                    htmlFor="edit-rebalance-threshold"
                     label={
                       strategyType === 'il_limit'
                         ? 'IL rebalance threshold % (optional)'
@@ -287,7 +326,7 @@ export default function StrategyCreate() {
                     tooltip={rebalanceThresholdTooltip}
                   />
                   <input
-                    id="rebalance-threshold"
+                    id="edit-rebalance-threshold"
                     type="number"
                     step="0.1"
                     disabled={!enabled.rebalanceThreshold}
@@ -302,12 +341,12 @@ export default function StrategyCreate() {
                 </div>
                 <div>
                   <FieldLabel
-                    htmlFor="min-interval"
+                    htmlFor="edit-min-interval"
                     label={`${minIntervalLabel} (optional)`}
                     tooltip={minIntervalTooltip}
                   />
                   <input
-                    id="min-interval"
+                    id="edit-min-interval"
                     type="number"
                     step="1"
                     disabled={!enabled.minInterval}
@@ -324,20 +363,48 @@ export default function StrategyCreate() {
                 </div>
               </div>
 
+              <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/20 px-3 py-3 sm:flex-row sm:items-center sm:gap-8">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="edit-dry-run"
+                    type="checkbox"
+                    checked={dryRun}
+                    onChange={(e) => setDryRun(e.target.checked)}
+                    className="rounded border-input"
+                  />
+                  <FieldLabel htmlFor="edit-dry-run" label="Dry run" tooltip={TOOLTIPS.dryRun} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="edit-auto-exec"
+                    type="checkbox"
+                    checked={autoExecute}
+                    onChange={(e) => setAutoExecute(e.target.checked)}
+                    disabled={dryRun}
+                    className="rounded border-input"
+                  />
+                  <FieldLabel
+                    htmlFor="edit-auto-exec"
+                    label="Auto-execute"
+                    tooltip={TOOLTIPS.autoExecute}
+                  />
+                </div>
+              </div>
+
               {mutation.isError && (
                 <p className="text-sm text-destructive" role="alert">
-                  {(mutation.error as Error)?.message ?? 'Request failed.'}
+                  {(mutation.error as Error)?.message ?? 'Save failed.'}
                 </p>
               )}
 
               <div className="flex justify-end gap-2 pt-2">
-                <Link to="/strategies">
+                <Link to={`/strategies/${id}`}>
                   <Button variant="outline" type="button">
                     Cancel
                   </Button>
                 </Link>
                 <Button type="submit" disabled={mutation.isPending}>
-                  {mutation.isPending ? 'Creating...' : 'Create Strategy'}
+                  {mutation.isPending ? 'Saving...' : 'Save changes'}
                 </Button>
               </div>
             </form>

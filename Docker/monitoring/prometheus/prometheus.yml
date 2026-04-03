@@ -26,7 +26,7 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # CLMM LP API Server
+  # Bociarz LP API Server
   - job_name: 'clmm-lp-api'
     static_configs:
       - targets: ['api:8080']

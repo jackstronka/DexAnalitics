@@ -1,5 +1,5 @@
 @echo off
-title CLMM LP — dashboard (API + Vite)
+title Bociarz LP — dashboard (API + Vite)
 cd /d "%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\Start-Dashboard.ps1"
 echo.

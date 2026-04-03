@@ -22,6 +22,10 @@ pub fn create_router(state: AppState) -> Router {
         // Position routes
         .route("/positions", get(handlers::list_positions))
         .route("/positions", post(handlers::open_position))
+        .route(
+            "/positions/swap-before-open",
+            post(handlers::swap_before_open),
+        )
         .route("/positions/{address}", get(handlers::get_position))
         .route("/positions/{address}", delete(handlers::close_position))
         .route("/positions/{address}/collect", post(handlers::collect_fees))
@@ -41,6 +45,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/strategies/{id}", put(handlers::update_strategy))
         .route("/strategies/{id}", delete(handlers::delete_strategy))
         .route("/strategies/{id}/start", post(handlers::start_strategy))
+        .route(
+            "/strategies/{id}/position-executor",
+            post(handlers::set_strategy_position_executor),
+        )
         .route("/strategies/{id}/stop", post(handlers::stop_strategy))
         .route(
             "/strategies/{id}/apply-optimize-result",
@@ -54,6 +62,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/pools", get(handlers::list_pools))
         .route("/pools/{address}", get(handlers::get_pool))
         .route("/pools/{address}/state", get(handlers::get_pool_state))
+        .route(
+            "/pools/{address}/estimate-swap-cost",
+            get(handlers::get_swap_cost_estimate),
+        )
         // Orca REST proxy routes
         .route("/orca/pools", get(handlers::orca_list_pools))
         .route("/orca/pools/search", get(handlers::orca_search_pools))
@@ -94,6 +106,8 @@ pub fn create_router(state: AppState) -> Router {
         // Wallets (local keypairs directory + on-chain balances)
         .route("/wallets", get(handlers::list_wallets))
         .route("/wallets/balances", get(handlers::get_wallet_balances))
+        // Prices (free external sources; server-side fetch)
+        .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // WebSocket routes
         .route("/ws/positions", get(websocket::positions_ws))
         .route("/ws/alerts", get(websocket::alerts_ws))

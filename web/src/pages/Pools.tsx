@@ -7,15 +7,16 @@ import { getPools } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
 
 export default function Pools() {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['pools'],
     queryFn: getPools,
   })
 
-  const pools = data?.pools || []
+  const raw = data?.pools
+  const pools = Array.isArray(raw) ? raw : []
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 text-foreground">
       <p className="text-xs text-muted-foreground">
         Pule ładowane są z publicznego API Orca przez backend — przy błędzie proxy/portu lista będzie pusta.
       </p>
@@ -35,6 +36,14 @@ export default function Pools() {
         <CardContent>
           {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
+          ) : isError ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
+              <p className="font-medium text-destructive">Nie udało się pobrać pul</p>
+              <p className="text-muted-foreground text-xs mt-1">
+                {(error as Error)?.message ?? 'Unknown error'} — sprawdź, czy API działa i czy Vite proxy ma{' '}
+                <code className="text-[11px]">API_UPSTREAM</code> na właściwy port.
+              </p>
+            </div>
           ) : pools.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground text-sm space-y-2 max-w-lg mx-auto">
               <p>Brak pul z API Orca.</p>
@@ -56,32 +65,40 @@ export default function Pools() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pools.map((pool) => (
-                    <tr key={pool.address} className="border-b last:border-0">
+                  {pools.map((pool) => {
+                    const pairLabel = `${shortenAddress(pool.token_mint_a, 4)}/${shortenAddress(pool.token_mint_b, 4)}`
+                    const feePct = (pool.fee_rate_bps ?? 0) / 100
+                    const addr = pool.address ?? 'unknown'
+                    const tvl = pool.tvl_usd != null ? String(pool.tvl_usd) : '0'
+                    const vol = pool.volume_24h_usd != null ? String(pool.volume_24h_usd) : '0'
+                    const apy = pool.apy_estimate != null ? String(pool.apy_estimate) : '0'
+                    return (
+                    <tr key={addr} className="border-b last:border-0">
                       <td className="py-4">
                         <Link 
-                          to={`/pools/${pool.address}`}
+                          to={`/pools/${addr}`}
                           className="font-mono text-sm hover:text-primary"
                         >
-                          {shortenAddress(pool.address)}
+                          {shortenAddress(addr)}
                         </Link>
                       </td>
                       <td className="py-4">
                         <span className="font-medium">
-                          {pool.token_a.symbol}/{pool.token_b.symbol}
+                          {pairLabel}
                         </span>
                         <span className="ml-2 text-xs text-muted-foreground">
-                          {pool.fee_tier / 100}%
+                          {feePct.toFixed(2)}%
                         </span>
                       </td>
-                      <td className="py-4 capitalize">{pool.protocol}</td>
-                      <td className="py-4 text-right">{formatUSD(pool.tvl_usd)}</td>
-                      <td className="py-4 text-right">{formatUSD(pool.volume_24h_usd)}</td>
+                      <td className="py-4 capitalize">{pool.protocol ?? '—'}</td>
+                      <td className="py-4 text-right">{formatUSD(tvl)}</td>
+                      <td className="py-4 text-right">{formatUSD(vol)}</td>
                       <td className="py-4 text-right text-green-500">
-                        {formatPercent(pool.fee_apy)}
+                        {formatPercent(apy)}
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

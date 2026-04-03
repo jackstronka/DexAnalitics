@@ -1,19 +1,42 @@
-import { useQuery } from '@tanstack/react-query'
-import { useParams, Link } from 'react-router-dom'
-import { ArrowLeft } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useParams, Link, useNavigate } from 'react-router-dom'
+import { ArrowLeft, Pencil, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { getStrategy } from '@/lib/api'
-import { formatDate } from '@/lib/utils'
+import { getStrategy, deleteStrategy } from '@/lib/api'
+import { formatDate, shortenAddress } from '@/lib/utils'
 
 export default function StrategyDetail() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   const { data: strategy, isLoading } = useQuery({
     queryKey: ['strategy', id],
     queryFn: () => getStrategy(id!),
     enabled: !!id,
   })
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteStrategy(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['strategies'] })
+      queryClient.removeQueries({ queryKey: ['strategy', id] })
+      navigate('/strategies')
+    },
+  })
+
+  const handleDelete = () => {
+    if (
+      !id ||
+      !window.confirm(
+        'Delete this strategy? Linked position addresses are removed from the server. This cannot be undone.',
+      )
+    ) {
+      return
+    }
+    deleteMutation.mutate()
+  }
 
   if (isLoading) {
     return <div className="text-center py-8">Loading...</div>
@@ -25,7 +48,7 @@ export default function StrategyDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         <Link to="/strategies">
           <Button variant="ghost" size="icon">
             <ArrowLeft className="h-4 w-4" />
@@ -39,6 +62,24 @@ export default function StrategyDetail() {
         }`}>
           {strategy.running ? 'Running' : 'Stopped'}
         </span>
+        <div className="ml-auto flex flex-wrap gap-2">
+          <Link to={`/strategies/${id}/edit`}>
+            <Button variant="outline" size="sm" type="button">
+              <Pencil className="h-4 w-4 mr-2" />
+              Edit
+            </Button>
+          </Link>
+          <Button
+            variant="destructive"
+            size="sm"
+            type="button"
+            onClick={handleDelete}
+            disabled={deleteMutation.isPending}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">
@@ -51,9 +92,13 @@ export default function StrategyDetail() {
               <span className="text-muted-foreground">Type</span>
               <span className="capitalize">{strategy.strategy_type.replace('_', ' ')}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Pool</span>
-              <span className="font-mono text-sm">{strategy.pool_address || 'Any'}</span>
+            <div className="flex justify-between gap-4">
+              <span className="text-muted-foreground shrink-0">Pool</span>
+              <span className="font-mono text-sm text-right">
+                {strategy.pool_address
+                  ? shortenAddress(strategy.pool_address, 6)
+                  : 'Per position (Open Position)'}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Created</span>
@@ -62,6 +107,14 @@ export default function StrategyDetail() {
             <div className="flex justify-between">
               <span className="text-muted-foreground">Updated</span>
               <span>{formatDate(strategy.updated_at)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Dry run</span>
+              <span>{strategy.dry_run ? 'Yes' : 'No'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Auto-execute</span>
+              <span>{strategy.auto_execute ? 'Yes' : 'No'}</span>
             </div>
           </CardContent>
         </Card>
@@ -95,6 +148,17 @@ export default function StrategyDetail() {
                 <span>{strategy.parameters.range_width_pct}%</span>
               </div>
             )}
+            {strategy.parameters.position_addresses &&
+              strategy.parameters.position_addresses.length > 0 && (
+                <div className="pt-2 border-t border-border">
+                  <p className="text-xs text-muted-foreground mb-2">Linked positions</p>
+                  <ul className="text-xs font-mono space-y-1">
+                    {strategy.parameters.position_addresses.map((a) => (
+                      <li key={a}>{shortenAddress(a, 8)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
           </CardContent>
         </Card>
       </div>

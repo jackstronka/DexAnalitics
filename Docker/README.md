@@ -1,6 +1,6 @@
 # Docker Deployment
 
-This directory contains Docker configuration for deploying the **Bociarz LP Strategy Lab** stack (derived from CLMM Liquidity Provider).
+This directory contains Docker configuration for deploying the **Bociarz LP** stack (derived from CLMM Liquidity Provider).
 
 ## Contents
 

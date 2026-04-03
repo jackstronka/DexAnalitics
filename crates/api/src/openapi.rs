@@ -8,14 +8,18 @@ use crate::models::{
     BuildUnsignedTxResponse, CreateStrategyRequest, DecreaseLiquidityRequest,
     EventBusMetricsResponse, HealthResponse, ListPoolsResponse, ListPositionsResponse,
     ListStrategiesResponse, MessageResponse, MetricsResponse, OpenPositionRequest,
+    SwapBeforeOpenRequest, SwapInPoolBeforeOpen,
     OrcaLockResponse, OrcaOwnerPositionEntry, OrcaOwnerPositionsResponse, OrcaProtocolResponse,
     OrcaTokenListResponse, OrcaTokenResponse,
     PhantomChallengeRequest, PhantomChallengeResponse, PhantomSessionResponse, PhantomVerifyRequest,
-    PnLResponse, PoolResponse, PoolStateResponse,     PortfolioAnalyticsResponse, PositionResponse,
+    PnLResponse, PoolResponse, PoolStateResponse, PortfolioAnalyticsResponse, PositionOpenResponse,
+    PositionResponse, SwapBeforeOpenResponse,
     RebalanceRequest, RunScriptRequest, ScriptCatalogItem, ScriptRunRecord, ScriptsListResponse,
     SimulationRequest, SimulationResponse, SlackActivitySummaryRequest,
-    SlackActivitySummaryResponse, StrategyPerformanceResponse, StrategyResponse,
+    SlackActivitySummaryResponse, StrategyPerformanceResponse, StrategyPositionExecutorRequest,
+    StrategyResponse,
     SubmitSignedTxRequest, SubmitSignedTxResponse,
+    JupiterPricesResponse, SwapCostEstimateResponse,
     WalletBalancesResponse, WalletEntry, WalletTokenBalance, WalletsListResponse,
 };
 use utoipa::OpenApi;
@@ -24,9 +28,9 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "CLMM LP Strategy Optimizer API",
+        title = "Bociarz LP API",
         version = "0.1.1-alpha.3",
-        description = "REST API for Bociarz LP Strategy Lab (derived from CLMM Liquidity Provider). \
+        description = "REST API for Bociarz LP (derived from CLMM Liquidity Provider). \
                        Provides endpoints for position management, strategy automation, \
                        pool analysis, and portfolio analytics.",
         license(
@@ -49,7 +53,8 @@ use utoipa::OpenApi;
         (name = "Analytics", description = "Portfolio analytics and simulations"),
         (name = "Bot activity", description = "Orca JSONL ledger + registry (CLI/bot history); Slack digest"),
         (name = "Scripts", description = "tools/*.ps1 manifest, run history, localhost runner proxy"),
-        (name = "Wallets", description = "Local keypairs directory + on-chain balances")
+        (name = "Wallets", description = "Local keypairs directory + on-chain balances"),
+        (name = "Prices", description = "Free external price sources (server-side fetch)")
     ),
     paths(
         // Health endpoints
@@ -64,6 +69,7 @@ use utoipa::OpenApi;
         handlers::list_positions,
         handlers::get_position,
         handlers::open_position,
+        handlers::swap_before_open,
         handlers::close_position,
         handlers::collect_fees,
         handlers::decrease_liquidity,
@@ -76,6 +82,7 @@ use utoipa::OpenApi;
         handlers::update_strategy,
         handlers::delete_strategy,
         handlers::start_strategy,
+        handlers::set_strategy_position_executor,
         handlers::stop_strategy,
         handlers::apply_optimize_result,
         handlers::get_strategy_performance,
@@ -83,6 +90,7 @@ use utoipa::OpenApi;
         handlers::list_pools,
         handlers::get_pool,
         handlers::get_pool_state,
+        handlers::get_swap_cost_estimate,
         // Orca REST proxy endpoints
         handlers::orca_list_pools,
         handlers::orca_search_pools,
@@ -114,6 +122,8 @@ use utoipa::OpenApi;
         // Wallets
         handlers::list_wallets,
         handlers::get_wallet_balances,
+        // Prices
+        handlers::get_jupiter_prices,
     ),
     components(
         schemas(
@@ -131,18 +141,24 @@ use utoipa::OpenApi;
             PositionResponse,
             PnLResponse,
             OpenPositionRequest,
+            SwapBeforeOpenRequest,
+            SwapInPoolBeforeOpen,
             DecreaseLiquidityRequest,
             RebalanceRequest,
             MessageResponse,
+            PositionOpenResponse,
+            SwapBeforeOpenResponse,
             // Strategies
             ListStrategiesResponse,
             StrategyResponse,
             StrategyPerformanceResponse,
             CreateStrategyRequest,
+            StrategyPositionExecutorRequest,
             // Pools
             ListPoolsResponse,
             PoolResponse,
             PoolStateResponse,
+            SwapCostEstimateResponse,
             // Orca REST proxy
             OrcaLockResponse,
             OrcaTokenResponse,
@@ -174,6 +190,8 @@ use utoipa::OpenApi;
             WalletEntry,
             WalletBalancesResponse,
             WalletTokenBalance,
+            // Prices
+            JupiterPricesResponse,
         )
     ),
     modifiers(&SecurityAddon)
@@ -227,13 +245,13 @@ mod tests {
     fn test_openapi_generation() {
         let json = openapi_json();
         assert!(!json.is_empty());
-        assert!(json.contains("CLMM LP Strategy Optimizer API"));
+        assert!(json.contains("Bociarz LP API"));
     }
 
     #[test]
     fn test_openapi_yaml() {
         let yaml = openapi_yaml();
         assert!(!yaml.is_empty());
-        assert!(yaml.contains("CLMM LP Strategy Optimizer API"));
+        assert!(yaml.contains("Bociarz LP API"));
     }
 }

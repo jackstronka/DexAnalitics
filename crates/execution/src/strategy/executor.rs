@@ -15,7 +15,8 @@ use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint, PositionT
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -82,6 +83,8 @@ pub struct StrategyExecutor {
     retouch_armed: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, bool>>>,
     /// Latest optimization profile id (for IL ledger continuity / auditing).
     optimization_run_id: Mutex<Option<String>>,
+    /// PDAs to skip in `evaluate_all` (strategy automation off for these positions).
+    skip_evaluation_for: Arc<RwLock<HashSet<solana_sdk::pubkey::Pubkey>>>,
 }
 
 impl StrategyExecutor {
@@ -120,7 +123,20 @@ impl StrategyExecutor {
             tick_reader,
             retouch_armed,
             optimization_run_id: Mutex::new(None),
+            skip_evaluation_for: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    /// Replaces the set of position addresses for which this executor skips decisions/transactions.
+    pub async fn set_skip_evaluation_for_addresses(&self, addresses: &[String]) {
+        let mut set = HashSet::new();
+        for s in addresses {
+            if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(s.trim()) {
+                set.insert(pk);
+            }
+        }
+        let mut w = self.skip_evaluation_for.write().await;
+        *w = set;
     }
 
     async fn capture_position_fee_checkpoint(
@@ -289,6 +305,28 @@ impl StrategyExecutor {
         Ok(())
     }
 
+    /// Orca swap ExactIn in pool (server wallet) — e.g. before `execute_open_position`.
+    ///
+    /// `ledger_session_id` ties lifecycle JSONL rows (swap + open) for per-position cost sums.
+    pub async fn execute_swap_exact_in(
+        &self,
+        pool: &solana_sdk::pubkey::Pubkey,
+        specified_mint: &solana_sdk::pubkey::Pubkey,
+        amount_in: u64,
+        slippage_bps: u16,
+        ledger_session_id: Option<String>,
+    ) -> anyhow::Result<Option<solana_sdk::signature::Signature>> {
+        self.rebalance_executor
+            .execute_swap_exact_in(
+                pool,
+                specified_mint,
+                amount_in,
+                slippage_bps,
+                ledger_session_id,
+            )
+            .await
+    }
+
     /// Opens a new Whirlpool position using explicit token caps.
     ///
     /// In dry-run mode this returns the derived position PDA without requiring wallet.
@@ -302,6 +340,7 @@ impl StrategyExecutor {
         amount_b: u64,
         slippage_bps: u16,
         full_range: bool,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<solana_sdk::pubkey::Pubkey> {
         let (position, eff_tl, eff_tu) = self
             .rebalance_executor
@@ -313,6 +352,7 @@ impl StrategyExecutor {
                 amount_b,
                 slippage_bps,
                 full_range,
+                ledger_session_id,
             )
             .await?;
 
@@ -464,6 +504,18 @@ impl StrategyExecutor {
         debug!(count = positions.len(), "Evaluating positions");
 
         for position in positions {
+            if self
+                .skip_evaluation_for
+                .read()
+                .await
+                .contains(&position.address)
+            {
+                debug!(
+                    position = %position.address,
+                    "Skipping strategy evaluation (disabled for this position)"
+                );
+                continue;
+            }
             if self.config.fee_mode == PositionTruthMode::PositionTruth {
                 if let Some(cp) = self
                     .capture_position_fee_checkpoint(&position.address, "poll", CheckpointSource::Onchain)

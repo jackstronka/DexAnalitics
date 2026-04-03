@@ -1,6 +1,6 @@
 # Attribution
 
-This repository (**Bociarz LP Strategy Lab**) is derived from:
+This repository (**Bociarz LP**) is derived from:
 
 - Upstream: `joaquinbejar/CLMM-Liquidity-Provider` — `https://github.com/joaquinbejar/CLMM-Liquidity-Provider`
 - License: MIT (see [`LICENSE`](LICENSE))

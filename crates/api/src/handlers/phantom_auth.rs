@@ -24,7 +24,7 @@ fn build_challenge_message(wallet_pubkey: &str, nonce: &str, expires_at: u64) ->
     // Keep the message stable and explicit to avoid ambiguity.
     // This is what Phantom will display in UI as "Sign message".
     format!(
-        "Bociarz LP Strategy Lab\n\
+        "Bociarz LP\n\
 Sign-in request\n\
 \n\
 wallet: {wallet_pubkey}\n\
