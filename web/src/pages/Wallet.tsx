@@ -15,7 +15,7 @@ import {
   getOrcaToken,
 } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
-import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
+import { formatUSD, formatPercent, shortenAddress, formatUsdcPriceRange } from '@/lib/utils'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
 
@@ -441,7 +441,12 @@ export default function Wallet() {
                   <div>
                     <div className="font-mono text-sm">{shortenAddress(p.pool_address, 6)}</div>
                     <div className="text-xs text-muted-foreground">
-                      Ticks {p.tick_lower} → {p.tick_upper} · {p.in_range ? 'in range' : 'out of range'}
+                      {formatUsdcPriceRange(
+                        p.range_lower_usdc ?? undefined,
+                        p.range_upper_usdc ?? undefined,
+                        p.range_usdc_quote ?? undefined,
+                      ) ?? `Ticks ${p.tick_lower} → ${p.tick_upper}`}{' '}
+                      · {p.in_range ? 'in range' : 'out of range'}
                     </div>
                   </div>
                   <div className="text-right">

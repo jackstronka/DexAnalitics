@@ -14,6 +14,16 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-03 — `PositionResponse`: zakres w USDC (pary z jednym USDC)
+
+**keywords:** PositionResponse, range_lower_usdc, range_upper_usdc, tick_range_usdc, PositionDetail, Dashboard
+**paths:** `crates/api/src/services/position_valuation.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/models.rs`, `web/src/lib/utils.ts`, `web/src/pages/PositionDetail.tsx`
+
+- Dla puli **USDC + jeden inny token** API uzupełnia `range_lower_usdc` / `range_upper_usdc` (min/max granicy zakresu) oraz `range_usdc_quote` (np. `per 1 SOL`) — liczone z ticków + decymali mintów (mainnet/devnet USDC mint).
+- Gdy para nie ma USDC, pola są `null` — UI pokazuje jak wcześniej same ticki.
+- **Poprawka:** cena UI z ticka jest liczona w **log-domenie** (`exp(tick·ln(1.0001) + Δdec·ln(10))`), żeby uniknąć **underflow `f64`** na samym `1.0001^tick` przy głębokich ujemnych tickach (np. -25276) — wcześniej zakres USDC znikał mimo pary SOL/USDC.
+- **`GET /orca/positions-by-owner`:** te same pola co w `PositionResponse` (po jednym fetchu stanu puli na wiersz), tabela RPC w UI pokazuje USDC jak monitor.
+
 ## 2026-04-03 — `GET /positions/:address`: fallback RPC gdy brak wpisu w monitorze
 
 **keywords:** get_position, list_positions, monitored_position_from_chain, registry.jsonl, lifecycle_ledger_aggregates

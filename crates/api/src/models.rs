@@ -150,6 +150,17 @@ pub struct PositionResponse {
     pub tick_lower: i32,
     /// Upper tick.
     pub tick_upper: i32,
+    /// When the pool is USDC vs one other token: lower bound of the range in **USDC per 1 unit of that token** (same convention as DEX UI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_lower_usdc: Option<Decimal>,
+    /// Upper bound (see `range_lower_usdc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_upper_usdc: Option<Decimal>,
+    /// e.g. `per 1 SOL` — only set when `range_*_usdc` are present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_usdc_quote: Option<String>,
     /// Liquidity amount.
     pub liquidity: String,
     /// Whether position is in range.
@@ -237,6 +248,15 @@ pub struct OrcaOwnerPositionEntry {
     pub pool_address: String,
     pub tick_lower: i32,
     pub tick_upper: i32,
+    /// Same semantics as [`PositionResponse::range_lower_usdc`] when the pool has a USDC leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_lower_usdc: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_upper_usdc: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_usdc_quote: Option<String>,
     /// Raw liquidity (u128 as decimal string).
     pub liquidity: String,
     #[serde(skip_serializing_if = "Option::is_none")]

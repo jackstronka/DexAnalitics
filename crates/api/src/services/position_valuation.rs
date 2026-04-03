@@ -21,12 +21,154 @@ use spl_token::state::Mint;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Tick range expressed as **USDC per 1 unit of the non-USDC token** when the pool has exactly one USDC leg.
+#[derive(Debug, Clone)]
+pub struct TickRangeUsdc {
+    pub lower: Decimal,
+    pub upper: Decimal,
+    /// e.g. `per 1 SOL`
+    pub quote: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PositionUsdValuation {
     pub value_usd: Decimal,
     pub fees_usd: Decimal,
     pub amount_a_raw: u64,
     pub amount_b_raw: u64,
+    pub range_usdc: Option<TickRangeUsdc>,
+}
+
+fn is_usdc_mint(mint: &Pubkey) -> bool {
+    matches!(
+        mint.to_string().as_str(),
+        // Mainnet + devnet USDC (common SPL mints)
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            | "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+    )
+}
+
+fn token_short_label(mint: &Pubkey) -> String {
+    match mint.to_string().as_str() {
+        "So11111111111111111111111111111111111111112" => "SOL".to_string(),
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" => "USDC".to_string(),
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" => "USDT".to_string(),
+        s => {
+            if s.len() > 10 {
+                format!("{}…{}", &s[..4], &s[s.len().saturating_sub(4)..])
+            } else {
+                s.to_string()
+            }
+        }
+    }
+}
+
+/// Raw Whirlpool price `1.0001^tick` (token B per token A, raw) → UI ratio (B human per 1 A human).
+///
+/// Implemented as `exp(tick * ln(1.0001) + (dec_a - dec_b) * ln(10))`. The protocols helper
+/// `tick_to_price` uses `f64.powi(tick)` on the raw ratio alone, which **underflows to 0** for
+/// large negative ticks (e.g. -25276) before decimals are applied — breaking USDC range display.
+fn b_per_a_ui_decimal(tick: i32, dec_a: u8, dec_b: u8) -> Decimal {
+    let ln_10001 = 1.0001_f64.ln();
+    let ln_ui =
+        (tick as f64) * ln_10001 + ((dec_a as f64) - (dec_b as f64)) * std::f64::consts::LN_10;
+    if !ln_ui.is_finite() {
+        return Decimal::ZERO;
+    }
+    let ui = ln_ui.exp();
+    if !ui.is_finite() || ui <= 0.0 {
+        return Decimal::ZERO;
+    }
+    Decimal::from_f64(ui).unwrap_or(Decimal::ZERO)
+}
+
+/// USDC-denominated bounds for the position range when the pool is USDC / one other token.
+pub fn compute_tick_range_usdc(
+    tick_lower: i32,
+    tick_upper: i32,
+    mint_a: &Pubkey,
+    mint_b: &Pubkey,
+    dec_a: u8,
+    dec_b: u8,
+) -> Option<TickRangeUsdc> {
+    let a_usdc = is_usdc_mint(mint_a);
+    let b_usdc = is_usdc_mint(mint_b);
+    if !a_usdc && !b_usdc || a_usdc && b_usdc {
+        return None;
+    }
+
+    let v_lo_tick = b_per_a_ui_decimal(tick_lower, dec_a, dec_b);
+    let v_hi_tick = b_per_a_ui_decimal(tick_upper, dec_a, dec_b);
+
+    let usdc_lo = if b_usdc {
+        v_lo_tick
+    } else {
+        if v_lo_tick.is_zero() {
+            return None;
+        }
+        Decimal::ONE / v_lo_tick
+    };
+    let usdc_hi = if b_usdc {
+        v_hi_tick
+    } else {
+        if v_hi_tick.is_zero() {
+            return None;
+        }
+        Decimal::ONE / v_hi_tick
+    };
+
+    let lower = usdc_lo.min(usdc_hi);
+    let upper = usdc_lo.max(usdc_hi);
+
+    let quote = if b_usdc {
+        format!("per 1 {}", token_short_label(mint_a))
+    } else {
+        format!("per 1 {}", token_short_label(mint_b))
+    };
+
+    Some(TickRangeUsdc { lower, upper, quote })
+}
+
+/// Pool + ticks only (no `MonitoredPosition`); used by Orca RPC scan and callers that already have ticks.
+pub async fn tick_range_usdc_for_pool_ticks(
+    provider: Arc<RpcProvider>,
+    pool: &Pubkey,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> Option<TickRangeUsdc> {
+    let pool_reader = WhirlpoolReader::new(provider.clone());
+    let pool_state = pool_reader
+        .get_pool_state(&pool.to_string())
+        .await
+        .ok()?;
+    let dec_a = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_a)
+        .await
+        .ok()?;
+    let dec_b = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_b)
+        .await
+        .ok()?;
+    compute_tick_range_usdc(
+        tick_lower,
+        tick_upper,
+        &pool_state.token_mint_a,
+        &pool_state.token_mint_b,
+        dec_a,
+        dec_b,
+    )
+}
+
+/// Pool fetch + decimals; used when USD valuation fails but we still want a USDC range line.
+pub async fn tick_range_usdc_for_position(
+    provider: Arc<RpcProvider>,
+    position: &MonitoredPosition,
+) -> Option<TickRangeUsdc> {
+    tick_range_usdc_for_pool_ticks(
+        provider,
+        &position.pool,
+        position.on_chain.tick_lower,
+        position.on_chain.tick_upper,
+    )
+    .await
 }
 
 async fn fetch_mint_decimals(provider: &RpcProvider, mint: &Pubkey) -> anyhow::Result<u8> {
@@ -125,11 +267,21 @@ pub async fn compute_position_usd_valuation(
     let value_usd_f = a_ui * pa + b_ui * pb;
     let fees_usd_f = fees_a_ui * pa + fees_b_ui * pb;
 
+    let range_usdc = compute_tick_range_usdc(
+        position.on_chain.tick_lower,
+        position.on_chain.tick_upper,
+        &pool_state.token_mint_a,
+        &pool_state.token_mint_b,
+        dec_a,
+        dec_b,
+    );
+
     Ok(PositionUsdValuation {
         value_usd: Decimal::from_f64(value_usd_f).unwrap_or(Decimal::ZERO),
         fees_usd: Decimal::from_f64(fees_usd_f).unwrap_or(Decimal::ZERO),
         amount_a_raw,
         amount_b_raw,
+        range_usdc,
     })
 }
 
@@ -149,4 +301,21 @@ pub async fn fetch_prices_for_positions(
     }
 
     fetch_mint_prices_usd(&mints).await.0
+}
+
+#[cfg(test)]
+mod tick_range_usdc_tests {
+    use super::compute_tick_range_usdc;
+    use rust_decimal::Decimal;
+    use solana_sdk::pubkey::Pubkey;
+    use std::str::FromStr;
+
+    #[test]
+    fn sol_usdc_deep_ticks_produce_nonzero_usdc_range() {
+        let sol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let usdc = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
+        let r = compute_tick_range_usdc(-25276, -25172, &sol, &usdc, 9, 6).expect("range");
+        assert!(r.lower > Decimal::ZERO);
+        assert!(r.upper > r.lower);
+    }
 }

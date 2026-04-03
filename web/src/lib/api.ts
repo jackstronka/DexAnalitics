@@ -8,6 +8,11 @@ export interface Position {
   owner: string
   tick_lower: number
   tick_upper: number
+  /** USDC per 1 unit of the other leg; only when pool is USDC vs one token. */
+  range_lower_usdc?: string | number | null
+  range_upper_usdc?: string | number | null
+  /** e.g. `per 1 SOL` */
+  range_usdc_quote?: string | null
   liquidity: string
   in_range: boolean
   value_usd: string
@@ -310,6 +315,9 @@ export interface OrcaOwnerPositionEntry {
   pool_address: string
   tick_lower: number
   tick_upper: number
+  range_lower_usdc?: string | number | null
+  range_upper_usdc?: string | number | null
+  range_usdc_quote?: string | null
   liquidity: string
   position_mint?: string | null
   position_bundle_address?: string | null

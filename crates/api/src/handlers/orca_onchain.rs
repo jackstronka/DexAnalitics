@@ -2,6 +2,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{OrcaOwnerPositionEntry, OrcaOwnerPositionsResponse};
+use crate::services::position_valuation::tick_range_usdc_for_pool_ticks;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use orca_whirlpools::{
@@ -11,6 +12,7 @@ use orca_whirlpools::{
 use serde::Deserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
+use std::sync::Arc;
 use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +70,9 @@ pub async fn orca_positions_by_owner(
                     pool_address: d.whirlpool.to_string(),
                     tick_lower: d.tick_lower_index,
                     tick_upper: d.tick_upper_index,
+                    range_lower_usdc: None,
+                    range_upper_usdc: None,
+                    range_usdc_quote: None,
                     liquidity: d.liquidity.to_string(),
                     position_mint: Some(d.position_mint.to_string()),
                     position_bundle_address: None,
@@ -83,6 +88,9 @@ pub async fn orca_positions_by_owner(
                         pool_address: d.whirlpool.to_string(),
                         tick_lower: d.tick_lower_index,
                         tick_upper: d.tick_upper_index,
+                        range_lower_usdc: None,
+                        range_upper_usdc: None,
+                        range_usdc_quote: None,
                         liquidity: d.liquidity.to_string(),
                         position_mint: Some(d.position_mint.to_string()),
                         position_bundle_address: Some(bundle_addr.clone()),
@@ -92,11 +100,34 @@ pub async fn orca_positions_by_owner(
         }
     }
 
-    let total = entries.len();
+    let provider = state.provider.clone();
+    let mut enriched: Vec<OrcaOwnerPositionEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        let range = match Pubkey::from_str(&e.pool_address) {
+            Ok(pk) => {
+                tick_range_usdc_for_pool_ticks(
+                    Arc::clone(&provider),
+                    &pk,
+                    e.tick_lower,
+                    e.tick_upper,
+                )
+                .await
+            }
+            Err(_) => None,
+        };
+        enriched.push(OrcaOwnerPositionEntry {
+            range_lower_usdc: range.as_ref().map(|r| r.lower),
+            range_upper_usdc: range.as_ref().map(|r| r.upper),
+            range_usdc_quote: range.as_ref().map(|r| r.quote.clone()),
+            ..e
+        });
+    }
+
+    let total = enriched.len();
     Ok(Json(OrcaOwnerPositionsResponse {
         owner: owner_pk.to_string(),
         rpc_url: endpoint,
         total,
-        entries,
+        entries: enriched,
     }))
 }

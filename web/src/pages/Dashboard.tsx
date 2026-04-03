@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
 import { getPortfolioAnalytics, getPositions, getHealth } from '@/lib/api'
-import { formatUSD, formatPercent } from '@/lib/utils'
+import { formatUSD, formatPercent, formatUsdcPriceRange } from '@/lib/utils'
 
 export default function Dashboard() {
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
@@ -160,7 +160,11 @@ export default function Dashboard() {
                       {position.pool_address.slice(0, 8)}...
                     </div>
                     <div className="text-sm text-muted-foreground">
-                      Tick: {position.tick_lower} → {position.tick_upper}
+                      {formatUsdcPriceRange(
+                        position.range_lower_usdc ?? undefined,
+                        position.range_upper_usdc ?? undefined,
+                        position.range_usdc_quote ?? undefined,
+                      ) ?? `Tick: ${position.tick_lower} → ${position.tick_upper}`}
                     </div>
                   </div>
                   <div className="text-right">

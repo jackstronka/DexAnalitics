@@ -22,6 +22,7 @@ use crate::services::PositionService;
 use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
+    tick_range_usdc_for_position,
 };
 use std::collections::HashSet;
 
@@ -87,12 +88,21 @@ pub async fn list_positions(
             .map(|v| v.fees_usd)
             .unwrap_or(p.pnl.fees_usd);
 
+        let range_usdc = if let Some(r) = valuation.as_ref().and_then(|v| v.range_usdc.as_ref()) {
+            Some(r.clone())
+        } else {
+            tick_range_usdc_for_position(state.provider.clone(), p).await
+        };
+
         responses.push(PositionResponse {
             address: p.address.to_string(),
             pool_address: p.pool.to_string(),
             owner: p.on_chain.owner.to_string(),
             tick_lower: p.on_chain.tick_lower,
             tick_upper: p.on_chain.tick_upper,
+            range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
+            range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
+            range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
             liquidity: p.on_chain.liquidity.to_string(),
             in_range: p.in_range,
             value_usd,
@@ -174,12 +184,21 @@ pub async fn get_position(
         .map(|v| v.fees_usd)
         .unwrap_or(position.pnl.fees_usd);
 
+    let range_usdc = if let Some(r) = valuation.as_ref().and_then(|v| v.range_usdc.as_ref()) {
+        Some(r.clone())
+    } else {
+        tick_range_usdc_for_position(state.provider.clone(), &position).await
+    };
+
     let response = PositionResponse {
         address: position.address.to_string(),
         pool_address: position.pool.to_string(),
         owner: position.on_chain.owner.to_string(),
         tick_lower: position.on_chain.tick_lower,
         tick_upper: position.on_chain.tick_upper,
+        range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
+        range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
+        range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
         liquidity: position.on_chain.liquidity.to_string(),
         in_range: position.in_range,
         value_usd,

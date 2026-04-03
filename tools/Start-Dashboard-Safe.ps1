@@ -61,6 +61,34 @@ if ($WithRunner.IsPresent) {
 # Start API in a separate window, always :8081 (inherits any SCRIPT_RUNNER_URL override from this process).
 & (Join-Path $RepoRoot "tools\\Start-ClmmApi-8081.ps1")
 
+# Vite proxy points at :8081 — if we start the browser before `cargo` finishes, UI shows HTTP 502.
+$apiHealthUrl = "http://127.0.0.1:8081/api/v1/health"
+$maxWaitSec = 180
+$intervalSec = 2
+$deadline = (Get-Date).AddSeconds($maxWaitSec)
+Write-Host "[Start-Dashboard-Safe] Czekam na API (pierwszy build Rusta może trwać kilka minut): $apiHealthUrl" -ForegroundColor Cyan
+$apiUp = $false
+$elapsed = 0
+while ((Get-Date) -lt $deadline) {
+  try {
+    $null = Invoke-RestMethod -Method Get -Uri $apiHealthUrl -TimeoutSec 3 -ErrorAction Stop
+    $apiUp = $true
+    break
+  } catch {
+    # API jeszcze nie nasłuchuje albo trwa kompilacja
+  }
+  Start-Sleep -Seconds $intervalSec
+  $elapsed += $intervalSec
+  if (($elapsed % 10) -eq 0 -and $elapsed -gt 0) {
+    Write-Host "[Start-Dashboard-Safe] nadal czekam... ${elapsed}s / ${maxWaitSec}s (okno API + tools\logs)" -ForegroundColor DarkGray
+  }
+}
+if ($apiUp) {
+  Write-Host "[Start-Dashboard-Safe] API odpowiada — startuję Vite." -ForegroundColor Green
+} else {
+  Write-Warning "[Start-Dashboard-Safe] Brak odpowiedzi z API po ${maxWaitSec}s. Vite i tak wystartuje; sprawdź drugie okno pwsh (cargo) i log w tools\logs — np. PostgreSQL / DATABASE_URL."
+}
+
 # Start Vite in this window (no kill-port, no touching API ports)
 Set-Location $WebDir
 $env:API_UPSTREAM = "http://127.0.0.1:8081"

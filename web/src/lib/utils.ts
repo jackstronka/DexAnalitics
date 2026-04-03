@@ -28,6 +28,27 @@ export function formatNumber(value: number | string, decimals = 2): string {
   }).format(num)
 }
 
+/** Position price range when API sends `range_*_usdc` (USDC per 1 of the other token). */
+export function formatUsdcPriceRange(
+  lo: number | string | null | undefined,
+  hi: number | string | null | undefined,
+  quote?: string | null,
+): string | null {
+  if (lo == null || hi == null) return null
+  const a = typeof lo === 'string' ? parseFloat(lo) : lo
+  const b = typeof hi === 'string' ? parseFloat(hi) : hi
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null
+  const fmt = (n: number) =>
+    new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 3,
+      maximumFractionDigits: 3,
+    }).format(n)
+  const core = `${fmt(a)} – ${fmt(b)} USDC`
+  return quote ? `${core} ${quote}` : core
+}
+
 export function shortenAddress(address: string, chars = 4): string {
   return `${address.slice(0, chars)}...${address.slice(-chars)}`
 }

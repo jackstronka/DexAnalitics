@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
 import { getOrcaPositionsByOwner, getPositions } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
-import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
+import { formatUSD, formatPercent, shortenAddress, formatUsdcPriceRange } from '@/lib/utils'
 
 export default function Positions() {
   const navigate = useNavigate()
@@ -95,7 +95,11 @@ export default function Positions() {
                       </td>
                       <td className="py-4">
                         <span className="text-sm">
-                          {position.tick_lower} → {position.tick_upper}
+                          {formatUsdcPriceRange(
+                            position.range_lower_usdc ?? undefined,
+                            position.range_upper_usdc ?? undefined,
+                            position.range_usdc_quote ?? undefined,
+                          ) ?? `${position.tick_lower} → ${position.tick_upper}`}
                         </span>
                       </td>
                       <td className="py-4 text-right font-medium">
@@ -221,7 +225,11 @@ export default function Positions() {
                             {shortenAddress(row.pool_address)}
                           </td>
                           <td className="py-3 text-sm">
-                            {row.tick_lower} → {row.tick_upper}
+                            {formatUsdcPriceRange(
+                              row.range_lower_usdc ?? undefined,
+                              row.range_upper_usdc ?? undefined,
+                              row.range_usdc_quote ?? undefined,
+                            ) ?? `${row.tick_lower} → ${row.tick_upper}`}
                           </td>
                           <td className="py-3 text-right font-mono text-xs">{row.liquidity}</td>
                         </tr>

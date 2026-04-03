@@ -17,7 +17,7 @@ import {
   setStrategyPositionExecutor,
 } from '@/lib/api'
 import type { Strategy } from '@/lib/api'
-import { formatUSD, formatPercent, shortenAddress, formatDate } from '@/lib/utils'
+import { formatUSD, formatPercent, shortenAddress, formatDate, formatUsdcPriceRange } from '@/lib/utils'
 
 type LedgerRow = Record<string, unknown>
 
@@ -237,6 +237,12 @@ export default function PositionDetail() {
   const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
   const bySession = groupLedgerBySession(ledgerRows)
 
+  const rangeUsdcLine = formatUsdcPriceRange(
+    position.range_lower_usdc ?? undefined,
+    position.range_upper_usdc ?? undefined,
+    position.range_usdc_quote ?? undefined,
+  )
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -279,10 +285,22 @@ export default function PositionDetail() {
                   <span className="text-muted-foreground">Pool</span>
                   <span className="font-mono">{shortenAddress(position.pool_address, 8)}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Tick Range</span>
-                  <span>
-                    {position.tick_lower} → {position.tick_upper}
+                <div className="flex justify-between gap-4">
+                  <span className="text-muted-foreground shrink-0">Range</span>
+                  <span className="text-right">
+                    {rangeUsdcLine ? (
+                      <>
+                        <span className="block">{rangeUsdcLine}</span>
+                        <span className="block text-xs text-muted-foreground mt-0.5">
+                          ticks {position.tick_lower} → {position.tick_upper}
+                        </span>
+                      </>
+                    ) : (
+                      <span>
+                        {position.tick_lower} → {position.tick_upper}{' '}
+                        <span className="text-xs text-muted-foreground">(ticks)</span>
+                      </span>
+                    )}
                   </span>
                 </div>
                 <div className="flex justify-between">
