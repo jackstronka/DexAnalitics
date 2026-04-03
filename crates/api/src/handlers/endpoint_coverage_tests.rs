@@ -448,6 +448,20 @@ async fn all_pool_and_analytics_endpoints_are_reachable() {
     assert_eq!(
         request(
             router.clone(),
+            Method::POST,
+            "/api/v1/pools/invalid/quote-open-budget",
+            Some(serde_json::json!({
+                "tick_lower": 0,
+                "tick_upper": 10,
+                "target_usd": 3.0
+            })),
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            router.clone(),
             Method::GET,
             "/api/v1/analytics/portfolio",
             None

@@ -14,6 +14,7 @@ import {
   getWalletBalances,
   getWallets,
   openPosition,
+  quoteOpenBudget,
   swapBeforeOpen as swapBeforeOpenTx,
   type WalletBalancesResponse,
 } from '@/lib/api'
@@ -157,7 +158,6 @@ export default function PositionCreate() {
   // Budget split mode (USD)
   const [mode, setMode] = useState<'tokens' | 'budget'>('tokens')
   const [totalUsd, setTotalUsd] = useState<number | ''>('')
-  const [splitPctA, setSplitPctA] = useState<number>(50)
   /** API-side Orca swap in pool before open (requires server KEYPAIR / executor). */
   const [swapBeforeOpen, setSwapBeforeOpen] = useState(false)
 
@@ -367,21 +367,48 @@ export default function PositionCreate() {
     staleTime: 60_000,
   })
 
-  useEffect(() => {
-    if (mode !== 'budget') return
-    if (!tokenA || !tokenB) return
-    if (totalUsd === '' || !Number.isFinite(totalUsd) || totalUsd <= 0) return
-    const pxA = pricesQ.data?.[tokenA.mint]
-    const pxB = pricesQ.data?.[tokenB.mint]
-    if (!pxA || !pxB) return
+  const budgetQuoteEnabled =
+    mode === 'budget' &&
+    poolAddress.trim().length > 0 &&
+    tickLower !== '' &&
+    tickUpper !== '' &&
+    totalUsd !== '' &&
+    Number.isFinite(Number(totalUsd)) &&
+    Number(totalUsd) > 0 &&
+    Number.isFinite(Number(tickLower)) &&
+    Number.isFinite(Number(tickUpper))
 
-    const usdA = (Number(totalUsd) * splitPctA) / 100
-    const usdB = Number(totalUsd) - usdA
-    const a = usdA / pxA
-    const b = usdB / pxB
-    setAmountAUi(Number.isFinite(a) ? Number(a.toFixed(8)) : '')
-    setAmountBUi(Number.isFinite(b) ? Number(b.toFixed(8)) : '')
-  }, [mode, tokenA, tokenB, totalUsd, splitPctA, pricesQ.data])
+  const budgetQuoteQ = useQuery({
+    queryKey: ['quote-open-budget', poolAddress.trim(), tickLower, tickUpper, totalUsd],
+    queryFn: () =>
+      quoteOpenBudget(poolAddress.trim(), {
+        tick_lower: Number(tickLower),
+        tick_upper: Number(tickUpper),
+        target_usd: Number(totalUsd),
+      }),
+    enabled: budgetQuoteEnabled,
+    staleTime: 10_000,
+  })
+
+  /** Caps z quote (u64) — submit bez strat float; UI pokazuje amount_*_ui. */
+  const [budgetSubmitRaw, setBudgetSubmitRaw] = useState<{ a: number; b: number } | null>(null)
+
+  useEffect(() => {
+    if (mode !== 'budget') {
+      setBudgetSubmitRaw(null)
+      return
+    }
+    const d = budgetQuoteQ.data
+    if (!d) {
+      setBudgetSubmitRaw(null)
+      return
+    }
+    if (Number.isFinite(d.amount_a_ui) && Number.isFinite(d.amount_b_ui)) {
+      setAmountAUi(Number(d.amount_a_ui.toFixed(8)))
+      setAmountBUi(Number(d.amount_b_ui.toFixed(8)))
+    }
+    setBudgetSubmitRaw({ a: d.token_max_a, b: d.token_max_b })
+  }, [mode, budgetQuoteQ.data])
 
   /** Wymagane kwoty vs saldo + linki Jupiter (prefill mintów i szacunkowa kwota wejścia). */
   const fundingCheck = useMemo(() => {
@@ -656,6 +683,10 @@ export default function PositionCreate() {
       return
     }
 
+    if (mode === 'budget' && budgetSubmitRaw == null) {
+      return
+    }
+
     if (fundingCheck.ready && fundingCheck.blocked) {
       if (swapBeforeOpen) {
         // Two-step flow: open is allowed only after swap succeeded.
@@ -665,10 +696,27 @@ export default function PositionCreate() {
       }
     }
 
-    const aRaw = toBaseUnitsU64(Number(amountAUi), tokenA!.decimals)
-    const bRaw = toBaseUnitsU64(Number(amountBUi), tokenB!.decimals)
-    if (aRaw === null || bRaw === null) {
-      return
+    let aRaw: number | null
+    let bRaw: number | null
+    if (mode === 'budget' && budgetSubmitRaw != null) {
+      aRaw = budgetSubmitRaw.a
+      bRaw = budgetSubmitRaw.b
+      if (
+        !Number.isFinite(aRaw) ||
+        !Number.isFinite(bRaw) ||
+        aRaw < 0 ||
+        bRaw < 0 ||
+        aRaw > Number.MAX_SAFE_INTEGER ||
+        bRaw > Number.MAX_SAFE_INTEGER
+      ) {
+        return
+      }
+    } else {
+      aRaw = toBaseUnitsU64(Number(amountAUi), tokenA!.decimals)
+      bRaw = toBaseUnitsU64(Number(amountBUi), tokenB!.decimals)
+      if (aRaw === null || bRaw === null) {
+        return
+      }
     }
 
     // Send the same bookkeeping id across SWAP and OPEN even if the swap plan
@@ -1006,43 +1054,50 @@ export default function PositionCreate() {
               </div>
 
               {mode === 'budget' && (
-                <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-3">
                   <div>
-                    <label className="block text-sm font-medium mb-1">Total USD</label>
+                    <label className="block text-sm font-medium mb-1">
+                      Docelowa wartość pozycji (USD, w zakresie)
+                    </label>
                     <input
                       type="number"
                       step="0.01"
-                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      className="w-full max-w-xs rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={totalUsd}
                       onChange={(e) => setTotalUsd(e.target.value === '' ? '' : Number(e.target.value))}
-                      placeholder="np. 100"
+                      placeholder="np. 3"
                     />
-                    {pricesQ.isLoading ? (
-                      <div className="text-xs text-muted-foreground mt-1">Pobieram ceny (Jupiter)…</div>
-                    ) : pricesQ.error ? (
+                    {budgetQuoteQ.isFetching ? (
+                      <div className="text-xs text-muted-foreground mt-1">Liczę kwoty A/B z krzywej puli…</div>
+                    ) : null}
+                    {budgetQuoteQ.isError ? (
                       <div className="text-xs text-destructive mt-1">
-                        {(pricesQ.error as Error).message}
+                        {(budgetQuoteQ.error as Error).message}
+                      </div>
+                    ) : null}
+                    {budgetQuoteQ.data ? (
+                      <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                        <div>
+                          Szac. wartość przy tych cenach API:{' '}
+                          <span className="font-medium text-foreground tabular-nums">
+                            ~{formatUSD(budgetQuoteQ.data.estimated_value_usd)}
+                          </span>{' '}
+                          (capped ≤ wpisanego USD; dyskretna płynność L).
+                        </div>
+                        {!budgetQuoteQ.data.in_range ? (
+                          <div className="text-amber-600/90">
+                            Cena puli nie leży w [tick lower, tick upper) — quote może być nieważny; poszerz zakres lub
+                            przełącz na Token A/B.
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-sm font-medium mb-1">
-                      Split {tokenA?.symbol ?? 'Token A'} / {tokenB?.symbol ?? 'Token B'}: {splitPctA}%
-                      / {100 - splitPctA}%
-                    </label>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={splitPctA}
-                      onChange={(e) => setSplitPctA(Number(e.target.value))}
-                      className="w-full"
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed md:col-span-3">
-                    <strong>Split %</strong> dzieli <strong>łączny budżet w USD</strong> (ceny mintów z Jupiter / API), a nie
-                    „po równo” w jednostkach tokenów. Przy 50/50 i $5: ok. połowa wartości w {tokenA?.symbol ?? 'A'}, połowa
-                    w {tokenB?.symbol ?? 'B'} — np. ~2,5 USDC i ~0,03 SOL przy cenie SOL ~$80 (liczby przeliczane na bieżąco).
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    Zamiast dzielić USD 50/50 między tokeny, backend wylicza{' '}
+                    <strong>ilości zgodne z Whirlpool</strong> przy aktualnym <code className="text-[11px]">sqrt_price</code> i
+                    Twoich tickach, tak żeby <strong>notional w pozycji był blisko</strong> wpisanej kwoty (w granicach
+                    zaokrągleń). Pola Amount poniżej uzupełniają się z tego quote; wysyłane są surowe capy z API.
                   </p>
                 </div>
               )}

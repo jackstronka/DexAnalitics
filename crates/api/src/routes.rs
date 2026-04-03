@@ -70,6 +70,10 @@ pub fn create_router(state: AppState) -> Router {
             "/pools/{address}/estimate-swap-cost",
             get(handlers::get_swap_cost_estimate),
         )
+        .route(
+            "/pools/{address}/quote-open-budget",
+            post(handlers::quote_open_budget),
+        )
         // Orca REST proxy routes
         .route("/orca/pools", get(handlers::orca_list_pools))
         .route("/orca/pools/search", get(handlers::orca_search_pools))

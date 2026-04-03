@@ -2,7 +2,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{OrcaOwnerPositionEntry, OrcaOwnerPositionsResponse};
-use crate::services::position_valuation::tick_range_usdc_for_pool_ticks;
+use crate::services::position_valuation::range_usdc_and_in_range_for_pool_ticks;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use orca_whirlpools::{
@@ -76,6 +76,7 @@ pub async fn orca_positions_by_owner(
                     liquidity: d.liquidity.to_string(),
                     position_mint: Some(d.position_mint.to_string()),
                     position_bundle_address: None,
+                    in_range: false,
                 });
             }
             PositionOrBundle::PositionBundle(b) => {
@@ -94,6 +95,7 @@ pub async fn orca_positions_by_owner(
                         liquidity: d.liquidity.to_string(),
                         position_mint: Some(d.position_mint.to_string()),
                         position_bundle_address: Some(bundle_addr.clone()),
+                        in_range: false,
                     });
                 }
             }
@@ -103,9 +105,9 @@ pub async fn orca_positions_by_owner(
     let provider = state.provider.clone();
     let mut enriched: Vec<OrcaOwnerPositionEntry> = Vec::with_capacity(entries.len());
     for e in entries {
-        let range = match Pubkey::from_str(&e.pool_address) {
+        let (range, in_range) = match Pubkey::from_str(&e.pool_address) {
             Ok(pk) => {
-                tick_range_usdc_for_pool_ticks(
+                range_usdc_and_in_range_for_pool_ticks(
                     Arc::clone(&provider),
                     &pk,
                     e.tick_lower,
@@ -113,12 +115,13 @@ pub async fn orca_positions_by_owner(
                 )
                 .await
             }
-            Err(_) => None,
+            Err(_) => (None, false),
         };
         enriched.push(OrcaOwnerPositionEntry {
             range_lower_usdc: range.as_ref().map(|r| r.lower),
             range_upper_usdc: range.as_ref().map(|r| r.upper),
             range_usdc_quote: range.as_ref().map(|r| r.quote.clone()),
+            in_range,
             ..e
         });
     }

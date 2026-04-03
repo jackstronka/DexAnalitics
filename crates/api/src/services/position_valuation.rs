@@ -16,7 +16,9 @@ use clmm_lp_protocols::orca::position_reader::PositionReader;
 use clmm_lp_protocols::rpc::RpcProvider;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Mint;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +47,9 @@ pub struct PositionUsdValuation {
     pub token_b_label: String,
 }
 
+/// Wrapped SOL (native mint) — same as SPL `spl_token::native_mint::ID`.
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
 fn is_usdc_mint(mint: &Pubkey) -> bool {
     matches!(
         mint.to_string().as_str(),
@@ -52,6 +57,57 @@ fn is_usdc_mint(mint: &Pubkey) -> bool {
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             | "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
     )
+}
+
+fn is_wsol_mint(mint: &Pubkey) -> bool {
+    mint.to_string().as_str() == WSOL_MINT
+}
+
+/// When Jupiter/Gecko omit **WSOL** in the mint→USD map, `unwrap_or(0.0)` drops the entire SOL leg
+/// (~half the position value on SOL/USDC). Derive **USD per 1 SOL** from the pool tick when the pool
+/// is exactly USDC + WSOL (Orca Whirlpool `token_b` per `token_a` convention).
+/// SOL spot in USD should stay in a loose band; feeds sometimes return **wrong small positives**
+/// (broken id / unit mix-up), which skips `<= 0` fallback and nukes the USD leg (~\$1–2 total).
+const WSOL_USD_SANITY_MIN: f64 = 10.0;
+const WSOL_USD_SANITY_MAX: f64 = 2500.0;
+
+fn wsol_feed_usd_looks_bogus(p: f64) -> bool {
+    !p.is_finite() || p <= 0.0 || p < WSOL_USD_SANITY_MIN || p > WSOL_USD_SANITY_MAX
+}
+
+fn wsol_usd_from_usdc_pair_tick(
+    tick: i32,
+    mint_a: &Pubkey,
+    mint_b: &Pubkey,
+    dec_a: u8,
+    dec_b: u8,
+) -> Option<f64> {
+    let a_usdc = is_usdc_mint(mint_a);
+    let b_usdc = is_usdc_mint(mint_b);
+    if !(a_usdc ^ b_usdc) {
+        return None;
+    }
+    let wsol = Pubkey::from_str(WSOL_MINT).ok()?;
+    if *mint_a != wsol && *mint_b != wsol {
+        return None;
+    }
+    let b_per_a = b_per_a_ui_decimal(tick, dec_a, dec_b);
+    if b_per_a.is_zero() {
+        return None;
+    }
+    let ratio = b_per_a.to_f64()?;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return None;
+    }
+    if *mint_a == wsol && b_usdc {
+        // B per A = USDC per SOL
+        Some(ratio)
+    } else if *mint_b == wsol && a_usdc {
+        // B per A = SOL per USDC → USD per SOL
+        Some(1.0 / ratio)
+    } else {
+        None
+    }
 }
 
 fn token_short_label(mint: &Pubkey) -> String {
@@ -135,6 +191,45 @@ pub fn compute_tick_range_usdc(
     Some(TickRangeUsdc { lower, upper, quote })
 }
 
+/// One pool RPC read: optional USDC range line + **in range** (spot inside `[tick_lower, tick_upper)`).
+pub async fn range_usdc_and_in_range_for_pool_ticks(
+    provider: Arc<RpcProvider>,
+    pool: &Pubkey,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> (Option<TickRangeUsdc>, bool) {
+    let pool_reader = WhirlpoolReader::new(provider.clone());
+    let Some(pool_state) = pool_reader
+        .get_pool_state(&pool.to_string())
+        .await
+        .ok()
+    else {
+        return (None, false);
+    };
+    let in_range = pool_state.is_tick_in_range(tick_lower, tick_upper);
+    let Some(dec_a) = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_a)
+        .await
+        .ok()
+    else {
+        return (None, in_range);
+    };
+    let Some(dec_b) = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_b)
+        .await
+        .ok()
+    else {
+        return (None, in_range);
+    };
+    let range = compute_tick_range_usdc(
+        tick_lower,
+        tick_upper,
+        &pool_state.token_mint_a,
+        &pool_state.token_mint_b,
+        dec_a,
+        dec_b,
+    );
+    (range, in_range)
+}
+
 /// Pool + ticks only (no `MonitoredPosition`); used by Orca RPC scan and callers that already have ticks.
 pub async fn tick_range_usdc_for_pool_ticks(
     provider: Arc<RpcProvider>,
@@ -142,25 +237,9 @@ pub async fn tick_range_usdc_for_pool_ticks(
     tick_lower: i32,
     tick_upper: i32,
 ) -> Option<TickRangeUsdc> {
-    let pool_reader = WhirlpoolReader::new(provider.clone());
-    let pool_state = pool_reader
-        .get_pool_state(&pool.to_string())
+    range_usdc_and_in_range_for_pool_ticks(provider, pool, tick_lower, tick_upper)
         .await
-        .ok()?;
-    let dec_a = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_a)
-        .await
-        .ok()?;
-    let dec_b = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_b)
-        .await
-        .ok()?;
-    compute_tick_range_usdc(
-        tick_lower,
-        tick_upper,
-        &pool_state.token_mint_a,
-        &pool_state.token_mint_b,
-        dec_a,
-        dec_b,
-    )
+        .0
 }
 
 /// Pool fetch + decimals; used when USD valuation fails but we still want a USDC range line.
@@ -302,14 +381,55 @@ pub async fn compute_position_usd_valuation(
         .await
         .map_err(|e| ApiError::internal(format!("mint decimals fetch failed (B): {e}")))?;
 
-    let pa = prices_usd
+    let mut pa = prices_usd
         .get(&pool_state.token_mint_a.to_string())
         .copied()
         .unwrap_or(0.0);
-    let pb = prices_usd
+    let mut pb = prices_usd
         .get(&pool_state.token_mint_b.to_string())
         .copied()
         .unwrap_or(0.0);
+
+    // Never drop the USDC leg when a stable mint is missing from the aggregator map.
+    if is_usdc_mint(&pool_state.token_mint_a) && (!pa.is_finite() || pa <= 0.0) {
+        pa = 1.0;
+    }
+    if is_usdc_mint(&pool_state.token_mint_b) && (!pb.is_finite() || pb <= 0.0) {
+        pb = 1.0;
+    }
+
+    let implied_sol_usd = wsol_usd_from_usdc_pair_tick(
+        pool_state.tick_current,
+        &pool_state.token_mint_a,
+        &pool_state.token_mint_b,
+        dec_a,
+        dec_b,
+    );
+
+    if amount_a_raw > 0 && is_wsol_mint(&pool_state.token_mint_a) && wsol_feed_usd_looks_bogus(pa) {
+        if let Some(p) = implied_sol_usd {
+            tracing::info!(
+                pool = %position.pool,
+                tick = pool_state.tick_current,
+                feed_usd = pa,
+                implied_sol_usd = p,
+                "WSOL USD from feed missing or implausible; using pool tick implied USDC/SOL"
+            );
+            pa = p;
+        }
+    }
+    if amount_b_raw > 0 && is_wsol_mint(&pool_state.token_mint_b) && wsol_feed_usd_looks_bogus(pb) {
+        if let Some(p) = implied_sol_usd {
+            tracing::info!(
+                pool = %position.pool,
+                tick = pool_state.tick_current,
+                feed_usd = pb,
+                implied_sol_usd = p,
+                "WSOL USD from feed missing or implausible; using pool tick implied USDC/SOL"
+            );
+            pb = p;
+        }
+    }
 
     let a_ui = ui_amount(amount_a_raw, dec_a);
     let b_ui = ui_amount(amount_b_raw, dec_b);
@@ -383,6 +503,8 @@ pub async fn fetch_prices_for_positions(
 #[cfg(test)]
 mod tick_range_usdc_tests {
     use super::compute_tick_range_usdc;
+    use super::wsol_feed_usd_looks_bogus;
+    use super::wsol_usd_from_usdc_pair_tick;
     use rust_decimal::Decimal;
     use solana_sdk::pubkey::Pubkey;
     use std::str::FromStr;
@@ -395,4 +517,23 @@ mod tick_range_usdc_tests {
         assert!(r.lower > Decimal::ZERO);
         assert!(r.upper > r.lower);
     }
+
+    #[test]
+    fn wsol_feed_sanity_flags_tiny_positive_garbage() {
+        assert!(wsol_feed_usd_looks_bogus(0.0088));
+        assert!(!wsol_feed_usd_looks_bogus(135.0));
+    }
+
+    /// Orca SOL/USDC (0.04%) uses SOL = token A, USDC = B — implied SOL/USD from tick should match spot band.
+    #[test]
+    fn wsol_implied_usd_matches_tick_sol_a_usdc_b() {
+        let sol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let usdc = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
+        let p = wsol_usd_from_usdc_pair_tick(-25_268, &sol, &usdc, 9, 6).expect("implied SOL USD");
+        assert!(
+            p > 50.0 && p < 150.0,
+            "implied SOL USD from tick -25268 (spot ~$80): got {p}"
+        );
+    }
+
 }

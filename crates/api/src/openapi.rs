@@ -17,7 +17,8 @@ use crate::models::{
     ScriptsListResponse, SimulationRequest, SimulationResponse, SlackActivitySummaryRequest,
     SlackActivitySummaryResponse, StrategyPerformanceResponse, StrategyPositionExecutorRequest,
     StrategyResponse, SubmitSignedTxRequest, SubmitSignedTxResponse, SwapBeforeOpenRequest,
-    SwapBeforeOpenResponse, SwapCostEstimateResponse, SwapInPoolBeforeOpen, WalletBalancesResponse,
+    QuoteOpenBudgetRequest, QuoteOpenBudgetResponse, SwapBeforeOpenResponse,
+    SwapCostEstimateResponse, SwapInPoolBeforeOpen, WalletBalancesResponse,
     WalletEntry, WalletTokenBalance, WalletsListResponse,
 };
 use utoipa::OpenApi;
@@ -90,6 +91,7 @@ use utoipa::OpenApi;
         handlers::get_pool,
         handlers::get_pool_state,
         handlers::get_swap_cost_estimate,
+        handlers::quote_open_budget,
         // Orca REST proxy endpoints
         handlers::orca_list_pools,
         handlers::orca_search_pools,
@@ -160,6 +162,8 @@ use utoipa::OpenApi;
             PoolResponse,
             PoolStateResponse,
             SwapCostEstimateResponse,
+            QuoteOpenBudgetRequest,
+            QuoteOpenBudgetResponse,
             // Orca REST proxy
             OrcaLockResponse,
             OrcaTokenResponse,

@@ -1,7 +1,11 @@
 //! Pool handlers.
 
 use crate::error::{ApiError, ApiResult};
-use crate::models::{ListPoolsResponse, PoolResponse, PoolStateResponse, SwapCostEstimateResponse};
+use crate::models::{
+    ListPoolsResponse, PoolResponse, PoolStateResponse, QuoteOpenBudgetRequest,
+    QuoteOpenBudgetResponse, SwapCostEstimateResponse,
+};
+use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use axum::{
     Json,
@@ -11,10 +15,14 @@ use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaRestClient};
 use clmm_lp_protocols::ledger::swap_cost_estimate::{
     DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS, median_historical_swap_network_fee_lamports,
 };
+use clmm_lp_protocols::orca::deposit_quote::quote_deposit_budget_in_range;
 use clmm_lp_protocols::prelude::WhirlpoolReader;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use solana_sdk::pubkey::Pubkey;
+use spl_token::solana_program::program_pack::Pack;
+use spl_token::state::Mint;
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 /// List available pools.
@@ -189,5 +197,116 @@ pub async fn get_swap_cost_estimate(
         default_network_fee_lamports: default,
         estimated_network_fee_lamports: est,
         note: "Shows estimated Solana network fee (meta.fee) for Whirlpool swaps from local ledger history. Full wallet delta (tokens + rent) is recorded after execution in orca_position_lifecycle.jsonl. Send cost_session_id with POST /positions to group swap + open rows for per-position cost totals.".to_string(),
+    }))
+}
+
+async fn mint_decimals_or_err(
+    state: &AppState,
+    mint: &Pubkey,
+    label: &str,
+) -> Result<u8, ApiError> {
+    let account = state
+        .provider
+        .get_account(mint)
+        .await
+        .map_err(|e| ApiError::internal(format!("fetch mint {label}: {e}")))?;
+    let m = Mint::unpack(&account.data).map_err(|e| {
+        ApiError::internal(format!("unpack SPL mint {label}: {e}"))
+    })?;
+    Ok(m.decimals)
+}
+
+/// Suggest `token_max_a/b` so an **in-range** open targets ~`target_usd` (fixes naive 50/50 USD caps).
+#[utoipa::path(
+    post,
+    path = "/pools/{address}/quote-open-budget",
+    tag = "Pools",
+    request_body = QuoteOpenBudgetRequest,
+    responses(
+        (status = 200, description = "Suggested deposit caps", body = QuoteOpenBudgetResponse),
+        (status = 400, description = "Invalid input or price out of range"),
+        (status = 404, description = "Pool not found")
+    )
+)]
+pub async fn quote_open_budget(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+    Json(body): Json<QuoteOpenBudgetRequest>,
+) -> ApiResult<Json<QuoteOpenBudgetResponse>> {
+    let addr = address.trim();
+    let _ = Pubkey::from_str(addr).map_err(|_| ApiError::bad_request("Invalid pool address"))?;
+
+    let reader = WhirlpoolReader::new(state.provider.clone());
+    let pool = reader
+        .get_pool_state(addr)
+        .await
+        .map_err(|e| ApiError::not_found(format!("Pool not found: {e}")))?;
+
+    let dec_a = mint_decimals_or_err(&state, &pool.token_mint_a, "A").await?;
+    let dec_b = mint_decimals_or_err(&state, &pool.token_mint_b, "B").await?;
+
+    let mut mints = BTreeSet::new();
+    mints.insert(pool.token_mint_a.to_string());
+    mints.insert(pool.token_mint_b.to_string());
+    let (prices, _) = fetch_mint_prices_usd(&mints).await;
+
+    let mut pa = prices
+        .get(&pool.token_mint_a.to_string())
+        .copied()
+        .unwrap_or(0.0);
+    let mut pb = prices
+        .get(&pool.token_mint_b.to_string())
+        .copied()
+        .unwrap_or(0.0);
+
+    const EPJ: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    const DEV_USDC: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+    let ma = pool.token_mint_a.to_string();
+    let mb = pool.token_mint_b.to_string();
+    if (ma == EPJ || ma == DEV_USDC) && (!pa.is_finite() || pa <= 0.0) {
+        pa = 1.0;
+    }
+    if (mb == EPJ || mb == DEV_USDC) && (!pb.is_finite() || pb <= 0.0) {
+        pb = 1.0;
+    }
+
+    if !pa.is_finite() || !pb.is_finite() || pa <= 0.0 || pb <= 0.0 {
+        return Err(ApiError::bad_request(
+            "Missing USD price for one or both pool mints; cannot size deposit",
+        ));
+    }
+
+    let in_range = pool.tick_current >= body.tick_lower && pool.tick_current < body.tick_upper;
+
+    let q = quote_deposit_budget_in_range(
+        body.tick_lower,
+        body.tick_upper,
+        pool.tick_current,
+        pool.sqrt_price,
+        dec_a,
+        dec_b,
+        pa,
+        pb,
+        body.target_usd,
+    )
+    .map_err(|m| ApiError::bad_request(m.to_string()))?;
+
+    let a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
+    let b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
+
+    Ok(Json(QuoteOpenBudgetResponse {
+        token_max_a: q.token_max_a,
+        token_max_b: q.token_max_b,
+        amount_a: q.amount_a,
+        amount_b: q.amount_b,
+        amount_a_ui: a_ui,
+        amount_b_ui: b_ui,
+        estimated_value_usd: q.estimated_value_usd,
+        liquidity: q.liquidity.to_string(),
+        in_range,
+        note: Some(
+            "Use token_max_a/b as POST /positions amount_a/b. Estimated USD uses the same mint prices as this quote; on-chain fill may differ slightly."
+                .to_string(),
+        ),
     }))
 }

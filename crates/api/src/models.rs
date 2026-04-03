@@ -287,6 +287,9 @@ pub struct OrcaOwnerPositionEntry {
     pub position_mint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position_bundle_address: Option<String>,
+    /// Pool spot tick inside `[tick_lower, tick_upper)` (same rule as monitor `in_range`).
+    #[serde(default)]
+    pub in_range: bool,
 }
 
 // ============================================================================
@@ -737,6 +740,32 @@ pub struct SwapCostEstimateResponse {
     pub estimated_network_fee_lamports: u64,
     /// Explains that full wallet delta is logged after confirmation in `orca_position_lifecycle.jsonl`.
     pub note: String,
+}
+
+/// Body: size an in-range open so **on-chain notional** is close to `target_usd` (Whirlpool caps).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct QuoteOpenBudgetRequest {
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    /// Desired position value in USD (both legs, at server price snapshot).
+    pub target_usd: f64,
+}
+
+/// Suggested `amount_a` / `amount_b` for `POST /positions` (raw + UI).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct QuoteOpenBudgetResponse {
+    pub token_max_a: u64,
+    pub token_max_b: u64,
+    pub amount_a: u64,
+    pub amount_b: u64,
+    pub amount_a_ui: f64,
+    pub amount_b_ui: f64,
+    pub estimated_value_usd: f64,
+    pub liquidity: String,
+    /// True when pool spot lies inside `[tick_lower, tick_upper)`.
+    pub in_range: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ============================================================================

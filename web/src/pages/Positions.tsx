@@ -9,6 +9,22 @@ import { getOrcaPositionsByOwner, getPositions } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import { formatUSD, formatPercent, shortenAddress, formatUsdcPriceRange } from '@/lib/utils'
 
+function rangeCellClass(inRange: boolean | undefined) {
+  if (inRange === true) {
+    return 'text-emerald-600 dark:text-emerald-400 border-l-2 border-emerald-500 pl-2'
+  }
+  if (inRange === false) {
+    return 'text-red-600 dark:text-red-400 border-l-2 border-red-500 pl-2'
+  }
+  return 'text-muted-foreground border-l-2 border-border pl-2'
+}
+
+function rangeStatusLabel(inRange: boolean | undefined) {
+  if (inRange === true) return 'In range'
+  if (inRange === false) return 'Out of range'
+  return '—'
+}
+
 export default function Positions() {
   const navigate = useNavigate()
   const devPk = getDevWalletPubkey()
@@ -72,7 +88,7 @@ export default function Positions() {
                   <tr className="border-b text-left text-sm text-muted-foreground">
                     <th className="pb-3 font-medium">Position</th>
                     <th className="pb-3 font-medium">Pool</th>
-                    <th className="pb-3 font-medium">Range</th>
+                    <th className="pb-3 font-medium">Range (in / out)</th>
                     <th className="pb-3 font-medium text-right">Value</th>
                     <th className="pb-3 font-medium text-right">PnL</th>
                     <th className="pb-3 font-medium text-right">Fees</th>
@@ -94,13 +110,18 @@ export default function Positions() {
                         {shortenAddress(position.pool_address)}
                       </td>
                       <td className="py-4">
-                        <span className="text-sm">
-                          {formatUsdcPriceRange(
-                            position.range_lower_usdc ?? undefined,
-                            position.range_upper_usdc ?? undefined,
-                            position.range_usdc_quote ?? undefined,
-                          ) ?? `${position.tick_lower} → ${position.tick_upper}`}
-                        </span>
+                        <div className="space-y-0.5">
+                          <span className={`text-sm block ${rangeCellClass(position.in_range)}`}>
+                            {formatUsdcPriceRange(
+                              position.range_lower_usdc ?? undefined,
+                              position.range_upper_usdc ?? undefined,
+                              position.range_usdc_quote ?? undefined,
+                            ) ?? `${position.tick_lower} → ${position.tick_upper}`}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {rangeStatusLabel(position.in_range)}
+                          </span>
+                        </div>
                       </td>
                       <td className="py-4 text-right font-medium">
                         {formatUSD(position.value_usd)}
@@ -200,7 +221,7 @@ export default function Positions() {
                         <th className="pb-3 font-medium">Kind</th>
                         <th className="pb-3 font-medium">Position</th>
                         <th className="pb-3 font-medium">Pool</th>
-                        <th className="pb-3 font-medium">Range</th>
+                        <th className="pb-3 font-medium">Range (in / out)</th>
                         <th className="pb-3 font-medium text-right">Liquidity (raw)</th>
                       </tr>
                     </thead>
@@ -224,12 +245,19 @@ export default function Positions() {
                           <td className="py-3 text-muted-foreground font-mono text-xs">
                             {shortenAddress(row.pool_address)}
                           </td>
-                          <td className="py-3 text-sm">
-                            {formatUsdcPriceRange(
-                              row.range_lower_usdc ?? undefined,
-                              row.range_upper_usdc ?? undefined,
-                              row.range_usdc_quote ?? undefined,
-                            ) ?? `${row.tick_lower} → ${row.tick_upper}`}
+                          <td className="py-3">
+                            <div className="space-y-0.5">
+                              <span className={`text-sm block ${rangeCellClass(row.in_range)}`}>
+                                {formatUsdcPriceRange(
+                                  row.range_lower_usdc ?? undefined,
+                                  row.range_upper_usdc ?? undefined,
+                                  row.range_usdc_quote ?? undefined,
+                                ) ?? `${row.tick_lower} → ${row.tick_upper}`}
+                              </span>
+                              <span className="text-[11px] text-muted-foreground">
+                                {rangeStatusLabel(row.in_range)}
+                              </span>
+                            </div>
                           </td>
                           <td className="py-3 text-right font-mono text-xs">{row.liquidity}</td>
                         </tr>

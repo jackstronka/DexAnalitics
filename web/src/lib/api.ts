@@ -321,6 +321,7 @@ export interface OrcaOwnerPositionEntry {
   liquidity: string
   position_mint?: string | null
   position_bundle_address?: string | null
+  in_range?: boolean
 }
 
 export interface OrcaOwnerPositionsResponse {
@@ -480,6 +481,36 @@ export interface SwapCostEstimateResponse {
 export const getSwapCostEstimate = (poolAddress: string) =>
   fetchJson<SwapCostEstimateResponse>(
     `/pools/${encodeURIComponent(poolAddress.trim())}/estimate-swap-cost`,
+  )
+
+/** `POST /pools/:address/quote-open-budget` — caps targeting ~`target_usd` in-range notional. */
+export interface QuoteOpenBudgetRequest {
+  tick_lower: number
+  tick_upper: number
+  target_usd: number
+}
+
+export interface QuoteOpenBudgetResponse {
+  token_max_a: number
+  token_max_b: number
+  amount_a: number
+  amount_b: number
+  amount_a_ui: number
+  amount_b_ui: number
+  estimated_value_usd: number
+  liquidity: string
+  in_range: boolean
+  note?: string
+}
+
+export const quoteOpenBudget = (poolAddress: string, body: QuoteOpenBudgetRequest) =>
+  fetchJson<QuoteOpenBudgetResponse>(
+    `/pools/${encodeURIComponent(poolAddress.trim())}/quote-open-budget`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
   )
 
 export const getOrcaToken = (mint: string) =>

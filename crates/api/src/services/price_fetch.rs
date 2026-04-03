@@ -13,6 +13,7 @@
 
 use clmm_lp_data::providers::{DexChain, DexscreenerClient};
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -30,6 +31,8 @@ static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// SPL mints we treat as ~1 USD without hitting external feeds (same idea as snapshot tooling).
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDT_MINT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+/// Wrapped SOL — feeds sometimes omit this mint; see `position_valuation` + CoinGecko fallback below.
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
 fn stablecoin_usd(mint: &str) -> Option<f64> {
     if mint.eq_ignore_ascii_case(USDC_MINT) || mint.eq_ignore_ascii_case(USDT_MINT) {
@@ -260,6 +263,22 @@ async fn fetch_dexpaprika_price_usd(mint: &str) -> Option<f64> {
     None
 }
 
+async fn fetch_coingecko_solana_usd() -> Option<f64> {
+    let url = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd";
+    let resp = HTTP.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let text = resp.text().await.ok()?;
+    let v: JsonValue = serde_json::from_str(&text).ok()?;
+    let u = v.get("solana")?.get("usd")?.as_f64()?;
+    if u.is_finite() && u > 0.0 {
+        Some(u)
+    } else {
+        None
+    }
+}
+
 async fn fetch_dexscreener_mint_usd(mint: &str) -> Option<f64> {
     let client = DexscreenerClient::new();
     let pairs = client.token_pairs(DexChain::Solana, mint).await.ok()?;
@@ -380,6 +399,15 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
         }
         if ds_any {
             tags.push("dexscreener");
+        }
+    }
+
+    // Last resort: Jupiter/Gecko occasionally omit WSOL; without a price, SOL/USDC positions show
+    // ~half the true USD (USDC leg only). CoinGecko `simple/price` is free-tier friendly.
+    if mints.iter().any(|m| m == WSOL_MINT) && !prices.contains_key(WSOL_MINT) {
+        if let Some(p) = fetch_coingecko_solana_usd().await {
+            prices.insert(WSOL_MINT.to_string(), p);
+            tags.push("coingecko_solana");
         }
     }
 

@@ -14,6 +14,36 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-04 — `/positions`: zakres kolor + `in_range` w `GET /orca/positions-by-owner`
+
+**keywords:** Positions.tsx, OrcaOwnerPositionEntry, range_usdc_and_in_range_for_pool_ticks, in_range
+**paths:** `web/src/pages/Positions.tsx`, `crates/api/src/handlers/orca_onchain.rs`, `crates/api/src/models.rs`, `crates/api/src/services/position_valuation.rs`
+
+- Tabela monitora i tabela RPC: kolumna zakresu **zielona / czerwona** + etykieta In / Out of range.
+- `OrcaOwnerPositionEntry.in_range`: jeden odczyt puli przez `range_usdc_and_in_range_for_pool_ticks` (wcześniej tylko zakres USDC).
+
+---
+## 2026-04-04 — Open Position: budżet USD ≈ wartość w pozycji (`quote-open-budget`)
+
+**keywords:** deposit_quote, quote_open_budget, PositionCreate, token_max, Whirlpool, POST /pools, budget mode
+**paths:** `crates/protocols/src/orca/deposit_quote.rs`, `crates/api/src/handlers/pools.rs`, `crates/api/src/models.rs`, `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`
+
+- Problem: tryb „wspólna kwota USD” dzielił wartość 50/50 między tokeny → **caps** na Orca często w **złym stosunku** do krzywej przy wąskim zakresie → **~połowa** budżetu zostawała poza faktyczną płynnością.
+- **Rozwiązanie:** `quote_deposit_budget_in_range` (binary search po `L`) + `POST /api/v1/pools/{address}/quote-open-budget` (ceny mintów jak `price_fetch`, ticki + `sqrt_price` z RPC). UI w trybie budżetowym **ustawia Amount** i wysyła **`token_max_*` z odpowiedzi** (bez straty float).
+- Warunek: sensowny quote gdy **cena puli jest w [tick_lower, tick_upper)**; inaczej 400 z komunikatem lub ostrzeżenie `in_range: false`.
+
+---
+## 2026-04-04 — Wycena USD pozycji SOL/USDC: brak ceny WSOL (~½ wartości) + fallback
+
+**keywords:** position_valuation, price_fetch, WSOL, Jupiter, CoinGecko, compute_position_usd_valuation, Value dashboard
+**paths:** `crates/api/src/services/position_valuation.rs`, `crates/api/src/services/price_fetch.rs`
+
+- Gdy mapa `mint → USD` nie zawiera ceny dla **WSOL** (`So111…`), kod używał `unwrap_or(0.0)` dla nogi SOL — **wartość pozycji** na dashboardzie była wtedy ok. **o połowę za niska** (została tylko noga USDC).
+- **Walidacja on-chain:** jeśli brak ceny z feedu a mint to WSOL w parze **USDC + WSOL**, uzupełnienie **USD/SOL** z **bieżącego ticka puli** (`b_per_a_ui_decimal` — ta sama konwencja co zakres USDC).
+- **price_fetch:** jeśli WSOL nadal nie ma ceny po Gecko/Jupiter/v4/DexPaprika/Dexscreener — ostatni fallback **CoinGecko** `simple/price` dla `solana` (tag źródła `coingecko_solana`).
+- **Poprawka (wartość spadała ~\$1.16):** feed potrafi zwrócić **małą dodatnią** cenę WSOL (błędna jednostka / zły id) — wtedy stary warunek tylko `<= 0` **nie** podmieniał na tick puli. Teraz: **sanity band** (~\$10–\$2500) → tick; oraz **USDC mint → \$1** jeśli brak wpisu w mapie (żeby nie gubić nogi USDC).
+
+---
 ## 2026-04-04 — `PositionResponse.uncollected_fees`: opłaty per token jak w Orca
 
 **keywords:** UncollectedFeesInfo, fee_owed, PositionDetail, GET /positions, position_valuation, uncollected_fees_info_for_position
