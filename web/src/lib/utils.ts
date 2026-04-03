@@ -15,6 +15,18 @@ export function formatUSD(value: number | string): string {
   }).format(num)
 }
 
+/** USD with a fixed number of fraction digits (e.g. small on-chain fees in lamports). */
+export function formatUsdFixed(value: number | string, fractionDigits: number): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value
+  if (!Number.isFinite(num)) return '—'
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(num)
+}
+
 export function formatPercent(value: number | string): string {
   const num = typeof value === 'string' ? parseFloat(value) : value
   return `${num >= 0 ? '+' : ''}${num.toFixed(2)}%`

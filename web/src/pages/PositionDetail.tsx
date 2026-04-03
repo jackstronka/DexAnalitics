@@ -15,9 +15,20 @@ import {
   getBotIlLedger,
   getStrategies,
   setStrategyPositionExecutor,
+  getJupiterPricesUsd,
 } from '@/lib/api'
 import type { Strategy } from '@/lib/api'
-import { formatUSD, formatPercent, shortenAddress, formatDate, formatUsdcPriceRange } from '@/lib/utils'
+import {
+  formatUSD,
+  formatUsdFixed,
+  formatPercent,
+  shortenAddress,
+  formatDate,
+  formatUsdcPriceRange,
+} from '@/lib/utils'
+
+/** Wrapped SOL mint — network fees are in native SOL (lamports). */
+const WSOL_MINT = 'So11111111111111111111111111111111111111112'
 
 type LedgerRow = Record<string, unknown>
 
@@ -38,6 +49,24 @@ function rowFee(r: LedgerRow): string {
   if (typeof v === 'number') return `${v}`
   if (typeof v === 'string') return v
   return '—'
+}
+
+function parseLamports(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string') {
+    const n = parseFloat(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+/** ~USD for tx fee in lamports, using SOL/USD from Jupiter proxy (`solUsd` per 1 SOL). */
+function lamportsToUsdDisplay(lamports: unknown, solUsd: number): string {
+  if (solUsd <= 0) return '—'
+  const lam = parseLamports(lamports)
+  if (lam === null) return '—'
+  const usd = (lam / 1e9) * solUsd
+  return formatUsdFixed(usd, 3)
 }
 
 function rowEvent(r: LedgerRow): string {
@@ -85,6 +114,14 @@ export default function PositionDetail() {
     queryKey: ['strategies'],
     queryFn: getStrategies,
   })
+
+  const { data: solPriceMap } = useQuery({
+    queryKey: ['jupiter-prices', WSOL_MINT, 'position-ledger-tx-fee'],
+    queryFn: () => getJupiterPricesUsd([WSOL_MINT]),
+    enabled: !!address,
+    staleTime: 60_000,
+  })
+  const solUsd = solPriceMap?.[WSOL_MINT] ?? 0
 
   const linkedStrategies = useMemo(() => {
     if (!address) {
@@ -475,7 +512,8 @@ export default function PositionDetail() {
               <p>
                 Rows from <code className="text-xs">/bot-activity/ledger</code> whose JSON contains this position
                 address. Grouped by <code className="text-xs">rebalance_session_id</code> when present (swap + bot +
-                open/close in one session).
+                open/close in one session). Fee (USD) uses SOL/USD from{' '}
+                <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).
               </p>
               {ledgerData?.file_missing && (
                 <p className="text-yellow-500">Ledger file missing on API host ({ledgerData.path}).</p>
@@ -508,6 +546,7 @@ export default function PositionDetail() {
                         <th className="px-2 py-1 text-left">old → new</th>
                         <th className="px-2 py-1 text-left">reason</th>
                         <th className="px-2 py-1 text-left">tx_cost_lamports</th>
+                        <th className="px-2 py-1 text-left">tx_cost (USD)</th>
                         <th className="px-2 py-1 text-left">session</th>
                       </tr>
                     </thead>
@@ -522,6 +561,9 @@ export default function PositionDetail() {
                           </td>
                           <td className="px-2 py-1">{String(r.reason ?? '—')}</td>
                           <td className="px-2 py-1">{String(r.tx_cost_lamports ?? '—')}</td>
+                          <td className="px-2 py-1 whitespace-nowrap">
+                            {lamportsToUsdDisplay(r.tx_cost_lamports, solUsd)}
+                          </td>
                           <td className="px-2 py-1 max-w-[8rem] truncate" title={String(r.rebalance_session_id ?? '')}>
                             {String(r.rebalance_session_id ?? '—')}
                           </td>
@@ -553,6 +595,7 @@ export default function PositionDetail() {
                       <th className="py-1 pr-2">Source</th>
                       <th className="py-1 pr-2">Event</th>
                       <th className="py-1 pr-2">Fee (lamports)</th>
+                      <th className="py-1 pr-2">Fee (USD)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -562,6 +605,9 @@ export default function PositionDetail() {
                         <td className="py-1 pr-2">{rowSource(r)}</td>
                         <td className="py-1 pr-2 font-mono">{rowEvent(r)}</td>
                         <td className="py-1 pr-2">{rowFee(r)}</td>
+                        <td className="py-1 pr-2 whitespace-nowrap">
+                          {lamportsToUsdDisplay(r.tx_fee_lamports, solUsd)}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
