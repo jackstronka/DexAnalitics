@@ -5,6 +5,7 @@ import Dashboard from '@/pages/Dashboard'
 import Positions from '@/pages/Positions'
 import PositionCreate from '@/pages/PositionCreate'
 import PositionDetail from '@/pages/PositionDetail'
+import PageErrorBoundary from '@/components/PageErrorBoundary'
 import Strategies from '@/pages/Strategies'
 import StrategyDetail from '@/pages/StrategyDetail'
 import StrategyCreate from '@/pages/StrategyCreate'
@@ -31,7 +32,14 @@ function App() {
             <Route path="scripts" element={<Scripts />} />
             <Route path="positions" element={<Positions />} />
             <Route path="positions/new" element={<PositionCreate />} />
-            <Route path="positions/:address" element={<PositionDetail />} />
+            <Route
+              path="positions/:address"
+              element={
+                <PageErrorBoundary title="Position details crashed while rendering">
+                  <PositionDetail />
+                </PageErrorBoundary>
+              }
+            />
             <Route path="strategies" element={<Strategies />} />
             <Route path="strategies/new" element={<StrategyCreate />} />
             <Route path="strategies/:id/edit" element={<StrategyEdit />} />

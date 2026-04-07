@@ -37,7 +37,11 @@ type LedgerRow = Record<string, unknown>
 function groupLedgerBySession(rows: LedgerRow[]): Map<string | null, LedgerRow[]> {
   const m = new Map<string | null, LedgerRow[]>()
   for (const r of rows) {
-    const raw = r.rebalance_session_id
+    // Defensive: API may return non-object rows (e.g. parse failures/nulls) — never crash the page.
+    if (!r || typeof r !== 'object') {
+      continue
+    }
+    const raw = (r as Record<string, unknown>).rebalance_session_id
     const sid = typeof raw === 'string' && raw.trim() ? raw.trim() : null
     const key = sid ?? '_no_session'
     if (!m.has(key)) m.set(key, [])
