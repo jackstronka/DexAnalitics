@@ -41,6 +41,9 @@ export default function StrategyCreate() {
   const [maxIlPct, setMaxIlPct] = useState<number | ''>('')
   const [minRebalanceIntervalHours, setMinRebalanceIntervalHours] = useState<number | ''>('')
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
+  // Semantics toggles (defaults = old behavior).
+  const [periodicRequiresOutOfRange, setPeriodicRequiresOutOfRange] = useState(false)
+  const [rebalanceOnRangeExitImmediately, setRebalanceOnRangeExitImmediately] = useState(true)
 
   const enabled = FIELD_ENABLED[strategyType]
 
@@ -62,6 +65,11 @@ export default function StrategyCreate() {
         break
       default:
         break
+    }
+
+    // Periodic-only toggle is ignored unless the type is periodic.
+    if (strategyType !== 'periodic') {
+      setPeriodicRequiresOutOfRange(false)
     }
   }, [strategyType])
 
@@ -109,6 +117,8 @@ export default function StrategyCreate() {
         maxIlPct,
         rebalanceThresholdPct,
         minRebalanceIntervalHours,
+        periodicRequiresOutOfRange,
+        rebalanceOnRangeExitImmediately,
       }),
       // Zawsze wysyłaj pole — starsze API wymagały `pool_address` w body; pusty = brak puli (pool przy Open Position).
       pool_address: '',
@@ -321,6 +331,52 @@ export default function StrategyCreate() {
                     }
                     placeholder="e.g. 24"
                   />
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <p className="text-sm font-medium text-foreground">Semantyka rebalance</p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="flex items-start gap-2">
+                    <input
+                      id="create-rebalance-on-exit"
+                      type="checkbox"
+                      checked={rebalanceOnRangeExitImmediately}
+                      onChange={(e) => setRebalanceOnRangeExitImmediately(e.target.checked)}
+                      className="mt-0.5 rounded border-input"
+                    />
+                    <div className="flex-1">
+                      <FieldLabel
+                        htmlFor="create-rebalance-on-exit"
+                        label="Rebalance immediately on range-exit (OOR)"
+                        tooltip={TOOLTIPS.rebalanceOnRangeExitImmediately}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Default: on (old behavior).
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2">
+                    <input
+                      id="create-periodic-requires-oor"
+                      type="checkbox"
+                      checked={periodicRequiresOutOfRange}
+                      onChange={(e) => setPeriodicRequiresOutOfRange(e.target.checked)}
+                      className="mt-0.5 rounded border-input"
+                      disabled={strategyType !== 'periodic'}
+                    />
+                    <div className={cn('flex-1', strategyType !== 'periodic' && 'opacity-60')}>
+                      <FieldLabel
+                        htmlFor="create-periodic-requires-oor"
+                        label="Periodic only when OOR"
+                        tooltip={TOOLTIPS.periodicRequiresOor}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Enabled only for Periodic strategy type.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 

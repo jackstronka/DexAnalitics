@@ -14,7 +14,7 @@ export const STRATEGY_COPY: Record<
   periodic: {
     title: 'Okresowa',
     body:
-      'Rebalance co ustaloną liczbę godzin od ostatniego rebalance’u, niezależnie od tego, czy jesteś w zakresie. Szerokość zakresu ustawia nowy przedział po rebalansie. Pole interwału w API ustawia okres periodyczny executora.',
+      'Rebalance co ustaloną liczbę godzin od ostatniego rebalance’u. Domyślnie działa „po staremu”: zegar tyka niezależnie od tego, czy jesteś w zakresie. Opcjonalnie możesz włączyć wariant „tylko gdy OOR”.',
   },
   threshold: {
     title: 'Próg (cena)',
@@ -97,6 +97,10 @@ export const TOOLTIPS = {
     'Co tyle godzin od ostatniego rebalance’u wykonywana jest kolejna akcja okresowa; w backendzie powiązane z interwałem periodycznym.',
   minIntervalOther:
     'Minimalna liczba godzin między rebalance’ami tam, gdzie silnik egzekwuje odstęp (np. przy limit IL).',
+  periodicRequiresOor:
+    'Gdy włączone, periodic wykonuje rebalance tylko jeśli pozycja jest poza zakresem (OOR). Gdy wyłączone — „po staremu”: rebalance dokładnie co N godzin niezależnie od in-range.',
+  rebalanceOnRangeExitImmediately:
+    'Gdy włączone — „po staremu”: wyjście poza zakres może od razu wywołać rebalance (close+open). Gdy wyłączone — OOR jest tylko sygnałem; rebalance czeka na minimalny interwał.',
   dryRun:
     'Gdy włączone, executor nie wykonuje prawdziwych transakcji on-chain (tryb bezpieczny).',
   autoExecute:
@@ -140,6 +144,8 @@ export function buildParameters(
     maxIlPct: number | ''
     rebalanceThresholdPct: number | ''
     minRebalanceIntervalHours: number | ''
+    periodicRequiresOutOfRange: boolean
+    rebalanceOnRangeExitImmediately: boolean
   },
 ): StrategyParameters {
   const e = FIELD_ENABLED[strategyType] ?? FIELD_ENABLED.static_range
@@ -156,6 +162,12 @@ export function buildParameters(
   if (e.minInterval && state.minRebalanceIntervalHours !== '') {
     p.min_rebalance_interval_hours = Number(state.minRebalanceIntervalHours)
   }
+
+  // Optional execution semantics toggles.
+  // We always send them so the behavior is explicit and visible in the saved config.
+  p.periodic_requires_out_of_range = state.periodicRequiresOutOfRange
+  p.rebalance_on_range_exit_immediately = state.rebalanceOnRangeExitImmediately
+
   return p
 }
 

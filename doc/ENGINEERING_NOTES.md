@@ -22,6 +22,14 @@
 - **Change:** out-of-range (OOR) no longer triggers an immediate rebalance by default for `OorRecenter` / OOR branch of `Threshold` / `RetouchShift`. Instead, it waits for `min_rebalance_interval_hours` unless `rebalance_on_range_exit_immediately=true`.
 - **Periodic:** `Periodic` now defaults to running only when OOR (`periodic_requires_out_of_range=true`) to match “rebalance every N hours *if* position is outside range”; set it to `false` for the previous “always on the timer” behavior.
 
+## 2026-04-07 — Revert defaults: restore legacy immediate OOR and periodic timer behavior
+
+**keywords:** strategy executor, DecisionConfig, periodic, oor_recenter, threshold, retouch_shift, defaults, UI, web
+**paths:** `crates/execution/src/strategy/decision.rs`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/lib/strategyFormShared.tsx`, `web/src/lib/api.ts`
+
+- Restored **legacy defaults**: `rebalance_on_range_exit_immediately=true` and `periodic_requires_out_of_range=false`.
+- Exposed both toggles in the Strategy UI (create/edit) so operators can opt into the “scheduled-only” semantics when desired.
+
 ## 2026-04-08 — `backtest-optimize`: siatka last-candle ze świecą 45m (@ 900s/krok)
 
 **keywords:** backtest_optimize, LAST_CANDLE_OPTIMIZE_GRID, last_candle, resolution_seconds

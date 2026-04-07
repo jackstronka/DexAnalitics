@@ -129,7 +129,7 @@ Semantyka strategii używanych w `backtest-optimize` obejmuje:
 - `static`: brak rebalance (trzymasz początkowy zakres).
 - `oor_recenter`: rebalance tylko po wyjściu poza zakres (OOR), a potem otwarcie nowego symetrycznego pasma wokół bieżącej ceny.
 - `threshold_<N>%`: rebalance gdy cena jest OOR albo gdy w zakresie od mid odbiega o co najmniej `N%` (mid = środek pasma).
-- `periodic_<N>h`: rebalance po upływie N godzin od ostatniego otwarcia/rebalance (w live domyślnie tylko gdy pozycja jest OOR; patrz `periodic_requires_out_of_range`).
+- `periodic_<N>h`: rebalance po upływie N godzin od ostatniego otwarcia/rebalance (w live domyślnie “po staremu” niezależnie od in-range; opcja `periodic_requires_out_of_range=true` ogranicza rebalance do OOR).
 - `il_limit`: rebalance (i opcjonalnie close) gdy miary „IL-like” przekraczają progi.
 - `retouch_shift`: hybrydowe „przesuwanie krawędzi wyjścia” po pierwszym OOR zamiast pełnego recenter; kolejne retouche mogą działać wg hybrydy czas + procent (flagami opisanymi w runbooku Orca).
 

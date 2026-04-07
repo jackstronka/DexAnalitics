@@ -93,6 +93,10 @@ export interface StrategyParameters {
   max_il_pct?: number
   min_rebalance_interval_hours?: number
   range_width_pct?: number
+  /** Periodic: when true, rebalance only if position is out of range. */
+  periodic_requires_out_of_range?: boolean
+  /** If true, range exit can trigger immediate close+open (rebalance). */
+  rebalance_on_range_exit_immediately?: boolean
   /** Populated when positions are linked (e.g. Open Position). */
   position_addresses?: string[]
   /** PDAs excluded from this strategy’s executor (automation off for those positions). */

@@ -61,6 +61,9 @@ export default function StrategyEdit() {
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
   const [dryRun, setDryRun] = useState(true)
   const [autoExecute, setAutoExecute] = useState(false)
+  // Semantics toggles (defaults = old behavior).
+  const [periodicRequiresOutOfRange, setPeriodicRequiresOutOfRange] = useState(false)
+  const [rebalanceOnRangeExitImmediately, setRebalanceOnRangeExitImmediately] = useState(true)
 
   useEffect(() => {
     if (!strategy) {
@@ -74,6 +77,13 @@ export default function StrategyEdit() {
     setMaxIlPct(numOrEmpty(p.max_il_pct))
     setRebalanceThresholdPct(numOrEmpty(p.rebalance_threshold_pct))
     setMinRebalanceIntervalHours(numOrEmpty(p.min_rebalance_interval_hours))
+    setPeriodicRequiresOutOfRange(Boolean(p.periodic_requires_out_of_range))
+    // Default to old behavior when absent.
+    setRebalanceOnRangeExitImmediately(
+      p.rebalance_on_range_exit_immediately === undefined
+        ? true
+        : Boolean(p.rebalance_on_range_exit_immediately),
+    )
     setDryRun(strategy.dry_run ?? true)
     setAutoExecute(strategy.auto_execute ?? false)
   }, [strategy])
@@ -100,6 +110,10 @@ export default function StrategyEdit() {
         break
       default:
         break
+    }
+
+    if (strategyType !== 'periodic') {
+      setPeriodicRequiresOutOfRange(false)
     }
   }, [strategyType])
 
@@ -148,6 +162,8 @@ export default function StrategyEdit() {
       maxIlPct,
       rebalanceThresholdPct,
       minRebalanceIntervalHours,
+      periodicRequiresOutOfRange,
+      rebalanceOnRangeExitImmediately,
     })
 
     const parameters: StrategyParameters = {
@@ -396,6 +412,46 @@ export default function StrategyEdit() {
                     on-chain transactions (requires API wallet).
                   </p>
                 )}
+              </div>
+
+              <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <p className="text-sm font-medium text-foreground">Semantyka rebalance</p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="flex items-start gap-2">
+                    <input
+                      id="edit-rebalance-on-exit"
+                      type="checkbox"
+                      checked={rebalanceOnRangeExitImmediately}
+                      onChange={(e) => setRebalanceOnRangeExitImmediately(e.target.checked)}
+                      className="mt-0.5 rounded border-input"
+                    />
+                    <div className="flex-1">
+                      <FieldLabel
+                        htmlFor="edit-rebalance-on-exit"
+                        label="Rebalance immediately on range-exit (OOR)"
+                        tooltip={TOOLTIPS.rebalanceOnRangeExitImmediately}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2">
+                    <input
+                      id="edit-periodic-requires-oor"
+                      type="checkbox"
+                      checked={periodicRequiresOutOfRange}
+                      onChange={(e) => setPeriodicRequiresOutOfRange(e.target.checked)}
+                      className="mt-0.5 rounded border-input"
+                      disabled={strategyType !== 'periodic'}
+                    />
+                    <div className={cn('flex-1', strategyType !== 'periodic' && 'opacity-60')}>
+                      <FieldLabel
+                        htmlFor="edit-periodic-requires-oor"
+                        label="Periodic only when OOR"
+                        tooltip={TOOLTIPS.periodicRequiresOor}
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {mutation.isError && (

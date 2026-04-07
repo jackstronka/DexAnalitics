@@ -64,8 +64,10 @@ impl Default for DecisionConfig {
             il_close_threshold: Decimal::new(15, 2),    // 15%
             min_rebalance_interval_hours: 24,
             periodic_interval_hours: 24,
-            periodic_requires_out_of_range: true,
-            rebalance_on_range_exit_immediately: false,
+            // Backward-compatible defaults: old behavior was "rebalance immediately on range exit"
+            // and `Periodic` was strictly timer-based regardless of in-range status.
+            periodic_requires_out_of_range: false,
+            rebalance_on_range_exit_immediately: true,
             threshold_pct: Decimal::new(5, 3),    // 0.5% by default
             range_width_pct: Decimal::new(10, 2), // 10%
             auto_collect_fees: true,
