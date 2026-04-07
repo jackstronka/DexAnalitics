@@ -14,6 +14,15 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-07 — Guardrail: no-close unless reopen feasible + auto-widen ticks; richer swap-mix amount logs
+
+**keywords:** no_close_unless_reopen_feasible, reopen_preflight, auto_widen_ticks, swap_mix, deposit_quote, bot_reopen_preflight_failed, bot_reopen_widen_ticks, bot_swap_mix_round, orca, clmm-lp-execution
+**paths:** `crates/execution/src/strategy/rebalance.rs`
+
+- Added a preflight check before `close_position`: if a deposit quote fails for the planned tick range with current wallet balances, the bot **skips closing** to avoid leaving the operator with no position.
+- Optional auto-widen: on quote failure, the bot expands tick width around `tick_current` for a few steps and retries the quote; all attempts are logged.
+- Swap-mix planning logs now include proposed swap amounts in UI + USD-estimates, plus wallet balances and deficits in UI.
+
 ## 2026-04-07 — Swap-mix diagnostics: log per-swap attempt/result and failure context
 
 **keywords:** swap_mix, swap_exact_in, bot_swap_exact_in_attempt, bot_swap_exact_in_submitted, bot_swap_exact_in_failed, bot_swap_mix_failed, lifecycle ledger, orca, clmm-lp-execution, clmm-lp-protocols

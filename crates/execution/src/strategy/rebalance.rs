@@ -38,6 +38,35 @@ fn swap_mix_max_rounds() -> u32 {
         .unwrap_or(6)
 }
 
+/// Guardrail: when enabled, do not close a position unless a reopen is feasible (preflight quote).
+fn no_close_unless_reopen_feasible() -> bool {
+    std::env::var("CLMM_NO_CLOSE_UNLESS_REOPEN_FEASIBLE")
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+        .map(|v| v == "1" || v == "true" || v == "yes" || v == "on")
+        .unwrap_or(true)
+}
+
+/// Swap-mix/open: widen tick range when reopen quote is too small.
+fn reopen_auto_widen_enabled() -> bool {
+    std::env::var("CLMM_REOPEN_AUTO_WIDEN_TICKS")
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+        .map(|v| v == "1" || v == "true" || v == "yes" || v == "on")
+        .unwrap_or(true)
+}
+
+/// Max widen steps (each step expands width ~x2 around current tick).
+fn reopen_auto_widen_max_steps() -> u32 {
+    std::env::var("CLMM_REOPEN_AUTO_WIDEN_MAX_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| (0..=10).contains(&n))
+        .unwrap_or(4)
+}
+
 /// Whether to block rebalance when [`RebalanceExecutor::is_profitable`] is false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RebalanceProfitabilityMode {
@@ -160,6 +189,32 @@ fn balances_cover_deposit_quote(wa: u64, wb: u64, q: &DepositBudgetQuote) -> boo
     let tol_a = (q.amount_a / 100).max(1);
     let tol_b = (q.amount_b / 100).max(1);
     wa >= q.amount_a.saturating_sub(tol_a) && wb >= q.amount_b.saturating_sub(tol_b)
+}
+
+fn widen_ticks_around_current(
+    tick_current: i32,
+    tick_spacing: u16,
+    tick_lower: i32,
+    tick_upper: i32,
+    step: u32,
+) -> (i32, i32) {
+    let spacing = tick_spacing as i32;
+    let width = (tick_upper - tick_lower).abs().max(spacing.max(1));
+    // Expand width by ~2^step, clamped to avoid overflow.
+    let shift = (step.min(10)) as u32;
+    let factor = 1i32.checked_shl(shift).unwrap_or(1024);
+    let new_width = width.saturating_mul(factor).max(spacing.max(1));
+    let half = new_width / 2;
+    let mut lo = tick_current.saturating_sub(half);
+    let mut hi = tick_current.saturating_add(half);
+    if spacing > 0 {
+        lo = (lo / spacing) * spacing;
+        hi = (hi / spacing) * spacing;
+    }
+    if hi <= lo {
+        hi = lo.saturating_add(spacing.max(1));
+    }
+    (lo, hi)
 }
 
 /// SPL Associated Token Account (classic SPL token program), same derivation as `spl_associated_token_account`.
@@ -615,19 +670,34 @@ impl RebalanceExecutor {
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wb)) as u64;
+                let amount_in_ui =
+                    (amount_in as f64) / 10f64.powi(i32::from(dec_b));
+                let amount_in_usd_est = amount_in_ui * pb;
+                let need_a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
+                let need_b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
+                let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
+                let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
                 last_round_details = Some(serde_json::json!({
                     "round": round,
                     "leg": "B_to_A",
                     "wa": wa,
                     "wb": wb,
+                    "wa_ui": a_ui,
+                    "wb_ui": b_ui,
                     "need_a": q.amount_a,
                     "need_b": q.amount_b,
+                    "need_a_ui": need_a_ui,
+                    "need_b_ui": need_b_ui,
                     "deficit_a": deficit_a,
                     "deficit_b": deficit_b,
+                    "deficit_a_ui": deficit_a_ui,
+                    "deficit_b_ui": deficit_b_ui,
                     "wallet_notional": wallet_notional,
                     "target_usd": target_usd,
                     "specified_mint": pool_state.token_mint_b.to_string(),
                     "amount_in": amount_in,
+                    "amount_in_ui": amount_in_ui,
+                    "amount_in_usd_est": amount_in_usd_est,
                     "slippage_bps": self.config.max_slippage_bps,
                 }));
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
@@ -642,17 +712,26 @@ impl RebalanceExecutor {
                         "max_rounds": max_rounds,
                         "leg": "B_to_A",
                         "amount_in": amount_in,
+                        "amount_in_ui": amount_in_ui,
+                        "amount_in_usd_est": amount_in_usd_est,
                         "wa": wa,
                         "wb": wb,
+                        "wa_ui": a_ui,
+                        "wb_ui": b_ui,
                         "need_a": q.amount_a,
                         "need_b": q.amount_b,
+                        "need_a_ui": need_a_ui,
+                        "need_b_ui": need_b_ui,
                         "deficit_a": deficit_a,
                         "deficit_b": deficit_b,
+                        "deficit_a_ui": deficit_a_ui,
+                        "deficit_b_ui": deficit_b_ui,
                         "tick_lower": tick_lower,
                         "tick_upper": tick_upper,
                         "tick_current": pool_state.tick_current,
                         "price": pool_state.price,
                         "target_usd": target_usd,
+                        "wallet_notional": wallet_notional,
                         "pa": pa,
                         "pb": pb,
                         "price_mode": price_mode,
@@ -758,19 +837,34 @@ impl RebalanceExecutor {
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wa)) as u64;
+                let amount_in_ui =
+                    (amount_in as f64) / 10f64.powi(i32::from(dec_a));
+                let amount_in_usd_est = amount_in_ui * pa;
+                let need_a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
+                let need_b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
+                let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
+                let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
                 last_round_details = Some(serde_json::json!({
                     "round": round,
                     "leg": "A_to_B",
                     "wa": wa,
                     "wb": wb,
+                    "wa_ui": a_ui,
+                    "wb_ui": b_ui,
                     "need_a": q.amount_a,
                     "need_b": q.amount_b,
+                    "need_a_ui": need_a_ui,
+                    "need_b_ui": need_b_ui,
                     "deficit_a": deficit_a,
                     "deficit_b": deficit_b,
+                    "deficit_a_ui": deficit_a_ui,
+                    "deficit_b_ui": deficit_b_ui,
                     "wallet_notional": wallet_notional,
                     "target_usd": target_usd,
                     "specified_mint": pool_state.token_mint_a.to_string(),
                     "amount_in": amount_in,
+                    "amount_in_ui": amount_in_ui,
+                    "amount_in_usd_est": amount_in_usd_est,
                     "slippage_bps": self.config.max_slippage_bps,
                 }));
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
@@ -785,17 +879,26 @@ impl RebalanceExecutor {
                         "max_rounds": max_rounds,
                         "leg": "A_to_B",
                         "amount_in": amount_in,
+                        "amount_in_ui": amount_in_ui,
+                        "amount_in_usd_est": amount_in_usd_est,
                         "wa": wa,
                         "wb": wb,
+                        "wa_ui": a_ui,
+                        "wb_ui": b_ui,
                         "need_a": q.amount_a,
                         "need_b": q.amount_b,
+                        "need_a_ui": need_a_ui,
+                        "need_b_ui": need_b_ui,
                         "deficit_a": deficit_a,
                         "deficit_b": deficit_b,
+                        "deficit_a_ui": deficit_a_ui,
+                        "deficit_b_ui": deficit_b_ui,
                         "tick_lower": tick_lower,
                         "tick_upper": tick_upper,
                         "tick_current": pool_state.tick_current,
                         "price": pool_state.price,
                         "target_usd": target_usd,
+                        "wallet_notional": wallet_notional,
                         "pa": pa,
                         "pb": pb,
                         "price_mode": price_mode,
@@ -1200,7 +1303,151 @@ impl RebalanceExecutor {
                 }
             }
         }
-        // Step 2: Close old position (includes decreasing all liquidity + collecting remaining fees)
+        // Step 2 (guardrail): ensure reopen is feasible *before* closing, using current wallet balances.
+        // If not feasible, we skip the close so we don't leave the operator with 0 positions.
+        let mut planned_tick_lower = params.new_tick_lower;
+        let mut planned_tick_upper = params.new_tick_upper;
+        if no_close_unless_reopen_feasible() {
+            let Some(owner) = self.wallet_pubkey() else {
+                result.error = Some(
+                    "wallet missing on RebalanceExecutor — cannot preflight reopen feasibility"
+                        .to_string(),
+                );
+                return result;
+            };
+            let pool_reader = WhirlpoolReader::new(self.provider.clone());
+            let pool_state = match pool_reader.get_pool_state(&params.pool.to_string()).await {
+                Ok(s) => s,
+                Err(e) => {
+                    result.error = Some(format!("preflight: get_pool_state failed: {e}"));
+                    return result;
+                }
+            };
+
+            let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_a).await
+                .unwrap_or(0);
+            let dec_b = spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_b).await
+                .unwrap_or(0);
+            let wa = spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_a).await;
+            let wb = spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_b).await;
+            let (pa, pb, price_mode) = synthetic_prices_for_deposit_quote(
+                pool_state.price,
+                &pool_state.token_mint_a,
+                &pool_state.token_mint_b,
+                dec_a,
+                dec_b,
+            );
+            let a_ui = wa as f64 / 10f64.powi(i32::from(dec_a));
+            let b_ui = wb as f64 / 10f64.powi(i32::from(dec_b));
+            let wallet_notional = a_ui * pa + b_ui * pb;
+            let target_usd = (wallet_notional * 0.995).max(0.0);
+
+            let mut ok = quote_deposit_budget_in_range(
+                planned_tick_lower,
+                planned_tick_upper,
+                pool_state.tick_current,
+                pool_state.sqrt_price,
+                dec_a,
+                dec_b,
+                pa,
+                pb,
+                target_usd,
+            )
+            .is_ok();
+
+            if !ok && reopen_auto_widen_enabled() {
+                for step in 1..=reopen_auto_widen_max_steps() {
+                    let (lo, hi) = widen_ticks_around_current(
+                        pool_state.tick_current,
+                        pool_state.tick_spacing,
+                        planned_tick_lower,
+                        planned_tick_upper,
+                        step,
+                    );
+                    let try_ok = quote_deposit_budget_in_range(
+                        lo,
+                        hi,
+                        pool_state.tick_current,
+                        pool_state.sqrt_price,
+                        dec_a,
+                        dec_b,
+                        pa,
+                        pb,
+                        target_usd,
+                    )
+                    .is_ok();
+                    clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                        self.provider.as_ref(),
+                        "bot_reopen_widen_ticks",
+                        "reopen_preflight",
+                        Some(params.pool),
+                        Some(params.position),
+                        None,
+                        serde_json::json!({
+                            "step": step,
+                            "old_tick_lower": planned_tick_lower,
+                            "old_tick_upper": planned_tick_upper,
+                            "new_tick_lower": lo,
+                            "new_tick_upper": hi,
+                            "tick_current": pool_state.tick_current,
+                            "tick_spacing": pool_state.tick_spacing,
+                            "wa": wa,
+                            "wb": wb,
+                            "wa_ui": a_ui,
+                            "wb_ui": b_ui,
+                            "wallet_notional": wallet_notional,
+                            "target_usd": target_usd,
+                            "pa": pa,
+                            "pb": pb,
+                            "price_mode": price_mode,
+                            "quote_ok": try_ok,
+                        }),
+                    )
+                    .await;
+                    if try_ok {
+                        planned_tick_lower = lo;
+                        planned_tick_upper = hi;
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+
+            if !ok {
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_reopen_preflight_failed",
+                    "reopen_preflight",
+                    Some(params.pool),
+                    Some(params.position),
+                    None,
+                    serde_json::json!({
+                        "tick_lower": planned_tick_lower,
+                        "tick_upper": planned_tick_upper,
+                        "tick_current": pool_state.tick_current,
+                        "tick_spacing": pool_state.tick_spacing,
+                        "wa": wa,
+                        "wb": wb,
+                        "wa_ui": a_ui,
+                        "wb_ui": b_ui,
+                        "wallet_notional": wallet_notional,
+                        "target_usd": target_usd,
+                        "pa": pa,
+                        "pb": pb,
+                        "price_mode": price_mode,
+                        "note": "Guardrail: skip close because reopen quote failed for planned range with current wallet balances."
+                    }),
+                )
+                .await;
+                result.error = Some(
+                    "reopen preflight failed (quote rejected) — skipping close (no-close-unless-reopen-feasible)"
+                        .to_string(),
+                );
+                return result;
+            }
+        }
+
+        // Step 3: Close old position (includes decreasing all liquidity + collecting remaining fees)
         result.liquidity_removed = params.current_liquidity;
         if let Err(e) = self.close_position(&params.position, &params.pool).await {
             error!(
@@ -1218,7 +1465,7 @@ impl RebalanceExecutor {
         result.old_position_closed_on_chain = true;
         result.tx_cost_lamports += 5000;
 
-        // Step 3: Open new position — swap-mix + retries (see [`Self::open_new_range_with_wallet_mix`]).
+        // Step 4: Open new position — swap-mix + retries (see [`Self::open_new_range_with_wallet_mix`]).
         let pool_reader = WhirlpoolReader::new(self.provider.clone());
         let pool_state = match pool_reader.get_pool_state(&params.pool.to_string()).await {
             Ok(s) => s,
@@ -1241,8 +1488,8 @@ impl RebalanceExecutor {
         match self
             .open_new_range_with_wallet_mix(
                 &params.pool,
-                params.new_tick_lower,
-                params.new_tick_upper,
+                planned_tick_lower,
+                planned_tick_upper,
                 &pool_state,
                 amount_a_before_calc,
                 amount_b_before_calc,
