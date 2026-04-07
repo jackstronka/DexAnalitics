@@ -14,6 +14,33 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-07 — Swap-mix diagnostics: log per-swap attempt/result and failure context
+
+**keywords:** swap_mix, swap_exact_in, bot_swap_exact_in_attempt, bot_swap_exact_in_submitted, bot_swap_exact_in_failed, bot_swap_mix_failed, lifecycle ledger, orca, clmm-lp-execution, clmm-lp-protocols
+**paths:** `crates/execution/src/strategy/rebalance.rs`
+
+- Added diagnostic lifecycle rows so swap-mix failures can be explained without guessing:
+  - `bot_swap_exact_in_attempt`: mint + amount_in + slippage + round/leg
+  - `bot_swap_exact_in_submitted`: signature + same context
+  - `bot_swap_exact_in_failed`: full error string + same context
+- `bot_swap_mix_failed` now includes `last_round` snapshot (balances, deficits, target_usd) to distinguish “tx failed” vs “target not reachable with wallet notional”.
+
+## 2026-04-07 — Perf note: scaling live execution to 100+ positions (cache/batch/RPC budgets) — TODO later
+
+**keywords:** performance, scaling, rpc, caching, get_multiple_accounts, scheduler, StrategyExecutor, WhirlpoolReader, clmm-lp-execution, clmm-lp-protocols, solana
+**paths:** `crates/execution/src/strategy/executor.rs`, `crates/protocols/src/orca/pool_reader.rs`, `crates/protocols/src/rpc/provider.rs`
+
+- **Motivation:** we may run **100+ active positions/strategies** with decision cadence \(30–300s\). With public RPC limits, the risk is **duplicated per-position reads** (same pool state fetched N times) and bursty simulate/quote calls.
+- **Current state (as of today):**
+  - `RpcProvider` has retry/failover/backoff but **no TTL cache** for `get_account` / `get_multiple_accounts`.
+  - `StrategyExecutor::evaluate_all` loops positions and calls `WhirlpoolReader::get_pool_state` **per position**; `WhirlpoolReader::get_multiple_pools` exists but is not used in the hot path.
+  - Websocket-driven `AccountListener` exists but is currently **placeholder / not production feed**, so it does not serve as an event-driven cache.
+- **Prep work we should do before scaling** (postponed):
+  - Add **shared per-pool cache** (TTL / slot-aware) for `WhirlpoolState` and tick boundary reads; dedupe concurrent fetches.
+  - Update executor hot path to **group positions by pool** and refresh each pool once per cycle (or use `get_multiple_pools`).
+  - Introduce an explicit **RPC budget** (RPS cap + queue/backpressure) and prioritize evaluations (near range edge, high TVL, etc.).
+  - Keep `simulate_transaction` / heavy quotes **alarm-driven**, not unconditional per loop.
+
 ## 2026-04-07 — Strategy executor: OOR rebalance is scheduled by default (no immediate close+open)
 
 **keywords:** strategy executor, DecisionConfig, periodic, oor_recenter, threshold, retouch_shift, range_exit, rebalance, clmm-lp-api, clmm-lp-execution
