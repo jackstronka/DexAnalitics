@@ -400,6 +400,7 @@ impl RebalanceExecutor {
         }
         let max_rounds = swap_mix_max_rounds();
         let mut swaps: u32 = 0;
+        let mut last_round_details: Option<serde_json::Value> = None;
         const MIN_SWAP: u64 = 1;
         const AMOUNT_IN_BUFFER_PCT: f64 = 1.02; // small buffer for pool price moves + fees
         const SPEND_CAP_PCT: f64 = 0.92; // avoid spending 100% of a leg due to rounding/fees
@@ -534,6 +535,21 @@ impl RebalanceExecutor {
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wb)) as u64;
+                last_round_details = Some(serde_json::json!({
+                    "round": round,
+                    "leg": "B_to_A",
+                    "wa": wa,
+                    "wb": wb,
+                    "need_a": q.amount_a,
+                    "need_b": q.amount_b,
+                    "deficit_a": deficit_a,
+                    "deficit_b": deficit_b,
+                    "wallet_notional": wallet_notional,
+                    "target_usd": target_usd,
+                    "specified_mint": pool_state.token_mint_b.to_string(),
+                    "amount_in": amount_in,
+                    "slippage_bps": self.config.max_slippage_bps,
+                }));
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                     self.provider.as_ref(),
                     "bot_swap_mix_round",
@@ -563,31 +579,88 @@ impl RebalanceExecutor {
                     }),
                 )
                 .await;
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_swap_exact_in_attempt",
+                    "swap_exact_in",
+                    Some(*pool),
+                    Some(*log_position),
+                    None,
+                    serde_json::json!({
+                        "round": round,
+                        "leg": "B_to_A",
+                        "specified_mint": pool_state.token_mint_b.to_string(),
+                        "amount_in": amount_in,
+                        "slippage_bps": self.config.max_slippage_bps,
+                    }),
+                )
+                .await;
                 info!(
                     round,
                     amount_in, "rebalance: swap ExactIn token B toward mix for open"
                 );
-                self.execute_swap_exact_in(
-                    pool,
-                    &pool_state.token_mint_b,
-                    amount_in,
-                    self.config.max_slippage_bps,
-                    None,
-                )
-                .await
-                .map_err(|e| {
-                    error!(
-                        op = "orca_rebalance",
-                        stage = "swap_mix",
-                        pool = %pool,
-                        round,
-                        leg = "B_to_A",
+                let sig = match self
+                    .execute_swap_exact_in(
+                        pool,
+                        &pool_state.token_mint_b,
                         amount_in,
-                        error = %e,
-                        "swap-mix: swap_exact_in (token B) failed"
-                    );
-                    e
-                })?;
+                        self.config.max_slippage_bps,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                            self.provider.as_ref(),
+                            "bot_swap_exact_in_failed",
+                            "swap_exact_in",
+                            Some(*pool),
+                            Some(*log_position),
+                            None,
+                            serde_json::json!({
+                                "round": round,
+                                "leg": "B_to_A",
+                                "specified_mint": pool_state.token_mint_b.to_string(),
+                                "amount_in": amount_in,
+                                "slippage_bps": self.config.max_slippage_bps,
+                                "error": msg,
+                            }),
+                        )
+                        .await;
+                        error!(
+                            op = "orca_rebalance",
+                            stage = "swap_mix",
+                            pool = %pool,
+                            round,
+                            leg = "B_to_A",
+                            amount_in,
+                            error = %e,
+                            "swap-mix: swap_exact_in (token B) failed"
+                        );
+                        return Err(e);
+                    }
+                };
+                if let Some(sig) = sig {
+                    clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                        self.provider.as_ref(),
+                        "bot_swap_exact_in_submitted",
+                        "swap_exact_in",
+                        Some(*pool),
+                        Some(*log_position),
+                        None,
+                        serde_json::json!({
+                            "round": round,
+                            "leg": "B_to_A",
+                            "signature": sig.to_string(),
+                            "specified_mint": pool_state.token_mint_b.to_string(),
+                            "amount_in": amount_in,
+                            "slippage_bps": self.config.max_slippage_bps,
+                        }),
+                    )
+                    .await;
+                }
                 swaps += 1;
                 continue;
             }
@@ -604,6 +677,21 @@ impl RebalanceExecutor {
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wa)) as u64;
+                last_round_details = Some(serde_json::json!({
+                    "round": round,
+                    "leg": "A_to_B",
+                    "wa": wa,
+                    "wb": wb,
+                    "need_a": q.amount_a,
+                    "need_b": q.amount_b,
+                    "deficit_a": deficit_a,
+                    "deficit_b": deficit_b,
+                    "wallet_notional": wallet_notional,
+                    "target_usd": target_usd,
+                    "specified_mint": pool_state.token_mint_a.to_string(),
+                    "amount_in": amount_in,
+                    "slippage_bps": self.config.max_slippage_bps,
+                }));
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                     self.provider.as_ref(),
                     "bot_swap_mix_round",
@@ -633,31 +721,88 @@ impl RebalanceExecutor {
                     }),
                 )
                 .await;
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_swap_exact_in_attempt",
+                    "swap_exact_in",
+                    Some(*pool),
+                    Some(*log_position),
+                    None,
+                    serde_json::json!({
+                        "round": round,
+                        "leg": "A_to_B",
+                        "specified_mint": pool_state.token_mint_a.to_string(),
+                        "amount_in": amount_in,
+                        "slippage_bps": self.config.max_slippage_bps,
+                    }),
+                )
+                .await;
                 info!(
                     round,
                     amount_in, "rebalance: swap ExactIn token A toward mix for open"
                 );
-                self.execute_swap_exact_in(
-                    pool,
-                    &pool_state.token_mint_a,
-                    amount_in,
-                    self.config.max_slippage_bps,
-                    None,
-                )
-                .await
-                .map_err(|e| {
-                    error!(
-                        op = "orca_rebalance",
-                        stage = "swap_mix",
-                        pool = %pool,
-                        round,
-                        leg = "A_to_B",
+                let sig = match self
+                    .execute_swap_exact_in(
+                        pool,
+                        &pool_state.token_mint_a,
                         amount_in,
-                        error = %e,
-                        "swap-mix: swap_exact_in (token A) failed"
-                    );
-                    e
-                })?;
+                        self.config.max_slippage_bps,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                            self.provider.as_ref(),
+                            "bot_swap_exact_in_failed",
+                            "swap_exact_in",
+                            Some(*pool),
+                            Some(*log_position),
+                            None,
+                            serde_json::json!({
+                                "round": round,
+                                "leg": "A_to_B",
+                                "specified_mint": pool_state.token_mint_a.to_string(),
+                                "amount_in": amount_in,
+                                "slippage_bps": self.config.max_slippage_bps,
+                                "error": msg,
+                            }),
+                        )
+                        .await;
+                        error!(
+                            op = "orca_rebalance",
+                            stage = "swap_mix",
+                            pool = %pool,
+                            round,
+                            leg = "A_to_B",
+                            amount_in,
+                            error = %e,
+                            "swap-mix: swap_exact_in (token A) failed"
+                        );
+                        return Err(e);
+                    }
+                };
+                if let Some(sig) = sig {
+                    clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                        self.provider.as_ref(),
+                        "bot_swap_exact_in_submitted",
+                        "swap_exact_in",
+                        Some(*pool),
+                        Some(*log_position),
+                        None,
+                        serde_json::json!({
+                            "round": round,
+                            "leg": "A_to_B",
+                            "signature": sig.to_string(),
+                            "specified_mint": pool_state.token_mint_a.to_string(),
+                            "amount_in": amount_in,
+                            "slippage_bps": self.config.max_slippage_bps,
+                        }),
+                    )
+                    .await;
+                }
                 swaps += 1;
                 continue;
             }
@@ -701,7 +846,8 @@ impl RebalanceExecutor {
                 "max_rounds": max_rounds,
                 "swaps_done": swaps,
                 "tick_lower": tick_lower,
-                "tick_upper": tick_upper
+                "tick_upper": tick_upper,
+                "last_round": last_round_details
             }),
         )
         .await;
