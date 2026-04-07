@@ -137,6 +137,32 @@ export default function PositionDetail() {
   })
   const solUsd = solPriceMap?.[WSOL_MINT] ?? 0
 
+  // Keep hooks unconditional: derive empty defaults even before `position` is loaded.
+  const ledgerRows = (ledgerData?.rows ?? []) as LedgerRow[]
+  const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
+  const bySession = useMemo(() => groupLedgerBySession(ledgerRows), [ledgerRows])
+
+  const lastRebalanceIncomplete = useMemo(() => {
+    for (const r of ilRows) {
+      if (typeof r?.event === 'string' && r.event === 'rebalance_incomplete') return r
+    }
+    return null
+  }, [ilRows])
+
+  const lastRebalanceSession = useMemo(() => {
+    // Find newest session with any bot_close/bot_open events; useful even without IL ledger.
+    const sessions = Array.from(bySession.entries())
+    for (const [sid, rows] of sessions) {
+      const hasClose = rows.some((r) => typeof r.event === 'string' && r.event.includes('close'))
+      const hasOpen = rows.some((r) => typeof r.event === 'string' && r.event.includes('open'))
+      const hasSwap = rows.some((r) => typeof r.event === 'string' && r.event.includes('swap'))
+      if (hasClose || hasOpen || hasSwap) {
+        return { session: sid, rows, hasClose, hasOpen, hasSwap }
+      }
+    }
+    return null
+  }, [bySession])
+
   const linkedStrategies = useMemo(() => {
     if (!address) {
       return []
@@ -311,31 +337,6 @@ export default function PositionDetail() {
   if (!position) {
     return <div className="text-center py-8">Position not found</div>
   }
-
-  const ledgerRows = (ledgerData?.rows ?? []) as LedgerRow[]
-  const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
-  const bySession = groupLedgerBySession(ledgerRows)
-
-  const lastRebalanceIncomplete = useMemo(() => {
-    for (const r of ilRows) {
-      if (typeof r?.event === 'string' && r.event === 'rebalance_incomplete') return r
-    }
-    return null
-  }, [ilRows])
-
-  const lastRebalanceSession = useMemo(() => {
-    // Find newest session with any bot_close/bot_open events; useful even without IL ledger.
-    const sessions = Array.from(bySession.entries())
-    for (const [sid, rows] of sessions) {
-      const hasClose = rows.some((r) => typeof r.event === 'string' && r.event.includes('close'))
-      const hasOpen = rows.some((r) => typeof r.event === 'string' && r.event.includes('open'))
-      const hasSwap = rows.some((r) => typeof r.event === 'string' && r.event.includes('swap'))
-      if (hasClose || hasOpen || hasSwap) {
-        return { session: sid, rows, hasClose, hasOpen, hasSwap }
-      }
-    }
-    return null
-  }, [bySession])
 
   const rangeUsdcLine = formatUsdcPriceRange(
     position.range_lower_usdc ?? undefined,
