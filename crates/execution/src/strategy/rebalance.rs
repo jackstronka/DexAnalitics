@@ -8,6 +8,7 @@ use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
+use solana_sdk::pubkey;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use spl_token::solana_program::program_pack::Pack;
@@ -74,12 +75,85 @@ async fn spl_mint_decimals(provider: &RpcProvider, mint: &Pubkey) -> anyhow::Res
     Ok(m.decimals)
 }
 
-/// Synthetic **relative** USD prices: A = 1, B = B_ui/A_ui from pool, so wallet notional matches spot mix scale.
-fn synthetic_prices_for_deposit_quote(pool_price: Decimal, dec_a: u8, dec_b: u8) -> (f64, f64) {
+/// Synthetic USD prices used for swap-mix sizing + `target_usd`.
+///
+/// Important: `WhirlpoolState.price` is not guaranteed to be "B per A" across all upstreams; we've
+/// observed cases where it behaves as "A per B" (inverse). For pools involving a stablecoin leg we
+/// use a stable-aware heuristic so `wallet_notional` and `target_usd` don't get inflated.
+fn synthetic_prices_for_deposit_quote(
+    pool_price: Decimal,
+    mint_a: &Pubkey,
+    mint_b: &Pubkey,
+    dec_a: u8,
+    dec_b: u8,
+) -> (f64, f64, &'static str) {
     let exp = i32::from(dec_a) - i32::from(dec_b);
     let b_per_a_ui = pool_price * Decimal::from(10).powi(i64::from(exp));
-    let pb = b_per_a_ui.to_f64().unwrap_or(1.0).max(1e-18);
-    (1.0_f64, pb)
+    let mut b_per_a = b_per_a_ui.to_f64().unwrap_or(1.0).max(1e-18);
+
+    const MIN_POSITIVE: f64 = 1e-18;
+    const INVERT_IF_LT: f64 = 0.2; // e.g. 0.08 USDC/SOL is almost certainly inverted (SOL/USDC)
+
+    // Stablecoin mint IDs (mainnet).
+    const USDC: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+    const USDT: Pubkey = pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+    let is_stable = |m: &Pubkey| *m == USDC || *m == USDT;
+
+    // If B is stablecoin: interpret price as stable_per_A (USD per token A). If it's tiny, assume inverse.
+    if is_stable(mint_b) {
+        if b_per_a < INVERT_IF_LT {
+            b_per_a = (1.0 / b_per_a).max(MIN_POSITIVE);
+            return (b_per_a, 1.0, "stable_b_inverted");
+        }
+        return (b_per_a, 1.0, "stable_b");
+    }
+    // If A is stablecoin: b_per_a is tokenB per 1 stable. USD per tokenB is 1 / b_per_a.
+    if is_stable(mint_a) {
+        return (1.0, (1.0 / b_per_a).max(MIN_POSITIVE), "stable_a");
+    }
+
+    // Fallback: relative scale only (A=1).
+    (1.0_f64, b_per_a, "relative")
+}
+
+#[cfg(test)]
+mod synthetic_price_tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn stable_b_inverts_tiny_price() {
+        // Simulate a case where upstream already returns UI-scaled tiny stable_per_A
+        // (e.g. due to inverted convention / missing decimal scaling in the upstream value).
+        let mint_a = Pubkey::new_unique();
+        let mint_b = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
+        let (pa, pb, mode) = synthetic_prices_for_deposit_quote(
+            Decimal::from_f64_retain(0.00008).unwrap(), // after UI scaling -> 0.08 (< INVERT_IF_LT) => invert
+            &mint_a,
+            &mint_b,
+            9,
+            6,
+        );
+        assert_eq!(pb, 1.0);
+        assert!(pa > 1.0);
+        assert_eq!(mode, "stable_b_inverted");
+    }
+
+    #[test]
+    fn stable_a_uses_inverse_for_b() {
+        // Simulate USDC/SOL where price is SOL per USDC (~0.0125) and A is stable.
+        let mint_a = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
+        let mint_b = Pubkey::new_unique();
+        let (_pa, pb, mode) = synthetic_prices_for_deposit_quote(
+            Decimal::from_f64_retain(0.0125).unwrap(),
+            &mint_a,
+            &mint_b,
+            6,
+            9,
+        );
+        assert!(pb > 1.0);
+        assert_eq!(mode, "stable_a");
+    }
 }
 
 fn balances_cover_deposit_quote(wa: u64, wb: u64, q: &DepositBudgetQuote) -> bool {
@@ -466,7 +540,13 @@ impl RebalanceExecutor {
                 );
                 anyhow::bail!("wallet has zero of both tokens; cannot swap or open");
             }
-            let (pa, pb) = synthetic_prices_for_deposit_quote(pool_state.price, dec_a, dec_b);
+            let (pa, pb, price_mode) = synthetic_prices_for_deposit_quote(
+                pool_state.price,
+                &pool_state.token_mint_a,
+                &pool_state.token_mint_b,
+                dec_a,
+                dec_b,
+            );
             let a_ui = wa as f64 / 10f64.powi(i32::from(dec_a));
             let b_ui = wb as f64 / 10f64.powi(i32::from(dec_b));
             let wallet_notional = a_ui * pa + b_ui * pb;
@@ -575,6 +655,7 @@ impl RebalanceExecutor {
                         "target_usd": target_usd,
                         "pa": pa,
                         "pb": pb,
+                        "price_mode": price_mode,
                         "amount_in_est_mode": "deficit_usd"
                     }),
                 )
@@ -717,6 +798,7 @@ impl RebalanceExecutor {
                         "target_usd": target_usd,
                         "pa": pa,
                         "pb": pb,
+                        "price_mode": price_mode,
                         "amount_in_est_mode": "deficit_usd"
                     }),
                 )
