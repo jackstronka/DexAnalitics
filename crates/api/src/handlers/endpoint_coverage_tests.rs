@@ -10,12 +10,23 @@ use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use tower::util::ServiceExt;
 
+const TEST_REQUEST_TIMEOUT_SECS: u64 = 30;
+const TEST_ONCHAIN_REQUEST_TIMEOUT_SECS: u64 = 120;
+
 fn test_state() -> AppState {
     let rpc_config = RpcConfig {
         primary_url: "http://127.0.0.1:1".to_string(),
         ..Default::default()
     };
     AppState::new(rpc_config, ApiConfig::default())
+}
+
+fn test_router(state: AppState) -> axum::Router {
+    create_versioned_router(
+        state,
+        TEST_REQUEST_TIMEOUT_SECS,
+        TEST_ONCHAIN_REQUEST_TIMEOUT_SECS,
+    )
 }
 
 async fn seed_strategy(state: &AppState, id: &str) {
@@ -76,7 +87,7 @@ async fn request_body(
 #[tokio::test]
 async fn all_health_endpoints_are_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state.clone());
+    let router = test_router(state.clone());
     assert_eq!(
         request(router.clone(), Method::GET, "/api/v1/health/live", None).await,
         StatusCode::OK
@@ -96,7 +107,7 @@ async fn all_health_endpoints_are_reachable() {
 #[tokio::test]
 async fn all_position_endpoints_are_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(router.clone(), Method::GET, "/api/v1/positions", None).await,
         StatusCode::OK
@@ -210,7 +221,7 @@ async fn position_action_buttons_have_dry_run_path() {
         .insert_test_monitored_position(monitored)
         .await;
 
-    let router = create_versioned_router(state);
+    let router = test_router(state);
 
     // 1) Swap (dry-run)
     let (st, body) = request_body(
@@ -326,7 +337,7 @@ async fn position_action_buttons_have_dry_run_path() {
 async fn all_strategy_endpoints_are_reachable() {
     let state = test_state();
     seed_strategy(&state, "s1").await;
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(router.clone(), Method::GET, "/api/v1/strategies", None).await,
         StatusCode::OK
@@ -418,7 +429,7 @@ async fn all_strategy_endpoints_are_reachable() {
 #[tokio::test]
 async fn all_pool_and_analytics_endpoints_are_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     let pools_status = request(router.clone(), Method::GET, "/api/v1/pools", None).await;
     assert_ne!(pools_status, StatusCode::NOT_FOUND);
     assert_eq!(
@@ -539,7 +550,7 @@ async fn all_orca_proxy_endpoints_are_reachable() {
     let mut cfg = ApiConfig::default();
     cfg.orca_public_api_base_url = Some(server.base_url());
     let state = AppState::new(RpcConfig::default(), cfg);
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(router.clone(), Method::GET, "/api/v1/orca/pools", None).await,
         StatusCode::OK
@@ -601,7 +612,7 @@ async fn all_orca_proxy_endpoints_are_reachable() {
 #[tokio::test]
 async fn orca_positions_by_owner_validates_query() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(
             router.clone(),
@@ -627,7 +638,7 @@ async fn orca_positions_by_owner_validates_query() {
 #[tokio::test]
 async fn auth_and_ws_endpoints_are_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     // auth endpoints
     assert_eq!(
         request(
@@ -738,7 +749,7 @@ async fn auth_and_ws_endpoints_are_reachable() {
 #[tokio::test]
 async fn scripts_list_endpoint_is_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(router, Method::GET, "/api/v1/scripts", None).await,
         StatusCode::OK
@@ -748,7 +759,7 @@ async fn scripts_list_endpoint_is_reachable() {
 #[tokio::test]
 async fn bot_activity_il_ledger_endpoint_is_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(router, Method::GET, "/api/v1/bot-activity/il-ledger", None,).await,
         StatusCode::OK
@@ -758,7 +769,7 @@ async fn bot_activity_il_ledger_endpoint_is_reachable() {
 #[tokio::test]
 async fn scripts_run_returns_503_without_runner() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     assert_eq!(
         request(
             router,
@@ -774,7 +785,7 @@ async fn scripts_run_returns_503_without_runner() {
 #[tokio::test]
 async fn unknown_route_is_404() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     let status = request(router, Method::GET, "/api/v1/nope", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -782,7 +793,7 @@ async fn unknown_route_is_404() {
 #[tokio::test]
 async fn open_position_endpoint_is_reachable() {
     let state = test_state();
-    let router = create_versioned_router(state);
+    let router = test_router(state);
     let status = request(
         router.clone(),
         Method::POST,
