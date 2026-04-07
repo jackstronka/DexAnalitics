@@ -110,7 +110,7 @@ pub async fn resolve_executor_for_position_ops(
         dry_run: false,
         fee_mode: PositionTruthMode::Heuristic,
     };
-    let mut executor = StrategyExecutor::new(
+    let executor = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
         state.tx_manager.clone(),

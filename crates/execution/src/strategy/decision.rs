@@ -37,6 +37,14 @@ pub struct DecisionConfig {
     pub min_rebalance_interval_hours: u64,
     /// For `Periodic`: rebalance every N hours.
     pub periodic_interval_hours: u64,
+    /// For `Periodic`: if true, periodic rebalance triggers only when the position is out of range.
+    /// This avoids an automatic close+open while in-range just because the timer elapsed.
+    pub periodic_requires_out_of_range: bool,
+    /// If true, exiting the range may trigger a rebalance immediately (subject to strategy mode),
+    /// instead of waiting for `min_rebalance_interval_hours` / `periodic_interval_hours`.
+    ///
+    /// Default is false: range exit is *observed*, but the rebalance happens only on the schedule.
+    pub rebalance_on_range_exit_immediately: bool,
     /// For `Threshold`: deviation from range midpoint that triggers rebalance.
     /// Expressed as a ratio (e.g. 0.05 = 5%).
     pub threshold_pct: Decimal,
@@ -56,6 +64,8 @@ impl Default for DecisionConfig {
             il_close_threshold: Decimal::new(15, 2),    // 15%
             min_rebalance_interval_hours: 24,
             periodic_interval_hours: 24,
+            periodic_requires_out_of_range: true,
+            rebalance_on_range_exit_immediately: false,
             threshold_pct: Decimal::new(5, 3),    // 0.5% by default
             range_width_pct: Decimal::new(10, 2), // 10%
             auto_collect_fees: true,
@@ -113,7 +123,9 @@ impl DecisionEngine {
             StrategyMode::StaticRange => Decision::Hold,
 
             StrategyMode::Periodic => {
-                if context.hours_since_rebalance >= cfg.periodic_interval_hours {
+                if context.hours_since_rebalance >= cfg.periodic_interval_hours
+                    && (!cfg.periodic_requires_out_of_range || !position.in_range)
+                {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
                         new_lower = new_lower,
@@ -130,6 +142,16 @@ impl DecisionEngine {
 
             StrategyMode::OorRecenter => {
                 if !position.in_range {
+                    if !cfg.rebalance_on_range_exit_immediately
+                        && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                    {
+                        debug!(
+                            hours_since_rebalance = context.hours_since_rebalance,
+                            min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                            "OorRecenter: out of range but waiting for rebalance interval"
+                        );
+                        return Decision::Hold;
+                    }
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
                         new_lower = new_lower,
@@ -146,6 +168,16 @@ impl DecisionEngine {
 
             StrategyMode::Threshold => {
                 if !position.in_range {
+                    if !cfg.rebalance_on_range_exit_immediately
+                        && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                    {
+                        debug!(
+                            hours_since_rebalance = context.hours_since_rebalance,
+                            min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                            "Threshold: out of range but waiting for rebalance interval"
+                        );
+                        return Decision::Hold;
+                    }
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
                         new_lower = new_lower,
@@ -193,6 +225,16 @@ impl DecisionEngine {
                 if !armed {
                     return Decision::Hold;
                 }
+                if !cfg.rebalance_on_range_exit_immediately
+                    && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                {
+                    debug!(
+                        hours_since_rebalance = context.hours_since_rebalance,
+                        min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                        "RetouchShift: out of range but waiting for rebalance interval"
+                    );
+                    return Decision::Hold;
+                }
 
                 let (new_lower, new_upper) = self.calculate_retouch_range(position, pool);
                 debug!(
@@ -211,7 +253,8 @@ impl DecisionEngine {
                 // above `il_close_threshold`; if we tested close first, we'd `Close` (no auto re-open)
                 // instead of `Rebalance` (close + open new range).
                 if !position.in_range
-                    && context.hours_since_rebalance >= cfg.min_rebalance_interval_hours
+                    && (cfg.rebalance_on_range_exit_immediately
+                        || context.hours_since_rebalance >= cfg.min_rebalance_interval_hours)
                 {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
@@ -472,5 +515,23 @@ mod tests {
 
         let decision = engine.decide(&context);
         assert!(matches!(decision, Decision::Hold));
+    }
+
+    #[test]
+    fn test_oor_recenter_waits_for_interval_by_default() {
+        let mut cfg = DecisionConfig::default();
+        cfg.strategy_mode = StrategyMode::OorRecenter;
+        cfg.min_rebalance_interval_hours = 1;
+        cfg.rebalance_on_range_exit_immediately = false;
+        let engine = DecisionEngine::new(cfg);
+
+        let mut context = create_test_context(false, Decimal::ZERO);
+        context.hours_since_rebalance = 0;
+
+        let decision = engine.decide(&context);
+        assert!(
+            matches!(decision, Decision::Hold),
+            "expected Hold, got {decision:?}"
+        );
     }
 }

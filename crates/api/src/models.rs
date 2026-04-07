@@ -531,6 +531,16 @@ pub struct StrategyParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rebalance_interval_hours: Option<u64>,
 
+    /// If true, `Periodic` strategy triggers only when the position is out of range.
+    /// Default (when omitted) is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub periodic_requires_out_of_range: Option<bool>,
+
+    /// If true, range-exit may trigger immediate close+open (rebalance) instead of waiting for the interval.
+    /// Default (when omitted) is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebalance_on_range_exit_immediately: Option<bool>,
+
     /// Position PDAs linked via Open Position (`strategy_id`) or API; seeded when the strategy starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_addresses: Option<Vec<String>>,

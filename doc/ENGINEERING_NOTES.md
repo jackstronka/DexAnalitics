@@ -14,6 +14,14 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-07 — Strategy executor: OOR rebalance is scheduled by default (no immediate close+open)
+
+**keywords:** strategy executor, DecisionConfig, periodic, oor_recenter, threshold, retouch_shift, range_exit, rebalance, clmm-lp-api, clmm-lp-execution
+**paths:** `crates/execution/src/strategy/decision.rs`, `crates/api/src/models.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+- **Change:** out-of-range (OOR) no longer triggers an immediate rebalance by default for `OorRecenter` / OOR branch of `Threshold` / `RetouchShift`. Instead, it waits for `min_rebalance_interval_hours` unless `rebalance_on_range_exit_immediately=true`.
+- **Periodic:** `Periodic` now defaults to running only when OOR (`periodic_requires_out_of_range=true`) to match “rebalance every N hours *if* position is outside range”; set it to `false` for the previous “always on the timer” behavior.
+
 ## 2026-04-08 — `backtest-optimize`: siatka last-candle ze świecą 45m (@ 900s/krok)
 
 **keywords:** backtest_optimize, LAST_CANDLE_OPTIMIZE_GRID, last_candle, resolution_seconds

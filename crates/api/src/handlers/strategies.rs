@@ -666,7 +666,7 @@ async fn start_strategy_executor_core(
         fee_mode: PositionTruthMode::Heuristic,
     };
 
-    let mut executor = StrategyExecutor::new(
+    let executor = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
         state.tx_manager.clone(),
@@ -711,6 +711,20 @@ async fn start_strategy_executor_core(
         if let Some(range_width_pct) = params.get("range_width_pct").and_then(|v| v.as_f64()) {
             decision_config.range_width_pct = Decimal::from_f64_retain(range_width_pct / 100.0)
                 .unwrap_or(decision_config.range_width_pct);
+        }
+
+        if let Some(v) = params
+            .get("periodic_requires_out_of_range")
+            .and_then(|v| v.as_bool())
+        {
+            decision_config.periodic_requires_out_of_range = v;
+        }
+
+        if let Some(v) = params
+            .get("rebalance_on_range_exit_immediately")
+            .and_then(|v| v.as_bool())
+        {
+            decision_config.rebalance_on_range_exit_immediately = v;
         }
 
         if let Some(threshold) = params.get("rebalance_threshold_pct")

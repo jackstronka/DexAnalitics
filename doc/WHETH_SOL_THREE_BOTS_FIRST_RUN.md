@@ -17,7 +17,7 @@ Powiązane: [`doc/BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026
 | `strategy_kind` (JSON) | Zachowanie (intuicja) | Uwagi przy pierwszym teście |
 |------------------------|------------------------|-----------------------------|
 | `oor_recenter` | Rebalans **tylko gdy cena jest poza zakresem** (OOR), potem centrowanie na aktualnej cenie | Zwykle **mniej transakcji** niż okresowy; dobra „baza ostrożna”. |
-| `periodic` | Rebalans co **`periodic_interval_hours`** niezależnie od tego, czy jesteś w zakresie | Przewidywalny rytm; **koszt tx** może być wyższy przy krótkim interwale. |
+| `periodic` | Rebalans co **`periodic_interval_hours`** (domyślnie **tylko gdy pozycja jest poza zakresem**) | Przewidywalny rytm; **koszt tx** może być wyższy przy krótkim interwale. Ustaw `periodic_requires_out_of_range=false`, jeśli chcesz “zegar niezależnie od in-range”. |
 | `threshold` | OOR → rebalans; w zakresie → rebalans gdy odchylenie od **środka zakresu** ≥ `threshold_ratio` | Łączy reakcję na wyjście z pasma i „przeciągnięcie” środka. |
 | `retouch_shift` | Poza zakresem: **jeden** krok „retouch” krawędzi (logika `RetouchShift` + bramka `retouch_armed` w executorze) | Inna geometria niż pełne centrowanie; **obserwuj** pierwsze OOR na sucho (dry-run). |
 | `il_limit` | Progi IL (close/rebalance) | Na start często **trudniejszy** do interpretacji niż OOR/periodic; zostaw na później albo osobny eksperyment. |

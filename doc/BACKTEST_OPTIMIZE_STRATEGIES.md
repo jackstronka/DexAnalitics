@@ -69,6 +69,9 @@ Szczegóły kosztów: `doc/ORCA_RUNBOOK.md` (sekcja o rebalance cost).
 
 **Idea:** „pilnowanie” pasma wokół spotu **tylko przez wyjście poza zakres**: dopóki cena A/B jest **wewnątrz** `[lower, upper]`, **nie** robisz rebalance’u. Gdy cena **wyjdzie** (OOR — *out of range*), wykonujesz rebalance i **otwierasz nowe** symetryczne pasmo **wokół bieżącej ceny**, z tą samą względną szerokością co w siatce (`width_pct`).
 
+**Live executor (ważne):** domyślnie range-exit **nie odpala natychmiast** close+open; to jest tylko sygnał „pozycja OOR”.  
+Rebalance następuje dopiero po spełnieniu interwału (`min_rebalance_interval_hours`). Jeśli chcesz “natychmiast po wyjściu”, ustaw `rebalance_on_range_exit_immediately=true`.
+
 **Różnica względem `threshold_*`:**  
 `threshold` może zrebalance’ować także wtedy, gdy cena jest **jeszcze w zakresie**, ale **oddaliła się od środka pasma** o co najmniej zadany procent — wtedy wiele wierszy `threshold_2%` … `threshold_10%` może dawać **identyczne** wyniki, jeśli w praktyce wszystkie rebalance’e i tak wynikają tylko z OOR.  
 `oor_recenter` **usuwa** ten drugi trigger — zostaje wyłącznie OOR + recenter.
@@ -96,6 +99,8 @@ Po rebalance (poza ścieżką retouch): **pełny recenter** na bieżącą cenę 
 ### 4. `periodic` (etykieta: `periodic_<N>h`, np. `periodic_48h`)
 
 - **Rebalance:** po upływie **N godzin** od ostatniego otwarcia / rebalance’u (tryb ścienny: `WallClockSeconds` na ścieżkach snapshotów).
+- **Live executor (ważne):** domyślnie `Periodic` odpala rebalance **tylko gdy pozycja jest poza zakresem** (`periodic_requires_out_of_range=true`).  
+  Jeśli chcesz stare zachowanie („zegar tyka niezależnie od in-range”), ustaw `periodic_requires_out_of_range=false`.
 - Po rebalance: **recenter** jak wyżej.
 
 ---
