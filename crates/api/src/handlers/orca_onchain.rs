@@ -12,8 +12,8 @@ use orca_whirlpools::{
 use serde::Deserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 pub struct OrcaPositionsByOwnerQuery {

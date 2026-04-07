@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
   getPosition,
+  getPositionDiagnostics,
   closePosition,
   collectFees,
   rebalancePosition,
@@ -97,6 +98,14 @@ export default function PositionDetail() {
     queryFn: () => getPosition(address!),
     enabled: !!address,
     retry: 1,
+  })
+
+  const { data: diag } = useQuery({
+    queryKey: ['position-diagnostics', address],
+    queryFn: () => getPositionDiagnostics(address!),
+    enabled: !!address,
+    retry: 0,
+    staleTime: 15_000,
   })
 
   const { data: ledgerData } = useQuery({
@@ -303,6 +312,27 @@ export default function PositionDetail() {
   const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
   const bySession = groupLedgerBySession(ledgerRows)
 
+  const lastRebalanceIncomplete = useMemo(() => {
+    for (const r of ilRows) {
+      if (typeof r?.event === 'string' && r.event === 'rebalance_incomplete') return r
+    }
+    return null
+  }, [ilRows])
+
+  const lastRebalanceSession = useMemo(() => {
+    // Find newest session with any bot_close/bot_open events; useful even without IL ledger.
+    const sessions = Array.from(bySession.entries())
+    for (const [sid, rows] of sessions) {
+      const hasClose = rows.some((r) => typeof r.event === 'string' && r.event.includes('close'))
+      const hasOpen = rows.some((r) => typeof r.event === 'string' && r.event.includes('open'))
+      const hasSwap = rows.some((r) => typeof r.event === 'string' && r.event.includes('swap'))
+      if (hasClose || hasOpen || hasSwap) {
+        return { session: sid, rows, hasClose, hasOpen, hasSwap }
+      }
+    }
+    return null
+  }, [bySession])
+
   const rangeUsdcLine = formatUsdcPriceRange(
     position.range_lower_usdc ?? undefined,
     position.range_upper_usdc ?? undefined,
@@ -332,11 +362,72 @@ export default function PositionDetail() {
             value="ledger"
             className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
-            Ledger / rebalances
+            Logs / rebalances
           </Tabs.Trigger>
         </Tabs.List>
 
         <Tabs.Content value="overview" className="mt-4 space-y-6">
+          {(lastRebalanceIncomplete || lastRebalanceSession) && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Last rebalance diagnostics</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm space-y-2">
+                {lastRebalanceIncomplete ? (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2">
+                    <div className="font-medium text-destructive">
+                      Rebalance incomplete — old position closed, new one not opened
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {typeof lastRebalanceIncomplete.ts_utc === 'string' ? lastRebalanceIncomplete.ts_utc : '—'}
+                      {typeof lastRebalanceIncomplete.rebalance_session_id === 'string'
+                        ? ` · session ${lastRebalanceIncomplete.rebalance_session_id}`
+                        : ''}
+                    </div>
+                    {typeof lastRebalanceIncomplete.error === 'string' && lastRebalanceIncomplete.error.trim() ? (
+                      <div className="text-xs mt-2 break-words">
+                        <span className="font-medium">error:</span> {lastRebalanceIncomplete.error}
+                      </div>
+                    ) : null}
+                    {typeof lastRebalanceIncomplete.hint === 'string' && lastRebalanceIncomplete.hint.trim() ? (
+                      <div className="text-xs mt-1 break-words">
+                        <span className="font-medium">hint:</span> {lastRebalanceIncomplete.hint}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {!lastRebalanceIncomplete && lastRebalanceSession ? (
+                  <div className="rounded-md border border-border bg-muted/10 px-3 py-2">
+                    <div className="font-medium">Latest tx session (from lifecycle ledger)</div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      session:{' '}
+                      <span className="font-mono">
+                        {lastRebalanceSession.session === '_no_session'
+                          ? '(no rebalance_session_id)'
+                          : String(lastRebalanceSession.session)}
+                      </span>
+                      {lastRebalanceSession.hasClose && !lastRebalanceSession.hasOpen
+                        ? ' · close without open (likely incomplete)'
+                        : ''}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      Open the <strong>Logs / rebalances</strong> tab to see raw rows.
+                    </div>
+                  </div>
+                ) : null}
+
+                {(ledgerData?.file_missing || ilLedgerData?.file_missing) && (
+                  <div className="text-xs text-yellow-500">
+                    Bot logs are file-backed on the API host. If IL ledger is missing, set{' '}
+                    <code className="text-[11px]">CLMM_IL_LEDGER_PATH</code> (or run CLI with{' '}
+                    <code className="text-[11px]">--il-ledger-path</code>) and restart API.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           <div className="grid gap-6 md:grid-cols-2">
             <Card>
               <CardHeader>
@@ -457,6 +548,68 @@ export default function PositionDetail() {
                     <span>{formatDate(position.created_at)}</span>
                   </div>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Diagnostics</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">In monitor</span>
+                  <span>{diag?.in_monitor ? 'Yes' : 'No'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Monitor in range</span>
+                  <span>{diag?.monitor_in_range === undefined ? '—' : diag?.monitor_in_range ? 'Yes' : 'No'}</span>
+                </div>
+
+                <div className="border-t border-border/60 pt-3 space-y-2">
+                  <div className="text-muted-foreground text-xs">Linked strategies</div>
+                  {diag?.linked_strategies?.length ? (
+                    <ul className="space-y-2">
+                      {diag.linked_strategies.map((s) => (
+                        <li key={s.strategy_id} className="rounded-md border border-border/60 p-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="font-medium">
+                              <Link to={`/strategies/${s.strategy_id}`} className="text-primary hover:underline">
+                                {s.name}
+                              </Link>{' '}
+                              <span className="text-xs text-muted-foreground">({s.strategy_type})</span>
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              running: {s.running ? 'yes' : 'no'} · auto_execute: {s.auto_execute ? 'yes' : 'no'} · dry_run:{' '}
+                              {s.dry_run ? 'yes' : 'no'}
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-1">
+                            disabled for this position: {s.automation_disabled_for_position ? 'yes' : 'no'}
+                          </div>
+                          {s.last_eval ? (
+                            <div className="mt-2 text-xs font-mono text-muted-foreground space-y-1">
+                              <div>last_eval: {s.last_eval.ts_utc}</div>
+                              <div>
+                                tick_current: {s.last_eval.pool_tick_current} · in_range: {s.last_eval.in_range ? 'yes' : 'no'} · hours_since_rebalance:{' '}
+                                {s.last_eval.hours_since_rebalance ?? '—'}
+                              </div>
+                              <div>
+                                decision: {s.last_eval.decision} · requires_tx: {s.last_eval.requires_transaction ? 'yes' : 'no'} · auto_execute:{' '}
+                                {s.last_eval.auto_execute ? 'yes' : 'no'}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="mt-2 text-xs text-muted-foreground">
+                              No executor evaluation snapshot yet (strategy not running, or no tick cycle since page load).
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-muted-foreground">No linked strategies.</div>
+                  )}
+                </div>
               </CardContent>
             </Card>
 

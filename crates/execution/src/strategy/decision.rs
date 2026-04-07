@@ -207,37 +207,44 @@ impl DecisionEngine {
             }
 
             StrategyMode::IlLimit => {
-                // Check for critical IL - close position
+                // Out-of-range recenter **before** IL-close: after an OOR move, `il_pct` often spikes
+                // above `il_close_threshold`; if we tested close first, we'd `Close` (no auto re-open)
+                // instead of `Rebalance` (close + open new range).
+                if !position.in_range
+                    && context.hours_since_rebalance >= cfg.min_rebalance_interval_hours
+                {
+                    let (new_lower, new_upper) = self.calculate_new_range(pool);
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        il_pct = %position.pnl.il_pct,
+                        "IlLimit: out of range with rebalance cooldown OK — recenter"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+
+                // Critical IL while we are not taking an OOR recenter: full exit (no new position).
                 if position.pnl.il_pct.abs() > cfg.il_close_threshold {
-                    debug!("IL exceeds close threshold, recommending close");
+                    debug!(
+                        il_pct = %position.pnl.il_pct,
+                        threshold = %cfg.il_close_threshold,
+                        in_range = position.in_range,
+                        "IlLimit: IL exceeds close threshold — close only"
+                    );
                     return Decision::Close;
                 }
 
-                // Check if out of range
-                if !position.in_range {
-                    // Check if enough time has passed since last rebalance
-                    if context.hours_since_rebalance >= cfg.min_rebalance_interval_hours {
-                        let (new_lower, new_upper) = self.calculate_new_range(pool);
-                        debug!(
-                            new_lower = new_lower,
-                            new_upper = new_upper,
-                            "Position out of range, recommending rebalance"
-                        );
-                        return Decision::Rebalance {
-                            new_tick_lower: new_lower,
-                            new_tick_upper: new_upper,
-                        };
-                    }
-                }
-
-                // Check for IL-based rebalancing
+                // In-range (or OOR but rebalance cooldown not met): IL-based rebalance
                 if position.pnl.il_pct.abs() > cfg.il_rebalance_threshold
                     && context.hours_since_rebalance >= cfg.min_rebalance_interval_hours
                 {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
                         il_pct = %position.pnl.il_pct,
-                        "IL exceeds threshold, recommending rebalance"
+                        "IlLimit: IL exceeds rebalance threshold"
                     );
                     return Decision::Rebalance {
                         new_tick_lower: new_lower,
@@ -418,6 +425,20 @@ mod tests {
 
         let decision = engine.decide(&context);
         assert!(matches!(decision, Decision::Close));
+    }
+
+    /// OOR + IL above *close* threshold used to hit `Close` first — no new position. Recenter first.
+    #[test]
+    fn test_oor_rebalance_before_il_close_when_cooldown_ok() {
+        let engine = DecisionEngine::default();
+        let mut context = create_test_context(false, Decimal::new(20, 2)); // OOR + 20% IL
+        context.hours_since_rebalance = 48;
+
+        let decision = engine.decide(&context);
+        assert!(
+            matches!(decision, Decision::Rebalance { .. }),
+            "expected Rebalance, got {decision:?}"
+        );
     }
 
     #[test]

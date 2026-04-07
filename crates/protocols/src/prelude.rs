@@ -24,7 +24,7 @@ pub use crate::events::{
 };
 
 // Orca
-pub use crate::orca::deposit_quote::{quote_deposit_budget_in_range, DepositBudgetQuote};
+pub use crate::orca::deposit_quote::{DepositBudgetQuote, quote_deposit_budget_in_range};
 pub use crate::orca::executor::{
     DecreaseLiquidityParams, ExecutionResult, IncreaseLiquidityParams, OpenFullRangeParams,
     OpenPositionParams, WhirlpoolExecutor, derive_whirlpool_position_address,

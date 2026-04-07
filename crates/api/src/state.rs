@@ -217,6 +217,8 @@ pub struct ApiConfig {
     pub enable_cors: bool,
     /// Request timeout in seconds.
     pub request_timeout_secs: u64,
+    /// Request timeout in seconds for **on-chain / tx** endpoints (open/close/swap/rebalance).
+    pub onchain_request_timeout_secs: u64,
     /// Rate limit per minute.
     pub rate_limit_per_minute: u32,
     /// Override Orca public API base URL (otherwise env `ORCA_PUBLIC_API_BASE_URL` or default).
@@ -247,6 +249,7 @@ impl Default for ApiConfig {
             api_keys: vec![],
             enable_cors: true,
             request_timeout_secs: 30,
+            onchain_request_timeout_secs: 120,
             rate_limit_per_minute: 100,
             orca_public_api_base_url: None,
             event_bus_mode: "inprocess".to_string(),

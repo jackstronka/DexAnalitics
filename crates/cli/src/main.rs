@@ -506,6 +506,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         retouch_repeat_off: bool,
 
+        /// Include Bollinger Bands + last-candle anchor strategies in the optimize grid (6 BB + 14 last-candle presets; more rows).
+        #[arg(long, default_value_t = false)]
+        indicator_strategies: bool,
+
         /// Write machine-readable grid winner JSON for bots / API (`clmm-lp-execution::optimize_profile`).
         #[arg(long, value_name = "PATH")]
         optimize_result_json: Option<std::path::PathBuf>,
@@ -2773,6 +2777,7 @@ async fn main() -> Result<()> {
             retouch_repeat_rearm_secs,
             retouch_repeat_extra_move_pct,
             retouch_repeat_off,
+            indicator_strategies,
             optimize_result_json,
             optimize_result_json_copy_dir,
         } => {
@@ -3339,6 +3344,7 @@ async fn main() -> Result<()> {
             let strategies: Vec<StratConfig> =
                 crate::commands::backtest_optimize::default_strategies(
                     *static_only,
+                    *indicator_strategies,
                     *il_max_pct,
                     *il_close_pct,
                     *il_grace_steps,
@@ -3888,6 +3894,9 @@ async fn main() -> Result<()> {
                     capital_dec,
                 );
                 table.printstd();
+                println!(
+                    "   Columns: vsHODL% = (vs HODL USD) / capital. IL-like% = (LP mark-to-market + rebalance costs paid − HODL) / capital (fee income not in LP mark). Hence vs HODL USD ≈ capital×(IL-like% + fees% − rebal-cost%). TIR% = in-range steps / all steps."
+                );
             }
             // Print diverse candidate sets to support manual/bot selection
             optimize_report::print_candidate_sets(
@@ -3896,6 +3905,7 @@ async fn main() -> Result<()> {
                 use_cross_pair,
                 audit_step_data.as_ref(),
                 capital_dec,
+                *resolution_seconds,
             );
             println!();
 

@@ -3,6 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 
 use crate::backtest_engine::StepData;
+use crate::backtest_engine::{parse_strategy_label, StratConfig};
 use clmm_lp_simulation::prelude::TrackerSummary;
 
 pub fn round2(d: Decimal) -> Decimal {
@@ -95,9 +96,14 @@ pub fn print_best_block(
         round2(best.4.vs_hodl),
     );
     println!(
-        "   Final value: ${:.2}   Fees: ${:.2}   Drag(ex-fees vs HODL): {:.2}%   TIR: {:.1}%   Rebalances: {} (${:.2})",
+        "   Final value: ${:.2}   Fees: ${:.2}   vs HODL: {:+.2}% cap   IL-like(ex-fee): {:.2}% cap   TIR: {:.1}%   Rebalances: {} (${:.2})",
         best.4.final_value,
         best.4.total_fees,
+        if capital_dec > Decimal::ZERO {
+            (best.4.vs_hodl / capital_dec) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        },
         best.4.final_il_pct * Decimal::from(100),
         best.4.time_in_range_pct * Decimal::from(100),
         best.4.rebalance_count,
@@ -282,8 +288,9 @@ pub fn build_results_table(
         "FinalValue",
         "PnL",
         "vs HODL",
+        "vsHODL%",
         "TIR%",
-        "Drag%"
+        "IL-like%"
     ]);
 
     for (i, (_wp, lo, up, name, s, sc)) in results.iter().take(top_n).enumerate() {
@@ -315,6 +322,14 @@ pub fn build_results_table(
             format!("{:.2}", round2(s.final_value)),
             format!("{:+.2}", round2(s.final_pnl)),
             format!("{:+.2}", round2(s.vs_hodl)),
+            format!(
+                "{:.2}%",
+                if capital_dec > Decimal::ZERO {
+                    (s.vs_hodl / capital_dec) * Decimal::from(100)
+                } else {
+                    Decimal::ZERO
+                }
+            ),
             format!("{:.1}%", s.time_in_range_pct * Decimal::from(100)),
             format!("{:.2}%", s.final_il_pct * Decimal::from(100)),
         ]);
@@ -328,6 +343,7 @@ pub fn print_candidate_sets(
     use_cross_pair: bool,
     audit_step_data: Option<&Vec<StepData>>,
     capital_dec: Decimal,
+    resolution_seconds: u64,
 ) {
     if results.is_empty() {
         return;
@@ -459,4 +475,89 @@ pub fn print_candidate_sets(
         low_high,
         capital_dec,
     );
+
+    // Full grid audit: summarize each LastCandle variant (candle_steps × rebalance_steps)
+    // by its best-performing width/range (according to the caller's objective score).
+    let mut last_candle_best: std::collections::BTreeMap<(u64, u64), (f64, f64, f64, String, TrackerSummary, Decimal)> =
+        std::collections::BTreeMap::new();
+    for row in results.iter().cloned() {
+        let name = row.3.as_str();
+        let Some(cfg) = parse_strategy_label(name) else { continue };
+        let StratConfig::LastCandle { candle_steps, rebalance_steps } = cfg else { continue };
+        let key = (candle_steps, rebalance_steps);
+        match last_candle_best.get(&key) {
+            None => {
+                last_candle_best.insert(key, row);
+            }
+            Some(prev) => {
+                if row.5 > prev.5 {
+                    last_candle_best.insert(key, row);
+                }
+            }
+        }
+    }
+
+    if !last_candle_best.is_empty() {
+        // In snapshot-path mode, steps are raw snapshot rows (irregular spacing); `resolution_seconds`
+        // is only an indexing hint. For a meaningful wall-clock label, derive step cadence from data.
+        let derived_step_seconds: u64 = audit_step_data
+            .and_then(|v| {
+                if v.len() < 3 {
+                    return None;
+                }
+                let mut dts: Vec<u64> = v
+                    .windows(2)
+                    .map(|w| w[1].start_timestamp.saturating_sub(w[0].start_timestamp))
+                    .filter(|dt| *dt > 0)
+                    .collect();
+                if dts.len() < 3 {
+                    return None;
+                }
+                dts.sort_unstable();
+                Some(dts[dts.len() / 2].max(1))
+            })
+            .unwrap_or_else(|| resolution_seconds.max(1));
+
+        let fmt_span = |steps: u64| -> String {
+            let secs = steps.saturating_mul(derived_step_seconds);
+            if secs < 3600 {
+                format!("{}m", secs / 60)
+            } else if secs % 3600 == 0 {
+                format!("{}h", secs / 3600)
+            } else {
+                format!("{:.1}h", (secs as f64) / 3600.0)
+            }
+        };
+
+        println!();
+        println!("== Last-candle grid (best per variant) ==");
+        let mut t = Table::new();
+        t.add_row(row![
+            "candle_steps",
+            "candle_time",
+            "rebalance_steps",
+            "rebalance_time",
+            "best_width%",
+            "Score",
+            "vsHODL",
+            "Fees",
+            "TIR%",
+            "Rebals"
+        ]);
+        for ((cs, rs), (wp, _lo_usd, _up_usd, _name, s, sc)) in last_candle_best.iter() {
+            t.add_row(row![
+                cs,
+                fmt_span(*cs),
+                rs,
+                fmt_span(*rs),
+                format!("{:.2}", wp * 100.0),
+                format!("{:+.2}", round2(*sc)),
+                format!("{:+.2}", round2(s.vs_hodl)),
+                format!("{:.2}", round2(s.total_fees)),
+                format!("{:.1}", pct(s.time_in_range_pct)),
+                format!("{}", s.rebalance_count),
+            ]);
+        }
+        t.printstd();
+    }
 }

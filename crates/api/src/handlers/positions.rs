@@ -4,7 +4,8 @@ use crate::error::{ApiError, ApiResult};
 use crate::handlers::strategies::ensure_strategy_running_after_position_link;
 use crate::models::{
     DecreaseLiquidityRequest, LinkPositionStrategyRequest, ListPositionsResponse, MessageResponse,
-    OpenPositionRequest, PnLResponse, PositionOpenResponse, PositionResponse, PositionStatus,
+    OpenPositionRequest, PnLResponse, PositionDiagnosticsResponse, PositionLastEvalSnapshot,
+    PositionOpenResponse, PositionResponse, PositionStatus, PositionStrategyDiagnostics,
     RebalanceRequest, SwapBeforeOpenRequest, SwapBeforeOpenResponse, UncollectedFeesInfo,
 };
 use crate::services::strategy_service::{
@@ -24,7 +25,7 @@ use crate::services::PositionService;
 use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
-    refresh_position_fees_from_chain, tick_range_usdc_for_position,
+    range_usdc_and_in_range_for_pool_ticks, refresh_position_fees_from_chain,
     uncollected_fees_info_for_position,
 };
 use std::collections::HashSet;
@@ -91,10 +92,18 @@ pub async fn list_positions(
             .map(|v| v.fees_usd)
             .unwrap_or(p.pnl.fees_usd);
 
-        let range_usdc = if let Some(r) = valuation.as_ref().and_then(|v| v.range_usdc.as_ref()) {
-            Some(r.clone())
-        } else {
-            tick_range_usdc_for_position(state.provider.clone(), p).await
+        let (range_usdc, in_range_fresh) = match valuation.as_ref() {
+            Some(v) => (v.range_usdc.as_ref().cloned(), v.in_range),
+            None => {
+                let (range, in_range) = range_usdc_and_in_range_for_pool_ticks(
+                    state.provider.clone(),
+                    &p.pool,
+                    p.on_chain.tick_lower,
+                    p.on_chain.tick_upper,
+                )
+                .await;
+                (range, in_range)
+            }
         };
 
         let uncollected_fees = match valuation.as_ref() {
@@ -118,7 +127,7 @@ pub async fn list_positions(
             range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
             uncollected_fees,
             liquidity: p.on_chain.liquidity.to_string(),
-            in_range: p.in_range,
+            in_range: in_range_fresh,
             value_usd,
             pnl: PnLResponse {
                 unrealized_pnl_usd: p.pnl.net_pnl_usd,
@@ -130,7 +139,7 @@ pub async fn list_positions(
                 net_pnl_usd: p.pnl.net_pnl_usd,
                 net_pnl_pct: p.pnl.net_pnl_pct,
             },
-            status: if p.in_range {
+            status: if in_range_fresh {
                 PositionStatus::Active
             } else {
                 PositionStatus::OutOfRange
@@ -200,10 +209,18 @@ pub async fn get_position(
         .map(|v| v.fees_usd)
         .unwrap_or(position.pnl.fees_usd);
 
-    let range_usdc = if let Some(r) = valuation.as_ref().and_then(|v| v.range_usdc.as_ref()) {
-        Some(r.clone())
-    } else {
-        tick_range_usdc_for_position(state.provider.clone(), &position).await
+    let (range_usdc, in_range_fresh) = match valuation.as_ref() {
+        Some(v) => (v.range_usdc.as_ref().cloned(), v.in_range),
+        None => {
+            let (range, in_range) = range_usdc_and_in_range_for_pool_ticks(
+                state.provider.clone(),
+                &position.pool,
+                position.on_chain.tick_lower,
+                position.on_chain.tick_upper,
+            )
+            .await;
+            (range, in_range)
+        }
     };
 
     let uncollected_fees = match valuation.as_ref() {
@@ -227,7 +244,7 @@ pub async fn get_position(
         range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
         uncollected_fees,
         liquidity: position.on_chain.liquidity.to_string(),
-        in_range: position.in_range,
+        in_range: in_range_fresh,
         value_usd,
         pnl: PnLResponse {
             unrealized_pnl_usd: position.pnl.net_pnl_usd,
@@ -239,7 +256,7 @@ pub async fn get_position(
             net_pnl_usd: position.pnl.net_pnl_usd,
             net_pnl_pct: position.pnl.net_pnl_pct,
         },
-        status: if position.in_range {
+        status: if in_range_fresh {
             PositionStatus::Active
         } else {
             PositionStatus::OutOfRange
@@ -248,6 +265,111 @@ pub async fn get_position(
     };
 
     Ok(Json(response))
+}
+
+/// Get "why didn't this position rebalance?" diagnostics.
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/diagnostics",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position address")
+    ),
+    responses(
+        (status = 200, description = "Diagnostics", body = PositionDiagnosticsResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_diagnostics(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionDiagnosticsResponse>> {
+    let pubkey = Pubkey::from_str(&address)
+        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    let monitored = state.monitor.get_position(&pubkey).await;
+    let in_monitor = monitored.is_some();
+    let monitor_in_range = monitored.as_ref().map(|p| p.in_range);
+
+    let strategies = state.strategies.read().await;
+    let mut linked: Vec<PositionStrategyDiagnostics> = Vec::new();
+    for s in strategies.values() {
+        let params = s.config.get("parameters");
+        let position_addresses = params
+            .and_then(|p| p.get("position_addresses"))
+            .and_then(|v| v.as_array());
+        let is_linked = position_addresses.is_some_and(|arr| {
+            arr.iter()
+                .any(|v| v.as_str().map(str::trim) == Some(address.trim()))
+        });
+        if !is_linked {
+            continue;
+        }
+
+        let disabled = params
+            .and_then(|p| p.get("executor_disabled_position_addresses"))
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| {
+                arr.iter()
+                    .any(|v| v.as_str().map(str::trim) == Some(address.trim()))
+            });
+
+        let strategy_type = s
+            .config
+            .get("strategy_type")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(crate::models::StrategyType::StaticRange);
+        let dry_run = s
+            .config
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let auto_execute = s
+            .config
+            .get("auto_execute")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let last_eval = if s.running {
+            let exec_opt = { state.executors.read().await.get(&s.id).cloned() };
+            if let Some(exec) = exec_opt {
+                let g = exec.read().await;
+                g.last_evaluation_for_position(&pubkey)
+                    .await
+                    .map(|snap| PositionLastEvalSnapshot {
+                        ts_utc: snap.ts_utc,
+                        in_range: snap.in_range,
+                        pool_tick_current: snap.pool_tick_current,
+                        decision: snap.decision,
+                        requires_transaction: snap.requires_transaction,
+                        auto_execute: snap.auto_execute,
+                        hours_since_rebalance: snap.hours_since_rebalance,
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        linked.push(PositionStrategyDiagnostics {
+            strategy_id: s.id.clone(),
+            name: s.name.clone(),
+            strategy_type,
+            running: s.running,
+            dry_run,
+            auto_execute,
+            automation_disabled_for_position: disabled,
+            last_eval,
+        });
+    }
+
+    Ok(Json(PositionDiagnosticsResponse {
+        address,
+        in_monitor,
+        monitor_in_range,
+        linked_strategies: linked,
+    }))
 }
 
 /// Executes an Orca Whirlpool swap (ExactIn) inside the same pool (SWAP-only step).
@@ -395,8 +517,7 @@ pub async fn open_position(
                 }));
             }
         }
-        if let Some(pda) = position_pda_opt
-        {
+        if let Some(pda) = position_pda_opt {
             let swap_signature = data
                 .and_then(|d| d.get("swap_signature"))
                 .and_then(|v| v.as_str())

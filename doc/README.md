@@ -10,6 +10,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Roadmap produktowa (strategie ↔ pozycja, shadow / historia):** [`ROADMAP.md`](ROADMAP.md) — wiele strategii na jednej pozycji (1 live + N shadow), odświeżanie co kilka minut, **zachowanie historii przypisań** przy zmianach.
 
+**Strategie Bollinger + ostatnia świeca (backtest, API, bot):** [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) — plan faz; [`ROADMAP.md`](ROADMAP.md) — opis produktowy.
+
 **Roadmap strategii (Jupiter / multi-venue / CLMM):** [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) — hipoteza routingu i fee; przenoszenie zakresów pod wolumen skierowany przez agregator; co zweryfikować danymi.
 
 ## Architecture and product
@@ -28,6 +30,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 | Document | Purpose |
 | -------- | ------- |
+| [`PRODUCTION_FAST_PATH.md`](PRODUCTION_FAST_PATH.md) | **Shortest path to live Orca bot CLI** — env, order dry-run → execute, links |
 | [`ORCA_RUNBOOK.md`](ORCA_RUNBOOK.md) | Orca-specific operational steps and notes |
 | [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | Step-by-step wallet setup + bot launch flow on devnet (`dry-run` -> `limited-live`) |
 | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) | Contract: `OrcaReadService` (REST) + `OrcaTxService` (on-chain), endpoint/method map, implementation checklist |
@@ -46,6 +49,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | Document | Purpose |
 | -------- | ------- |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | Strategy catalog semantics for `backtest` / `backtest-optimize` |
+| [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | Plan: strategie Bollinger i ostatnia świeca (symulacja, API, web, execution) |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | Focused backtest-optimize notes (example pair / fees) |
 | [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) | Jupiter aggregation, routing vs fee tier, hypothesis for CLMM range placement across venues |
 
@@ -90,6 +94,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | stream, narrator, obs, studio, agent |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | async, event bus, kafka, nats, redis, rollout |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |
+| [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | bollinger, candle, StratConfig, StrategyMode, backtest, roadmap |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | whETH/SOL, fees, grid example |
 | [`BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md`](BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md) | hybrid bot, scoring, contract (snapshot) |
 | [`BOT_HYBRID_DEFINITION_OF_READY_2026-03-23.md`](BOT_HYBRID_DEFINITION_OF_READY_2026-03-23.md) | DoR, Go/No-Go (snapshot) |

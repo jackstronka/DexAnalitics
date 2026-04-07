@@ -6,10 +6,10 @@
 //! - Execute LP operations
 //! - Calculate token amounts
 
-/// Executor for on-chain operations.
-pub mod executor;
 /// In-range deposit sizing from a USD budget (token caps for Whirlpool).
 pub mod deposit_quote;
+/// Executor for on-chain operations.
+pub mod executor;
 /// Pool reader for on-chain state.
 pub mod pool_reader;
 /// Position reader for on-chain state.

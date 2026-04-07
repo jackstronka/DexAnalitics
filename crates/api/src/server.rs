@@ -11,11 +11,9 @@ use clmm_lp_protocols::prelude::RpcConfig;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{Any, CorsLayer},
-    timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 use tracing::info;
@@ -78,7 +76,11 @@ impl ApiServer {
             self.config.api_config.rate_limit_per_minute,
         ));
 
-        let mut router = create_versioned_router(self.state.clone());
+        let mut router = create_versioned_router(
+            self.state.clone(),
+            self.config.api_config.request_timeout_secs,
+            self.config.api_config.onchain_request_timeout_secs,
+        );
 
         // Add Swagger UI at /docs
         router =
@@ -96,13 +98,9 @@ impl ApiServer {
             router = router.layer(cors);
         }
 
-        // Add timeout
-        #[allow(deprecated)]
-        {
-            router = router.layer(TimeoutLayer::new(Duration::from_secs(
-                self.config.api_config.request_timeout_secs,
-            )));
-        }
+        // Timeouts are applied per-router in `routes`:
+        // - regular requests: `request_timeout_secs`
+        // - on-chain tx endpoints: `onchain_request_timeout_secs`
 
         // Add tracing
         router = router.layer(TraceLayer::new_for_http());

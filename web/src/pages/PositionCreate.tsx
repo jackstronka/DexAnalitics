@@ -165,6 +165,7 @@ export default function PositionCreate() {
   const [swapCostSessionId, setSwapCostSessionId] = useState<string | null>(null)
   const [swapSignature, setSwapSignature] = useState<string | null>(null)
   const [swapStepError, setSwapStepError] = useState<string | null>(null)
+  const [openStepError, setOpenStepError] = useState<string | null>(null)
 
   /** Editable price range (mint B per 1 mint A); when `syncPriceInputsFromTicks`, fields mirror ticks. */
   const [priceRangeLo, setPriceRangeLo] = useState('')
@@ -367,6 +368,20 @@ export default function PositionCreate() {
     staleTime: 60_000,
   })
 
+  const currentTick = useMemo(() => {
+    const t = poolStateQ.data?.current_tick ?? poolQ.data?.current_tick
+    return typeof t === 'number' && Number.isFinite(t) ? t : null
+  }, [poolStateQ.data?.current_tick, poolQ.data?.current_tick])
+
+  const budgetTickRangeInPrice = useMemo(() => {
+    if (currentTick == null) return null
+    if (tickLower === '' || tickUpper === '') return null
+    const tl = Number(tickLower)
+    const tu = Number(tickUpper)
+    if (!Number.isFinite(tl) || !Number.isFinite(tu)) return null
+    return tl <= currentTick && currentTick < tu
+  }, [currentTick, tickLower, tickUpper])
+
   const budgetQuoteEnabled =
     mode === 'budget' &&
     poolAddress.trim().length > 0 &&
@@ -376,7 +391,10 @@ export default function PositionCreate() {
     Number.isFinite(Number(totalUsd)) &&
     Number(totalUsd) > 0 &&
     Number.isFinite(Number(tickLower)) &&
-    Number.isFinite(Number(tickUpper))
+    Number.isFinite(Number(tickUpper)) &&
+    // Backend quote requires current price to be in-range; otherwise it errors.
+    // When we can infer current tick, block the request and show a clear UI hint.
+    (budgetTickRangeInPrice !== false)
 
   const budgetQuoteQ = useQuery({
     queryKey: ['quote-open-budget', poolAddress.trim(), tickLower, tickUpper, totalUsd],
@@ -659,6 +677,7 @@ export default function PositionCreate() {
   const mutation = useMutation({
     mutationFn: openPosition,
     onSuccess: (data) => {
+      setOpenStepError(null)
       queryClient.invalidateQueries({ queryKey: ['positions'] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
       if (data.position_pda?.trim()) {
@@ -667,10 +686,15 @@ export default function PositionCreate() {
         navigate('/positions')
       }
     },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setOpenStepError(`POST /api/v1/positions failed: ${msg}`)
+    },
   })
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    setOpenStepError(null)
     const pool = poolQ.data
     if (
       !poolAddress.trim() ||
@@ -680,18 +704,24 @@ export default function PositionCreate() {
       amountBUi === '' ||
       !pool
     ) {
+      setOpenStepError('Uzupełnij wymagane pola (pool, ticki i kwoty tokenów).')
       return
     }
 
     if (mode === 'budget' && budgetSubmitRaw == null) {
+      setOpenStepError('Tryb USD: poczekaj na wyliczenie kwot (quote) zanim wyślesz.')
       return
     }
 
     if (fundingCheck.ready && fundingCheck.blocked) {
       if (swapBeforeOpen) {
         // Two-step flow: open is allowed only after swap succeeded.
-        if (!swapSignature) return
+        if (!swapSignature) {
+          setOpenStepError('Najpierw wykonaj swap (krok 1), dopiero potem otwórz pozycję.')
+          return
+        }
       } else {
+        setOpenStepError('Za mało tokenów na portfelu dla zadanych kwot (zrób swap albo zmniejsz Amount).')
         return
       }
     }
@@ -709,12 +739,14 @@ export default function PositionCreate() {
         aRaw > Number.MAX_SAFE_INTEGER ||
         bRaw > Number.MAX_SAFE_INTEGER
       ) {
+        setOpenStepError('Nieprawidłowe capy z quote (przekroczony limit liczb w JS).')
         return
       }
     } else {
       aRaw = toBaseUnitsU64(Number(amountAUi), tokenA!.decimals)
       bRaw = toBaseUnitsU64(Number(amountBUi), tokenB!.decimals)
       if (aRaw === null || bRaw === null) {
+        setOpenStepError('Kwoty tokenów są nieprawidłowe lub za duże (przekraczają bezpieczny zakres).')
         return
       }
     }
@@ -1067,6 +1099,43 @@ export default function PositionCreate() {
                       onChange={(e) => setTotalUsd(e.target.value === '' ? '' : Number(e.target.value))}
                       placeholder="np. 3"
                     />
+                    {budgetTickRangeInPrice === false ? (
+                      <div className="text-xs text-amber-600/90 mt-1 space-y-1">
+                        <div>
+                          Cena puli jest poza zakresem ticków — quote USD nie może policzyć kwot A/B. Ustaw zakres tak,
+                          żeby obejmował bieżącą cenę (in-range).
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              const spacing = poolQ.data?.tick_spacing
+                              if (spacing == null || currentTick == null) return
+                              const width = strategyRangeWidthPct != null && strategyRangeWidthPct > 0 ? strategyRangeWidthPct : 2
+                              const { tickLower: tl, tickUpper: tu } = calculateTickRangeFromWidthPct(
+                                currentTick,
+                                width,
+                                spacing,
+                              )
+                              setTickLower(tl)
+                              setTickUpper(tu)
+                              setTickAutoSync(false)
+                              setSyncPriceInputsFromTicks(true)
+                            }}
+                            disabled={currentTick == null || poolQ.data?.tick_spacing == null}
+                          >
+                            Ustaw ticki wokół ceny
+                          </Button>
+                          {currentTick != null ? (
+                            <span className="text-[11px] text-muted-foreground font-mono tabular-nums">
+                              current_tick={currentTick}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
                     {budgetQuoteQ.isFetching ? (
                       <div className="text-xs text-muted-foreground mt-1">Liczę kwoty A/B z krzywej puli…</div>
                     ) : null}
@@ -1371,6 +1440,40 @@ export default function PositionCreate() {
                 ) : null}
               </div>
             )}
+
+            {openStepError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <div className="font-medium">Open failed</div>
+                <div className="break-words">
+                  {openStepError.length > 220 ? `${openStepError.slice(0, 220)}…` : openStepError}
+                </div>
+                {openStepError.toLowerCase().includes('insufficient sol') ? (
+                  <div className="mt-2 text-[11px] text-muted-foreground">
+                    Tip: możesz szybko podmienić tokeny na SOL w Jupiterze. Wejdź w menu <strong>Swap</strong> albo użyj Jupitera:
+                    {' '}
+                    <a
+                      className="underline underline-offset-2 hover:opacity-90"
+                      href="https://jup.ag/swap?outputMint=So11111111111111111111111111111111111111112"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      swap to SOL
+                    </a>
+                    .
+                  </div>
+                ) : null}
+                {openStepError.length > 220 ? (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer select-none text-[11px] text-destructive/90">
+                      Show details
+                    </summary>
+                    <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-[11px] text-foreground/80">
+                      {openStepError}
+                    </pre>
+                  </details>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="flex justify-end gap-2 pt-2">
               <Link to="/positions">

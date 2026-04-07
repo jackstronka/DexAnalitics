@@ -38,7 +38,7 @@ pub struct OptimizeResultFile {
 pub struct OptimizeWinner {
     /// Simulator label, e.g. `periodic_24h`, `threshold_5%`.
     pub strategy_label: String,
-    /// One of: `static`, `periodic`, `threshold`, `il_limit`, `retouch_shift`, `oor_recenter`.
+    /// One of: `static`, `periodic`, `threshold`, `il_limit`, `retouch_shift`, `oor_recenter`, `bollinger`, `last_candle`.
     pub strategy_kind: String,
     /// Total range width as a **fraction** (matches backtest grid / `DecisionConfig.range_width_pct`), e.g. `0.1` = 10%.
     pub width_pct: f64,

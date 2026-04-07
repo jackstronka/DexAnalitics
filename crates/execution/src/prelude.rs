@@ -44,9 +44,9 @@ pub use crate::optimize_profile::{
 
 // Strategy
 pub use crate::strategy::{
-    Decision, DecisionConfig, DecisionContext, DecisionEngine, ExecutorConfig, ProfitabilityCheck,
-    RebalanceConfig, RebalanceExecutor, RebalanceParams, RebalanceResult, StrategyExecutor,
-    StrategyMode,
+    Decision, DecisionConfig, DecisionContext, DecisionEngine, ExecutorConfig, PendingOpenItem,
+    PendingOpenStore, ProfitabilityCheck, RebalanceConfig, RebalanceExecutor, RebalanceParams,
+    RebalanceProfitabilityMode, RebalanceResult, RecoverOpenParams, StrategyExecutor, StrategyMode,
 };
 
 // Sync

@@ -19,6 +19,7 @@ clmm-lp-protocols = { workspace = true }
 clmm-lp-optimization = { workspace = true }
 solana-client = { workspace = true }
 solana-sdk = { workspace = true }
+spl-token = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

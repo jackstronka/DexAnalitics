@@ -90,6 +90,20 @@ pub fn decision_config_from_optimize_result(
                 let _ = g;
             }
         }
+        "bollinger" => {
+            // Backtest uses band touches; live: approximate with Threshold on midpoint deviation.
+            cfg.strategy_mode = StrategyMode::Threshold;
+            let t = w
+                .threshold_ratio
+                .unwrap_or_else(|| (w.width_pct * 0.5).max(1e-6));
+            cfg.threshold_pct = Decimal::from_f64_retain(t).ok_or_else(|| {
+                OptimizeProfileError::InvalidDecimal("threshold_ratio (bollinger)", t.to_string())
+            })?;
+        }
+        "last_candle" => {
+            // Backtest recent-candle logic → live: recenter when out of range only.
+            cfg.strategy_mode = StrategyMode::OorRecenter;
+        }
         other => {
             return Err(OptimizeProfileError::UnknownStrategyKind(other.to_string()));
         }
@@ -155,6 +169,43 @@ mod tests {
         assert_eq!(c.strategy_mode, StrategyMode::Periodic);
         assert_eq!(c.periodic_interval_hours, 24);
         assert_eq!(c.range_width_pct, Decimal::from_f64_retain(0.08).unwrap());
+    }
+
+    #[test]
+    fn maps_bollinger_to_threshold() {
+        let f = minimal_file(OptimizeWinner {
+            strategy_label: "bollinger".to_string(),
+            strategy_kind: "bollinger".to_string(),
+            width_pct: 0.1,
+            range_lower_usd: 1.0,
+            range_upper_usd: 2.0,
+            periodic_interval_hours: None,
+            threshold_ratio: Some(0.02),
+            il_max_ratio: None,
+            il_close_ratio: None,
+            il_grace_steps: None,
+        });
+        let c = decision_config_from_optimize_result(&f).unwrap();
+        assert_eq!(c.strategy_mode, StrategyMode::Threshold);
+        assert_eq!(c.threshold_pct, Decimal::from_f64_retain(0.02).unwrap());
+    }
+
+    #[test]
+    fn maps_last_candle_to_oor_recenter() {
+        let f = minimal_file(OptimizeWinner {
+            strategy_label: "last_candle".to_string(),
+            strategy_kind: "last_candle".to_string(),
+            width_pct: 0.1,
+            range_lower_usd: 1.0,
+            range_upper_usd: 2.0,
+            periodic_interval_hours: None,
+            threshold_ratio: None,
+            il_max_ratio: None,
+            il_close_ratio: None,
+            il_grace_steps: None,
+        });
+        let c = decision_config_from_optimize_result(&f).unwrap();
+        assert_eq!(c.strategy_mode, StrategyMode::OorRecenter);
     }
 
     #[test]

@@ -9,6 +9,8 @@ use crate::state::AppState;
 use axum::{Json, extract::State};
 use clmm_lp_execution::prelude::CircuitState;
 use std::time::Instant;
+use std::time::Duration;
+use tokio::time::timeout;
 
 /// Start time for uptime calculation.
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -55,8 +57,11 @@ pub async fn health_check(State(state): State<AppState>) -> ApiResult<Json<Healt
         CircuitState::HalfOpen => CircuitBreakerStatus::HalfOpen,
     };
 
-    // Check RPC health
-    let rpc_healthy = state.provider.get_slot().await.is_ok();
+    // Check RPC health (bounded time). Health endpoint should be fast even on flaky public RPC.
+    let rpc_healthy = timeout(Duration::from_millis(1500), state.provider.get_slot())
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
 
     let status = if rpc_healthy && circuit_state == CircuitState::Closed {
         ServiceStatus::Healthy

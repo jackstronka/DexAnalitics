@@ -13,8 +13,10 @@ import Pools from '@/pages/Pools'
 import PoolDetail from '@/pages/PoolDetail'
 import Settings from '@/pages/Settings'
 import BotActivity from '@/pages/BotActivity'
+import Logs from '@/pages/Logs'
 import Scripts from '@/pages/Scripts'
 import Wallet from '@/pages/Wallet'
+import Swap from '@/pages/Swap'
 
 function App() {
   return (
@@ -25,6 +27,7 @@ function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="wallet" element={<Wallet />} />
+            <Route path="swap" element={<Swap />} />
             <Route path="scripts" element={<Scripts />} />
             <Route path="positions" element={<Positions />} />
             <Route path="positions/new" element={<PositionCreate />} />
@@ -36,6 +39,7 @@ function App() {
             <Route path="pools" element={<Pools />} />
             <Route path="pools/:address" element={<PoolDetail />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="logs" element={<Logs />} />
             <Route path="bot-activity" element={<BotActivity />} />
           </Route>
         </Routes>

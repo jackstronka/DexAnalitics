@@ -3,7 +3,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     BotActivityJsonlResponse, BotRegistryJsonlResponse, SlackActivitySummaryRequest,
-    SlackActivitySummaryResponse,
+    SlackActivitySummaryResponse, PendingOpenRecoveryResponse,
 };
 use crate::state::AppState;
 use axum::{
@@ -152,6 +152,53 @@ pub async fn get_bot_registry(
         total_matching_lines: total_matching,
         rows_returned: rows.len(),
         rows,
+    }))
+}
+
+/// Read pending-open recovery JSON (`CLMM_PENDING_OPEN_RECOVERY_PATH`).
+#[utoipa::path(
+    get,
+    path = "/bot-activity/pending-open",
+    tag = "Bot activity",
+    responses(
+        (status = 200, description = "Pending open recovery document", body = PendingOpenRecoveryResponse)
+    )
+)]
+pub async fn get_pending_open_recovery(
+    State(_state): State<AppState>,
+) -> ApiResult<Json<PendingOpenRecoveryResponse>> {
+    let path = std::env::var("CLMM_PENDING_OPEN_RECOVERY_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "data/pending-open-recovery.json".to_string());
+
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Ok(Json(PendingOpenRecoveryResponse {
+            path,
+            file_missing: true,
+            data: None,
+        }));
+    }
+
+    let txt = std::fs::read_to_string(&p)
+        .map_err(|e| ApiError::internal(format!("read pending-open file: {e}")))?;
+    let trimmed = txt.trim();
+    if trimmed.is_empty() {
+        return Ok(Json(PendingOpenRecoveryResponse {
+            path,
+            file_missing: false,
+            data: Some(serde_json::json!({})),
+        }));
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| ApiError::internal(format!("parse pending-open JSON: {e}")))?;
+
+    Ok(Json(PendingOpenRecoveryResponse {
+        path,
+        file_missing: false,
+        data: Some(v),
     }))
 }
 

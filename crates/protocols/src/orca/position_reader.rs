@@ -11,6 +11,7 @@ use crate::events::OnChainPosition;
 use crate::rpc::RpcProvider;
 use anyhow::{Context, Result};
 use borsh::BorshDeserialize;
+use primitive_types::U256;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -195,12 +196,9 @@ impl PositionReader {
         let sqrt_price_lower = tick_to_sqrt_price(tick_lower);
         let sqrt_price_upper = tick_to_sqrt_price(tick_upper);
 
-        // amount_a = L * (1/sqrt_price_lower - 1/sqrt_price_upper)
-        let inv_lower = (1u128 << 64) / sqrt_price_lower;
-        let inv_upper = (1u128 << 64) / sqrt_price_upper;
-
-        let delta = inv_lower.saturating_sub(inv_upper);
-        ((liquidity * delta) >> 64) as u64
+        // Exact form (avoids inverse floor collapse):
+        // amount_a = L * (√Pu - √Pl) * 2^64 / (√Pl * √Pu)
+        amount_a_q64_exact(liquidity, sqrt_price_lower, sqrt_price_upper)
     }
 
     /// Gets amount of token B when position is above current tick.
@@ -222,12 +220,7 @@ impl PositionReader {
         sqrt_price: u128,
     ) -> u64 {
         let sqrt_price_upper = tick_to_sqrt_price(tick_upper);
-
-        let inv_current = (1u128 << 64) / sqrt_price;
-        let inv_upper = (1u128 << 64) / sqrt_price_upper;
-
-        let delta = inv_current.saturating_sub(inv_upper);
-        ((liquidity * delta) >> 64) as u64
+        amount_a_q64_exact(liquidity, sqrt_price, sqrt_price_upper)
     }
 
     /// Gets amount of token B when in range.
@@ -251,6 +244,27 @@ fn tick_to_sqrt_price(tick: i32) -> u128 {
     let base: f64 = 1.0001;
     let sqrt_price = base.powi(tick).sqrt() * (1u128 << 64) as f64;
     sqrt_price as u128
+}
+
+fn amount_a_q64_exact(liquidity: u128, sqrt_lower_or_current: u128, sqrt_upper: u128) -> u64 {
+    if sqrt_lower_or_current == 0 || sqrt_upper == 0 || sqrt_upper <= sqrt_lower_or_current {
+        return 0;
+    }
+    let l = U256::from(liquidity);
+    let sl = U256::from(sqrt_lower_or_current);
+    let su = U256::from(sqrt_upper);
+    let diff = su - sl;
+    if diff.is_zero() {
+        return 0;
+    }
+    let num = l * diff * U256::from(1u128 << 64);
+    let den = sl * su;
+    if den.is_zero() {
+        return 0;
+    }
+    let q = num / den;
+    let cap = U256::from(u64::MAX);
+    if q > cap { u64::MAX } else { q.as_u64() }
 }
 
 #[cfg(test)]

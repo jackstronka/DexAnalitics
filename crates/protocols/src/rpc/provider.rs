@@ -9,6 +9,7 @@ use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
+use solana_sdk::transaction::Transaction;
 use solana_transaction_status_client_types::{
     EncodedConfirmedTransactionWithStatusMeta, UiTransactionEncoding,
 };
@@ -420,7 +421,38 @@ impl RpcProvider {
                 match client.send_transaction(&tx).await {
                     Ok(sig) => break Ok(sig),
                     Err(e) => {
-                        let err = anyhow::Error::new(e).context("send_transaction");
+                        // `solana_client` errors are often opaque in Display; keep Debug for UI/ops.
+                        // Also include endpoint to distinguish rate-limit / auth / cluster issues.
+                        let mut err_s =
+                            format!("send_transaction failed (endpoint={endpoint}): {e:?}");
+
+                        // When preflight simulation fails, try to fetch logs for actionable diagnostics.
+                        // This keeps the error useful for UI users without requiring server-side log access.
+                        let e_dbg = format!("{e:?}");
+                        if e_dbg.contains("Transaction simulation failed") {
+                            if let Ok(sim) = client.simulate_transaction(&tx).await {
+                                let v = sim.value;
+                                if let Some(sim_err) = v.err {
+                                    err_s.push_str(&format!(" | simulation_err={sim_err:?}"));
+                                }
+                                if let Some(logs) = v.logs {
+                                    // Keep the message bounded; UI shows ~400 chars by default.
+                                    let mut joined = logs.join(" | ");
+                                    if joined.len() > 2500 {
+                                        joined.truncate(2500);
+                                        joined.push_str("…");
+                                    }
+                                    err_s.push_str(&format!(" | logs={joined}"));
+                                }
+                            }
+                            // Also include program ids per instruction to map "Instruction N".
+                            let progs = format_instruction_program_ids(&tx);
+                            if !progs.is_empty() {
+                                err_s.push_str(&format!(" | ix_programs={progs}"));
+                            }
+                        }
+
+                        let err = anyhow::anyhow!("{err_s}");
                         last_err = Some(err);
                         if send_attempt >= self.config.max_retries {
                             break Err(());
@@ -514,6 +546,19 @@ impl RpcProvider {
         })
         .await
     }
+}
+
+fn format_instruction_program_ids(tx: &Transaction) -> String {
+    // Legacy transactions in this codebase use `tx.message.account_keys`.
+    // If indices are out of bounds, skip rather than failing error formatting.
+    let mut parts: Vec<String> = Vec::new();
+    for (i, ix) in tx.message.instructions.iter().enumerate() {
+        let idx = usize::from(ix.program_id_index);
+        if let Some(pk) = tx.message.account_keys.get(idx) {
+            parts.push(format!("{i}:{pk}"));
+        }
+    }
+    parts.join(",")
 }
 
 fn hard_disable_reason(err: &anyhow::Error) -> Option<String> {

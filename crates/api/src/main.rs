@@ -88,6 +88,10 @@ fn load_config_from_env() -> ServerConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30),
+        onchain_request_timeout_secs: env::var("API_ONCHAIN_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120),
         ..Default::default()
     };
 

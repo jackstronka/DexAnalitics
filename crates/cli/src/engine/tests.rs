@@ -430,8 +430,11 @@ mod tests {
         let capital = dec!(10_000);
         let width_pct = 0.20; // bounds around entry price: [90,110]
 
+        // Pool active L must be **much larger** than estimated position L so fee share stays in
+        // (0, 1); otherwise `pos/pool` hits the safety clamp and the ratio below collapses to 1.
+        let pool_l: u128 = 1_000_000_000_000_000;
         let (_l1, _u1, _n1, s1) = run_single(
-            &make_steps(1000, 1000),
+            &make_steps(pool_l, pool_l),
             Price::new(price_ab * quote_usd),
             price_ab.to_f64().unwrap_or(100.0),
             width_pct,
@@ -447,7 +450,7 @@ mod tests {
         );
 
         let (_l2, _u2, _n2, s2) = run_single(
-            &make_steps(1000, 2000),
+            &make_steps(pool_l, pool_l * 2),
             Price::new(price_ab * quote_usd),
             price_ab.to_f64().unwrap_or(100.0),
             width_pct,
@@ -464,10 +467,9 @@ mod tests {
 
         assert!(s1.total_fees > Decimal::ZERO);
         let ratio = s2.total_fees / s1.total_fees;
-        // Expected ratio:
-        //   sum(pool_fees/liq) case1 = 100/1000 + 100/1000 = 0.2
-        //   sum(pool_fees/liq) case2 = 100/1000 + 100/2000 = 0.15
-        //   ratio = 0.15 / 0.2 = 0.75
+        // Expected ratio (same L_pos; only per-step pool L differs):
+        //   case1 ∝ 100/L + 100/L = 200/L
+        //   case2 ∝ 100/L + 100/(2L) = 150/L  →  ratio = 150/200 = 0.75
         assert!(
             (ratio - dec!(0.75)).abs() < dec!(0.000_001),
             "ratio={} expected=0.75 (fees1={} fees2={})",
@@ -475,5 +477,100 @@ mod tests {
             s1.total_fees,
             s2.total_fees
         );
+    }
+
+    #[test]
+    fn parse_strategy_label_bollinger_and_last_candle() {
+        use crate::backtest_engine::parse_strategy_label;
+        assert_eq!(
+            parse_strategy_label("bollinger_w20_k2_r12"),
+            Some(StratConfig::Bollinger {
+                window: 20,
+                k: 2.0,
+                rebalance_steps: 12,
+            })
+        );
+        assert_eq!(
+            parse_strategy_label("bollinger_w20_k1.5_r24"),
+            Some(StratConfig::Bollinger {
+                window: 20,
+                k: 1.5,
+                rebalance_steps: 24,
+            })
+        );
+        assert_eq!(
+            parse_strategy_label("last_candle_c4_r24"),
+            Some(StratConfig::LastCandle {
+                candle_steps: 4,
+                rebalance_steps: 24,
+            })
+        );
+        assert_eq!(
+            parse_strategy_label("last_candle_c1_r1"),
+            Some(StratConfig::LastCandle {
+                candle_steps: 1,
+                rebalance_steps: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn bollinger_flat_price_rebalances_with_fallback_band() {
+        let mut steps = Vec::new();
+        for i in 0..30u64 {
+            let mut s = step(dec!(100), dec!(1));
+            s.start_timestamp = i * 3600;
+            steps.push(s);
+        }
+        let (_lo, _hi, name, summary) = run_single(
+            &steps,
+            Price::new(dec!(100)),
+            100.0,
+            0.10,
+            StratConfig::Bollinger {
+                window: 20,
+                k: 2.0,
+                rebalance_steps: 25,
+            },
+            dec!(1000),
+            dec!(0),
+            dec!(0),
+            None,
+            9,
+            9,
+            None,
+            None,
+        );
+        assert!(name.contains("bollinger"));
+        assert!(summary.rebalance_count >= 1);
+    }
+
+    #[test]
+    fn last_candle_triggers_one_rebalance_on_schedule() {
+        let mut steps = Vec::new();
+        for i in 0..8u64 {
+            let mut s = step(dec!(100) + Decimal::from(i), dec!(1));
+            s.start_timestamp = i * 3600;
+            steps.push(s);
+        }
+        let (_lo, _hi, _name, summary) = run_single(
+            &steps,
+            Price::new(dec!(100)),
+            100.0,
+            0.20,
+            StratConfig::LastCandle {
+                candle_steps: 4,
+                rebalance_steps: 8,
+            },
+            dec!(1000),
+            dec!(0),
+            dec!(0),
+            None,
+            9,
+            9,
+            None,
+            None,
+        );
+        assert_eq!(summary.rebalance_count, 1);
     }
 }

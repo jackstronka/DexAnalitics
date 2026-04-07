@@ -85,22 +85,25 @@ impl WebhookNotifier {
 #[async_trait]
 impl Notifier for WebhookNotifier {
     async fn notify(&self, alert: &Alert) -> anyhow::Result<()> {
-        // Build webhook payload
         let payload = serde_json::json!({
             "text": alert.format(),
             "alert": alert,
         });
 
-        // Note: In a real implementation, we would use the client to send
-        // For now, just log the attempt
+        self.client
+            .post(&self.url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("webhook POST: {e}"))?
+            .error_for_status()
+            .map_err(|e| anyhow::anyhow!("webhook response: {e}"))?;
+
         info!(
             url = %self.url,
             alert_id = %alert.id,
-            "Would send webhook notification"
+            "Webhook notification sent"
         );
-
-        // Placeholder for actual HTTP request
-        let _ = payload;
 
         Ok(())
     }

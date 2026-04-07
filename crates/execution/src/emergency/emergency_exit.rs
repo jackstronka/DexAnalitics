@@ -2,7 +2,6 @@
 
 use crate::monitor::PositionMonitor;
 use crate::transaction::TransactionManager;
-use crate::wallet::Wallet;
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -71,9 +70,8 @@ pub struct EmergencyExitManager {
     /// Transaction manager.
     #[allow(dead_code)]
     tx_manager: Arc<TransactionManager>,
-    /// Wallet for signing.
-    #[allow(dead_code)]
-    wallet: Option<Arc<Wallet>>,
+    /// When set, performs real collect / decrease / close via Orca.
+    rebalance_executor: Option<Arc<crate::strategy::RebalanceExecutor>>,
     /// Configuration.
     config: EmergencyExitConfig,
     /// Exit results.
@@ -92,16 +90,28 @@ impl EmergencyExitManager {
         Self {
             monitor,
             tx_manager,
-            wallet: None,
+            rebalance_executor: None,
             config,
             results: Arc::new(RwLock::new(Vec::new())),
             in_progress: Arc::new(RwLock::new(false)),
         }
     }
 
-    /// Sets the wallet for signing.
-    pub fn set_wallet(&mut self, wallet: Arc<Wallet>) {
-        self.wallet = Some(wallet);
+    /// Use the same signing + Orca path as [`crate::strategy::RebalanceExecutor`].
+    pub fn new_with_rebalance(
+        monitor: Arc<PositionMonitor>,
+        tx_manager: Arc<TransactionManager>,
+        rebalance_executor: Arc<crate::strategy::RebalanceExecutor>,
+        config: EmergencyExitConfig,
+    ) -> Self {
+        Self {
+            monitor,
+            tx_manager,
+            rebalance_executor: Some(rebalance_executor),
+            config,
+            results: Arc::new(RwLock::new(Vec::new())),
+            in_progress: Arc::new(RwLock::new(false)),
+        }
     }
 
     /// Executes emergency exit for all positions.
@@ -206,23 +216,50 @@ impl EmergencyExitManager {
 
     /// Collects fees from a position.
     async fn collect_fees(&self, position: &Pubkey) -> anyhow::Result<(u64, u64)> {
-        // TODO: Implement actual fee collection
-        info!(position = %position, "Would collect fees");
-        Ok((0, 0))
+        let monitored = self
+            .monitor
+            .get_position(position)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("position not in monitor"))?;
+        let pool = monitored.pool;
+        if let Some(ref r) = self.rebalance_executor {
+            r.emergency_collect_fees(position, &pool).await
+        } else {
+            warn!(position = %position, "EmergencyExitManager: no RebalanceExecutor — skipping fee collection");
+            Ok((0, 0))
+        }
     }
 
     /// Decreases all liquidity from a position.
     async fn decrease_all_liquidity(&self, position: &Pubkey) -> anyhow::Result<u128> {
-        // TODO: Implement actual liquidity decrease
-        info!(position = %position, "Would decrease all liquidity");
-        Ok(0)
+        let monitored = self
+            .monitor
+            .get_position(position)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("position not in monitor"))?;
+        let pool = monitored.pool;
+        if let Some(ref r) = self.rebalance_executor {
+            r.emergency_decrease_all_liquidity(position, &pool).await
+        } else {
+            warn!(position = %position, "EmergencyExitManager: no RebalanceExecutor — skipping decrease");
+            Ok(0)
+        }
     }
 
     /// Closes a position.
     async fn close_position(&self, position: &Pubkey) -> anyhow::Result<()> {
-        // TODO: Implement actual position close
-        info!(position = %position, "Would close position");
-        Ok(())
+        let monitored = self
+            .monitor
+            .get_position(position)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("position not in monitor"))?;
+        let pool = monitored.pool;
+        if let Some(ref r) = self.rebalance_executor {
+            r.emergency_close_position(position, &pool).await
+        } else {
+            warn!(position = %position, "EmergencyExitManager: no RebalanceExecutor — skipping close");
+            Ok(())
+        }
     }
 
     /// Gets the results of the last exit.

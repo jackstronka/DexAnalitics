@@ -2,7 +2,7 @@
 
 **Purpose:** shorten the path from devnet to **observation / dry-run / limited live** on mainnet without mixing clusters or surprise live trades.
 
-**Related:** [`doc/BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) (Dry-Run → Limited Live → Standard Live), [`doc/RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) (RPC choice, priority fees, fallbacks), [`doc/OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) (supervisor, restarty, logi).
+**Related:** [`doc/PRODUCTION_FAST_PATH.md`](PRODUCTION_FAST_PATH.md) (shortest path: build → env → dry-run → `--execute`), [`doc/BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) (Dry-Run → Limited Live → Standard Live), [`doc/RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) (RPC choice, priority fees, fallbacks), [`doc/OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) (supervisor, restarty, logi).
 
 ## 0. Data: minimum position sizing (Orca Whirlpool)
 

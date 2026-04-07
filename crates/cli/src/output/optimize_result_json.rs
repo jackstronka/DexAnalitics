@@ -66,6 +66,8 @@ fn optimize_winner_from_strat(
         StratConfig::Static => "static",
         StratConfig::Periodic(_) => "periodic",
         StratConfig::Threshold(_) => "threshold",
+        StratConfig::Bollinger { .. } => "bollinger",
+        StratConfig::LastCandle { .. } => "last_candle",
     }
     .to_string();
 
@@ -78,7 +80,7 @@ fn optimize_winner_from_strat(
     match strat {
         StratConfig::Periodic(h) => periodic_interval_hours = Some(h),
         StratConfig::Threshold(p) => threshold_ratio = Some(p),
-        StratConfig::Static => {}
+        StratConfig::Static | StratConfig::Bollinger { .. } | StratConfig::LastCandle { .. } => {}
     }
 
     OptimizeWinner {

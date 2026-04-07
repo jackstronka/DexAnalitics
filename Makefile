@@ -17,6 +17,11 @@ build:
 release:
 	cargo build --release
 
+# Release binary for mainnet Orca bot CLI only (fast iteration)
+.PHONY: cli-release
+cli-release:
+	cargo build --release -p clmm-lp-cli
+
 # Run tests
 .PHONY: test
 test:

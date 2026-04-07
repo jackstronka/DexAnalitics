@@ -2,6 +2,7 @@
 //!
 //! Used by both `backtest` (single run) and `backtest-optimize` (grid + rolling windows).
 
+use crate::engine::indicators;
 use crate::engine::{fees as fee_engine, hodl, liquidity};
 use clmm_lp_data::swaps::SwapEvent;
 use clmm_lp_domain::prelude::{Amount, Price, PriceCandle};
@@ -57,11 +58,23 @@ pub struct StepDataPoint {
 pub type StepData = StepDataPoint;
 
 /// Strategy variant for grid search.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StratConfig {
     Static,
     Threshold(f64),
+    /// Steps between rebalances (label uses `h` suffix historically; value is **step count**).
     Periodic(u64),
+    /// Bollinger: last `window` closes (A/B), bands `SMA ± k·σ`; rebalance every `rebalance_steps` steps.
+    Bollinger {
+        window: u32,
+        k: f64,
+        rebalance_steps: u64,
+    },
+    /// Anchor on close of last completed candle of `candle_steps` steps; rebalance every `rebalance_steps` steps.
+    LastCandle {
+        candle_steps: u64,
+        rebalance_steps: u64,
+    },
 }
 
 /// Build step data (price, volume, share) for each candle.
@@ -321,6 +334,15 @@ pub fn run_single(
         StratConfig::Static => "static".to_string(),
         StratConfig::Threshold(p) => format!("threshold_{:.0}%", p * 100.0),
         StratConfig::Periodic(h) => format!("periodic_{}h", h),
+        StratConfig::Bollinger {
+            window,
+            k,
+            rebalance_steps,
+        } => format!("bollinger_w{}_k{}_r{}", window, k, rebalance_steps),
+        StratConfig::LastCandle {
+            candle_steps,
+            rebalance_steps,
+        } => format!("last_candle_c{}_r{}", candle_steps, rebalance_steps),
     };
 
     let mut fee_share_model = if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
@@ -397,7 +419,7 @@ pub fn run_single(
                         let pos_l_dec = Decimal::from_u128(liquidity_l).unwrap_or(Decimal::ZERO);
                         let liq_dec = Decimal::from_u128(liq_active_raw).unwrap_or(Decimal::ONE);
                         if liq_dec > Decimal::ZERO {
-                            pos_l_dec / liq_dec
+                            (pos_l_dec / liq_dec).min(Decimal::ONE)
                         } else {
                             fee_share_model.step_fee_share(p)
                         }
@@ -477,6 +499,17 @@ pub fn run_single(
                 }
             }
             StratConfig::Periodic(interval) => steps_since_rebalance >= interval,
+            StratConfig::Bollinger {
+                window,
+                rebalance_steps,
+                ..
+            } => {
+                let w = window as usize;
+                steps_since_rebalance >= rebalance_steps && (i + 1) >= w
+            }
+            StratConfig::LastCandle {
+                rebalance_steps, ..
+            } => steps_since_rebalance >= rebalance_steps,
         };
 
         if should_rebalance && liquidity_l > 0 {
@@ -486,22 +519,95 @@ pub fn run_single(
 
             // Re-deploy current position value minus tx cost; fees are NOT compounded here.
             let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
-            let center_ab_now = price_ab.to_f64().unwrap_or(1.0);
-            let new_lower_ab = Decimal::from_f64(center_ab_now * (1.0 - half)).unwrap();
-            let new_upper_ab = Decimal::from_f64(center_ab_now * (1.0 + half)).unwrap();
+            let (new_lower_ab, new_upper_ab) = match strat {
+                StratConfig::Bollinger { window, k, .. } => {
+                    let w = window as usize;
+                    let start = i + 1 - w;
+                    let closes: Vec<f64> = step_data[start..=i]
+                        .iter()
+                        .filter_map(|p| p.price_ab.value.to_f64())
+                        .collect();
+                    if let Some((lo, hi)) = indicators::bollinger_lower_upper(&closes, k) {
+                        (
+                            Decimal::from_f64(lo).unwrap_or(current_lower_ab),
+                            Decimal::from_f64(hi).unwrap_or(current_upper_ab),
+                        )
+                    } else {
+                        let sma = closes.iter().sum::<f64>() / closes.len().max(1) as f64;
+                        (
+                            Decimal::from_f64(sma * (1.0 - half)).unwrap(),
+                            Decimal::from_f64(sma * (1.0 + half)).unwrap(),
+                        )
+                    }
+                }
+                StratConfig::LastCandle { candle_steps, .. } => {
+                    // LP range = [min(price_ab), max(price_ab)] over the last **completed** candle (OHLC-style band on the path).
+                    // If the candle is flat (min == max) or no candle closed yet, fall back to ±width_pct around close/current.
+                    let cs = candle_steps as usize;
+                    if let Some((start, end)) = indicators::last_closed_candle_step_range(i, cs) {
+                        let slice = &step_data[start..=end];
+                        let mut lo_ab = slice[0].price_ab.value;
+                        let mut hi_ab = lo_ab;
+                        for p in &slice[1..] {
+                            let v = p.price_ab.value;
+                            lo_ab = lo_ab.min(v);
+                            hi_ab = hi_ab.max(v);
+                        }
+                        if lo_ab > Decimal::ZERO && lo_ab < hi_ab {
+                            (lo_ab, hi_ab)
+                        } else {
+                            let anchor = if lo_ab > Decimal::ZERO {
+                                lo_ab
+                            } else {
+                                step_data[indicators::last_closed_candle_close_idx(i, cs)]
+                                    .price_ab
+                                    .value
+                            };
+                            let c = anchor.to_f64().unwrap_or(1.0);
+                            (
+                                Decimal::from_f64(c * (1.0 - half)).unwrap(),
+                                Decimal::from_f64(c * (1.0 + half)).unwrap(),
+                            )
+                        }
+                    } else {
+                        let anchor = step_data[0].price_ab.value;
+                        let c = anchor.to_f64().unwrap_or(1.0);
+                        (
+                            Decimal::from_f64(c * (1.0 - half)).unwrap(),
+                            Decimal::from_f64(c * (1.0 + half)).unwrap(),
+                        )
+                    }
+                }
+                _ => {
+                    let center_ab_now = price_ab.to_f64().unwrap_or(1.0);
+                    (
+                        Decimal::from_f64(center_ab_now * (1.0 - half)).unwrap(),
+                        Decimal::from_f64(center_ab_now * (1.0 + half)).unwrap(),
+                    )
+                }
+            };
             current_lower_ab = new_lower_ab;
             current_upper_ab = new_upper_ab;
 
             // Convert AB bounds to USD using current quote USD for liquidity estimation.
             let new_lower_usd = current_lower_ab * p.quote_usd;
             let new_upper_usd = current_upper_ab * p.quote_usd;
-            liquidity_l = liquidity::estimate_position_liquidity(
+            // `estimate_position_liquidity` defaults to **entry** `quote_usd` / `price_ab` for
+            // converting USD bounds → A/B and for normalizing L. After rebalance, bounds were built
+            // with **this step's** quote — must pass overrides or L and fee-share vs pool blow up when
+            // B/USD drifts (cross-pairs).
+            liquidity_l = liquidity::estimate_position_liquidity_with_overrides(
                 step_data,
                 new_lower_usd,
                 new_upper_usd,
                 capital_usd_now,
                 token_a_decimals,
                 token_b_decimals,
+                liquidity::LiquidityEstimateOverrides {
+                    quote_usd: Some(p.quote_usd),
+                    price_ab: Some(p.price_ab.value),
+                    price_a_usd: Some(p.price_usd.value),
+                },
             );
 
             if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
@@ -633,6 +739,40 @@ pub fn parse_strategy_label(name: &str) -> Option<StratConfig> {
         let num_str = rest.trim_end_matches('h').trim();
         let steps = num_str.parse::<u64>().ok()?;
         return Some(StratConfig::Periodic(steps));
+    }
+    if let Some(rest) = name.strip_prefix("bollinger_") {
+        let mut window: Option<u32> = None;
+        let mut k: Option<f64> = None;
+        let mut rebalance_steps: Option<u64> = None;
+        for part in rest.split('_') {
+            if let Some(n) = part.strip_prefix('w') {
+                window = n.parse().ok();
+            } else if let Some(n) = part.strip_prefix('k') {
+                k = n.parse().ok();
+            } else if let Some(n) = part.strip_prefix('r') {
+                rebalance_steps = n.parse().ok();
+            }
+        }
+        return Some(StratConfig::Bollinger {
+            window: window?,
+            k: k?,
+            rebalance_steps: rebalance_steps?,
+        });
+    }
+    if let Some(rest) = name.strip_prefix("last_candle_") {
+        let mut candle_steps: Option<u64> = None;
+        let mut rebalance_steps: Option<u64> = None;
+        for part in rest.split('_') {
+            if let Some(n) = part.strip_prefix('c') {
+                candle_steps = n.parse().ok();
+            } else if let Some(n) = part.strip_prefix('r') {
+                rebalance_steps = n.parse().ok();
+            }
+        }
+        return Some(StratConfig::LastCandle {
+            candle_steps: candle_steps?,
+            rebalance_steps: rebalance_steps?,
+        });
     }
     None
 }

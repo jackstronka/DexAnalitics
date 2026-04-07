@@ -2,6 +2,7 @@ import { Outlet, Link, useLocation } from 'react-router-dom'
 import { 
   LayoutDashboard, 
   Wallet, 
+  ArrowLeftRight,
   Target, 
   Droplets, 
   Settings,
@@ -10,6 +11,7 @@ import {
   Menu,
   X,
   Terminal,
+  ScrollText,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -22,10 +24,12 @@ import { connectWebSockets, disconnectWebSockets } from '@/lib/websocket'
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Wallet', href: '/wallet', icon: Wallet },
+  { name: 'Swap', href: '/swap', icon: ArrowLeftRight },
   { name: 'Positions', href: '/positions', icon: Activity },
   { name: 'Strategies', href: '/strategies', icon: Target },
   { name: 'Pools', href: '/pools', icon: Droplets },
   { name: 'Scripts', href: '/scripts', icon: Terminal },
+  { name: 'Logs', href: '/logs', icon: ScrollText },
   { name: 'Bot activity', href: '/bot-activity', icon: History },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

@@ -467,7 +467,7 @@ pub async fn run_position_decrease(
         TransactionConfig::default(),
     ));
     let lifecycle = Arc::new(LifecycleTracker::new());
-    let mut exec =
+    let exec =
         RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
     exec.set_wallet(Arc::new(load_signing_wallet(keypair)?));
     exec.set_dry_run(dry_run);
@@ -504,7 +504,7 @@ pub async fn run_position_collect_fees(
         TransactionConfig::default(),
     ));
     let lifecycle = Arc::new(LifecycleTracker::new());
-    let mut exec =
+    let exec =
         RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
     exec.set_wallet(Arc::new(load_signing_wallet(keypair)?));
     exec.set_dry_run(dry_run);

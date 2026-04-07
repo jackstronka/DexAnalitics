@@ -188,6 +188,46 @@ pub struct PositionResponse {
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Diagnostics for "why didn't this position rebalance?" (best-effort, read-only).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionDiagnosticsResponse {
+    /// Position PDA (base58).
+    pub address: String,
+    /// Whether the position exists in the in-memory monitor.
+    pub in_monitor: bool,
+    /// Latest `in_range` from monitor (may lag if monitor is stale).
+    pub monitor_in_range: Option<bool>,
+    /// Strategy ids that include this PDA in `parameters.position_addresses`.
+    pub linked_strategies: Vec<PositionStrategyDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionStrategyDiagnostics {
+    pub strategy_id: String,
+    pub name: String,
+    pub strategy_type: StrategyType,
+    pub running: bool,
+    pub dry_run: bool,
+    pub auto_execute: bool,
+    /// True when this position is in `executor_disabled_position_addresses`.
+    pub automation_disabled_for_position: bool,
+    /// Last evaluation snapshot from the running executor (if available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_eval: Option<PositionLastEvalSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionLastEvalSnapshot {
+    pub ts_utc: String,
+    pub in_range: bool,
+    pub pool_tick_current: i32,
+    pub decision: String,
+    pub requires_transaction: bool,
+    pub auto_execute: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours_since_rebalance: Option<u64>,
+}
+
 /// Uncollected LP fees from the Whirlpool position account (`fee_owed_a` / `fee_owed_b`), in human
 /// token units — same semantics as the Orca app “uncollected fees” before a collect transaction.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1094,6 +1134,19 @@ pub struct BotRegistryJsonlResponse {
     pub rows: Vec<serde_json::Value>,
 }
 
+/// Pending-open recovery queue (`CLMM_PENDING_OPEN_RECOVERY_PATH`) used after `rebalance_incomplete`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PendingOpenRecoveryResponse {
+    /// Resolved filesystem path.
+    pub path: String,
+    /// True when the file does not exist yet.
+    pub file_missing: bool,
+    /// Parsed JSON document when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub data: Option<serde_json::Value>,
+}
+
 /// POST body: how many recent ledger rows to include in the Slack digest.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SlackActivitySummaryRequest {
@@ -1239,6 +1292,31 @@ pub struct WalletBalancesResponse {
     pub lamports: u64,
     pub sol: String,
     pub tokens: Vec<WalletTokenBalance>,
+}
+
+/// `GET /wallets/api-signer` — API signing wallet (from KEYPAIR_PATH / SOLANA_KEYPAIR_PATH) and its SOL balance.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ApiSignerWalletResponse {
+    /// Whether a signing wallet is configured on the API host.
+    pub configured: bool,
+    /// Wallet pubkey (base58) when configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey: Option<String>,
+    /// RPC URL used for the balance read (best-effort).
+    pub rpc_url: String,
+    /// Current SOL balance in lamports (when configured + RPC succeeded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lamports: Option<u64>,
+    /// Current SOL balance as decimal string (when configured + RPC succeeded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sol: Option<String>,
+    /// Minimum lamports for **open** / rent-heavy ops (`CLMM_MIN_OPEN_SOL_LAMPORTS`, default 0.01 SOL).
+    pub min_open_lamports: u64,
+    /// Minimum lamports for **swap-only** (fee + buffer; lower than open; `CLMM_MIN_SWAP_SOL_LAMPORTS`, default ~0.0015 SOL).
+    pub min_swap_lamports: u64,
+    /// Optional note/hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ============================================================================

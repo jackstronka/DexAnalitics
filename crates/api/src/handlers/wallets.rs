@@ -1,7 +1,11 @@
 //! Local wallets (keypairs on API host) + on-chain read-only balances.
 
 use crate::error::{ApiError, ApiResult};
-use crate::models::{WalletBalancesResponse, WalletEntry, WalletTokenBalance, WalletsListResponse};
+use crate::models::{
+    ApiSignerWalletResponse, WalletBalancesResponse, WalletEntry, WalletTokenBalance,
+    WalletsListResponse,
+};
+use crate::services::position_executor::load_wallet_from_env;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use serde::Deserialize;
@@ -260,4 +264,70 @@ pub async fn get_wallet_balances(
         sol,
         tokens,
     }))
+}
+
+/// Returns the API signing wallet pubkey and SOL balance (wallet loaded from env).
+#[utoipa::path(
+    get,
+    path = "/wallets/api-signer",
+    tag = "Wallets",
+    responses(
+        (status = 200, description = "API signer wallet status", body = ApiSignerWalletResponse)
+    )
+)]
+pub async fn get_api_signer_wallet(
+    State(state): State<AppState>,
+) -> ApiResult<Json<ApiSignerWalletResponse>> {
+    let min_open_lamports = std::env::var("CLMM_MIN_OPEN_SOL_LAMPORTS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(10_000_000);
+    let min_swap_lamports = std::env::var("CLMM_MIN_SWAP_SOL_LAMPORTS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(1_500_000);
+
+    let rpc_url = state.provider.current_endpoint().await;
+
+    let w = load_wallet_from_env()
+        .map_err(|e| ApiError::internal(format!("api-signer wallet load: {e}")))?;
+    let Some(w) = w else {
+        return Ok(Json(ApiSignerWalletResponse {
+            configured: false,
+            pubkey: None,
+            rpc_url,
+            lamports: None,
+            sol: None,
+            min_open_lamports,
+            min_swap_lamports,
+            note: Some(
+                "Set KEYPAIR_PATH (or SOLANA_KEYPAIR_PATH) on the API host to enable in-app swaps/open."
+                    .to_string(),
+            ),
+        }));
+    };
+
+    let pk = w.pubkey();
+    match state.provider.get_balance(&pk).await {
+        Ok(l) => Ok(Json(ApiSignerWalletResponse {
+            configured: true,
+            pubkey: Some(pk.to_string()),
+            rpc_url,
+            lamports: Some(l),
+            sol: Some(format!("{:.9}", (l as f64) / 1e9)),
+            min_open_lamports,
+            min_swap_lamports,
+            note: None,
+        })),
+        Err(e) => Ok(Json(ApiSignerWalletResponse {
+            configured: true,
+            pubkey: Some(pk.to_string()),
+            rpc_url,
+            lamports: None,
+            sol: None,
+            min_open_lamports,
+            min_swap_lamports,
+            note: Some(format!("Wallet loaded but SOL balance RPC failed: {e}")),
+        })),
+    }
 }

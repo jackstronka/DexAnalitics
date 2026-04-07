@@ -210,9 +210,8 @@ async fn mint_decimals_or_err(
         .get_account(mint)
         .await
         .map_err(|e| ApiError::internal(format!("fetch mint {label}: {e}")))?;
-    let m = Mint::unpack(&account.data).map_err(|e| {
-        ApiError::internal(format!("unpack SPL mint {label}: {e}"))
-    })?;
+    let m = Mint::unpack(&account.data)
+        .map_err(|e| ApiError::internal(format!("unpack SPL mint {label}: {e}")))?;
     Ok(m.decimals)
 }
 

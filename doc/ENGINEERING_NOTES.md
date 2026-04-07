@@ -14,6 +14,186 @@
 **Order:** **newest first** (add new `##` sections at the **top**, right under this preamble).
 
 ---
+## 2026-04-08 — `backtest-optimize`: siatka last-candle ze świecą 45m (@ 900s/krok)
+
+**keywords:** backtest_optimize, LAST_CANDLE_OPTIMIZE_GRID, last_candle, resolution_seconds
+**paths:** `crates/cli/src/commands/backtest_optimize.rs`
+
+- Do `LAST_CANDLE_OPTIMIZE_GRID` dopisano wiersze **`(3, *)`** — przy `--resolution-seconds 900` to **45m** świeca (min–max po 3 krokach), z presetami rebalansu `1|2|3|4|16|48` kroków (jak dla 15m/30m).
+
+## 2026-04-04 — `.env.example`: Orca CLI + `SOLANA_RPC_FALLBACK_URLS`; `make cli-release`
+
+**keywords:** .env.example, SOLANA_RPC_FALLBACK_URLS, CLMM_EXPECTED_CLUSTER, cli-release, Makefile, orca-bot-run
+**paths:** `.env.example`, `Makefile`, `doc/MAINNET_OPERATIONAL_CHECKLIST.md`, `doc/PRODUCTION_FAST_PATH.md`
+
+- **RPC:** przykładowa zmienna **`SOLANA_RPC_BACKUP_URLS`** zastąpiona przez **`SOLANA_RPC_FALLBACK_URLS`** (zgodnie z `RpcConfig`); dopisany komentarz o legacy.
+- **Orca bot:** sekcja z `CLMM_ALERT_WEBHOOK_URL`, pending recovery, profitability (szablon, zakomentowane).
+- **Build:** target **`make cli-release`** = `cargo build --release -p clmm-lp-cli`. Checklist mainnet linkuje do fast path.
+
+## 2026-04-08 — Backtest `run_single`: estymacja L po rebalance z aktualnym quote (cross-pair)
+
+**keywords:** backtest_engine, estimate_position_liquidity, LiquidityEstimateOverrides, rebalance, snapshot fees, fee share
+**paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/engine/fees.rs`, `crates/cli/src/engine/tests.rs`
+
+- **Błąd wzoru:** po rebalance granice USD były liczone jako `lower_ab * p.quote_usd`, ale `estimate_position_liquidity` (bez override) dzieliło je przez **`quote_usd` z pierwszego kroku** → zniekształcone `lower_ab`/`upper_ab` i `L`, gdy zmienia się kurs quote (np. SOL/USD). To mogło dawać absurdalne `final_value`, `vs_hodl` i udział fee względem `liquidity_active_raw`.
+- **Poprawka:** po rebalance wywołanie `estimate_position_liquidity_with_overrides` z `quote_usd`, `price_ab`, `price_a_usd` z **bieżącego** kroku.
+- **Fee share:** `position_liquidity / pool_liquidity` ograniczone do **≤ 1** (dynamiczna gałąź snapshot + `FeeShareModel::LiquidityShare`), żeby nie przekraczać „pool fees” kroku przy błędach skali.
+- Test `snapshot_pool_fee_dynamic_liquidity_active_scales_fees`: większe `liquidity_active_raw` w fixture (żeby `L_pos` < `L_pool` i nie wchodzić w clamp w teście).
+
+## 2026-04-04 — Runbook: najkrótsza ścieżka do live bota (`PRODUCTION_FAST_PATH`)
+
+**keywords:** PRODUCTION_FAST_PATH, orca-bot-run, SOLANA_RPC_URL, CLMM_ALERT_WEBHOOK_URL, CLMM_PENDING_OPEN_RECOVERY_PATH, doc
+**paths:** `doc/PRODUCTION_FAST_PATH.md`, `doc/README.md`, `STARTUP.md`
+
+- Nowy dokument: kolejność **dry-run (bez `--execute`) → limited live → `--execute`**, tabela env (RPC, klaster, webhook, pending recovery, profitability), linki do checklist mainnet i continuity. Indeks `doc/README.md` + jedna linia w `STARTUP.md`.
+
+## 2026-04-08 — `last_candle`: zakres LP = min–max ceny w świecy (nie close ± width)
+
+**keywords:** last_candle, last_closed_candle_step_range, backtest_engine, StratConfig, BACKTEST_OPTIMIZE_STRATEGIES
+**paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/engine/indicators.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+- Po rebalance granice A/B = **minimum i maksimum `price_ab`** na ostatniej zamkniętej świecy (`candle_steps` kroków). Przy min=max lub braku zamkniętej świecy: fallback **±`width_pct`** wokół ceny. `last_closed_candle_step_range` w `indicators.rs`; test `last_closed_candle_step_range_matches_candle`.
+
+## 2026-04-04 — Bot LP: bramka opłacalności, recovery `open`, alerty, emergency, optimize→live (bollinger/last_candle)
+
+**keywords:** RebalanceProfitabilityMode, CLMM_REBALANCE_PROFITABILITY, CLMM_PENDING_OPEN_RECOVERY_PATH, CLMM_ALERT_WEBHOOK_URL, pending_open, RecoverOpenParams, EmergencyExitManager, WebhookNotifier, optimize_profile, StrategyExecutor, orca_bot
+**paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/monitor/position_monitor.rs`, `crates/execution/src/emergency/emergency_exit.rs`, `crates/execution/src/optimize_profile.rs`, `crates/cli/src/commands/orca_bot.rs`
+
+- **Opłacalność:** `RebalanceConfig::from_env()` — `CLMM_REBALANCE_PROFITABILITY=off|warn|block`, `CLMM_REBALANCE_EST_TX_COST_LAMPORTS` (domyślnie 500_000). Po `dry_run` sprawdzana jest heurystyka `is_profitable`; `block` przerywa rebalance z komunikatem.
+- **Recovery po incomplete:** plik JSON (`CLMM_PENDING_OPEN_RECOVERY_PATH` lub domyślnie `data/pending-open-recovery.json` w `orca-bot` z `--execute`), wpis po `rebalance_incomplete`, ponawianie `recover_open_after_incomplete` na początku `evaluate_all` (do `CLMM_PENDING_OPEN_MAX_ATTEMPTS`). `Arc<RebalanceExecutor>` + `open_new_range_with_wallet_mix` (wspólne z pełnym rebalance).
+- **Alerty:** `CLMM_ALERT_WEBHOOK_URL` → `MultiNotifier` + `WebhookNotifier` (prawdziwy POST JSON); monitor: range exit + progi IL; nowy `AlertType::RebalanceIncomplete` przy incomplete.
+- **Emergency:** `EmergencyExitManager::new_with_rebalance` wywołuje Orcę przez `RebalanceExecutor::{emergency_collect_fees, emergency_decrease_all_liquidity, emergency_close_position}`; `StrategyExecutor::rebalance_executor_handle()` do podpięcia.
+- **Optimize JSON:** `bollinger` → `Threshold` (fallback `threshold_ratio` lub `width_pct*0.5`); `last_candle` → `OorRecenter`.
+- **Async:** `tokio::sync::Mutex` dla `optimization_run_id` / pending path / alert notifier w executorze (Send w `tokio::spawn`).
+
+---
+## 2026-04-04 — Rebalance: ustrukturyzowane logi błędów (`op = orca_rebalance`)
+
+**keywords:** tracing, orca_rebalance, RebalanceExecutor, StrategyExecutor, swap_mix, open_position, close_position
+**paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`
+
+- Pola **`op = "orca_rebalance"`** + **`stage`** (`start`, `close_position`, `swap_mix`, `open_position`, `collect_fees`) oraz kontekst (pool, ticks, caps, `reason`) ułatwiają **grep** w logach. Niepowodzenia **`swap_mix`** i **`open`** logują szczegóły przed `bail`; executor przy **`outcome: incomplete` / `failed`** dopisuje stare/nowe ticki i `tick_current`.
+
+---
+## 2026-04-07 — Rebalance: swap w puli przed `open` przy złym mixie (quote deposit)
+
+**keywords:** RebalanceExecutor, ensure_swap_mix_for_rebalance_open, quote_deposit_budget_in_range, swap_exact_in, CLMM_REBALANCE_SWAP_MAX_ROUNDS, orca_bot
+**paths:** `crates/execution/src/strategy/rebalance.rs`
+
+- Po `close` wykonywane jest **wyrównanie mixu** do `quote_deposit_budget_in_range` (`crates/protocols/src/orca/deposit_quote.rs`): ceny względne z `pool.price` + decimals mintów (bez płatnego feedu), `target_usd` ≈ 99.5% notional portfela, pętla do **`CLMM_REBALANCE_SWAP_MAX_ROUNDS`** (domyślnie 6) z **ExactIn** na tej samej puli (B→A lub A→B, połowa nadwyżki na krok). Potem istniejące ponawianie **`open_position`**.
+- Nadal możliwe błędy: tick poza nowym zakresem, całkowity brak jednej nogi do swapu, wyczerpanie rund.
+
+---
+## 2026-04-07 — IL JSONL: `rebalance_incomplete` gdy zamknięcie OK, open nie
+
+**keywords:** LifecycleTracker, rebalance_incomplete, IL ledger, StrategyExecutor, orca_bot, CLMM_REBALANCE_OPEN_MAX_ATTEMPTS
+**paths:** `crates/execution/src/lifecycle/tracker.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+- Po nieudanym `open_position` po udanym `close` wiersz `event: "rebalance"` **nie** powstaje (wcześniej tylko `tracing` + `result.error`). Teraz — jeśli ustawiono `--il-ledger-path` / `set_il_ledger_path` — dopisywany jest **`event: "rebalance_incomplete"`** z `intended_tick_*`, `error`, `reason`, `hint` (retry: swap + open / quote caps).
+- **Automatyczne ponawianie open:** `RebalanceExecutor::execute` ponawia **`open_position`** do **`CLMM_REBALANCE_OPEN_MAX_ATTEMPTS`** (1..=20, domyślnie **5**) z krótkim backoffiem i **ponownym odczytem SPL** po każdej próbie (opóźnienia RPC po zamknięciu). Nie rozwiązuje to złego **stosunku tokenów** do nowego zakresu — wtedy nadal może być swap przed open.
+
+---
+## 2026-04-07 — Orca bot `IlLimit`: OOR recenter przed zamknięciem na IL (rebalans zamiast samego `Close`)
+
+**keywords:** StrategyExecutor, DecisionEngine, IlLimit, il_close_threshold, OOR, rebalance, orca_bot
+**paths:** `crates/execution/src/strategy/decision.rs`
+
+- **Problem:** W `IlLimit` najpierw sprawdzany był `il_close_threshold`; po wyjściu z zakresu IL często przekracza próg → `Decision::Close` (`execute_full_close_only`) zamiast `Rebalance` → w logu `bot_close_position` **bez** `bot_open_position`.
+- **Zmiana:** Kolejność: (1) **OOR** + `hours_since_rebalance >= min_rebalance_interval_hours` → **Rebalance**; (2) IL powyżej **close** → **Close**; (3) IL powyżej **rebalance** (in-range / bez spełnionego OOR+cooldown) → **Rebalance**.
+- **Uwaga:** Jeśli **OOR** i min. odstępu **nie** minął, nadal możliwe **Close** przy `|IL| > il_close_threshold`. Gdy **Rebalance** zamknie starą pozycję, a **open** padnie (mix tokenów), log: `Rebalance incomplete: old position closed on-chain but new position was not opened`.
+
+---
+## 2026-04-07 — Tabela `backtest-optimize`: vsHODL% vs IL-like% (była „Drag%”)
+
+**keywords:** backtest-optimize, optimize_report, TrackerSummary, vs_hodl, final_il_pct, TIR
+**paths:** `crates/cli/src/output/optimize_report.rs`, `crates/cli/src/main.rs`
+
+- Ostatnia kolumna rankingu nie była „dragiem” opłat — to **IL-like** (`final_il_pct`): (LP końcowe + koszty rebalance − HODL) / kapitał, **bez** zaliczenia fee do wartości pozycji. Dodano **`vsHODL%`** = `vs_hodl / capital`, spójne z kolumną „vs HODL” (USD). Legenda drukuje się pod tabelą.
+
+## 2026-04-07 — `backtest-optimize`: rozszerzona siatka last-candle (świeca × rebalans)
+
+**keywords:** backtest-optimize, indicator-strategies, last_candle, last_closed_candle, rebalance_steps, clmm-lp-cli
+**paths:** `crates/cli/src/commands/backtest_optimize.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+- Zamiast dwóch wariantów `LastCandle` jest **14** par `(candle_steps, rebalance_steps)` w `LAST_CANDLE_OPTIMIZE_GRID` (15m / 30m / 1h świeca w krokach przy założeniu 15 min/krok, oraz zestawy rebalansów 15m…12h jak w specyfikacji). Koszt transakcji rebalansu pozostaje w `run_single` (`tx_cost` na każdy rebalance).
+
+## 2026-04-06 — `backtest-optimize --indicator-strategies`: trzy szerokości Bollingera (K)
+
+**keywords:** backtest-optimize, indicator-strategies, bollinger, StratConfig, clmm-lp-cli
+**paths:** `crates/cli/src/commands/backtest_optimize.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+- Siatka z `--indicator-strategies` zawiera teraz **6** wariantów Bollingera zamiast 2: to samo `window=20`, **`k` ∈ {1.5, 2.0, 2.5}** (węższe / klasyczne / szersze pasma w jednostkach σ), każde z **`rebalance_steps` 24 i 48** (kroki symulacji — przy `--resolution-seconds 900` to odpowiednio co 6 h i 12 h między rebalansami).
+
+## 2026-04-06 — API signer: osobny próg SOL dla swap vs open
+
+**keywords:** api-signer, CLMM_MIN_SWAP_SOL_LAMPORTS, CLMM_MIN_OPEN_SOL_LAMPORTS, swap, lamports, clmm-lp-api, web
+**paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`
+
+- `GET /wallets/api-signer` zwraca `min_open_lamports` (jak dotąd: domyślnie 0.01 SOL, env `CLMM_MIN_OPEN_SOL_LAMPORTS`) oraz `min_swap_lamports` (niższy próg tylko pod opłaty swapu; domyślnie 1_500_000 lamportów ≈ 0.0015 SOL, env `CLMM_MIN_SWAP_SOL_LAMPORTS`).
+- UI `Swap` używa `min_swap_lamports` do ostrzeżenia i blokady „Swap now”; open nadal chroniony osobnym progiem po stronie API.
+
+## 2026-04-06 — Open Position: guardrail na minimalne SOL + czytelniejsze błędy w UI
+
+**keywords:** open_position, rent, lamports, insufficient, ui, clmm-lp-api, clmm-lp-protocols, web
+**paths:** `crates/api/src/services/position_service.rs`, `crates/protocols/src/rpc/provider.rs`, `crates/execution/src/strategy/executor.rs`, `web/src/pages/PositionCreate.tsx`
+
+- API: przed `open_position` sprawdzamy saldo SOL walleta podpisującego i blokujemy request, jeśli jest poniżej progu (domyślnie \(0.01\) SOL; env: `CLMM_MIN_OPEN_SOL_LAMPORTS`).
+- RPC: przy błędach preflight symulacji doklejamy `logs` + mapę `ix_programs`, żeby jednoznacznie wskazać przyczynę (np. brak lamportów na rent).
+- Web: błąd `Open Position` nie jest już “cichy” i jest skracany z opcją “Show details”, żeby nie zalewać UI ścianą tekstu.
+
+## 2026-04-06 — Wycena pozycji: poprawka ilości token A (uniknięcie „~połowa wartości”)
+
+**keywords:** valuation, calculate_token_amounts, amount_a, inverse floor, U256, half value, clmm-lp-protocols, clmm-lp-api
+**paths:** `crates/protocols/src/orca/position_reader.rs`, `crates/api/src/services/position_valuation.rs`
+
+- `PositionReader::calculate_token_amounts` używa teraz dokładnej formuły U256 dla token A (`L*(√Pu-√P)*2^64/(√P*√Pu)`), bo wcześniejsze `floor(2^64/√P)` potrafiło zaniżać amount A i w UI wyglądało jak ~połowa wartości pozycji.
+
+## 2026-04-06 — Swap (Orca): pokaz stanu walleta API + blokada przy zbyt małym SOL
+
+**keywords:** swap, orca, api-signer, KEYPAIR_PATH, wallet, lamports, ui, clmm-lp-api, web
+**paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/routes.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`
+
+- Dodano `GET /wallets/api-signer` zwracające pubkey walleta podpisującego na hoście API (env `KEYPAIR_PATH`/`SOLANA_KEYPAIR_PATH`) + saldo SOL i próg `CLMM_MIN_OPEN_SOL_LAMPORTS`.
+- UI `Swap` pokazuje ten stan i blokuje “Swap now (Orca pool)” gdy wallet nie jest skonfigurowany albo SOL < próg.
+
+## 2026-04-06 — Rebalance: `open` po `close` z realnymi capami SPL + sensowne `hours_since_rebalance` w snapshot
+
+**keywords:** rebalance, RebalanceExecutor, open_position, close_position, u64::MAX, ATA, diagnostics, hours_since_rebalance
+**paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/models.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
+
+- Po udanym zamknięciu pozycji **nie** używamy już `token_max_a/b = u64::MAX` przy otwarciu nowej — zamiast tego bierzemy **salda SPL z ATA** właściciela po `close` (fallback: kwoty z LP sprzed close). To usuwa scenariusz „zamknięte on-chain, ale `open` nie przechodzi” oraz przygotowuje grunt pod przyszły swap (gdy nowy zakres wymaga innego mixu tokenów).
+- Snapshot `last_eval.hours_since_rebalance`: `None` zamiast `u64::MAX` gdy brak wpisu w lifecycle (nie mylić z gigantyczną liczbą w UI).
+
+## 2026-04-06 — Diagnostyka rebalansu per pozycja + świeże `in_range`
+
+**keywords:** positions, diagnostics, in_range, strategy executor, auto_execute, periodic, oor_recenter, clmm-lp-api, clmm-lp-execution, web
+**paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/execution/src/strategy/executor.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
+
+- `GET /positions/:address` i lista pozycji zwracają `in_range` liczone z aktualnego `pool_state.tick_current` (RPC), zamiast potencjalnie starego cache monitora.
+- Dodano `GET /positions/:address/diagnostics`: pokazuje czy PDA jest w monitorze, podpięte strategie, flagi `running/auto_execute/dry_run`, czy pozycja jest wyłączona z automatyki, oraz ostatni snapshot decyzji executora (jeśli dostępny).
+- UI `Position Details` pokazuje sekcję **Diagnostics** z tymi danymi.
+
+## 2026-04-05 — Backtest: strategie Bollinger i „ostatnia świeca” (`StratConfig` + `--indicator-strategies`)
+
+**keywords:** backtest-optimize, StratConfig, Bollinger, last_candle, run_single, indicators, parse_strategy_label, clmm-lp-cli
+**paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/engine/indicators.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/cli/src/output/optimize_result_json.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+- **`StratConfig::Bollinger { window, k, rebalance_steps }`:** co `rebalance_steps` kroków (min. `window` zamknięć) nowe granice = SMA±K·σ na ostatnich `window` zamknięciach A/B; przy degeneracji (σ=0, dolna ≤0, itd.) fallback do pasma `width_pct` wokół SMA.
+- **`StratConfig::LastCandle { candle_steps, rebalance_steps }`:** kotwica = close ostatniej **pełnej** „świecy” o długości `candle_steps` kroków; rebalance co `rebalance_steps` kroków (wyśrodkowanie na kotwicy, szerokość z siatki).
+- **CLI:** `backtest-optimize --indicator-strategies` dokłada kilka wariantów do siatki (domyślnie wyłączone).
+- **Etykiety / JSON:** `bollinger_w20_k2_r12`, `last_candle_c4_r24`; `strategy_kind` w optimize result: `bollinger`, `last_candle`.
+- **Live:** `decision_config_from_optimize_result` zwraca czytelny błąd dla `bollinger` / `last_candle` (mapowanie na `StrategyMode` — osobna faza).
+
+---
+## 2026-04-04 — `deposit_quote`: noga A (U256) + wymuszenie dwustronnego quote (Open Position)
+
+**keywords:** deposit_quote, quote_open_budget, Open Position, U256, amount_a, inv floor, Whirlpool
+**paths:** `crates/protocols/src/orca/deposit_quote.rs`
+
+- **Problem:** `amount_a` z `(L * (⌊2^64/√Pc⌋ - ⌊2^64/√Pu⌋)) >> 64` bywało **0** przy realnej odległości ticków (oba inverse po floor takie same), więc UI pokazywało np. **SOL = 0** przy **USDC > 0** i transakcja otwarcia pozycji bywała **nie do złożenia** mimo potwierdzonego swapu.
+- **Fix:** token A z `L * (√Pu - √Pc) * 2^64 / (√Pc * √Pu)` w **U256**; zachowane **wymuszenie obu nóg > 0** (podłoga `L`, max `L` przy `usd ≤ target`, do ~3% slip jeśli minimalny dwustronny depozyt minimalnie przekracza nominalny target).
+
+---
 ## 2026-04-04 — `/positions`: zakres kolor + `in_range` w `GET /orca/positions-by-owner`
 
 **keywords:** Positions.tsx, OrcaOwnerPositionEntry, range_usdc_and_in_range_for_pool_ticks, in_range

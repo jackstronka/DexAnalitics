@@ -2,7 +2,7 @@
 
 use super::{
     EventData, FeesCollectedData, LifecycleEvent, LifecycleEventType, LiquidityChangeData,
-    PositionClosedData, PositionOpenedData, RebalanceData,
+    PositionClosedData, PositionOpenedData, RebalanceData, RebalanceReason,
 };
 use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint};
 use clmm_lp_protocols::ledger::tx_lifecycle::rebalance_session_id_from_env;
@@ -319,6 +319,45 @@ impl LifecycleTracker {
             "reason": format!("{:?}", data.reason),
             "optimization_run_id": data.optimization_run_id,
             "rebalance_session_id": rebalance_session_id_from_env(),
+        });
+        self.append_il_ledger_jsonl(row).await;
+    }
+
+    /// Close succeeded but open failed — funds are typically in wallet ATAs; row is written when
+    /// [`Self::set_il_ledger_path`] is set (same file as successful `event: "rebalance"`).
+    pub async fn record_rebalance_incomplete(
+        &self,
+        old_position: Pubkey,
+        pool: Pubkey,
+        old_tick_lower: i32,
+        old_tick_upper: i32,
+        intended_tick_lower: i32,
+        intended_tick_upper: i32,
+        reason: RebalanceReason,
+        error: Option<&str>,
+        optimization_run_id: Option<String>,
+    ) {
+        warn!(
+            position = %old_position,
+            pool = %pool,
+            error = error.unwrap_or("(none)"),
+            "rebalance_incomplete (close OK, open failed); IL JSONL row if --il-ledger-path set"
+        );
+        let row = serde_json::json!({
+            "schema_version": 1,
+            "event": "rebalance_incomplete",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "old_position": old_position.to_string(),
+            "pool": pool.to_string(),
+            "old_tick_lower": old_tick_lower,
+            "old_tick_upper": old_tick_upper,
+            "intended_tick_lower": intended_tick_lower,
+            "intended_tick_upper": intended_tick_upper,
+            "reason": format!("{reason:?}"),
+            "error": error,
+            "rebalance_session_id": rebalance_session_id_from_env(),
+            "optimization_run_id": optimization_run_id,
+            "hint": "Tokens returned to wallet after close; new range may need a different ratio — swap then open, or use quote-open-budget caps."
         });
         self.append_il_ledger_jsonl(row).await;
     }

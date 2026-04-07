@@ -5,9 +5,9 @@ use super::position_lifecycle_ledger::try_append_position_open_cost_ledger;
 use anyhow::{Context, Result};
 use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{
-    DecisionConfig, ExecutorConfig, MonitorConfig, PositionMonitor, StrategyExecutor,
-    TransactionConfig, TransactionManager, decision_config_from_optimize_result,
-    parse_optimize_result_json,
+    DecisionConfig, ExecutorConfig, MonitorConfig, MultiNotifier, PositionMonitor,
+    StrategyExecutor, TransactionConfig, TransactionManager, WebhookNotifier,
+    decision_config_from_optimize_result, parse_optimize_result_json,
 };
 use clmm_lp_protocols::ledger::position_registry::try_append_registry_open;
 use clmm_lp_protocols::prelude::{
@@ -121,7 +121,7 @@ pub async fn run_orca_bot(
         fee_mode,
     };
 
-    let mut executor = StrategyExecutor::new(
+    let executor = StrategyExecutor::new(
         provider.clone(),
         monitor.clone(),
         tx_manager,
@@ -141,6 +141,24 @@ pub async fn run_orca_bot(
 
     if let Some(w) = signing_wallet {
         executor.set_wallet(Arc::new(w));
+    }
+
+    if execute {
+        let path = std::env::var("CLMM_PENDING_OPEN_RECOVERY_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("data/pending-open-recovery.json"));
+        ensure_parent_dir(&path)?;
+        executor.set_pending_open_recovery_path(Some(path));
+    }
+
+    if let Ok(url) = std::env::var("CLMM_ALERT_WEBHOOK_URL") {
+        if !url.is_empty() {
+            let mut m = MultiNotifier::new();
+            m.add(WebhookNotifier::new(url));
+            executor.set_alert_notifier(Some(Arc::new(m)));
+        }
     }
 
     if let Some(ref p) = il_ledger_path {

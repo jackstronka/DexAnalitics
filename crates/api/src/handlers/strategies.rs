@@ -32,7 +32,9 @@ use tracing::{info, warn};
 /// still returned when strict [`StrategyParameters`] deserialization fails (e.g. odd `Decimal`
 /// encodings in older configs) — otherwise `GET /strategies` dropped them and the UI showed
 /// "None linked" after Open Position.
-fn strategy_parameters_from_stored_config(parameters: Option<&serde_json::Value>) -> StrategyParameters {
+fn strategy_parameters_from_stored_config(
+    parameters: Option<&serde_json::Value>,
+) -> StrategyParameters {
     let Some(p) = parameters else {
         return StrategyParameters::default();
     };
@@ -267,6 +269,11 @@ pub async fn update_strategy(
     Path(id): Path<String>,
     Json(request): Json<CreateStrategyRequest>,
 ) -> ApiResult<Json<StrategyResponse>> {
+    let was_running = {
+        let strategies = state.strategies.read().await;
+        strategies.get(&id).map(|s| s.running).unwrap_or(false)
+    };
+
     let response = {
         let mut strategies = state.strategies.write().await;
         let strategy = match strategies.get_mut(&id) {
@@ -359,6 +366,32 @@ pub async fn update_strategy(
     // Persist strategy config so it survives API restarts.
     let snapshot = state.strategies.read().await.clone();
     crate::state::try_persist_strategies_best_effort(&snapshot);
+
+    // If strategy is running, it must be restarted to pick up executor-level flags like
+    // `auto_execute`, `dry_run`, and `eval_interval_secs` (they are read only on executor start).
+    if was_running {
+        // Stop current executor (if any) and remove it from the map.
+        {
+            let exec_opt = { state.executors.read().await.get(&id).cloned() };
+            if let Some(exec) = exec_opt {
+                exec.read().await.stop();
+            }
+        }
+        {
+            let mut execs = state.executors.write().await;
+            execs.remove(&id);
+        }
+
+        // Start a fresh executor using the updated persisted config.
+        let cfg = {
+            let strategies = state.strategies.read().await;
+            strategies
+                .get(&id)
+                .map(|s| s.config.clone())
+                .unwrap_or(serde_json::json!({}))
+        };
+        let _ = start_strategy_executor_core(&state, &id, cfg).await?;
+    }
 
     Ok(Json(response))
 }
@@ -660,12 +693,31 @@ async fn start_strategy_executor_core(
 
     if let Some(params) = strategy_config.get("parameters") {
         let mut decision_config = DecisionConfig::default();
+        let strategy_type: StrategyType = strategy_config
+            .get("strategy_type")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(StrategyType::StaticRange);
+
+        decision_config.strategy_mode = match strategy_type {
+            StrategyType::StaticRange => clmm_lp_execution::prelude::StrategyMode::StaticRange,
+            StrategyType::Periodic => clmm_lp_execution::prelude::StrategyMode::Periodic,
+            StrategyType::Threshold => clmm_lp_execution::prelude::StrategyMode::Threshold,
+            StrategyType::OorRecenter => clmm_lp_execution::prelude::StrategyMode::OorRecenter,
+            StrategyType::IlLimit => clmm_lp_execution::prelude::StrategyMode::IlLimit,
+            StrategyType::RetouchShift => clmm_lp_execution::prelude::StrategyMode::RetouchShift,
+        };
+
+        // Common: width and periodic / thresholds.
+        if let Some(range_width_pct) = params.get("range_width_pct").and_then(|v| v.as_f64()) {
+            decision_config.range_width_pct = Decimal::from_f64_retain(range_width_pct / 100.0)
+                .unwrap_or(decision_config.range_width_pct);
+        }
 
         if let Some(threshold) = params.get("rebalance_threshold_pct")
             && let Some(val) = threshold.as_f64()
         {
-            decision_config.il_rebalance_threshold =
-                Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(5, 2));
+            decision_config.threshold_pct =
+                Decimal::from_f64_retain(val / 100.0).unwrap_or(decision_config.threshold_pct);
         }
 
         if let Some(max_il) = params.get("max_il_pct")
@@ -679,6 +731,25 @@ async fn start_strategy_executor_core(
             && let Some(val) = min_hours.as_u64()
         {
             decision_config.min_rebalance_interval_hours = val;
+            // Align Periodic interval with the same knob used in the UI ("1h", "4h", ...).
+            // For non-periodic modes this value is still used as the minimum rebalance interval gate.
+            decision_config.periodic_interval_hours = val;
+        }
+
+        // IL-specific knobs (only meaningful for IlLimit strategy mode).
+        if decision_config.strategy_mode == clmm_lp_execution::prelude::StrategyMode::IlLimit {
+            if let Some(max_il) = params.get("max_il_pct").and_then(|v| v.as_f64()) {
+                decision_config.il_close_threshold = Decimal::from_f64_retain(max_il / 100.0)
+                    .unwrap_or(decision_config.il_close_threshold);
+            }
+            if let Some(threshold) = params
+                .get("rebalance_threshold_pct")
+                .and_then(|v| v.as_f64())
+            {
+                decision_config.il_rebalance_threshold =
+                    Decimal::from_f64_retain(threshold / 100.0)
+                        .unwrap_or(decision_config.il_rebalance_threshold);
+            }
         }
 
         executor.set_decision_config(decision_config);

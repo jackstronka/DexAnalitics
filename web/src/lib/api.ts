@@ -21,6 +21,34 @@ export interface Position {
   created_at: string | null
 }
 
+export interface PositionLastEvalSnapshot {
+  ts_utc: string
+  in_range: boolean
+  pool_tick_current: number
+  decision: string
+  requires_transaction: boolean
+  auto_execute: boolean
+  hours_since_rebalance?: number | null
+}
+
+export interface PositionStrategyDiagnostics {
+  strategy_id: string
+  name: string
+  strategy_type: StrategyType
+  running: boolean
+  dry_run: boolean
+  auto_execute: boolean
+  automation_disabled_for_position: boolean
+  last_eval?: PositionLastEvalSnapshot | null
+}
+
+export interface PositionDiagnosticsResponse {
+  address: string
+  in_monitor: boolean
+  monitor_in_range?: boolean | null
+  linked_strategies: PositionStrategyDiagnostics[]
+}
+
 export interface PnL {
   unrealized_pnl_usd: string
   unrealized_pnl_pct: string
@@ -233,15 +261,29 @@ async function fetchJsonWithTimeout<T>(
 ): Promise<T> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), timeoutMs)
-  const response = await fetch(`${API_BASE}${url}`, {
-    ...options,
-    signal: options?.signal ?? ctrl.signal,
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...options?.headers,
-    },
-  }).finally(() => clearTimeout(t))
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${url}`, {
+      ...options,
+      signal: options?.signal ?? ctrl.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...options?.headers,
+      },
+    })
+  } catch (e) {
+    // Browser abort (timeout or navigation). Make it actionable.
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(
+        `Request timed out in UI after ${(timeoutMs / 1000).toFixed(0)}s (endpoint ${API_BASE}${url}). ` +
+          `API may still be processing the transaction; check Positions/Registry and retry if needed.`,
+      )
+    }
+    throw e
+  } finally {
+    clearTimeout(t)
+  }
 
   const text = await response.text()
 
@@ -269,7 +311,8 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 
 async function fetchJsonLong<T>(url: string, options?: RequestInit): Promise<T> {
   // On-chain operations (swap/open/close) can take longer than regular API reads.
-  return fetchJsonWithTimeout(url, 90_000, options)
+  // Keep this comfortably above API on-chain timeout (see API_ONCHAIN_REQUEST_TIMEOUT_SECS).
+  return fetchJsonWithTimeout(url, 180_000, options)
 }
 
 // ============================================================================
@@ -339,6 +382,8 @@ export const getOrcaPositionsByOwner = (owner: string) =>
 // Positions
 export const getPositions = () => fetchJson<{ positions: Position[] }>('/positions')
 export const getPosition = (address: string) => fetchJson<Position>(`/positions/${address}`)
+export const getPositionDiagnostics = (address: string) =>
+  fetchJson<PositionDiagnosticsResponse>(`/positions/${encodeURIComponent(address)}/diagnostics`)
 /** Orca swap in the **same pool** (ExactIn) before open — executed by API wallet, then open tx. */
 export interface SwapInPoolBeforeOpen {
   specified_mint: string
@@ -546,6 +591,19 @@ export interface WalletBalancesResponse {
   tokens: WalletTokenBalance[]
 }
 
+export interface ApiSignerWalletResponse {
+  configured: boolean
+  pubkey?: string | null
+  rpc_url: string
+  lamports?: number | null
+  sol?: string | null
+  /** Min SOL for open/rent-heavy ops (default ~0.01 SOL). */
+  min_open_lamports: number
+  /** Min SOL for swap-only fee buffer (default ~0.0015 SOL; lower than open). */
+  min_swap_lamports: number
+  note?: string | null
+}
+
 export const getWallets = () => fetchJson<WalletsListResponse>('/wallets')
 export const getWalletBalances = (owner: string) =>
   // This call may require multiple RPC fallbacks; allow longer than the global 15s timeout.
@@ -553,6 +611,8 @@ export const getWalletBalances = (owner: string) =>
     `/wallets/balances?${new URLSearchParams({ owner: owner.trim() })}`,
     35_000,
   )
+
+export const getApiSignerWallet = () => fetchJson<ApiSignerWalletResponse>('/wallets/api-signer')
 
 // Bot activity (JSONL ledger + registry; Slack digest)
 export interface BotActivityJsonlResponse {
@@ -572,6 +632,12 @@ export interface SlackActivitySummaryResponse {
   webhook_configured: boolean
 }
 
+export interface PendingOpenRecoveryResponse {
+  path: string
+  file_missing: boolean
+  data?: Record<string, unknown> | null
+}
+
 function qsBotActivity(limit: number, filter?: string): string {
   const p = new URLSearchParams()
   p.set('limit', String(limit))
@@ -588,6 +654,9 @@ export const getBotIlLedger = (limit = 200, filter?: string) =>
 
 export const getBotRegistry = (limit = 200, filter?: string) =>
   fetchJson<BotRegistryJsonlResponse>(`/bot-activity/registry?${qsBotActivity(limit, filter)}`)
+
+export const getPendingOpenRecovery = () =>
+  fetchJson<PendingOpenRecoveryResponse>('/bot-activity/pending-open')
 
 export const postSlackActivitySummary = (limit = 40) =>
   fetchJson<SlackActivitySummaryResponse>('/bot-activity/slack-summary', {

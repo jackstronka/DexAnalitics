@@ -1,9 +1,11 @@
 //! Strategy executor for automated position management.
 
+use super::pending_open;
 use super::{
     Decision, DecisionConfig, DecisionContext, DecisionEngine, RebalanceConfig, RebalanceExecutor,
-    RebalanceParams, StrategyMode,
+    RebalanceParams, RecoverOpenParams, StrategyMode,
 };
+use crate::alerts::{Alert, AlertLevel, AlertType, MultiNotifier};
 use crate::emergency::CircuitBreaker;
 use crate::lifecycle::{
     CloseReason, FeesCollectedData, LifecycleTracker, PositionClosedData, RebalanceReason,
@@ -16,13 +18,26 @@ use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
+
+/// Snapshot of the latest evaluation outcome for a position.
+#[derive(Debug, Clone)]
+pub struct PositionEvalSnapshot {
+    pub ts_utc: String,
+    pub in_range: bool,
+    pub pool_tick_current: i32,
+    pub decision: String,
+    pub requires_transaction: bool,
+    pub auto_execute: bool,
+    /// `None` when unknown (no lifecycle summary) — avoid showing `u64::MAX` in UIs.
+    pub hours_since_rebalance: Option<u64>,
+}
 
 /// Configuration for strategy execution.
 #[derive(Debug, Clone)]
@@ -64,13 +79,11 @@ pub struct StrategyExecutor {
     #[allow(dead_code)]
     tx_manager: Arc<TransactionManager>,
     /// Rebalance executor.
-    rebalance_executor: RebalanceExecutor,
+    rebalance_executor: Arc<RebalanceExecutor>,
     /// Circuit breaker.
     circuit_breaker: Arc<CircuitBreaker>,
     /// Lifecycle tracker.
     lifecycle: Arc<LifecycleTracker>,
-    /// Wallet for signing.
-    wallet: Option<Arc<Wallet>>,
     /// Configuration.
     config: ExecutorConfig,
     /// Running flag.
@@ -85,6 +98,12 @@ pub struct StrategyExecutor {
     optimization_run_id: Mutex<Option<String>>,
     /// PDAs to skip in `evaluate_all` (strategy automation off for these positions).
     skip_evaluation_for: Arc<RwLock<HashSet<solana_sdk::pubkey::Pubkey>>>,
+    /// Latest evaluation snapshot per position (best-effort, in-memory only).
+    last_eval: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, PositionEvalSnapshot>>>,
+    /// Optional JSON file for [`pending_open`] recovery (`CLMM_PENDING_OPEN_RECOVERY_PATH`).
+    pending_open_recovery_path: Mutex<Option<PathBuf>>,
+    /// Optional notifier for executor-level alerts (e.g. rebalance incomplete).
+    alert_notifier: Mutex<Option<Arc<MultiNotifier>>>,
 }
 
 impl StrategyExecutor {
@@ -101,12 +120,12 @@ impl StrategyExecutor {
         let tick_reader = WhirlpoolTickReader::new(provider.clone());
         let retouch_armed = Arc::new(RwLock::new(HashMap::new()));
 
-        let mut rebalance_executor = RebalanceExecutor::new(
+        let rebalance_executor = Arc::new(RebalanceExecutor::new(
             provider,
             tx_manager.clone(),
             lifecycle.clone(),
-            RebalanceConfig::default(),
-        );
+            RebalanceConfig::from_env(),
+        ));
         rebalance_executor.set_dry_run(config.dry_run);
 
         Self {
@@ -116,7 +135,6 @@ impl StrategyExecutor {
             rebalance_executor,
             circuit_breaker,
             lifecycle,
-            wallet: None,
             config,
             running: std::sync::atomic::AtomicBool::new(false),
             pool_reader,
@@ -124,7 +142,31 @@ impl StrategyExecutor {
             retouch_armed,
             optimization_run_id: Mutex::new(None),
             skip_evaluation_for: Arc::new(RwLock::new(HashSet::new())),
+            last_eval: Arc::new(RwLock::new(HashMap::new())),
+            pending_open_recovery_path: Mutex::new(
+                std::env::var("CLMM_PENDING_OPEN_RECOVERY_PATH")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from),
+            ),
+            alert_notifier: Mutex::new(None),
         }
+    }
+
+    /// Override pending-open recovery path (e.g. from CLI). `None` disables persistence.
+    pub fn set_pending_open_recovery_path(&self, path: Option<PathBuf>) {
+        *self.pending_open_recovery_path.blocking_lock() = path;
+    }
+
+    /// Webhook / multi notifier for [`AlertType::RebalanceIncomplete`] and similar.
+    pub fn set_alert_notifier(&self, notifier: Option<Arc<MultiNotifier>>) {
+        *self.alert_notifier.blocking_lock() = notifier;
+    }
+
+    /// Shared handle for [`EmergencyExitManager`] or custom tooling.
+    #[must_use]
+    pub fn rebalance_executor_handle(&self) -> Arc<RebalanceExecutor> {
+        self.rebalance_executor.clone()
     }
 
     /// Replaces the set of position addresses for which this executor skips decisions/transactions.
@@ -238,9 +280,14 @@ impl StrategyExecutor {
     }
 
     /// Sets the wallet for signing transactions.
-    pub fn set_wallet(&mut self, wallet: Arc<Wallet>) {
-        self.wallet = Some(wallet.clone());
+    pub fn set_wallet(&self, wallet: Arc<Wallet>) {
         self.rebalance_executor.set_wallet(wallet);
+    }
+
+    /// Returns the configured wallet pubkey (if any).
+    #[must_use]
+    pub fn wallet_pubkey(&self) -> Option<solana_sdk::pubkey::Pubkey> {
+        self.rebalance_executor.wallet_pubkey()
     }
 
     /// Sets the decision engine configuration.
@@ -250,11 +297,7 @@ impl StrategyExecutor {
 
     /// Sets the current optimization run id used to stamp lifecycle/ledger rows.
     pub fn set_optimization_run_id(&self, run_id: Option<String>) {
-        let mut g = self
-            .optimization_run_id
-            .lock()
-            .expect("optimization_run_id lock");
-        *g = run_id;
+        *self.optimization_run_id.blocking_lock() = run_id;
     }
 
     /// Enables or disables dry run mode.
@@ -271,6 +314,14 @@ impl StrategyExecutor {
     /// Gets the lifecycle tracker.
     pub fn lifecycle(&self) -> &Arc<LifecycleTracker> {
         &self.lifecycle
+    }
+
+    /// Returns the most recent evaluation snapshot for the given position, if any.
+    pub async fn last_evaluation_for_position(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+    ) -> Option<PositionEvalSnapshot> {
+        self.last_eval.read().await.get(position).cloned()
     }
 
     /// Optional JSONL path for IL / rebalance ledger (see `LifecycleTracker::set_il_ledger_path`).
@@ -517,8 +568,100 @@ impl StrategyExecutor {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    async fn emit_executor_alert(&self, alert: Alert) {
+        let notifier = self.alert_notifier.lock().await.clone();
+        if let Some(n) = notifier {
+            n.notify_all(&alert).await;
+        }
+    }
+
+    /// Retry `open` for rows in [`pending_open::PendingOpenStore`] (after `rebalance_incomplete`).
+    async fn process_pending_open_recoveries(&self) -> anyhow::Result<()> {
+        let path = self.pending_open_recovery_path.lock().await.clone();
+        let Some(path) = path else {
+            return Ok(());
+        };
+        if !self.config.auto_execute || self.config.dry_run {
+            return Ok(());
+        }
+        if self.wallet_pubkey().is_none() {
+            return Ok(());
+        }
+
+        let mut store = pending_open::load(&path).unwrap_or_default();
+        if store.items.is_empty() {
+            return Ok(());
+        }
+        let max_a = pending_open::max_recovery_attempts();
+        let mut kept: Vec<super::pending_open::PendingOpenItem> = Vec::new();
+
+        for mut item in std::mem::take(&mut store.items) {
+            if item.attempts >= max_a {
+                continue;
+            }
+            item.attempts += 1;
+            let pool = solana_sdk::pubkey::Pubkey::from_str(item.pool.trim())
+                .map_err(|e| anyhow::anyhow!("pending pool pubkey: {e}"))?;
+            let closed = solana_sdk::pubkey::Pubkey::from_str(item.closed_position_nft.trim())
+                .map_err(|e| anyhow::anyhow!("pending closed NFT pubkey: {e}"))?;
+
+            let res = self
+                .rebalance_executor
+                .recover_open_after_incomplete(RecoverOpenParams {
+                    pool,
+                    new_tick_lower: item.intended_tick_lower,
+                    new_tick_upper: item.intended_tick_upper,
+                    reason: item.reason.clone(),
+                    closed_position_nft: closed,
+                    optimization_run_id: item.optimization_run_id.clone(),
+                })
+                .await;
+
+            if res.success {
+                if let Some(np) = res.new_position {
+                    if let Err(e) = self.monitor.add_position(&np.to_string()).await {
+                        warn!(
+                            error = %e,
+                            new_position = %np,
+                            "pending_open: add_position failed after recover"
+                        );
+                        item.last_error = Some(format!("add_position: {e}"));
+                        if item.attempts < max_a {
+                            kept.push(item);
+                        }
+                    } else {
+                        info!(
+                            new_position = %np,
+                            pool = %pool,
+                            "pending_open recovery succeeded"
+                        );
+                    }
+                }
+            } else {
+                item.last_error = res.error.clone();
+                if item.attempts < max_a {
+                    kept.push(item);
+                } else {
+                    warn!(
+                        pool = %pool,
+                        error = ?res.error,
+                        "pending_open recovery failed (max attempts)"
+                    );
+                }
+            }
+        }
+
+        store.items = kept;
+        pending_open::save(&path, &store)?;
+        Ok(())
+    }
+
     /// Evaluates all monitored positions.
     async fn evaluate_all(&self) -> anyhow::Result<()> {
+        if let Err(e) = self.process_pending_open_recoveries().await {
+            warn!(error = %e, "pending_open recovery pass failed");
+        }
+
         let positions = self.monitor.get_positions().await;
 
         debug!(count = positions.len(), "Evaluating positions");
@@ -615,6 +758,24 @@ impl StrategyExecutor {
 
         let decision = self.decision_engine.decide(&context);
 
+        {
+            let snap = PositionEvalSnapshot {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                in_range: position.in_range,
+                pool_tick_current: pool.tick_current,
+                decision: decision.description(),
+                requires_transaction: decision.requires_transaction(),
+                auto_execute: self.config.auto_execute,
+                hours_since_rebalance: if hours_since_rebalance == u64::MAX {
+                    None
+                } else {
+                    Some(hours_since_rebalance)
+                },
+            };
+            let mut m = self.last_eval.write().await;
+            m.insert(position.address, snap);
+        }
+
         if decision.requires_transaction() {
             info!(
                 position = %position.address,
@@ -700,6 +861,7 @@ impl StrategyExecutor {
                         }
                     }
                 };
+                let optimization_run_id = self.optimization_run_id.lock().await.clone();
                 let params = RebalanceParams {
                     position: position.address,
                     pool: position.pool,
@@ -710,7 +872,7 @@ impl StrategyExecutor {
                     current_liquidity: position.on_chain.liquidity,
                     pool_tick_current: pool.tick_current,
                     pool_sqrt_price: pool.sqrt_price,
-                    reason,
+                    reason: reason.clone(),
                     current_il_pct: position.pnl.il_pct,
                     amount_a_before: None,
                     amount_b_before: None,
@@ -718,11 +880,7 @@ impl StrategyExecutor {
                     amount_a_after: None,
                     amount_b_after: None,
                     price_ab_after: None,
-                    optimization_run_id: self
-                        .optimization_run_id
-                        .lock()
-                        .expect("optimization_run_id lock")
-                        .clone(),
+                    optimization_run_id,
                 };
 
                 let result = self.rebalance_executor.execute(params).await;
@@ -730,11 +888,70 @@ impl StrategyExecutor {
                 if !result.success {
                     if result.old_position_closed_on_chain && result.new_position.is_none() {
                         error!(
+                            op = "orca_rebalance",
+                            outcome = "incomplete",
                             position = %position.address,
                             pool = %position.pool,
-                            error = ?result.error,
+                            tick_lower_old = position.on_chain.tick_lower,
+                            tick_upper_old = position.on_chain.tick_upper,
+                            tick_lower_new = *new_tick_lower,
+                            tick_upper_new = *new_tick_upper,
+                            tick_current = pool.tick_current,
+                            reason = ?reason,
+                            error = result.error.as_deref(),
                             "Rebalance incomplete: old position closed on-chain but new position was not opened; removing stale monitor entry (restart with a new position NFT or re-open manually)"
                         );
+                        self.lifecycle
+                            .record_rebalance_incomplete(
+                                position.address,
+                                position.pool,
+                                position.on_chain.tick_lower,
+                                position.on_chain.tick_upper,
+                                *new_tick_lower,
+                                *new_tick_upper,
+                                reason.clone(),
+                                result.error.as_deref(),
+                                self.optimization_run_id.lock().await.clone(),
+                            )
+                            .await;
+                        let path_opt = self.pending_open_recovery_path.lock().await.clone();
+                        if let Some(ref path) = path_opt {
+                            let mut s = pending_open::load(path).unwrap_or_default();
+                            pending_open::upsert(
+                                &mut s,
+                                pending_open::PendingOpenItem {
+                                    pool: position.pool.to_string(),
+                                    intended_tick_lower: *new_tick_lower,
+                                    intended_tick_upper: *new_tick_upper,
+                                    closed_position_nft: position.address.to_string(),
+                                    reason: reason.clone(),
+                                    optimization_run_id: self
+                                        .optimization_run_id
+                                        .lock()
+                                        .await
+                                        .clone(),
+                                    attempts: 0,
+                                    last_error: result.error.clone(),
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                },
+                            );
+                            let _ = pending_open::save(path, &s);
+                        }
+                        self.emit_executor_alert(
+                            Alert::new(
+                                AlertLevel::Critical,
+                                AlertType::RebalanceIncomplete,
+                                format!(
+                                    "Rebalance incomplete: pool {} position {} — {}",
+                                    position.pool,
+                                    position.address,
+                                    result.error.as_deref().unwrap_or("unknown")
+                                ),
+                            )
+                            .with_position(&position.address)
+                            .with_pool(&position.pool),
+                        )
+                        .await;
                         let old_addr = position.address;
                         self.monitor.remove_position(&old_addr).await;
                         if self.decision_engine.config().strategy_mode == StrategyMode::RetouchShift
@@ -743,7 +960,21 @@ impl StrategyExecutor {
                             m.remove(&old_addr);
                         }
                     } else if let Some(ref err) = result.error {
-                        error!(error = %err, "Rebalance failed");
+                        error!(
+                            op = "orca_rebalance",
+                            outcome = "failed",
+                            position = %position.address,
+                            pool = %position.pool,
+                            tick_lower_old = position.on_chain.tick_lower,
+                            tick_upper_old = position.on_chain.tick_upper,
+                            tick_lower_new = *new_tick_lower,
+                            tick_upper_new = *new_tick_upper,
+                            tick_current = pool.tick_current,
+                            reason = ?reason,
+                            old_position_closed = result.old_position_closed_on_chain,
+                            error = %err,
+                            "Rebalance failed"
+                        );
                     }
                 }
 

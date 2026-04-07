@@ -116,6 +116,7 @@ pub async fn fetch_swaps_for_optimize(query_arg: &str) -> Result<Option<Vec<Swap
 /// Default strategy set for grid search.
 pub fn default_strategies(
     static_only: bool,
+    indicator_strategies: bool,
     _il_max_pct: f64,
     _il_close_pct: Option<f64>,
     _il_grace_steps: u64,
@@ -123,7 +124,7 @@ pub fn default_strategies(
     if static_only {
         vec![StratConfig::Static]
     } else {
-        vec![
+        let mut v = vec![
             StratConfig::Static,
             StratConfig::Threshold(0.02),
             StratConfig::Threshold(0.03),
@@ -136,6 +137,64 @@ pub fn default_strategies(
             StratConfig::Periodic(24),
             StratConfig::Periodic(48),
             StratConfig::Periodic(72),
-        ]
+        ];
+        if indicator_strategies {
+            // Three σ-width presets (`k` in `SMA ± k·σ`): narrower (1.5σ), classic (2σ), wider (2.5σ).
+            // Each paired with two rebalance cadences (`rebalance_steps`; same timebase as the path).
+            for k in [1.5_f64, 2.0, 2.5] {
+                v.push(StratConfig::Bollinger {
+                    window: 20,
+                    k,
+                    rebalance_steps: 24,
+                });
+                v.push(StratConfig::Bollinger {
+                    window: 20,
+                    k,
+                    rebalance_steps: 48,
+                });
+            }
+            // Last-closed-candle anchor: `(candle_steps, rebalance_steps)` in **simulation steps**.
+            // With `--resolution-seconds 900` (15 min/step), the grid below matches:
+            // - 15m candle: rebal 15/30/45/60m, 4h, 12h  → (1,1|2|3|4|16|48)
+            // - 30m candle: rebal 30/45/60m, 4h, 12h     → (2,2|3|4|16|48)
+            // - 45m candle: rebal 15/30/45/60m, 4h, 12h → (3,1|2|3|4|16|48)
+            // - 1h candle:  rebal 1h, 4h, 12h           → (4,4|16|48)
+            // Each rebalance pays `tx_cost` in `run_single` — frequent presets stress fee drag.
+            for &(candle_steps, rebalance_steps) in LAST_CANDLE_OPTIMIZE_GRID {
+                v.push(StratConfig::LastCandle {
+                    candle_steps,
+                    rebalance_steps,
+                });
+            }
+        }
+        v
     }
 }
+
+/// Presets for `backtest-optimize --indicator-strategies`: wall-clock labels assume **15 min / step** (`--resolution-seconds 900`).
+const LAST_CANDLE_OPTIMIZE_GRID: &[(u64, u64)] = &[
+    // 15-minute candle (1 step)
+    (1, 1),
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (1, 16),
+    (1, 48),
+    // 30-minute candle (2 steps)
+    (2, 2),
+    (2, 3),
+    (2, 4),
+    (2, 16),
+    (2, 48),
+    // 45-minute candle (3 steps @ 900s/step)
+    (3, 1),
+    (3, 2),
+    (3, 3),
+    (3, 4),
+    (3, 16),
+    (3, 48),
+    // 1-hour candle (4 steps)
+    (4, 4),
+    (4, 16),
+    (4, 48),
+];

@@ -18,10 +18,10 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey::Pubkey;
-use std::str::FromStr;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Mint;
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// Tick range expressed as **USDC per 1 unit of the non-USDC token** when the pool has exactly one USDC leg.
@@ -40,6 +40,8 @@ pub struct PositionUsdValuation {
     pub amount_a_raw: u64,
     pub amount_b_raw: u64,
     pub range_usdc: Option<TickRangeUsdc>,
+    /// Spot is inside `[tick_lower, tick_upper)` using **fresh** pool tick from RPC.
+    pub in_range: bool,
     /// Human-token uncollected fees (Whirlpool `fee_owed_*` × 10^-decimals).
     pub fees_owed_a_ui: Decimal,
     pub fees_owed_b_ui: Decimal,
@@ -188,7 +190,11 @@ pub fn compute_tick_range_usdc(
         format!("per 1 {}", token_short_label(mint_b))
     };
 
-    Some(TickRangeUsdc { lower, upper, quote })
+    Some(TickRangeUsdc {
+        lower,
+        upper,
+        quote,
+    })
 }
 
 /// One pool RPC read: optional USDC range line + **in range** (spot inside `[tick_lower, tick_upper)`).
@@ -199,11 +205,7 @@ pub async fn range_usdc_and_in_range_for_pool_ticks(
     tick_upper: i32,
 ) -> (Option<TickRangeUsdc>, bool) {
     let pool_reader = WhirlpoolReader::new(provider.clone());
-    let Some(pool_state) = pool_reader
-        .get_pool_state(&pool.to_string())
-        .await
-        .ok()
-    else {
+    let Some(pool_state) = pool_reader.get_pool_state(&pool.to_string()).await.ok() else {
         return (None, false);
     };
     let in_range = pool_state.is_tick_in_range(tick_lower, tick_upper);
@@ -368,6 +370,9 @@ pub async fn compute_position_usd_valuation(
         .await
         .map_err(|e| ApiError::internal(format!("pool state fetch failed: {e}")))?;
 
+    let in_range =
+        pool_state.is_tick_in_range(position.on_chain.tick_lower, position.on_chain.tick_upper);
+
     let (amount_a_raw, amount_b_raw) = position_reader.calculate_token_amounts(
         &position.on_chain,
         pool_state.tick_current,
@@ -457,7 +462,9 @@ pub async fn compute_position_usd_valuation(
     let token_a_label = token_short_label(&pool_state.token_mint_a);
     let token_b_label = token_short_label(&pool_state.token_mint_b);
 
-    if (position.on_chain.fees_owed_a > 0 || position.on_chain.fees_owed_b > 0) && fees_usd.is_zero() {
+    if (position.on_chain.fees_owed_a > 0 || position.on_chain.fees_owed_b > 0)
+        && fees_usd.is_zero()
+    {
         tracing::warn!(
             mint_a = %pool_state.token_mint_a,
             mint_b = %pool_state.token_mint_b,
@@ -475,6 +482,7 @@ pub async fn compute_position_usd_valuation(
         amount_a_raw,
         amount_b_raw,
         range_usdc,
+        in_range,
         fees_owed_a_ui,
         fees_owed_b_ui,
         token_a_label,
@@ -535,5 +543,4 @@ mod tick_range_usdc_tests {
             "implied SOL USD from tick -25268 (spot ~$80): got {p}"
         );
     }
-
 }

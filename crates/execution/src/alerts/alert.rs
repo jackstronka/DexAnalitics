@@ -58,6 +58,8 @@ pub enum AlertType {
     ConnectionIssue,
     /// Custom alert.
     Custom(String),
+    /// Rebalance closed old position but failed to open the new one (funds in wallet).
+    RebalanceIncomplete,
 }
 
 impl AlertType {
@@ -74,6 +76,7 @@ impl AlertType {
             Self::SystemError => "System Error",
             Self::ConnectionIssue => "Connection Issue",
             Self::Custom(name) => name,
+            Self::RebalanceIncomplete => "Rebalance Incomplete",
         }
     }
 }

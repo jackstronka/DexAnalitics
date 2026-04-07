@@ -7,9 +7,18 @@ use axum::{
     Router,
     routing::{delete, get, post, put},
 };
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 /// Creates the API router with all routes.
+///
+/// Note: timeouts are applied in [`create_versioned_router`]. This helper is kept for internal
+/// callers (e.g. tests / prelude) and returns the merged router without timeout layers.
 pub fn create_router(state: AppState) -> Router {
+    create_base_router(state.clone()).merge(create_onchain_router(state))
+}
+
+fn create_base_router(state: AppState) -> Router {
     Router::new()
         // Health routes
         .route("/health", get(handlers::health_check))
@@ -19,29 +28,14 @@ pub fn create_router(state: AppState) -> Router {
         // Auth routes
         .route("/auth/phantom/challenge", post(handlers::phantom_challenge))
         .route("/auth/phantom/verify", post(handlers::phantom_verify))
-        // Position routes
+        // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
-        .route("/positions", post(handlers::open_position))
-        .route(
-            "/positions/swap-before-open",
-            post(handlers::swap_before_open),
-        )
         .route("/positions/{address}", get(handlers::get_position))
-        .route(
-            "/positions/{address}/strategy",
-            post(handlers::link_position_strategy),
-        )
-        .route("/positions/{address}", delete(handlers::close_position))
-        .route("/positions/{address}/collect", post(handlers::collect_fees))
-        .route(
-            "/positions/{address}/decrease",
-            post(handlers::decrease_liquidity),
-        )
-        .route(
-            "/positions/{address}/rebalance",
-            post(handlers::rebalance_position),
-        )
         .route("/positions/{address}/pnl", get(handlers::get_position_pnl))
+        .route(
+            "/positions/{address}/diagnostics",
+            get(handlers::get_position_diagnostics),
+        )
         // Strategy routes
         .route("/strategies", get(handlers::list_strategies))
         .route("/strategies", post(handlers::create_strategy))
@@ -87,13 +81,12 @@ pub fn create_router(state: AppState) -> Router {
             "/orca/positions-by-owner",
             get(handlers::orca_positions_by_owner),
         )
-        // Unsiged tx flow routes
+        // Unsiged tx flow routes (build = lightweight)
         .route("/tx/open/build", post(handlers::tx_open_build))
         .route("/tx/increase/build", post(handlers::tx_increase_build))
         .route("/tx/decrease/build", post(handlers::tx_decrease_build))
         .route("/tx/collect/build", post(handlers::tx_collect_build))
         .route("/tx/close/build", post(handlers::tx_close_build))
-        .route("/tx/submit-signed", post(handlers::tx_submit_signed))
         // Analytics routes
         .route(
             "/analytics/portfolio",
@@ -105,6 +98,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/bot-activity/il-ledger", get(handlers::get_bot_il_ledger))
         .route("/bot-activity/registry", get(handlers::get_bot_registry))
         .route(
+            "/bot-activity/pending-open",
+            get(handlers::get_pending_open_recovery),
+        )
+        .route(
             "/bot-activity/slack-summary",
             post(handlers::post_bot_slack_summary),
         )
@@ -114,6 +111,7 @@ pub fn create_router(state: AppState) -> Router {
         // Wallets (local keypairs directory + on-chain balances)
         .route("/wallets", get(handlers::list_wallets))
         .route("/wallets/balances", get(handlers::get_wallet_balances))
+        .route("/wallets/api-signer", get(handlers::get_api_signer_wallet))
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // WebSocket routes
@@ -123,7 +121,47 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+fn create_onchain_router(state: AppState) -> Router {
+    Router::new()
+        // Position routes (on-chain / can take long)
+        .route("/positions", post(handlers::open_position))
+        .route(
+            "/positions/swap-before-open",
+            post(handlers::swap_before_open),
+        )
+        .route(
+            "/positions/{address}/strategy",
+            post(handlers::link_position_strategy),
+        )
+        .route("/positions/{address}", delete(handlers::close_position))
+        .route("/positions/{address}/collect", post(handlers::collect_fees))
+        .route(
+            "/positions/{address}/decrease",
+            post(handlers::decrease_liquidity),
+        )
+        .route(
+            "/positions/{address}/rebalance",
+            post(handlers::rebalance_position),
+        )
+        // Unsiged tx flow routes (submit can take long)
+        .route("/tx/submit-signed", post(handlers::tx_submit_signed))
+        // Add state
+        .with_state(state)
+}
+
 /// Creates the API router with versioning prefix.
-pub fn create_versioned_router(state: AppState) -> Router {
-    Router::new().nest("/api/v1", create_router(state))
+pub fn create_versioned_router(
+    state: AppState,
+    request_timeout_secs: u64,
+    onchain_request_timeout_secs: u64,
+) -> Router {
+    #[allow(deprecated)]
+    let base = create_base_router(state.clone()).layer(TimeoutLayer::new(Duration::from_secs(
+        request_timeout_secs,
+    )));
+    #[allow(deprecated)]
+    let onchain = create_onchain_router(state).layer(TimeoutLayer::new(Duration::from_secs(
+        onchain_request_timeout_secs,
+    )));
+    Router::new().nest("/api/v1", base.merge(onchain))
 }

@@ -71,9 +71,10 @@ fn message_static_pubkeys(tx_root: &serde_json::Value) -> Option<Vec<String>> {
         if let Some(s) = k.as_str() {
             out.push(s.to_string());
         } else {
-            let pk = k.get("pubkey").and_then(|x| x.as_str()).or_else(|| {
-                k.get("pubKey").and_then(|x| x.as_str())
-            })?;
+            let pk = k
+                .get("pubkey")
+                .and_then(|x| x.as_str())
+                .or_else(|| k.get("pubKey").and_then(|x| x.as_str()))?;
             out.push(pk.to_string());
         }
     }
@@ -102,8 +103,8 @@ fn fee_payer_balance_delta(
         .and_then(|x| x.as_u64());
     match (pre, post) {
         (Some(pre), Some(post)) => {
-            let delta = i64::try_from(post).unwrap_or(i64::MAX)
-                - i64::try_from(pre).unwrap_or(i64::MAX);
+            let delta =
+                i64::try_from(post).unwrap_or(i64::MAX) - i64::try_from(pre).unwrap_or(i64::MAX);
             (Some(pre), Some(post), Some(delta))
         }
         _ => (None, None, None),
@@ -139,10 +140,7 @@ pub async fn enrich_tx_costs(
 ) -> (u64, Option<u64>, Option<u64>, Option<u64>, Option<i64>) {
     match fetch_tx_json_with_retry(provider, signature).await {
         Ok(v) => {
-            let fee = v
-                .pointer("/meta/fee")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0);
+            let fee = v.pointer("/meta/fee").and_then(|x| x.as_u64()).unwrap_or(0);
             let slot = v.get("slot").and_then(|x| x.as_u64());
             let (pre, post, delta) = fee_payer_balance_delta(&v, fee_payer);
             (fee, slot, pre, post, delta)
@@ -281,9 +279,14 @@ pub async fn try_append_cli_swap_tx_cost(
     pool: &Pubkey,
     rebalance_session_id_override: Option<String>,
 ) {
-    if let Err(e) =
-        append_cli_swap_inner(provider, fee_payer, signature, pool, rebalance_session_id_override)
-            .await
+    if let Err(e) = append_cli_swap_inner(
+        provider,
+        fee_payer,
+        signature,
+        pool,
+        rebalance_session_id_override,
+    )
+    .await
     {
         warn!(error = %e, "cli swap tx lifecycle ledger: append failed");
     }
@@ -343,4 +346,58 @@ async fn append_cli_swap_inner(
     };
 
     append_jsonl_line(&rec)
+}
+
+/// Best-effort append of a **non-tx** diagnostic row (e.g. swap-mix planning / failure).
+///
+/// This is used to debug cases where the bot closes a position but cannot open a new one
+/// due to wallet mix / deposit quote constraints. These rows are intentionally lightweight
+/// (no `getTransaction` calls).
+pub async fn try_append_bot_diagnostic_row(
+    provider: &RpcProvider,
+    event: &'static str,
+    operation: &'static str,
+    pool: Option<Pubkey>,
+    position: Option<Pubkey>,
+    rebalance_session_id_override: Option<String>,
+    details: serde_json::Value,
+) {
+    #[derive(Serialize)]
+    struct Row {
+        schema_version: u32,
+        ts_utc: String,
+        event: &'static str,
+        source: &'static str,
+        operation: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pool_address: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        position_pubkey: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rebalance_session_id: Option<String>,
+        rpc_url: String,
+        /// Structured free-form fields; stable keys are preferred but not enforced.
+        details: serde_json::Value,
+        accounting_note: &'static str,
+    }
+
+    let rpc_url = provider.current_endpoint().await;
+    let rec = Row {
+        schema_version: 2,
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        event,
+        source: "orca_bot",
+        operation,
+        pool_address: pool.map(|p| p.to_string()),
+        position_pubkey: position.map(|p| p.to_string()),
+        rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
+        rpc_url,
+        details,
+        accounting_note:
+            "Diagnostic row (no tx); helps debug swap-mix / rebalance incomplete sequences.",
+    };
+
+    if let Err(e) = append_jsonl_line(&rec) {
+        warn!(error = %e, event, operation, "bot diagnostic ledger: append failed");
+    }
 }

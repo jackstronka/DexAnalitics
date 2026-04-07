@@ -1,6 +1,6 @@
 //! Position monitor for real-time tracking.
 
-use crate::alerts::{Alert, AlertRule};
+use crate::alerts::{Alert, AlertLevel, AlertRule, AlertType, MultiNotifier, WebhookNotifier};
 use clmm_lp_domain::metrics::impermanent_loss::calculate_il_concentrated;
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
@@ -8,7 +8,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
@@ -25,6 +25,8 @@ pub struct MonitorConfig {
     pub il_critical_threshold: Decimal,
     /// Range exit alert enabled.
     pub range_exit_alert: bool,
+    /// Optional webhook URL for [`WebhookNotifier`] (e.g. `CLMM_ALERT_WEBHOOK_URL`).
+    pub webhook_url: Option<String>,
 }
 
 impl Default for MonitorConfig {
@@ -35,6 +37,9 @@ impl Default for MonitorConfig {
             il_warning_threshold: Decimal::new(5, 2),   // 5%
             il_critical_threshold: Decimal::new(10, 2), // 10%
             range_exit_alert: true,
+            webhook_url: std::env::var("CLMM_ALERT_WEBHOOK_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -98,8 +103,9 @@ pub struct PositionMonitor {
     /// Alert rules.
     alert_rules: Vec<AlertRule>,
     /// Alert callback.
-    #[allow(dead_code)]
     alert_callback: Option<Box<dyn Fn(Alert) + Send + Sync>>,
+    /// Optional multi-channel notifier (e.g. webhook).
+    alert_notifier: Mutex<Option<Arc<MultiNotifier>>>,
 }
 
 impl PositionMonitor {
@@ -107,6 +113,12 @@ impl PositionMonitor {
     pub fn new(provider: Arc<RpcProvider>, config: MonitorConfig) -> Self {
         let pool_reader = WhirlpoolReader::new(provider.clone());
         let position_reader = PositionReader::new(provider.clone());
+
+        let alert_notifier = config.webhook_url.as_ref().map(|url| {
+            let mut m = MultiNotifier::new();
+            m.add(WebhookNotifier::new(url.clone()));
+            Arc::new(m)
+        });
 
         Self {
             provider,
@@ -116,6 +128,17 @@ impl PositionMonitor {
             config,
             alert_rules: Vec::new(),
             alert_callback: None,
+            alert_notifier: Mutex::new(alert_notifier),
+        }
+    }
+
+    async fn emit_alert(&self, alert: Alert) {
+        if let Some(cb) = &self.alert_callback {
+            cb(alert.clone());
+        }
+        let notifier = self.alert_notifier.lock().await.clone();
+        if let Some(n) = notifier {
+            n.notify_all(&alert).await;
         }
     }
 
@@ -241,53 +264,96 @@ impl PositionMonitor {
             pool_state.sqrt_price,
         );
 
-        // Update position state
-        let mut positions = self.positions.write().await;
-        if let Some(monitored) = positions.get_mut(address) {
-            let was_in_range = monitored.in_range;
+        let mut range_alert: Option<Alert> = None;
+        let mut il_alert: Option<Alert> = None;
 
-            monitored.on_chain = position.clone();
-            monitored.in_range = in_range;
-            monitored.last_updated = chrono::Utc::now();
+        {
+            let mut positions = self.positions.write().await;
+            if let Some(monitored) = positions.get_mut(address) {
+                let was_in_range = monitored.in_range;
+                let prev_il_pct = monitored.pnl.il_pct;
 
-            // Update PnL
-            monitored.pnl.fees_earned_a = position.fees_owed_a;
-            monitored.pnl.fees_earned_b = position.fees_owed_b;
+                monitored.on_chain = position.clone();
+                monitored.in_range = in_range;
+                monitored.last_updated = chrono::Utc::now();
 
-            // Update IL percentage if we have an entry price.
-            if let Some(entry_price) = monitored.pnl.entry_price {
-                let lower_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
-                let upper_price = clmm_lp_protocols::prelude::tick_to_price(position.tick_upper);
-                let il = calculate_il_concentrated(
-                    entry_price,
-                    pool_state.price,
-                    lower_price,
-                    upper_price,
-                )
-                .unwrap_or(Decimal::ZERO);
-                monitored.pnl.il_pct = il;
-            } else {
-                // If entry price wasn't set, treat current price as entry to avoid NaNs.
-                monitored.pnl.entry_price = Some(pool_state.price);
-                monitored.pnl.il_pct = Decimal::ZERO;
-            }
+                monitored.pnl.fees_earned_a = position.fees_owed_a;
+                monitored.pnl.fees_earned_b = position.fees_owed_b;
 
-            debug!(
-                position = %address,
-                in_range = in_range,
-                amount_a = amount_a,
-                amount_b = amount_b,
-                "Updated position state"
-            );
+                if let Some(entry_price) = monitored.pnl.entry_price {
+                    let lower_price =
+                        clmm_lp_protocols::prelude::tick_to_price(position.tick_lower);
+                    let upper_price =
+                        clmm_lp_protocols::prelude::tick_to_price(position.tick_upper);
+                    let il = calculate_il_concentrated(
+                        entry_price,
+                        pool_state.price,
+                        lower_price,
+                        upper_price,
+                    )
+                    .unwrap_or(Decimal::ZERO);
+                    monitored.pnl.il_pct = il;
+                } else {
+                    monitored.pnl.entry_price = Some(pool_state.price);
+                    monitored.pnl.il_pct = Decimal::ZERO;
+                }
 
-            // Check for range exit
-            if was_in_range && !in_range && self.config.range_exit_alert {
-                warn!(
+                debug!(
                     position = %address,
-                    "Position exited range"
+                    in_range = in_range,
+                    amount_a = amount_a,
+                    amount_b = amount_b,
+                    "Updated position state"
                 );
-                // TODO: Trigger alert
+
+                if was_in_range && !in_range && self.config.range_exit_alert {
+                    warn!(position = %address, "Position exited range");
+                    if self.config.alerts_enabled {
+                        range_alert = Some(
+                            Alert::new(
+                                AlertLevel::Warning,
+                                AlertType::RangeExit,
+                                format!("Position {address} exited price range"),
+                            )
+                            .with_position(address)
+                            .with_pool(&monitored.pool),
+                        );
+                    }
+                }
+
+                if self.config.alerts_enabled {
+                    let il = monitored.pnl.il_pct;
+                    let level = if il.abs() >= self.config.il_critical_threshold
+                        && prev_il_pct.abs() < self.config.il_critical_threshold
+                    {
+                        Some(AlertLevel::Critical)
+                    } else if il.abs() >= self.config.il_warning_threshold
+                        && prev_il_pct.abs() < self.config.il_warning_threshold
+                    {
+                        Some(AlertLevel::Warning)
+                    } else {
+                        None
+                    };
+                    if let Some(level) = level {
+                        il_alert = Some(
+                            Alert::new(
+                                level,
+                                AlertType::ILThreshold,
+                                format!("IL |{il}| for position {address}"),
+                            )
+                            .with_position(address)
+                            .with_pool(&monitored.pool),
+                        );
+                    }
+                }
             }
+        }
+
+        if let Some(a) = range_alert {
+            self.emit_alert(a).await;
+        }
+        if let Some(a) = il_alert {
+            self.emit_alert(a).await;
         }
 
         Ok(())

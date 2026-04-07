@@ -24,7 +24,8 @@ impl FeeShareModel {
                 if pool_active_liquidity == 0 || position_liquidity == 0 {
                     Decimal::ZERO
                 } else {
-                    Decimal::from(position_liquidity) / Decimal::from(pool_active_liquidity)
+                    (Decimal::from(position_liquidity) / Decimal::from(pool_active_liquidity))
+                        .min(Decimal::ONE)
                 }
             }
         }

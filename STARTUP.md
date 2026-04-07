@@ -15,6 +15,8 @@ Before starting, ensure you have the following installed:
 
 ## Quick Start (TL;DR)
 
+**Orca LP bot (mainnet, minimal runbook):** [`doc/PRODUCTION_FAST_PATH.md`](doc/PRODUCTION_FAST_PATH.md) — build CLI, `SOLANA_RPC_URL`, `orca-bot-run` bez `--execute`, potem z `--execute`.
+
 ```bash
 # 1. Setup environment
 cp .env.example .env

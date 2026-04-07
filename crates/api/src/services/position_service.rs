@@ -8,6 +8,7 @@ use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::orca::position_reader::PositionReader;
 use clmm_lp_protocols::prelude::WhirlpoolReader;
 use solana_sdk::pubkey::Pubkey;
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::str::FromStr;
@@ -334,6 +335,29 @@ impl PositionService {
 
         let guard = executor.read().await;
 
+        // Guardrail: fail fast if API wallet doesn't have enough SOL to cover rent/fees.
+        // This avoids long opaque simulation errors when accounts must be created.
+        if let Some(wallet_pk) = guard.wallet_pubkey() {
+            let min_lamports = min_open_sol_lamports();
+            if min_lamports > 0 {
+                match self.state.provider.get_balance(&wallet_pk).await {
+                    Ok(have) if have < min_lamports => {
+                        let have_sol = (have as f64) / 1e9;
+                        let need_sol = (min_lamports as f64) / 1e9;
+                        return Err(ApiError::bad_request(format!(
+                            "Open position blocked: API wallet has insufficient SOL for rent/fees. \
+Have {have} lamports (~{have_sol:.6} SOL), require at least {min_lamports} lamports (~{need_sol:.6} SOL). \
+Top up the API wallet and retry."
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "Failed to precheck API wallet SOL balance; continuing with open");
+                    }
+                }
+            }
+        }
+
         let mut swap_signature: Option<String> = None;
         if let Some(ref sw) = request.swap_before_open {
             let mint = Pubkey::from_str(sw.specified_mint.trim())
@@ -364,7 +388,8 @@ impl PositionService {
                 request.full_range,
                 ledger_session.clone(),
             )
-            .await?;
+            .await
+            .map_err(classify_open_position_error)?;
 
         let mut data = serde_json::json!({
             "position_pda": opened_position.to_string(),
@@ -715,6 +740,103 @@ impl PositionService {
             Err(e) => Ok(OperationResult::failure(e.to_string())),
         }
     }
+}
+
+fn min_open_sol_lamports() -> u64 {
+    // 0 disables. Default is conservative: 0.01 SOL (covers rent + a few retries).
+    const DEFAULT: u64 = 10_000_000; // 0.01 SOL
+    env::var("CLMM_MIN_OPEN_SOL_LAMPORTS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+fn classify_open_position_error(err: anyhow::Error) -> ApiError {
+    // Default conversion would be 500. For user-triggered open failures,
+    // return 4xx with a concrete hint when we can.
+    // Use alternate formatting to include the full error chain.
+    let raw = format!("{err:#}");
+    let s = raw.to_lowercase();
+
+    if s.contains("wallet not set")
+        || s.contains("requires executor")
+        || s.contains("wallet/executor not configured")
+    {
+        return ApiError::service_unavailable(format!(
+            "Open position failed: API host cannot sign transactions (missing wallet/executor). \
+Set `KEYPAIR_PATH` (or `SOLANA_KEYPAIR_PATH`) on the server. Detail: {raw}"
+        ));
+    }
+
+    if s.contains("insufficient funds")
+        || s.contains("insufficient lamports")
+        || s.contains("insufficient balance")
+        || s.contains("insufficient token")
+    {
+        if let Some((have, need)) = parse_insufficient_lamports(&s) {
+            let have_sol = (have as f64) / 1e9;
+            let need_sol = (need as f64) / 1e9;
+            return ApiError::bad_request(format!(
+                "Open position failed: insufficient SOL (lamports) to create required accounts (rent/fees). \
+Have {have} lamports (~{have_sol:.6} SOL), need {need} lamports (~{need_sol:.6} SOL). \
+Top up SOL on the API wallet, then retry. Detail: {raw}"
+            ));
+        }
+        return ApiError::bad_request(format!(
+            "Open position failed: insufficient funds/tokens for requested caps. \
+Top up the wallet or lower Amount A/B (or use swap-before-open). Detail: {raw}"
+        ));
+    }
+
+    if s.contains("tokenminsubceeded")
+        || s.contains("token_min_subceeded")
+        || s.contains("slippage")
+        || s.contains("6018")
+        || s.contains("0x1782")
+    {
+        return ApiError::bad_request(format!(
+            "Open position failed: slippage/min-out too tight vs pool move. \
+Retry; if it keeps failing, raise `slippage_tolerance_bps` for this open. Detail: {raw}"
+        ));
+    }
+
+    if s.contains("tick")
+        && (s.contains("spacing") || s.contains("invalid") || s.contains("out of bounds"))
+    {
+        return ApiError::bad_request(format!(
+            "Open position failed: invalid tick bounds for this pool (spacing/range). \
+Align ticks to pool tick_spacing and keep tick_lower < tick_upper. Detail: {raw}"
+        ));
+    }
+
+    ApiError::bad_request(format!("Open position failed: {raw}"))
+}
+
+fn parse_insufficient_lamports(s_lower: &str) -> Option<(u64, u64)> {
+    // From Solana logs: `Transfer: insufficient lamports 313234, need 2770080`
+    // Input is already lowercased; we parse digits after the keywords.
+    let i = s_lower.find("insufficient lamports")?;
+    let tail = &s_lower[i..];
+    let have = extract_first_u64_after(tail, "insufficient lamports")?;
+    let need = extract_first_u64_after(tail, "need")?;
+    Some((have, need))
+}
+
+fn extract_first_u64_after(haystack: &str, marker: &str) -> Option<u64> {
+    let i = haystack.find(marker)?;
+    let mut j = i + marker.len();
+    // Skip non-digits
+    while j < haystack.len() && !haystack.as_bytes()[j].is_ascii_digit() {
+        j += 1;
+    }
+    let start = j;
+    while j < haystack.len() && haystack.as_bytes()[j].is_ascii_digit() {
+        j += 1;
+    }
+    if start == j {
+        return None;
+    }
+    haystack[start..j].parse::<u64>().ok()
 }
 
 #[derive(Debug, Clone)]

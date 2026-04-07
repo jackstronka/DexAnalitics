@@ -118,6 +118,30 @@ Parametry CLI gridu: `--il-max-pct`, `--il-close-pct`, `--il-grace-steps`.
 
 ---
 
+### 7. `bollinger` (etykieta: `bollinger_w<N>_k<K>_r<R>`)
+
+- **Rebalance:** co `R` **kroków** symulacji, gdy jest już dostępne `N` zamknięć (ścieżka A/B).
+- **Nowe granice:** dolna / górna = `SMA(N) ± K·σ` (σ populacyjne z ostatnich `N` zamknięć). **`K`** steruje **szerokością** pasów (typowo 1,5σ / 2σ / 2,5σ w siatce). Gdy pasmo jest niepoprawne (np. σ=0 albo dolna ≤ 0), **fallback:** symetryczne pasmo `± width_pct/2` wokół SMA (jak klasyczny recenter).
+- **Siatka optimize:** opcjonalnie `--indicator-strategies` — dodaje **6** wariantów BB: `K ∈ {1.5, 2.0, 2.5}` × `R ∈ {24, 48}` (przy `window=20`), plus **14** wariantów „last candle” (siatka czasów przy 15 min/kroku — patrz §8).
+
+### 8. `last_candle` (etykieta: `last_candle_c<C>_r<R>`)
+
+- **„Świeca”** = `C` kolejnych **kroków** symulacji (ostatnia **w pełni zamknięta** świeca: zakres kroków `last_closed_candle_step_range` w `crates/cli/src/engine/indicators.rs`).
+- **Nowe granice LP po rebalance:** **dolna / górna = min i max `price_ab`** po tej świecy (jak **low / high** na ścieżce dyskretnej — szerokość pasma zależy od ruchu ceny w oknie). Gdy min = max (płaska świeca) albo gdy żadna świeca nie jest jeszcze zamknięta, **fallback:** symetryczne `± width_pct/2` wokół ceny (jak wcześniejszy model „close ± width”). **Siatka `width_pct` w optimize** dla `last_candle` wpływa głównie na ten fallback, nie na typowy przypadek z rozstrzelonym min≠max.
+- **Rebalance:** co `R` kroków. Każdy rebalance nalicza **`tx_cost`** (jak pozostałe strategie).
+
+**Siatka `--indicator-strategies`:** `LAST_CANDLE_OPTIMIZE_GRID` w `commands/backtest_optimize.rs` — **14** par `(C, R)`. Przy **`--resolution-seconds 900`** (15 min/krok) odpowiada to:
+
+| Kotwica świecy (kroki → czas) | Dozwolone odstępy rebalansu (kroki → czas) |
+|-------------------------------|-------------------------------------------|
+| `C=1` → 15 min | `R=1,2,3,4,16,48` → 15/30/45/60 min, 4h, 12h |
+| `C=2` → 30 min | `R=2,3,4,16,48` → 30/45/60 min, 4h, 12h |
+| `C=4` → 1 h | `R=4,16,48` → 1h, 4h, 12h |
+
+Inna rozdzielczość ścieżki zmienia **realny** czas kroku — wtedy te same `C`/`R` mają inną interpretację wall-clock.
+
+---
+
 ## Planowane (niezaimplementowane)
 
 **Koperta ±X% + sub‑pasma** (np. dyskretne kroki 0,2% / 0,5% wewnątrz szerszej koperty): wymaga nowego wariantu `StratConfig` i osobnej logiki triggerów — **nie ma** jeszcze w `backtest_engine`.
@@ -141,6 +165,7 @@ Nagłówek raportu `BACKTEST OPTIMIZE` musi pokazywać **rzeczywisty** horyzont 
 | Element | Lokalizacja |
 |--------|-------------|
 | Enum strategii + logika kroków | `crates/cli/src/backtest_engine.rs` |
+| Wskaźniki (σ, ostatnia świeca w krokach) | `crates/cli/src/engine/indicators.rs` |
 | Domyślny zestaw dla optimize | `crates/cli/src/commands/backtest_optimize.rs` → `default_strategies` |
 | Testy zachowania | `crates/cli/src/engine/tests.rs` |
 

@@ -55,11 +55,17 @@ pub fn aggregate_bot_collect_fees_totals() -> FeesCollectedFromLedger {
             continue;
         }
         collect_events = collect_events.saturating_add(1);
-        if let Some(d) = v.get("fee_payer_token_a_delta_ui").and_then(decimal_from_value) {
+        if let Some(d) = v
+            .get("fee_payer_token_a_delta_ui")
+            .and_then(decimal_from_value)
+        {
             sum_a += d;
             any_a = true;
         }
-        if let Some(d) = v.get("fee_payer_token_b_delta_ui").and_then(decimal_from_value) {
+        if let Some(d) = v
+            .get("fee_payer_token_b_delta_ui")
+            .and_then(decimal_from_value)
+        {
             sum_b += d;
             any_b = true;
         }
