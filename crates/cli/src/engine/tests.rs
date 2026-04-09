@@ -512,6 +512,13 @@ mod tests {
                 rebalance_steps: 1,
             })
         );
+        assert_eq!(
+            parse_strategy_label("last_candle_t3600_r14400"),
+            Some(StratConfig::LastCandleTime {
+                candle_seconds: 3600,
+                rebalance_seconds: 14400,
+            })
+        );
     }
 
     #[test]

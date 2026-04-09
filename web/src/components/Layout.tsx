@@ -26,6 +26,7 @@ const navigation = [
   { name: 'Wallet', href: '/wallet', icon: Wallet },
   { name: 'Swap', href: '/swap', icon: ArrowLeftRight },
   { name: 'Positions', href: '/positions', icon: Activity },
+  { name: 'Closed', href: '/positions/closed', icon: History },
   { name: 'Strategies', href: '/strategies', icon: Target },
   { name: 'Pools', href: '/pools', icon: Droplets },
   { name: 'Scripts', href: '/scripts', icon: Terminal },

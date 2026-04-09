@@ -30,7 +30,7 @@ async fn list_pools_uses_orca_rest_base_url_env() {
     let old = std::env::var("ORCA_PUBLIC_API_BASE_URL").ok();
     unsafe { std::env::set_var("ORCA_PUBLIC_API_BASE_URL", server.base_url()) };
 
-    let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+    let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
     let res = list_pools(State(state)).await.unwrap().0;
     assert_eq!(res.total, 1);
     assert_eq!(res.pools.len(), 1);

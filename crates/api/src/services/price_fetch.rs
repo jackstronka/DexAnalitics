@@ -316,6 +316,17 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
         tags.push("stable");
     }
 
+    // Prefer a known-good SOL/USD for WSOL mint.
+    //
+    // We observed `GeckoTerminal simple token_price` sometimes returning stale/wrong values for WSOL,
+    // which then propagates to the dashboard as a misleading "Jupiter" USD estimate.
+    if mints.iter().any(|m| m == WSOL_MINT) {
+        if let Some(p) = fetch_coingecko_solana_usd().await {
+            prices.insert(WSOL_MINT.to_string(), p);
+            tags.push("coingecko_solana");
+        }
+    }
+
     let mut pending: Vec<String> = mints
         .iter()
         .filter(|m| !prices.contains_key(*m))
@@ -402,14 +413,7 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
         }
     }
 
-    // Last resort: Jupiter/Gecko occasionally omit WSOL; without a price, SOL/USDC positions show
-    // ~half the true USD (USDC leg only). CoinGecko `simple/price` is free-tier friendly.
-    if mints.iter().any(|m| m == WSOL_MINT) && !prices.contains_key(WSOL_MINT) {
-        if let Some(p) = fetch_coingecko_solana_usd().await {
-            prices.insert(WSOL_MINT.to_string(), p);
-            tags.push("coingecko_solana");
-        }
-    }
+    // WSOL fallback is handled early (prefer CoinGecko).
 
     let source = if tags.is_empty() {
         "none".to_string()

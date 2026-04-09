@@ -27,6 +27,16 @@ export function formatUsdFixed(value: number | string, fractionDigits: number): 
   }).format(num)
 }
 
+/** USD spot for one token leg — extra decimals when price is tiny. */
+export function formatUsdTokenSpot(value: number | string | null | undefined): string {
+  if (value == null) return '—'
+  const num = typeof value === 'string' ? parseFloat(value) : value
+  if (!Number.isFinite(num)) return '—'
+  const abs = Math.abs(num)
+  const frac = abs >= 100 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 5 : 6
+  return formatUsdFixed(num, frac)
+}
+
 /**
  * USD for uncollected LP fees: 3 dp for normal amounts; for sub-cent non-zero values use 6 dp so
  * e.g. $0.0007 does not show as $0.000.
@@ -52,7 +62,11 @@ export function formatPercent(value: number | string): string {
 export function formatPercentFixed(value: number | string, fractionDigits: number): string {
   const num = typeof value === 'string' ? parseFloat(value) : value
   if (!Number.isFinite(num)) return '—'
-  return `${num >= 0 ? '+' : ''}${num.toFixed(fractionDigits)}%`
+  const abs = Math.abs(num)
+  // If the value is extremely small, increase precision so we don't show "-0.000%".
+  // Example: -0.0013% should render as "-0.0013%" (4 dp), not "-0.000%".
+  const dynamicDigits = abs > 0 && abs < 0.01 ? Math.max(fractionDigits, 5) : fractionDigits
+  return `${num >= 0 ? '+' : ''}${num.toFixed(dynamicDigits)}%`
 }
 
 export function formatNumber(value: number | string, decimals = 2): string {

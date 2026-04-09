@@ -1,5 +1,7 @@
 //! Rolling indicators for backtest strategies (Bollinger, last-completed candle index).
 
+use crate::backtest_engine::StepData;
+
 /// Population standard deviation and mean of `xs` (empty → `None`).
 #[must_use]
 pub fn mean_std(xs: &[f64]) -> Option<(f64, f64)> {
@@ -54,6 +56,54 @@ pub fn last_closed_candle_step_range(i: usize, candle_steps: usize) -> Option<(u
     let end = last_candle_id * cs + cs - 1;
     debug_assert!(end <= i);
     Some((start, end))
+}
+
+/// Inclusive `[start, end]` indices of the last fully closed **time bucket** ending at or before `step_data[i]`.
+///
+/// Bucket semantics:
+/// - Let `t = step_data[i].start_timestamp`.
+/// - `bucket_end = floor(t / candle_seconds) * candle_seconds`.
+/// - The last closed bucket is `[bucket_end - candle_seconds, bucket_end)`.
+/// - We then return the first/last indices whose timestamps fall inside that interval.
+///
+/// Returns `None` if `candle_seconds == 0` or the last closed bucket contains no steps.
+#[must_use]
+pub fn last_closed_time_bucket_step_range(
+    step_data: &[StepData],
+    i: usize,
+    candle_seconds: u64,
+) -> Option<(usize, usize)> {
+    if candle_seconds == 0 || step_data.is_empty() {
+        return None;
+    }
+    let i = i.min(step_data.len().saturating_sub(1));
+    let t = step_data[i].start_timestamp;
+    let bucket_end = (t / candle_seconds) * candle_seconds;
+    if bucket_end < candle_seconds {
+        return None;
+    }
+    let start_ts = bucket_end - candle_seconds;
+    let end_ts = bucket_end; // exclusive
+
+    let mut start_idx: Option<usize> = None;
+    let mut end_idx: Option<usize> = None;
+    for idx in (0..=i).rev() {
+        let ts = step_data[idx].start_timestamp;
+        if ts >= end_ts {
+            continue;
+        }
+        if ts < start_ts {
+            break;
+        }
+        start_idx = Some(idx);
+        if end_idx.is_none() {
+            end_idx = Some(idx);
+        }
+    }
+    match (start_idx, end_idx) {
+        (Some(s), Some(e)) if s <= e => Some((s, e)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

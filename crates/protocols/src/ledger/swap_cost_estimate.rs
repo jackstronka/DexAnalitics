@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use super::tx_lifecycle::ledger_path;
+use super::tx_lifecycle::ledger_read_path;
 
 /// Conservative default when the ledger has no swap rows (typical base fee + small priority band).
 pub const DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS: u64 = 10_000;
@@ -16,7 +16,7 @@ pub const DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS: u64 = 10_000;
 pub fn median_historical_swap_network_fee_lamports(
     pool_address: Option<&str>,
 ) -> (Option<u64>, usize) {
-    median_from_path(&ledger_path(), pool_address)
+    median_from_path(&ledger_read_path(), pool_address)
 }
 
 fn median_from_path(path: &Path, pool_address: Option<&str>) -> (Option<u64>, usize) {

@@ -300,7 +300,8 @@ async fn append_open_inner(
             0
         });
 
-    let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
+    let (tx_fee, slot, pre, post, delta, _meta) =
+        enrich_tx_costs(provider, signature, fee_payer).await;
     let rpc_url = provider.current_endpoint().await;
 
     let rec = PositionLifecycleRecord {
@@ -371,7 +372,8 @@ async fn append_close_inner(
         .await
         .unwrap_or(0);
 
-    let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
+    let (tx_fee, slot, pre, post, delta, _meta) =
+        enrich_tx_costs(provider, signature, fee_payer).await;
     let rpc_url = provider.current_endpoint().await;
 
     // Best-effort: token balances are not part of SOL fee delta, so compute token "refunds" from

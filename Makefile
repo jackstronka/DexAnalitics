@@ -22,6 +22,11 @@ release:
 cli-release:
 	cargo build --release -p clmm-lp-cli
 
+# Recompute fee_payer_token_deltas from RPC tx meta → writes `<ledger>.enriched.jsonl` (see CLMM_POSITION_LIFECYCLE_USE_ENRICHED).
+.PHONY: enrich-lifecycle-ledger
+enrich-lifecycle-ledger:
+	cargo run -p clmm-lp-cli --bin enrich_lifecycle_ledger --release
+
 # Run tests
 .PHONY: test
 test:

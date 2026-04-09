@@ -2,7 +2,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{OrcaOwnerPositionEntry, OrcaOwnerPositionsResponse};
-use crate::services::position_valuation::range_usdc_and_in_range_for_pool_ticks;
+use crate::services::position_valuation::enrich_pool_ticks_for_display;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use orca_whirlpools::{
@@ -77,6 +77,12 @@ pub async fn orca_positions_by_owner(
                     position_mint: Some(d.position_mint.to_string()),
                     position_bundle_address: None,
                     in_range: false,
+                    token_a_label: None,
+                    token_b_label: None,
+                    token_mint_a: None,
+                    token_mint_b: None,
+                    token_price_a_usd: None,
+                    token_price_b_usd: None,
                 });
             }
             PositionOrBundle::PositionBundle(b) => {
@@ -96,6 +102,12 @@ pub async fn orca_positions_by_owner(
                         position_mint: Some(d.position_mint.to_string()),
                         position_bundle_address: Some(bundle_addr.clone()),
                         in_range: false,
+                        token_a_label: None,
+                        token_b_label: None,
+                        token_mint_a: None,
+                        token_mint_b: None,
+                        token_price_a_usd: None,
+                        token_price_b_usd: None,
                     });
                 }
             }
@@ -105,9 +117,9 @@ pub async fn orca_positions_by_owner(
     let provider = state.provider.clone();
     let mut enriched: Vec<OrcaOwnerPositionEntry> = Vec::with_capacity(entries.len());
     for e in entries {
-        let (range, in_range) = match Pubkey::from_str(&e.pool_address) {
+        let enrich = match Pubkey::from_str(&e.pool_address) {
             Ok(pk) => {
-                range_usdc_and_in_range_for_pool_ticks(
+                enrich_pool_ticks_for_display(
                     Arc::clone(&provider),
                     &pk,
                     e.tick_lower,
@@ -115,13 +127,20 @@ pub async fn orca_positions_by_owner(
                 )
                 .await
             }
-            Err(_) => (None, false),
+            Err(_) => crate::services::position_valuation::PoolTicksEnrichment::default(),
         };
+        let range = enrich.range_usdc;
         enriched.push(OrcaOwnerPositionEntry {
             range_lower_usdc: range.as_ref().map(|r| r.lower),
             range_upper_usdc: range.as_ref().map(|r| r.upper),
             range_usdc_quote: range.as_ref().map(|r| r.quote.clone()),
-            in_range,
+            in_range: enrich.in_range,
+            token_a_label: enrich.token_a_label,
+            token_b_label: enrich.token_b_label,
+            token_mint_a: enrich.token_mint_a,
+            token_mint_b: enrich.token_mint_b,
+            token_price_a_usd: enrich.token_price_a_usd,
+            token_price_b_usd: enrich.token_price_b_usd,
             ..e
         });
     }

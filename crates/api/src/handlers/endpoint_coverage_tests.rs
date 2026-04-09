@@ -18,7 +18,7 @@ fn test_state() -> AppState {
         primary_url: "http://127.0.0.1:1".to_string(),
         ..Default::default()
     };
-    AppState::new(rpc_config, ApiConfig::default())
+    AppState::new(rpc_config, ApiConfig::default(), None)
 }
 
 fn test_router(state: AppState) -> axum::Router {
@@ -549,7 +549,7 @@ async fn all_orca_proxy_endpoints_are_reachable() {
     });
     let mut cfg = ApiConfig::default();
     cfg.orca_public_api_base_url = Some(server.base_url());
-    let state = AppState::new(RpcConfig::default(), cfg);
+    let state = AppState::new(RpcConfig::default(), cfg, None);
     let router = test_router(state);
     assert_eq!(
         request(router.clone(), Method::GET, "/api/v1/orca/pools", None).await,

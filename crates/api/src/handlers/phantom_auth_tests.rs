@@ -8,7 +8,7 @@ use solana_sdk::signature::{Keypair, Signer};
 
 #[tokio::test]
 async fn phantom_challenge_then_verify_returns_token() {
-    let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+    let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
     let kp = Keypair::new();
     let wallet = kp.pubkey().to_string();
 
@@ -42,7 +42,7 @@ async fn phantom_challenge_then_verify_returns_token() {
 
 #[tokio::test]
 async fn phantom_verify_rejects_replay_nonce() {
-    let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+    let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
     let kp = Keypair::new();
     let wallet = kp.pubkey().to_string();
 

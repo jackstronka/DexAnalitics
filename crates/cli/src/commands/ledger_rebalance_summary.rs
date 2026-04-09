@@ -1,7 +1,7 @@
 //! CLI: aggregate rebalance rows from IL JSONL + tx-cost rows from `orca_position_lifecycle.jsonl`.
 
 use anyhow::{Context, Result};
-use clmm_lp_protocols::ledger::tx_lifecycle::{il_ledger_path_from_env, ledger_path};
+use clmm_lp_protocols::ledger::tx_lifecycle::{il_ledger_path_from_env, ledger_read_path};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -40,7 +40,7 @@ pub fn run_ledger_rebalance_summary(
     lifecycle_ledger: Option<PathBuf>,
 ) -> Result<()> {
     let il_path = resolve_il_path(il_ledger);
-    let life_path = lifecycle_ledger.unwrap_or_else(ledger_path);
+    let life_path = lifecycle_ledger.unwrap_or_else(ledger_read_path);
 
     if il_path.is_none() && !life_path.exists() {
         anyhow::bail!(

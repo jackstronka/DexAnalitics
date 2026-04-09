@@ -1,7 +1,7 @@
 //! Aggregate `bot_collect_fees` rows from `orca_position_lifecycle.jsonl` (same path as CLI).
 
 use crate::models::FeesCollectedFromLedger;
-use clmm_lp_protocols::ledger::tx_lifecycle::ledger_path;
+use clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path;
 use rust_decimal::Decimal;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -26,7 +26,7 @@ fn decimal_from_value(v: &serde_json::Value) -> Option<Decimal> {
 /// Sum fee credits across all `bot_collect_fees` events in the lifecycle ledger file.
 #[must_use]
 pub fn aggregate_bot_collect_fees_totals() -> FeesCollectedFromLedger {
-    let path = ledger_path();
+    let path = ledger_read_path();
     let file = match File::open(&path) {
         Ok(f) => f,
         Err(_) => {

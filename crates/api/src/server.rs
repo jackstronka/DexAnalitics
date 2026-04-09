@@ -7,11 +7,13 @@ use crate::position_registry_seed::seed_monitor_from_registry;
 use crate::routes::create_versioned_router;
 use crate::state::{ApiConfig, AppState};
 use axum::{Router, middleware};
+use clmm_lp_data::repositories::Database;
 use clmm_lp_protocols::prelude::RpcConfig;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::time::{Duration, timeout};
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -19,6 +21,67 @@ use tower_http::{
 use tracing::info;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+
+fn env_autostart_strategies_on_boot() -> bool {
+    match std::env::var("CLMM_STRATEGY_AUTOSTART_ON_BOOT") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+async fn maybe_autostart_strategies(state: &AppState) {
+    if !env_autostart_strategies_on_boot() {
+        return;
+    }
+
+    let ids: Vec<String> = {
+        let map = state.strategies.read().await;
+        map.values()
+            .filter_map(|s| {
+                let auto_start = s
+                    .config
+                    .get("parameters")
+                    .and_then(|p| p.get("auto_start"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if auto_start {
+                    Some(s.id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    if ids.is_empty() {
+        info!("Strategy autostart enabled but no strategies opted in (parameters.auto_start=true)");
+        return;
+    }
+
+    info!(count = ids.len(), "Auto-starting opted-in strategies on API boot");
+    let svc = crate::services::StrategyService::new(state.clone());
+    for id in ids {
+        match svc.start_strategy(&id).await {
+            Ok(res) => {
+                if res.success {
+                    info!(strategy_id = %id, "Auto-started strategy");
+                } else {
+                    tracing::warn!(
+                        strategy_id = %id,
+                        error = ?res.error,
+                        "Strategy autostart failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(strategy_id = %id, error = %e, "Strategy autostart errored");
+            }
+        }
+    }
+}
 
 /// Server configuration.
 #[derive(Debug, Clone)]
@@ -54,8 +117,9 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Creates a new API server.
-    pub fn new(config: ServerConfig) -> Self {
-        let state = AppState::new(config.rpc_config.clone(), config.api_config.clone());
+    pub async fn new(config: ServerConfig) -> Self {
+        let db = connect_db_best_effort().await;
+        let state = AppState::new(config.rpc_config.clone(), config.api_config.clone(), db);
         Self { config, state }
     }
 
@@ -116,6 +180,7 @@ impl ApiServer {
 
         // Best-effort: re-add open positions into monitor after restart.
         seed_monitor_from_registry(self.state.monitor.clone()).await;
+        maybe_autostart_strategies(&self.state).await;
 
         let router = self.build_router();
 
@@ -138,6 +203,7 @@ impl ApiServer {
 
         // Best-effort: re-add open positions into monitor after restart.
         seed_monitor_from_registry(self.state.monitor.clone()).await;
+        maybe_autostart_strategies(&self.state).await;
 
         let router = self.build_router();
 
@@ -151,6 +217,49 @@ impl ApiServer {
         info!("API server stopped");
 
         Ok(())
+    }
+}
+
+async fn connect_db_best_effort() -> Option<Database> {
+    let url = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(database_url) = url else {
+        tracing::warn!("DATABASE_URL not set; DB-backed stream performance will be unavailable");
+        return None;
+    };
+
+    // On dev machines Postgres may be stopped; never block API startup on DB.
+    let connect_timeout = Duration::from_secs(3);
+    let db = match timeout(connect_timeout, Database::connect(&database_url)).await {
+        Ok(Ok(db)) => db,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "DB connect failed (continuing without DB)");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = connect_timeout.as_secs(),
+                "DB connect timed out (continuing without DB)"
+            );
+            return None;
+        }
+    };
+
+    match timeout(connect_timeout, db.migrate()).await {
+        Ok(Ok(())) => Some(db),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "DB migrate failed (continuing without DB)");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = connect_timeout.as_secs(),
+                "DB migrate timed out (continuing without DB)"
+            );
+            None
+        }
     }
 }
 

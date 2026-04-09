@@ -30,11 +30,32 @@ fn create_base_router(state: AppState) -> Router {
         .route("/auth/phantom/verify", post(handlers::phantom_verify))
         // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
+        .route("/positions/closed", get(handlers::list_closed_positions))
         .route("/positions/{address}", get(handlers::get_position))
         .route("/positions/{address}/pnl", get(handlers::get_position_pnl))
         .route(
+            "/positions/{address}/stream-performance",
+            get(handlers::get_position_stream_performance),
+        )
+        .route(
+            "/positions/{address}/stream-pnl",
+            get(handlers::get_position_stream_pnl),
+        )
+        .route(
+            "/positions/{address}/stream-lineage",
+            get(handlers::get_position_stream_lineage),
+        )
+        .route(
             "/positions/{address}/diagnostics",
             get(handlers::get_position_diagnostics),
+        )
+        .route(
+            "/positions/{address}/lifecycle-summary",
+            get(handlers::get_position_lifecycle_summary),
+        )
+        .route(
+            "/positions/{address}/experiment-config",
+            get(handlers::get_position_experiment_config),
         )
         // Strategy routes
         .route("/strategies", get(handlers::list_strategies))
@@ -93,6 +114,12 @@ fn create_base_router(state: AppState) -> Router {
             get(handlers::get_portfolio_analytics),
         )
         .route("/analytics/simulate", post(handlers::run_simulation))
+        // Backtests (CLI subprocess)
+        .route(
+            "/backtests/from-closed-position",
+            post(handlers::backtest_from_closed_position),
+        )
+        .route("/backtests/{id}", get(handlers::get_backtest_job))
         // Bot activity (JSONL ledger / registry; Slack digest)
         .route("/bot-activity/ledger", get(handlers::get_bot_ledger))
         .route("/bot-activity/il-ledger", get(handlers::get_bot_il_ledger))

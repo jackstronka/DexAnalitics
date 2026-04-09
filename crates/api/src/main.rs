@@ -29,6 +29,15 @@ async fn async_main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     info!("Starting Bociarz LP API Server");
+    if let Ok(cwd) = env::current_dir() {
+        info!(cwd = %cwd.display(), "API working directory");
+    }
+    let il = env::var("CLMM_IL_LEDGER_PATH").ok().unwrap_or_default();
+    if il.trim().is_empty() {
+        info!("CLMM_IL_LEDGER_PATH is not set (IL ledger endpoint will report missing)");
+    } else {
+        info!(clmm_il_ledger_path = %il.trim(), "CLMM_IL_LEDGER_PATH loaded");
+    }
 
     // Load configuration from environment
     let config = load_config_from_env();
@@ -40,7 +49,7 @@ async fn async_main() -> Result<()> {
     );
 
     // Create and run server
-    let server = ApiServer::new(config);
+    let server = ApiServer::new(config).await;
     server.run_with_shutdown(shutdown_signal()).await?;
 
     Ok(())

@@ -43,6 +43,9 @@ pub fn il_ledger_path_from_env() -> Option<PathBuf> {
 }
 
 /// Default / env-resolved ledger path (same as CLI lifecycle ledger).
+///
+/// **Appends** (bot, CLI) always use this path. For **reads** (API aggregates, lineage), prefer
+/// [`ledger_read_path`] so an offline-enriched copy can be used without moving the canonical file.
 #[must_use]
 pub fn ledger_path() -> PathBuf {
     if let Ok(p) = std::env::var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH") {
@@ -58,6 +61,57 @@ pub fn ledger_path() -> PathBuf {
         }
     }
     PathBuf::from(DEFAULT_REL_PATH)
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Sibling path produced by `enrich-lifecycle-ledger` (same directory, `<stem>.enriched.jsonl`).
+#[must_use]
+pub fn enriched_ledger_path_candidate() -> PathBuf {
+    let base = ledger_path();
+    let s = base.to_string_lossy();
+    if s.ends_with(".jsonl") {
+        PathBuf::from(format!("{}.enriched.jsonl", s.trim_end_matches(".jsonl")))
+    } else {
+        let mut p = base.clone();
+        p.set_extension("enriched.jsonl");
+        p
+    }
+}
+
+/// Path for **reading** lifecycle JSONL rows (dashboard, lineage, aggregates).
+///
+/// Resolution order:
+/// 1. **`CLMM_POSITION_LIFECYCLE_LEDGER_READ_PATH`** — explicit path when set and non-empty.
+/// 2. If **`CLMM_POSITION_LIFECYCLE_USE_ENRICHED`** is truthy (`1` / `true` / `yes` / `on`) **and**
+///    [`enriched_ledger_path_candidate`] exists as a regular file — use it (RPC-recomputed
+///    `fee_payer_token_deltas` from `enrich-lifecycle-ledger`).
+/// 3. Otherwise [`ledger_path`] (same file the bot appends to).
+#[must_use]
+pub fn ledger_read_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CLMM_POSITION_LIFECYCLE_LEDGER_READ_PATH") {
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+    if env_truthy("CLMM_POSITION_LIFECYCLE_USE_ENRICHED") {
+        let cand = enriched_ledger_path_candidate();
+        if cand.is_file() {
+            return cand;
+        }
+    }
+    ledger_path()
 }
 
 fn message_static_pubkeys(tx_root: &serde_json::Value) -> Option<Vec<String>> {
@@ -111,6 +165,93 @@ fn fee_payer_balance_delta(
     }
 }
 
+/// Compute per-mint UI deltas for SPL token balances owned by `fee_payer`.
+///
+/// Uses tx `meta.preTokenBalances`/`postTokenBalances` and **sums across all token accounts** per mint
+/// (important for WSOL/temp accounts).
+#[must_use]
+pub fn fee_payer_token_deltas_by_mint(
+    tx_root: &serde_json::Value,
+    fee_payer: &Pubkey,
+) -> serde_json::Value {
+    use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+    use std::str::FromStr;
+
+    fn ui_amount_from_token_balance_entry(e: &serde_json::Value) -> Option<Decimal> {
+        let ui = e
+            .get("uiTokenAmount")
+            .or_else(|| e.get("ui_token_amount"))?;
+        if let Some(s) = ui.get("uiAmountString").and_then(|x| x.as_str()) {
+            return Decimal::from_str(s.trim()).ok();
+        }
+        if let Some(f) = ui.get("uiAmount").and_then(|x| x.as_f64()) {
+            return Decimal::from_str(&format!("{f:.18}")).ok();
+        }
+        None
+    }
+
+    let owner_s = fee_payer.to_string();
+    let mut pre: BTreeMap<String, Decimal> = BTreeMap::new();
+    let mut post: BTreeMap<String, Decimal> = BTreeMap::new();
+
+    if let Some(arr) = tx_root
+        .get("meta")
+        .and_then(|m| m.get("preTokenBalances"))
+        .and_then(|x| x.as_array())
+    {
+        for e in arr {
+            let owner = e.get("owner").and_then(|x| x.as_str()).unwrap_or("");
+            if owner != owner_s {
+                continue;
+            }
+            let mint = e.get("mint").and_then(|x| x.as_str()).unwrap_or("");
+            if mint.is_empty() {
+                continue;
+            }
+            if let Some(v) = ui_amount_from_token_balance_entry(e) {
+                // Multiple token accounts for the same mint may exist (ATA + temp WSOL, etc.).
+                // Sum UI amounts across all accounts owned by the fee payer.
+                *pre.entry(mint.to_string()).or_insert(Decimal::ZERO) += v;
+            }
+        }
+    }
+    if let Some(arr) = tx_root
+        .get("meta")
+        .and_then(|m| m.get("postTokenBalances"))
+        .and_then(|x| x.as_array())
+    {
+        for e in arr {
+            let owner = e.get("owner").and_then(|x| x.as_str()).unwrap_or("");
+            if owner != owner_s {
+                continue;
+            }
+            let mint = e.get("mint").and_then(|x| x.as_str()).unwrap_or("");
+            if mint.is_empty() {
+                continue;
+            }
+            if let Some(v) = ui_amount_from_token_balance_entry(e) {
+                *post.entry(mint.to_string()).or_insert(Decimal::ZERO) += v;
+            }
+        }
+    }
+
+    let mut out = serde_json::Map::new();
+    let mut all: BTreeSet<String> = BTreeSet::new();
+    all.extend(pre.keys().cloned());
+    all.extend(post.keys().cloned());
+    for mint in all {
+        let a = pre.get(&mint).cloned().unwrap_or(Decimal::ZERO);
+        let b = post.get(&mint).cloned().unwrap_or(Decimal::ZERO);
+        let d = b - a;
+        if !d.is_zero() {
+            out.insert(mint, serde_json::Value::String(d.to_string()));
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 async fn fetch_tx_json_with_retry(
     provider: &RpcProvider,
     signature: &Signature,
@@ -137,17 +278,24 @@ pub async fn enrich_tx_costs(
     provider: &RpcProvider,
     signature: &Signature,
     fee_payer: &Pubkey,
-) -> (u64, Option<u64>, Option<u64>, Option<u64>, Option<i64>) {
+) -> (
+    u64,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<i64>,
+    Option<serde_json::Value>,
+) {
     match fetch_tx_json_with_retry(provider, signature).await {
         Ok(v) => {
             let fee = v.pointer("/meta/fee").and_then(|x| x.as_u64()).unwrap_or(0);
             let slot = v.get("slot").and_then(|x| x.as_u64());
             let (pre, post, delta) = fee_payer_balance_delta(&v, fee_payer);
-            (fee, slot, pre, post, delta)
+            (fee, slot, pre, post, delta, Some(v))
         }
         Err(e) => {
             warn!(err = %e, "tx lifecycle ledger: could not fetch transaction");
-            (0, None, None, None, None)
+            (0, None, None, None, None, None)
         }
     }
 }
@@ -195,6 +343,8 @@ pub async fn try_append_rebalance_executor_tx_cost(
     position: Option<Pubkey>,
     created_position: Option<Pubkey>,
     rebalance_session_id_override: Option<String>,
+    // Extra structured fields for operators (e.g. swap mints + amount_in for swap_exact_in).
+    details: Option<serde_json::Value>,
 ) {
     if let Err(e) = append_rebalance_inner(
         provider,
@@ -205,6 +355,7 @@ pub async fn try_append_rebalance_executor_tx_cost(
         position,
         created_position,
         rebalance_session_id_override,
+        details,
     )
     .await
     {
@@ -221,8 +372,14 @@ async fn append_rebalance_inner(
     position: Option<Pubkey>,
     created_position: Option<Pubkey>,
     rebalance_session_id_override: Option<String>,
+    details: Option<serde_json::Value>,
 ) -> Result<()> {
-    let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
+    let (tx_fee, slot, pre, post, delta, tx_json) =
+        enrich_tx_costs(provider, signature, fee_payer).await;
+    let fee_payer_token_deltas = tx_json
+        .as_ref()
+        .map(|v| fee_payer_token_deltas_by_mint(v, fee_payer))
+        .filter(|v| !v.as_object().is_some_and(|m| m.is_empty()));
     let rpc_url = provider.current_endpoint().await;
     let effective_position = position.or(created_position);
 
@@ -238,11 +395,15 @@ async fn append_rebalance_inner(
         position_pubkey: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         rebalance_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
         tx_fee_lamports: u64,
         fee_payer_pubkey: String,
         fee_payer_pre_lamports: Option<u64>,
         fee_payer_post_lamports: Option<u64>,
         fee_payer_net_lamports_delta: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fee_payer_token_deltas: Option<serde_json::Value>,
         accounting_note: &'static str,
         slot: Option<u64>,
         rpc_url: String,
@@ -258,12 +419,14 @@ async fn append_rebalance_inner(
         pool_address: pool.map(|p| p.to_string()),
         position_pubkey: effective_position.map(|p| p.to_string()),
         rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
+        details,
         tx_fee_lamports: tx_fee,
         fee_payer_pubkey: fee_payer.to_string(),
         fee_payer_pre_lamports: pre,
         fee_payer_post_lamports: post,
         fee_payer_net_lamports_delta: delta,
-        accounting_note: "tx_fee_lamports=network fee only; fee_payer_net_lamports_delta includes fee+rent+token/SOL legs affecting fee payer. source=orca_bot joins IL/fee ledgers via pool_address/position_pubkey. Sum rows with same rebalance_session_id for swap+rebalance total.",
+        fee_payer_token_deltas,
+        accounting_note: "tx_fee_lamports=network fee only; fee_payer_net_lamports_delta includes fee+rent+token/SOL legs affecting fee payer. fee_payer_token_deltas is a mint->Δ(ui) map derived from meta pre/postTokenBalances (owner=fee payer). Sum rows with same rebalance_session_id for swap+rebalance total.",
         slot,
         rpc_url,
     };
@@ -299,7 +462,12 @@ async fn append_cli_swap_inner(
     pool: &Pubkey,
     rebalance_session_id_override: Option<String>,
 ) -> Result<()> {
-    let (tx_fee, slot, pre, post, delta) = enrich_tx_costs(provider, signature, fee_payer).await;
+    let (tx_fee, slot, pre, post, delta, tx_json) =
+        enrich_tx_costs(provider, signature, fee_payer).await;
+    let fee_payer_token_deltas = tx_json
+        .as_ref()
+        .map(|v| fee_payer_token_deltas_by_mint(v, fee_payer))
+        .filter(|v| !v.as_object().is_some_and(|m| m.is_empty()));
     let rpc_url = provider.current_endpoint().await;
 
     #[derive(Serialize)]
@@ -320,6 +488,8 @@ async fn append_cli_swap_inner(
         fee_payer_pre_lamports: Option<u64>,
         fee_payer_post_lamports: Option<u64>,
         fee_payer_net_lamports_delta: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fee_payer_token_deltas: Option<serde_json::Value>,
         accounting_note: &'static str,
         slot: Option<u64>,
         rpc_url: String,
@@ -340,7 +510,8 @@ async fn append_cli_swap_inner(
         fee_payer_pre_lamports: pre,
         fee_payer_post_lamports: post,
         fee_payer_net_lamports_delta: delta,
-        accounting_note: "Whirlpool swap only; sum with bot_* and position_* rows sharing rebalance_session_id for full rebalance+open cost.",
+        fee_payer_token_deltas,
+        accounting_note: "Whirlpool swap only; fee_payer_token_deltas is a mint->Δ(ui) map for the fee payer. Sum with bot_* and position_* rows sharing rebalance_session_id for full rebalance+open cost.",
         slot,
         rpc_url,
     };

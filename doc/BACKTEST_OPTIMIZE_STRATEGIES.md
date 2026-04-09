@@ -10,7 +10,7 @@ Siatka zawsze skanuje **wiele** szerokości (`--min-range-pct` … `--max-range-
 |-----|------------------|------------------------|
 | **`vs_hodl`** (domyślny) | Nadwyżka LP vs benchmark HODL | Często **najszersze** pasmo z siatki (wysoki TIR, mała „dźwignia” vs HODL) |
 | **`fees`** | Suma zebranych opłat | Częściej **węższe** pasma (więcej fee na jednostkę czasu *gdy* jesteś w zakresie i idzie wolumen) — **bez** kary za IL vs HODL w score |
-| **`composite`** | `fees − α·|IL|·capital − koszty` | Kompromis fee / drag; strojenie `--alpha` |
+| **`composite`** | `fees − α·IL_drag_usd − koszty_rebal`, gdzie `IL_drag_usd = max(0, −(final_il_pct·capital))` (tylko **gorszy** wynik LP vs HODL na **marku** bez fee — ta sama baza co kolumna IL-like%) | Kompromis fee / drag IL / koszty tx; strojenie `--alpha` |
 | **`pnl`** | `final_pnl` (wartość końcowa − kapitał) | Maksymalizacja zysku w USD w modelu |
 | **`risk_adj`** | `final_pnl / (1 + max_drawdown)` | Kara za głębokie obsunięcie equity; **to nie jest wskaźnik Sharpe** (patrz niżej) |
 

@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
 import { ArrowLeft, RefreshCw, X, DollarSign } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { PoolPairLabels } from '@/components/PoolPairLabels'
+import { PositionLifecycleTimeline } from '@/components/PositionLifecycleTimeline'
 import {
   getPosition,
   getPositionDiagnostics,
+  getPositionStreamPerformance,
+  getPositionStreamPnL,
+  getPositionStreamLineage,
   closePosition,
   collectFees,
   rebalancePosition,
@@ -34,6 +39,66 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112'
 
 type LedgerRow = Record<string, unknown>
 
+function mergeLifecycleLedgerRows(
+  queries: { data?: { rows?: Record<string, unknown>[] } | undefined }[],
+): LedgerRow[] {
+  const seen = new Set<string>()
+  const out: LedgerRow[] = []
+  for (const q of queries) {
+    for (const row of (q.data?.rows ?? []) as LedgerRow[]) {
+      if (!row || typeof row !== 'object') continue
+      const sig = typeof row.signature === 'string' ? row.signature : ''
+      const ts = typeof row.ts_utc === 'string' ? row.ts_utc : ''
+      const ev = typeof row.event === 'string' ? row.event : ''
+      const key = `lc|${sig}|${ts}|${ev}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(row)
+    }
+  }
+  return out
+}
+
+function normalizeIlTimelineRow(row: LedgerRow): LedgerRow | null {
+  const ts = row.timestamp ?? row.ts_utc
+  if (typeof ts !== 'string' || !ts.trim()) return null
+  const evRaw = row.event
+  const evBase = typeof evRaw === 'string' && evRaw.trim() ? evRaw.trim() : 'rebalance'
+  const lam = row.tx_cost_lamports ?? row.tx_fee_lamports
+  let txNum = 0
+  if (typeof lam === 'number' && Number.isFinite(lam) && lam > 0) txNum = lam
+  else if (typeof lam === 'string') {
+    const n = parseFloat(lam)
+    if (Number.isFinite(n) && n > 0) txNum = n
+  }
+  return {
+    ...row,
+    ts_utc: ts,
+    event: evBase.startsWith('il:') ? evBase : `il:${evBase}`,
+    tx_fee_lamports: txNum,
+    source: 'il_ledger',
+  }
+}
+
+function mergeIlLedgerRows(
+  queries: { data?: { rows?: Record<string, unknown>[] } | undefined }[],
+): LedgerRow[] {
+  const seen = new Set<string>()
+  const out: LedgerRow[] = []
+  for (const q of queries) {
+    for (const row of (q.data?.rows ?? []) as LedgerRow[]) {
+      if (!row || typeof row !== 'object') continue
+      const norm = normalizeIlTimelineRow(row)
+      if (!norm) continue
+      const k = `il|${norm.ts_utc}|${String(row.old_position ?? '')}|${String(row.position ?? '')}|${String(row.rebalance_session_id ?? '')}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(norm)
+    }
+  }
+  return out
+}
+
 function groupLedgerBySession(rows: LedgerRow[]): Map<string | null, LedgerRow[]> {
   const m = new Map<string | null, LedgerRow[]>()
   for (const r of rows) {
@@ -48,13 +113,6 @@ function groupLedgerBySession(rows: LedgerRow[]): Map<string | null, LedgerRow[]
     m.get(key)!.push(r)
   }
   return m
-}
-
-function rowFee(r: LedgerRow): string {
-  const v = r.tx_fee_lamports
-  if (typeof v === 'number') return `${v}`
-  if (typeof v === 'string') return v
-  return '—'
 }
 
 function parseLamports(v: unknown): number | null {
@@ -73,6 +131,39 @@ function lamportsToUsdDisplay(lamports: unknown, solUsd: number): string {
   if (lam === null) return '—'
   const usd = (lam / 1e9) * solUsd
   return formatUsdFixed(usd, 3)
+}
+
+/** Lamports + USD (~) stacked — for ledger tables. */
+function LamportsFeeCell({
+  lamportsRaw,
+  solUsd,
+}: {
+  lamportsRaw: unknown
+  solUsd: number
+}) {
+  const lam = parseLamports(lamportsRaw)
+  const usd = lamportsToUsdDisplay(lamportsRaw, solUsd)
+  if (lam === null) return <span className="text-muted-foreground">—</span>
+  return (
+    <div className="leading-tight">
+      <div className="font-mono tabular-nums">{lam.toLocaleString()} λ</div>
+      <div className="text-[11px] text-muted-foreground">{usd}</div>
+    </div>
+  )
+}
+
+function usdOrDash(v: string | number, digits = 3): string {
+  // We return "—" instead of $0.000 when backend is explicitly missing the metric.
+  // In JSONL-only mode many fields are best-effort; showing zero looks like a real value.
+  const n = typeof v === 'number' ? v : parseFloat(String(v))
+  if (!Number.isFinite(n)) return '—'
+  if (n === 0) return '—'
+  return formatUsdFixed(n, digits)
+}
+
+function parseUsdNum(v: string | number): number | null {
+  const n = typeof v === 'number' ? v : parseFloat(String(v))
+  return Number.isFinite(n) ? n : null
 }
 
 function rowEvent(r: LedgerRow): string {
@@ -112,17 +203,85 @@ export default function PositionDetail() {
     staleTime: 15_000,
   })
 
-  const { data: ledgerData } = useQuery({
-    queryKey: ['bot-ledger', address],
-    queryFn: () => getBotLedger(1500, address),
+  const { data: streamPerf } = useQuery({
+    queryKey: ['position-stream-performance', address],
+    queryFn: () => getPositionStreamPerformance(address!),
     enabled: !!address,
+    retry: 0,
+    staleTime: 30_000,
   })
 
-  const { data: ilLedgerData } = useQuery({
-    queryKey: ['bot-il-ledger', address],
-    queryFn: () => getBotIlLedger(200, address),
+  const { data: streamPnl } = useQuery({
+    queryKey: ['position-stream-pnl', address],
+    queryFn: () => getPositionStreamPnL(address!),
     enabled: !!address,
+    retry: 0,
+    staleTime: 30_000,
   })
+
+  const { data: streamLineage } = useQuery({
+    queryKey: ['position-stream-lineage', address],
+    queryFn: () => getPositionStreamLineage(address!),
+    enabled: !!address,
+    retry: 0,
+    staleTime: 30_000,
+  })
+
+  const chainSet = useMemo(() => {
+    const addr = address?.trim() ?? ''
+    const raw = (streamLineage?.chain ?? [])
+      .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      .map((x) => x.trim())
+    const uniq = [...new Set(raw)]
+    if (uniq.length === 0) return addr ? [addr] : []
+    if (addr && !uniq.includes(addr)) return [...uniq, addr]
+    return uniq
+  }, [streamLineage?.chain, address])
+
+  const ledgerQueries = useQueries({
+    queries: chainSet.map((pda) => ({
+      queryKey: ['bot-ledger', pda, 1500],
+      queryFn: () => getBotLedger(1500, pda),
+      enabled: !!pda,
+      staleTime: 30_000,
+    })),
+  })
+
+  const ilQueries = useQueries({
+    queries: chainSet.map((pda) => ({
+      queryKey: ['bot-il-ledger', pda, 800],
+      queryFn: () => getBotIlLedger(800, pda),
+      enabled: !!pda,
+      staleTime: 30_000,
+    })),
+  })
+
+  const ledgerDigest = ledgerQueries.map((q) => `${q.isFetched}:${q.data?.rows_returned ?? 0}:${q.data?.file_missing}`).join('|')
+  const mergedLifecycleRows = useMemo(() => mergeLifecycleLedgerRows(ledgerQueries), [ledgerDigest])
+
+  const ilDigest = ilQueries.map((q) => `${q.isFetched}:${q.data?.rows_returned ?? 0}`).join('|')
+  const mergedIlTimelineRows = useMemo(() => mergeIlLedgerRows(ilQueries), [ilDigest])
+
+  const timelineRows = useMemo(
+    () => [...mergedLifecycleRows, ...mergedIlTimelineRows],
+    [mergedLifecycleRows, mergedIlTimelineRows],
+  )
+
+  const sessionLedgerIdx = useMemo(
+    () => chainSet.findIndex((p) => p === address?.trim()),
+    [chainSet, address],
+  )
+
+  const ledgerData =
+    sessionLedgerIdx >= 0 ? ledgerQueries[sessionLedgerIdx]?.data : ledgerQueries[0]?.data
+  const ledgerRows = (ledgerData?.rows ?? []) as LedgerRow[]
+
+  const ilLedgerData =
+    sessionLedgerIdx >= 0 ? ilQueries[sessionLedgerIdx]?.data : ilQueries[0]?.data
+  const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
+
+  const ledgerAnyPresent = ledgerQueries.some((q) => q.data && !q.data.file_missing)
+  const ilAnyPresent = ilQueries.some((q) => q.data && !q.data.file_missing)
 
   const { data: strategiesData } = useQuery({
     queryKey: ['strategies'],
@@ -137,10 +296,13 @@ export default function PositionDetail() {
   })
   const solUsd = solPriceMap?.[WSOL_MINT] ?? 0
 
-  // Keep hooks unconditional: derive empty defaults even before `position` is loaded.
-  const ledgerRows = (ledgerData?.rows ?? []) as LedgerRow[]
-  const ilRows = (ilLedgerData?.rows ?? []) as LedgerRow[]
   const bySession = useMemo(() => groupLedgerBySession(ledgerRows), [ledgerRows])
+
+  const streamTotals = streamLineage?.totals ?? streamPnl ?? null
+  const streamKnownPdas =
+    streamLineage?.chain?.length && streamLineage.chain.length > 0
+      ? streamLineage.chain.length
+      : streamPerf?.positions?.length ?? 1
 
   const lastRebalanceIncomplete = useMemo(() => {
     for (const r of ilRows) {
@@ -346,13 +508,33 @@ export default function PositionDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
+      <div className="flex items-start gap-4 min-w-0">
         <Link to="/positions">
           <Button variant="ghost" size="icon">
             <ArrowLeft className="h-4 w-4" />
           </Button>
         </Link>
-        <h1 className="text-3xl font-bold">Position Details</h1>
+        <div className="min-w-0 space-y-1 flex-1">
+          <h1 className="text-3xl font-bold">Position Details</h1>
+          {position.token_a_label && position.token_b_label ? (
+            <div className="text-lg font-semibold">
+              {position.token_a_label} / {position.token_b_label}
+            </div>
+          ) : null}
+          <div className="max-w-xl">
+            <PoolPairLabels
+              labelA={position.token_a_label}
+              labelB={position.token_b_label}
+              mintA={position.token_mint_a}
+              mintB={position.token_mint_b}
+              priceA={position.token_price_a_usd}
+              priceB={position.token_price_b_usd}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground font-mono break-all pt-0.5" title={position.address}>
+            PDA {position.address}
+          </p>
+        </div>
       </div>
 
       <Tabs.Root defaultValue="overview">
@@ -422,7 +604,7 @@ export default function PositionDetail() {
                   </div>
                 ) : null}
 
-                {(ledgerData?.file_missing || ilLedgerData?.file_missing) && (
+                {(!ledgerAnyPresent || !ilAnyPresent) && (
                   <div className="text-xs text-yellow-500">
                     Bot logs are file-backed on the API host. If IL ledger is missing, set{' '}
                     <code className="text-[11px]">CLMM_IL_LEDGER_PATH</code> (or run CLI with{' '}
@@ -439,13 +621,24 @@ export default function PositionDetail() {
                 <CardTitle>Position Info</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Address</span>
-                  <span className="font-mono">{shortenAddress(position.address, 8)}</span>
+                <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-start border-b border-border/50 pb-3">
+                  <span className="text-muted-foreground shrink-0">Token pair</span>
+                  <div className="text-right max-w-md">
+                    <PoolPairLabels
+                      labelA={position.token_a_label}
+                      labelB={position.token_b_label}
+                      mintA={position.token_mint_a}
+                      mintB={position.token_mint_b}
+                      priceA={position.token_price_a_usd}
+                      priceB={position.token_price_b_usd}
+                    />
+                  </div>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Pool</span>
-                  <span className="font-mono">{shortenAddress(position.pool_address, 8)}</span>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground">Whirlpool</span>
+                  <span className="font-mono text-xs text-right break-all max-w-[16rem]" title={position.pool_address}>
+                    {shortenAddress(position.pool_address, 6)}
+                  </span>
                 </div>
                 <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
                   <span className="text-muted-foreground shrink-0 pt-0.5">Strategy</span>
@@ -645,8 +838,10 @@ export default function PositionDetail() {
                   </span>
                 </div>
                 <p className="text-[11px] text-muted-foreground leading-snug">
-                  On-chain <code className="text-[10px]">fee_owed</code> raw: token A{' '}
-                  <span className="font-mono tabular-nums">{position.pnl.fees_earned_a}</span> · token B{' '}
+                  On-chain <code className="text-[10px]">fee_owed</code> raw:{' '}
+                  {position.token_a_label ? `${position.token_a_label} (A)` : 'token A'}{' '}
+                  <span className="font-mono tabular-nums">{position.pnl.fees_earned_a}</span> ·{' '}
+                  {position.token_b_label ? `${position.token_b_label} (B)` : 'token B'}{' '}
                   <span className="font-mono tabular-nums">{position.pnl.fees_earned_b}</span> (smallest
                   units). If both are 0, nothing has accrued in the position account yet. If non-zero but
                   USD stays $0, the price service did not return a USD rate for a pool mint.
@@ -655,6 +850,76 @@ export default function PositionDetail() {
                   <span className="text-muted-foreground">Impermanent Loss</span>
                   <span className="text-yellow-500">{formatPercentFixed(position.pnl.il_pct, 3)}</span>
                 </div>
+                {(streamTotals || streamPerf || streamLineage) ? (
+                  <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
+                    <div className="text-xs text-muted-foreground">Stream summary (across rotated PDAs)</div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Known PDAs</span>
+                      <span className="font-mono tabular-nums">{streamKnownPdas}</span>
+                    </div>
+                    <div className="flex justify-between text-sm gap-4">
+                      <span className="text-muted-foreground shrink-0">Tx fees (network)</span>
+                      <div className="text-right font-mono tabular-nums text-xs leading-tight">
+                        {(() => {
+                          const lam =
+                            streamLineage?.chain_cost_summary?.tx_fee_lamports_total ??
+                            streamPerf?.total_tx_fee_lamports
+                          const usdStr = streamTotals
+                            ? String(streamTotals.tx_fees_usd)
+                            : streamPerf
+                              ? streamPerf.total_tx_fee_usd
+                              : null
+                          if (!usdStr && lam == null) return '—'
+                          return (
+                            <>
+                              {lam != null && lam > 0 ? (
+                                <div>{Number(lam).toLocaleString()} λ</div>
+                              ) : null}
+                              <div className="text-muted-foreground">
+                                {usdStr ? formatUsdFixed(parseFloat(usdStr), 4) : '—'}
+                              </div>
+                            </>
+                          )
+                        })()}
+                      </div>
+                    </div>
+                    {streamTotals ? (
+                      <div className="border-t border-border/60 pt-2 space-y-1">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Baseline → current</span>
+                          <span className="font-mono tabular-nums">
+                            {usdOrDash(streamTotals.baseline_value_usd)} → {usdOrDash(streamTotals.current_value_usd)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Realized cashflow</span>
+                          <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.realized_cashflow_usd, 3)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Stream Net PnL</span>
+                          <span
+                            className={
+                              parseFloat(streamTotals.net_pnl_pct) >= 0
+                                ? 'text-green-500 font-mono'
+                                : 'text-red-500 font-mono'
+                            }
+                          >
+                            {formatUsdFixed(streamTotals.net_pnl_usd, 3)} ({formatPercentFixed(streamTotals.net_pnl_pct, 3)})
+                          </span>
+                        </div>
+                        {streamTotals.note ? (
+                          <div className="text-[11px] text-muted-foreground leading-snug">{streamTotals.note}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {streamLineage?.note ? (
+                      <div className="text-[11px] text-muted-foreground leading-snug">{streamLineage.note}</div>
+                    ) : null}
+                    {!streamTotals && streamPerf?.note ? (
+                      <div className="text-[11px] text-muted-foreground leading-snug">{streamPerf.note}</div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <p className="text-xs text-muted-foreground border-t border-border/60 pt-3 leading-relaxed">
                   <span className="font-medium text-foreground/90">Why zeros?</span> Net PnL and IL% come from
                   the API process monitor (entry baseline vs current mark). Uncollected fees (USD) are an
@@ -780,22 +1045,193 @@ export default function PositionDetail() {
         </Tabs.Content>
 
         <Tabs.Content value="ledger" className="mt-4 space-y-4">
+          {streamLineage ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Position history (rotations)</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Best-effort chain reconstructed from IL edges (old → new). Each row is a distinct PDA created by rebalance/strategy rotation.
+                </p>
+                {streamLineage.note ? (
+                  <p className="text-[11px] text-muted-foreground leading-snug">{streamLineage.note}</p>
+                ) : null}
+
+                {streamLineage.nodes.length > 0 ? (
+                  <div className="overflow-x-auto rounded-md border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-muted/50">
+                        <tr>
+                          <th className="px-2 py-1 text-left">#</th>
+                          <th className="px-2 py-1 text-left">position</th>
+                          <th className="px-2 py-1 text-left">opened</th>
+                          <th className="px-2 py-1 text-left">closed / last</th>
+                          <th className="px-2 py-1 text-left">start value</th>
+                          <th className="px-2 py-1 text-left">end value</th>
+                          <th className="px-2 py-1 text-left">principal Δ</th>
+                          <th className="px-2 py-1 text-left">Sieć (tx)</th>
+                          <th className="px-2 py-1 text-left">LP zebrane</th>
+                          <th className="px-2 py-1 text-left">cashflow</th>
+                          <th className="px-2 py-1 text-left">net PnL</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {streamLineage.nodes.map((n, i) => (
+                          <tr key={n.position_address} className="border-t border-border/60">
+                            <td className="px-2 py-1 font-mono tabular-nums">{i + 1}</td>
+                            <td className="px-2 py-1 font-mono whitespace-nowrap">
+                              <Link
+                                to={
+                                  n.closed_ts_utc
+                                    ? `/positions/closed/${n.position_address}`
+                                    : `/positions/${n.position_address}`
+                                }
+                                className="text-primary hover:underline"
+                                title={n.position_address}
+                              >
+                                {shortenAddress(n.position_address, 8)}
+                              </Link>
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap">
+                              {n.opened_ts_utc ? formatDate(n.opened_ts_utc) : '—'}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap">
+                              {n.closed_ts_utc ? formatDate(n.closed_ts_utc) : '—'}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono">
+                              {usdOrDash(n.baseline_value_usd, 3)}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono">
+                              {usdOrDash(n.current_value_usd, 3)}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono">
+                              {(() => {
+                                const a = parseUsdNum(n.baseline_value_usd)
+                                const b = parseUsdNum(n.current_value_usd)
+                                if (a === null || b === null) return '—'
+                                return formatUsdFixed(b - a, 3)
+                              })()}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px] leading-tight">
+                              {(n.tx_fee_lamports ?? 0).toLocaleString()} λ
+                              <br />
+                              <span className="text-muted-foreground">{formatUsdFixed(parseFloat(String(n.tx_fees_usd)), 4)}</span>
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]">
+                              {formatUsdFixed(parseFloat(String(n.fees_collected_usd ?? '0')), 4)}
+                              <span className="text-muted-foreground"> · {n.collect_events ?? 0}×</span>
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono">
+                              {formatUsdFixed(n.realized_cashflow_usd, 3)}
+                            </td>
+                            <td
+                              className={
+                                parseFloat(n.net_pnl_pct) >= 0
+                                  ? 'px-2 py-1 whitespace-nowrap font-mono text-green-500'
+                                  : 'px-2 py-1 whitespace-nowrap font-mono text-red-500'
+                              }
+                            >
+                              {formatUsdFixed(n.net_pnl_usd, 3)} ({formatPercentFixed(n.net_pnl_pct, 3)})
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No lineage rows yet (missing IL edges / DB snapshots).</p>
+                )}
+
+                {streamLineage.totals ? (
+                  <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Totals (across full chain)</div>
+                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm mt-1">
+                      <div>
+                        <span className="text-muted-foreground">baseline</span>{' '}
+                        <span className="font-mono">{formatUsdFixed(streamLineage.totals.baseline_value_usd, 3)}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">current</span>{' '}
+                        <span className="font-mono">{formatUsdFixed(streamLineage.totals.current_value_usd, 3)}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">tx fees</span>{' '}
+                        <span className="font-mono text-[11px] leading-tight inline-block align-top">
+                          {streamLineage.chain_cost_summary != null ? (
+                            <>
+                              <span className="block">
+                                {streamLineage.chain_cost_summary.tx_fee_lamports_total.toLocaleString()} λ
+                              </span>
+                              <span className="block text-muted-foreground">
+                                {formatUsdFixed(
+                                  parseFloat(String(streamLineage.chain_cost_summary.tx_fees_usd_total)),
+                                  4,
+                                )}
+                              </span>
+                            </>
+                          ) : (
+                            formatUsdFixed(streamLineage.totals.tx_fees_usd, 3)
+                          )}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">cashflow</span>{' '}
+                        <span className="font-mono">{formatUsdFixed(streamLineage.totals.realized_cashflow_usd, 3)}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">net PnL</span>{' '}
+                        <span
+                          className={
+                            parseFloat(streamLineage.totals.net_pnl_pct) >= 0
+                              ? 'font-mono text-green-500'
+                              : 'font-mono text-red-500'
+                          }
+                        >
+                          {formatUsdFixed(streamLineage.totals.net_pnl_usd, 3)} (
+                          {formatPercentFixed(streamLineage.totals.net_pnl_pct, 3)})
+                        </span>
+                      </div>
+                    </div>
+                    {streamLineage.totals.note ? (
+                      <div className="text-[11px] text-muted-foreground leading-snug mt-2">{streamLineage.totals.note}</div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader>
               <CardTitle>Lifecycle ledger (filtered)</CardTitle>
             </CardHeader>
             <CardContent className="text-sm text-muted-foreground space-y-2">
               <p>
-                Rows from <code className="text-xs">/bot-activity/ledger</code> whose JSON contains this position
-                address. Grouped by <code className="text-xs">rebalance_session_id</code> when present (swap + bot +
-                open/close in one session). Fee (USD) uses SOL/USD from{' '}
+                Rows from <code className="text-xs">/bot-activity/ledger</code> filtered to <strong>this</strong>{' '}
+                position PDA (sesje poniżej). Oś <strong>Lifecycle timeline</strong> scala też wszystkie PDA z{' '}
+                <code className="text-xs">stream-lineage</code> oraz IL ledger. Fee (USD) uses SOL/USD from{' '}
                 <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).
               </p>
-              {ledgerData?.file_missing && (
-                <p className="text-yellow-500">Ledger file missing on API host ({ledgerData.path}).</p>
+              {!ledgerAnyPresent && (
+                <p className="text-yellow-500">
+                  Lifecycle ledger file missing on API host ({ledgerData?.path ?? '—'}).
+                </p>
               )}
             </CardContent>
           </Card>
+
+          {ledgerAnyPresent ? (
+            <PositionLifecycleTimeline
+              rows={timelineRows}
+              solUsd={solUsd}
+              tokenMintA={position.token_mint_a}
+              tokenMintB={position.token_mint_b}
+              priceA={position.token_price_a_usd}
+              priceB={position.token_price_b_usd}
+              chainPdaCount={chainSet.length}
+            />
+          ) : null}
 
           <Card>
             <CardHeader>
@@ -808,12 +1244,12 @@ export default function PositionDetail() {
                 <code className="text-xs">CLMM_IL_LEDGER_PATH</code> on the API host (same file as{' '}
                 <code className="text-xs">orca-bot-run --il-ledger-path</code>).
               </p>
-              {ilLedgerData?.file_missing && (
+              {!ilAnyPresent && (
                 <p className="text-yellow-500">
-                  IL ledger not configured or file missing ({ilLedgerData.path}).
+                  IL ledger not configured or file missing ({ilLedgerData?.path ?? '—'}).
                 </p>
               )}
-              {!ilLedgerData?.file_missing && ilRows.length > 0 && (
+              {ilAnyPresent && ilRows.length > 0 && (
                 <div className="overflow-x-auto rounded-md border">
                   <table className="w-full text-xs">
                     <thead className="bg-muted/50">
@@ -821,8 +1257,7 @@ export default function PositionDetail() {
                         <th className="px-2 py-1 text-left">timestamp</th>
                         <th className="px-2 py-1 text-left">old → new</th>
                         <th className="px-2 py-1 text-left">reason</th>
-                        <th className="px-2 py-1 text-left">tx_cost_lamports</th>
-                        <th className="px-2 py-1 text-left">tx_cost (USD)</th>
+                        <th className="px-2 py-1 text-left">Tx fee (λ · ~USD)</th>
                         <th className="px-2 py-1 text-left">session</th>
                       </tr>
                     </thead>
@@ -833,12 +1268,12 @@ export default function PositionDetail() {
                             {typeof r.timestamp === 'string' ? r.timestamp : '—'}
                           </td>
                           <td className="px-2 py-1 font-mono max-w-[12rem] truncate" title={String(r.old_position ?? '')}>
-                            {String(r.old_position ?? '—')} → {String(r.position ?? '—')}
+                            {typeof r.old_position === 'string' ? shortenAddress(r.old_position, 5) : '—'} →{' '}
+                            {typeof r.position === 'string' ? shortenAddress(r.position, 5) : '—'}
                           </td>
                           <td className="px-2 py-1">{String(r.reason ?? '—')}</td>
-                          <td className="px-2 py-1">{String(r.tx_cost_lamports ?? '—')}</td>
-                          <td className="px-2 py-1 whitespace-nowrap">
-                            {lamportsToUsdDisplay(r.tx_cost_lamports, solUsd)}
+                          <td className="px-2 py-1">
+                            <LamportsFeeCell lamportsRaw={r.tx_cost_lamports} solUsd={solUsd} />
                           </td>
                           <td className="px-2 py-1 max-w-[8rem] truncate" title={String(r.rebalance_session_id ?? '')}>
                             {String(r.rebalance_session_id ?? '—')}
@@ -849,7 +1284,7 @@ export default function PositionDetail() {
                   </table>
                 </div>
               )}
-              {!ilLedgerData?.file_missing && ilRows.length === 0 && (
+              {ilAnyPresent && ilRows.length === 0 && (
                 <p className="text-muted-foreground">No IL rows for this address yet.</p>
               )}
             </CardContent>
@@ -870,8 +1305,7 @@ export default function PositionDetail() {
                       <th className="py-1 pr-2">Time</th>
                       <th className="py-1 pr-2">Source</th>
                       <th className="py-1 pr-2">Event</th>
-                      <th className="py-1 pr-2">Fee (lamports)</th>
-                      <th className="py-1 pr-2">Fee (USD)</th>
+                      <th className="py-1 pr-2">Tx fee (λ · ~USD)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -880,9 +1314,8 @@ export default function PositionDetail() {
                         <td className="py-1 pr-2 whitespace-nowrap">{rowTs(r)}</td>
                         <td className="py-1 pr-2">{rowSource(r)}</td>
                         <td className="py-1 pr-2 font-mono">{rowEvent(r)}</td>
-                        <td className="py-1 pr-2">{rowFee(r)}</td>
-                        <td className="py-1 pr-2 whitespace-nowrap">
-                          {lamportsToUsdDisplay(r.tx_fee_lamports, solUsd)}
+                        <td className="py-1 pr-2">
+                          <LamportsFeeCell lamportsRaw={r.tx_fee_lamports} solUsd={solUsd} />
                         </td>
                       </tr>
                     ))}
@@ -892,7 +1325,7 @@ export default function PositionDetail() {
             </Card>
           ))}
 
-          {ledgerRows.length === 0 && !ledgerData?.file_missing && (
+          {ledgerRows.length === 0 && ledgerAnyPresent && (
             <p className="text-muted-foreground text-sm">No matching lines yet for this address.</p>
           )}
         </Tabs.Content>

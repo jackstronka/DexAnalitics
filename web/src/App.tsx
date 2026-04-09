@@ -5,6 +5,8 @@ import Dashboard from '@/pages/Dashboard'
 import Positions from '@/pages/Positions'
 import PositionCreate from '@/pages/PositionCreate'
 import PositionDetail from '@/pages/PositionDetail'
+import ClosedPositions from '@/pages/ClosedPositions'
+import ClosedPositionDetail from '@/pages/ClosedPositionDetail'
 import PageErrorBoundary from '@/components/PageErrorBoundary'
 import Strategies from '@/pages/Strategies'
 import StrategyDetail from '@/pages/StrategyDetail'
@@ -32,6 +34,15 @@ function App() {
             <Route path="scripts" element={<Scripts />} />
             <Route path="positions" element={<Positions />} />
             <Route path="positions/new" element={<PositionCreate />} />
+            <Route path="positions/closed" element={<ClosedPositions />} />
+            <Route
+              path="positions/closed/:address"
+              element={
+                <PageErrorBoundary title="Closed position details crashed while rendering">
+                  <ClosedPositionDetail />
+                </PageErrorBoundary>
+              }
+            />
             <Route
               path="positions/:address"
               element={

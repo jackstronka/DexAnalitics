@@ -76,16 +76,25 @@ impl Database {
     /// # Errors
     /// Returns an error if any migration statement fails.
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
-        let migration_sql = include_str!("../../migrations/001_initial_schema.sql");
+        // Keep migrations simple: include fixed SQL files and run each statement idempotently.
+        // (No migration table yet; statements are written with IF NOT EXISTS.)
+        let migrations: [&str; 4] = [
+            include_str!("../../migrations/001_initial_schema.sql"),
+            include_str!("../../migrations/002_position_stream_performance.sql"),
+            include_str!("../../migrations/003_stream_pnl_snapshots.sql"),
+            include_str!("../../migrations/004_stream_snapshot_mints_prices.sql"),
+        ];
 
-        // Split by semicolons and execute each statement separately
-        for statement in migration_sql.split(';') {
-            let trimmed = statement.trim();
-            // Skip empty statements and comments-only blocks
-            if trimmed.is_empty() || trimmed.starts_with("--") && !trimmed.contains("CREATE") {
-                continue;
+        for migration_sql in migrations {
+            // Split by semicolons and execute each statement separately.
+            for statement in migration_sql.split(';') {
+                let trimmed = statement.trim();
+                // Skip empty statements and comments-only blocks.
+                if trimmed.is_empty() || trimmed.starts_with("--") && !trimmed.contains("CREATE") {
+                    continue;
+                }
+                sqlx::query(trimmed).execute(self.pool.as_ref()).await?;
             }
-            sqlx::query(trimmed).execute(self.pool.as_ref()).await?;
         }
         Ok(())
     }

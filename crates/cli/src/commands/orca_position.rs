@@ -82,6 +82,7 @@ async fn maybe_registry_open_cli(
             owner,
             sig,
             None,
+            None,
         )
         .await;
     }
@@ -508,7 +509,7 @@ pub async fn run_position_collect_fees(
         RebalanceExecutor::new(provider, tx_manager, lifecycle, RebalanceConfig::default());
     exec.set_wallet(Arc::new(load_signing_wallet(keypair)?));
     exec.set_dry_run(dry_run);
-    exec.execute_collect_fees_only(&position_pk, &pool_pk)
+    exec.execute_collect_fees_only(&position_pk, &pool_pk, None)
         .await?;
 
     if dry_run {
@@ -584,6 +585,7 @@ pub async fn run_position_close(
         &fee_payer,
         &res.signature,
         None,
+        Some("manual"),
     )
     .await;
 

@@ -22,9 +22,12 @@ function rowCell(v: unknown): string {
 function JsonlTable({
   data,
   columnKeys,
+  getCellValue,
 }: {
   data: BotActivityJsonlResponse | BotRegistryJsonlResponse
   columnKeys: string[]
+  /** Optional: map column key → value (np. `position_pubkey` z fallbackiem do `position_pda`). */
+  getCellValue?: (row: Record<string, unknown>, key: string) => unknown
 }) {
   if (data.file_missing) {
     return (
@@ -51,15 +54,21 @@ function JsonlTable({
         <tbody>
           {data.rows.map((row, i) => (
             <tr key={i} className="border-t border-border/60 hover:bg-muted/30">
-              {columnKeys.map((k) => (
-                <td
-                  key={k}
-                  className="px-3 py-2 max-w-[18rem] truncate font-mono text-xs"
-                  title={rowCell((row as Record<string, unknown>)[k])}
-                >
-                  {rowCell((row as Record<string, unknown>)[k])}
-                </td>
-              ))}
+              {columnKeys.map((k) => {
+                const raw = getCellValue
+                  ? getCellValue(row as Record<string, unknown>, k)
+                  : (row as Record<string, unknown>)[k]
+                const shown = rowCell(raw)
+                return (
+                  <td
+                    key={k}
+                    className="px-3 py-2 max-w-[18rem] truncate font-mono text-xs"
+                    title={shown}
+                  >
+                    {shown}
+                  </td>
+                )
+              })}
             </tr>
           ))}
         </tbody>
@@ -68,17 +77,26 @@ function JsonlTable({
   )
 }
 
+// `details`: confirmed `bot_swap_exact_in` swap params (mints, amount_in, slippage); diagnostic rows use the same key.
+// Ledger JSONL używa `position_pubkey` (orca_bot); starsze/CLI mogą mieć `position_pda` — łączymy w getLifecycleCell.
 const LIFECYCLE_KEYS = [
   'ts_utc',
   'source',
   'event',
   'signature',
-  'position_pda',
+  'position_pubkey',
   'pool_address',
   'rebalance_session_id',
   'tx_fee_lamports',
   'details',
 ]
+
+function getLifecycleCell(row: Record<string, unknown>, key: string): unknown {
+  if (key === 'position_pubkey') {
+    return row.position_pubkey ?? row.position_pda ?? null
+  }
+  return row[key]
+}
 
 const IL_KEYS = ['timestamp', 'event', 'old_position', 'position', 'pool', 'reason', 'tx_cost_lamports', 'hint']
 
@@ -88,10 +106,11 @@ export default function Logs() {
   const qc = useQueryClient()
   const [filter, setFilter] = useState('')
   const [limit, setLimit] = useState(300)
+  const [ledgerOffset, setLedgerOffset] = useState(0)
 
   const ledgerQ = useQuery({
-    queryKey: ['logs-ledger', limit, filter],
-    queryFn: () => getBotLedger(limit, filter || undefined),
+    queryKey: ['logs-ledger', limit, filter, ledgerOffset],
+    queryFn: () => getBotLedger(limit, filter || undefined, ledgerOffset),
   })
   const ilQ = useQuery({
     queryKey: ['logs-il', limit, filter],
@@ -114,6 +133,15 @@ export default function Logs() {
     }
     return null
   }, [ilQ.data?.rows])
+
+  /** W obrębie strony: najnowsze wiersze na górze (API zwraca fragment w kolejności pliku). */
+  const ledgerDisplayData = useMemo((): BotActivityJsonlResponse | null => {
+    if (!ledgerQ.data) return null
+    return {
+      ...ledgerQ.data,
+      rows: [...ledgerQ.data.rows].reverse(),
+    }
+  }, [ledgerQ.data])
 
   const closeWithoutOpen = useMemo(() => {
     const rows = (ledgerQ.data?.rows ?? []) as Record<string, unknown>[]
@@ -176,7 +204,10 @@ export default function Logs() {
             <input
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+              onChange={(e) => {
+                setLedgerOffset(0)
+                setFilter(e.target.value)
+              }}
               placeholder="opcjonalnie"
             />
           </div>
@@ -188,7 +219,10 @@ export default function Logs() {
               max={2000}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={limit}
-              onChange={(e) => setLimit(Number(e.target.value) || 300)}
+              onChange={(e) => {
+                setLedgerOffset(0)
+                setLimit(Number(e.target.value) || 300)
+              }}
             />
           </div>
         </CardContent>
@@ -256,10 +290,59 @@ export default function Logs() {
           <CardTitle>Lifecycle ledger</CardTitle>
           <p className="text-sm text-muted-foreground">
             {ledgerQ.data?.path ?? '…'} — dopasowanych: {ledgerQ.data?.total_matching_lines ?? '—'}, zwrócono:{' '}
-            {ledgerQ.data?.rows_returned ?? '—'}
+            {ledgerQ.data?.rows_returned ?? '—'}. Zamknięcie pozycji: szukaj{' '}
+            <code className="text-xs">bot_close_position</code> w kolumnie <code className="text-xs">event</code>.
           </p>
         </CardHeader>
         <CardContent>
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-xs text-muted-foreground">
+              offset: <code className="text-[11px]">{ledgerOffset}</code>
+              {typeof ledgerQ.data?.total_matching_lines === 'number' ? (
+                <>
+                  {' '}
+                  • strona{' '}
+                  <code className="text-[11px]">
+                    {Math.floor(ledgerOffset / Math.max(1, limit)) + 1}
+                  </code>
+                </>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={ledgerOffset <= 0}
+                onClick={() => setLedgerOffset((x) => Math.max(0, x - Math.max(1, limit)))}
+              >
+                Nowsze
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={
+                  !ledgerQ.data ||
+                  ledgerQ.data.file_missing ||
+                  ledgerQ.data.rows_returned === 0 ||
+                  ledgerOffset + ledgerQ.data.rows_returned >= ledgerQ.data.total_matching_lines
+                }
+                onClick={() => setLedgerOffset((x) => x + Math.max(1, limit))}
+              >
+                Starsze
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={ledgerOffset === 0}
+                onClick={() => setLedgerOffset(0)}
+              >
+                Najnowsze
+              </Button>
+            </div>
+          </div>
           {closeWithoutOpen.length > 0 && (
             <div className="mb-3 rounded-md border border-amber-500/35 bg-amber-500/5 px-3 py-2 text-sm">
               <div className="font-medium">Sessions with close but no open (recent)</div>
@@ -273,7 +356,10 @@ export default function Logs() {
                     type="button"
                     size="sm"
                     variant="secondary"
-                    onClick={() => setFilter(x.sid)}
+                    onClick={() => {
+                      setLedgerOffset(0)
+                      setFilter(x.sid)
+                    }}
                     title={x.lastTs ?? undefined}
                   >
                     {x.sid}
@@ -284,7 +370,13 @@ export default function Logs() {
           )}
           {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
           {ledgerQ.isError && <p className="text-sm text-destructive">{(ledgerQ.error as Error).message}</p>}
-          {ledgerQ.data && <JsonlTable data={ledgerQ.data} columnKeys={LIFECYCLE_KEYS} />}
+          {ledgerDisplayData && (
+            <JsonlTable
+              data={ledgerDisplayData}
+              columnKeys={LIFECYCLE_KEYS}
+              getCellValue={getLifecycleCell}
+            />
+          )}
         </CardContent>
       </Card>
 

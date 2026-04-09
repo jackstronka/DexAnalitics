@@ -8,7 +8,7 @@ use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 
 fn state() -> AppState {
-    AppState::new(RpcConfig::default(), ApiConfig::default())
+    AppState::new(RpcConfig::default(), ApiConfig::default(), None)
 }
 
 #[tokio::test]

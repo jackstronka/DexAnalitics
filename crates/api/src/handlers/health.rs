@@ -77,7 +77,7 @@ pub async fn health_check(State(state): State<AppState>) -> ApiResult<Json<Healt
         uptime_secs: uptime,
         components: ComponentHealth {
             rpc: rpc_healthy,
-            database: true, // Placeholder - no DB yet
+            database: state.db.is_some(),
             circuit_breaker: circuit_status,
         },
     };

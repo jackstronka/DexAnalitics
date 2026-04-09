@@ -11,7 +11,7 @@ use axum::{
     extract::{Query, State},
 };
 use clmm_lp_protocols::ledger::position_registry::registry_path;
-use clmm_lp_protocols::ledger::tx_lifecycle::{il_ledger_path_from_env, ledger_path};
+use clmm_lp_protocols::ledger::tx_lifecycle::{il_ledger_path_from_env, ledger_read_path};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -29,6 +29,9 @@ const MAX_LEDGER_ROWS: usize = 2000;
 pub struct BotJsonlQuery {
     #[serde(default = "default_limit")]
     limit: usize,
+    /// How many newest matching rows to skip (pagination). `0` = newest page.
+    #[serde(default)]
+    offset: usize,
     /// If set, only lines whose JSON string contains this substring (e.g. position pubkey).
     filter: Option<String>,
 }
@@ -41,7 +44,11 @@ fn clamp_limit(n: usize) -> usize {
     n.clamp(1, MAX_LEDGER_ROWS)
 }
 
-/// Read tail of `data/ledger/orca_position_lifecycle.jsonl` (override: `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`).
+/// Read tail of the lifecycle JSONL used for dashboard summaries.
+///
+/// Uses [`clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path`] (see
+/// `CLMM_POSITION_LIFECYCLE_LEDGER_READ_PATH`, `CLMM_POSITION_LIFECYCLE_USE_ENRICHED`, and canonical
+/// `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` for writes).
 #[utoipa::path(
     get,
     path = "/bot-activity/ledger",
@@ -58,11 +65,12 @@ pub async fn get_bot_ledger(
     State(_state): State<AppState>,
     Query(q): Query<BotJsonlQuery>,
 ) -> ApiResult<Json<BotActivityJsonlResponse>> {
-    let path = ledger_path();
+    let path = ledger_read_path();
     let limit = clamp_limit(q.limit);
+    let offset = q.offset;
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, filter)
+    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, offset, filter)
         .map_err(|e| ApiError::internal(format!("read ledger file: {e}")))?;
     let path_s = path.display().to_string();
 
@@ -95,6 +103,7 @@ pub async fn get_bot_il_ledger(
     Query(q): Query<BotJsonlQuery>,
 ) -> ApiResult<Json<BotActivityJsonlResponse>> {
     let limit = clamp_limit(q.limit);
+    let offset = q.offset;
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
     let Some(path) = il_ledger_path_from_env() else {
@@ -109,7 +118,7 @@ pub async fn get_bot_il_ledger(
     };
 
     let path_s = path.display().to_string();
-    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, filter)
+    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, offset, filter)
         .map_err(|e| ApiError::internal(format!("read IL ledger file: {e}")))?;
 
     Ok(Json(BotActivityJsonlResponse {
@@ -140,9 +149,10 @@ pub async fn get_bot_registry(
 ) -> ApiResult<Json<BotRegistryJsonlResponse>> {
     let path = registry_path();
     let limit = clamp_limit(q.limit);
+    let offset = q.offset;
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, filter)
+    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, offset, filter)
         .map_err(|e| ApiError::internal(format!("read registry file: {e}")))?;
     let path_s = path.display().to_string();
 
@@ -234,8 +244,8 @@ pub async fn post_bot_slack_summary(
     let webhook = webhook.expect("checked");
 
     let lim = body.limit.clamp(1, 80);
-    let path = ledger_path();
-    let (file_missing, _total, rows) = read_jsonl_tail(path.as_path(), lim, None)
+    let path = ledger_read_path();
+    let (file_missing, _total, rows) = read_jsonl_tail(path.as_path(), lim, 0, None)
         .map_err(|e| ApiError::internal(format!("read ledger: {e}")))?;
 
     if file_missing {
@@ -282,6 +292,7 @@ pub async fn post_bot_slack_summary(
 fn read_jsonl_tail(
     path: &Path,
     limit: usize,
+    offset: usize,
     filter: Option<&str>,
 ) -> std::io::Result<(bool, usize, Vec<serde_json::Value>)> {
     if !path.exists() {
@@ -308,11 +319,12 @@ fn read_jsonl_tail(
     }
 
     let total = parsed.len();
-    let out = if parsed.len() > limit {
-        parsed[parsed.len() - limit..].to_vec()
-    } else {
-        parsed
-    };
+    if total == 0 {
+        return Ok((false, 0, Vec::new()));
+    }
+    let end_exclusive = total.saturating_sub(offset).min(total);
+    let start_inclusive = end_exclusive.saturating_sub(limit);
+    let out = parsed[start_inclusive..end_exclusive].to_vec();
 
     Ok((false, total, out))
 }

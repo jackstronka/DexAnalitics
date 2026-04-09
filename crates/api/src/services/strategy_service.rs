@@ -10,14 +10,21 @@ use crate::services::optimization_runner::{
 use crate::state::{AlertUpdate, AppState};
 use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
+use crate::position_registry_seed::registry_open_position_pubkeys;
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tracing::{info, warn};
+
+fn json_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
 
 /// Result of a strategy operation.
 #[derive(Debug, Clone)]
@@ -177,6 +184,56 @@ impl StrategyService {
             executor_config,
         );
 
+        // Guardrail: lock the executor to the “initial” managed set (do not grow positions over time).
+        // Prefer the intersection of registry-open positions with the configured position_addresses.
+        let managed_allow: Vec<solana_sdk::pubkey::Pubkey> = {
+            let open = registry_open_position_pubkeys();
+            if let Some(params) = strategy.config.get("parameters") {
+                let configured: Vec<solana_sdk::pubkey::Pubkey> = params
+                    .get("position_addresses")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .filter_map(|s| solana_sdk::pubkey::Pubkey::from_str(s.trim()).ok())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if !configured.is_empty() {
+                    let set: std::collections::HashSet<_> = configured.into_iter().collect();
+                    open.into_iter().filter(|p| set.contains(p)).collect()
+                } else {
+                    open
+                }
+            } else {
+                open
+            }
+        };
+        executor.set_managed_allowlist(managed_allow).await;
+
+        // Keep strategy links consistent across bot-driven close→open cycles.
+        // When the executor opens a new PDA (reopen), replace the old PDA in this strategy.
+        {
+            let st = self.state.clone();
+            let sid = strategy_id.to_string();
+            executor
+                .set_reopen_hook(Some(Arc::new(move |old, new| {
+                let st = st.clone();
+                let sid = sid.clone();
+                tokio::spawn(async move {
+                    // Best-effort; errors should not break the executor loop.
+                    let _ = replace_position_address_in_strategy(
+                        &st,
+                        &sid,
+                        &old.to_string(),
+                        &new.to_string(),
+                    )
+                    .await;
+                });
+            })))
+                .await;
+        }
+
         // Always enable Tier3 checkpoint ledger by default (append-only JSONL).
         executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
             "data/position-fee-checkpoints.jsonl",
@@ -209,7 +266,7 @@ impl StrategyService {
 
         if let Some(params) = strategy.config.get("parameters") {
             // Common: width and periodic / thresholds.
-            if let Some(range_width_pct) = params.get("range_width_pct").and_then(|v| v.as_f64()) {
+            if let Some(range_width_pct) = params.get("range_width_pct").and_then(json_f64) {
                 decision_config.range_width_pct = Decimal::from_f64_retain(range_width_pct / 100.0)
                     .unwrap_or(decision_config.range_width_pct);
             }
@@ -228,10 +285,7 @@ impl StrategyService {
                 decision_config.rebalance_on_range_exit_immediately = v;
             }
 
-            if let Some(threshold) = params
-                .get("rebalance_threshold_pct")
-                .and_then(|v| v.as_f64())
-            {
+            if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(json_f64) {
                 decision_config.threshold_pct = Decimal::from_f64_retain(threshold / 100.0)
                     .unwrap_or(decision_config.threshold_pct);
             }
@@ -246,14 +300,11 @@ impl StrategyService {
 
             // IL-specific knobs (only meaningful for IlLimit strategy mode).
             if let StrategyMode::IlLimit = decision_config.strategy_mode {
-                if let Some(max_il) = params.get("max_il_pct").and_then(|v| v.as_f64()) {
+                if let Some(max_il) = params.get("max_il_pct").and_then(json_f64) {
                     decision_config.il_close_threshold = Decimal::from_f64_retain(max_il / 100.0)
                         .unwrap_or(decision_config.il_close_threshold);
                 }
-                if let Some(threshold) = params
-                    .get("rebalance_threshold_pct")
-                    .and_then(|v| v.as_f64())
-                {
+                if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(json_f64) {
                     decision_config.il_rebalance_threshold =
                         Decimal::from_f64_retain(threshold / 100.0)
                             .unwrap_or(decision_config.il_rebalance_threshold);
@@ -602,6 +653,85 @@ pub async fn remove_position_address_from_all_strategies(
         );
     } else {
         drop(strategies);
+    }
+    Ok(())
+}
+
+/// Replace `old_position` with `new_position` in a strategy's `parameters.position_addresses`.
+///
+/// Used for bot-driven close→open cycles so the UI keeps showing the strategy link.
+pub async fn replace_position_address_in_strategy(
+    state: &AppState,
+    strategy_id: &str,
+    old_position: &str,
+    new_position: &str,
+) -> Result<(), ApiError> {
+    let old_pos = old_position.trim();
+    let new_pos = new_position.trim();
+    if old_pos.is_empty() || new_pos.is_empty() {
+        return Err(ApiError::bad_request("position address empty"));
+    }
+    if old_pos == new_pos {
+        return Ok(());
+    }
+
+    let mut strategies = state.strategies.write().await;
+    let strategy = strategies
+        .get_mut(strategy_id)
+        .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+
+    let config_obj = strategy
+        .config
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("strategy config must be a JSON object"))?;
+
+    let params = config_obj
+        .entry("parameters".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !params.is_object() {
+        *params = serde_json::json!({});
+    }
+    let params_obj = params
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("parameters must be a JSON object"))?;
+
+    let arr_val = params_obj
+        .entry("position_addresses".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = arr_val
+        .as_array_mut()
+        .ok_or_else(|| ApiError::bad_request("parameters.position_addresses must be a JSON array"))?;
+
+    let mut changed = false;
+    for v in arr.iter_mut() {
+        if v.as_str().map(|s| s.trim()) == Some(old_pos) {
+            *v = serde_json::json!(new_pos);
+            changed = true;
+        }
+    }
+    // Ensure new is present exactly once.
+    if !arr.iter().any(|v| v.as_str().map(|s| s.trim()) == Some(new_pos)) {
+        arr.push(serde_json::json!(new_pos));
+        changed = true;
+    }
+    // Remove any remaining old occurrences.
+    let before = arr.len();
+    arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(old_pos));
+    if arr.len() != before {
+        changed = true;
+    }
+
+    if changed {
+        strategy.updated_at = chrono::Utc::now();
+        let snapshot = strategies.clone();
+        drop(strategies);
+        crate::state::try_persist_strategies_best_effort(&snapshot);
+        info!(
+            strategy_id = %strategy_id,
+            old_position = %old_pos,
+            new_position = %new_pos,
+            "Replaced linked position PDA in strategy (parameters.position_addresses)"
+        );
     }
     Ok(())
 }

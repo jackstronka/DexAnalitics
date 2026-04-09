@@ -23,6 +23,14 @@ pub fn registry_open_position_pubkeys() -> Vec<Pubkey> {
     replay_registry_open_positions()
 }
 
+/// Latest open/close state from `registry.jsonl` (last event per key wins).
+///
+/// `true` = open, `false` = closed.
+#[must_use]
+pub fn registry_position_open_map() -> HashMap<Pubkey, bool> {
+    replay_registry_open_map()
+}
+
 fn replay_registry_open_positions() -> Vec<Pubkey> {
     let path = registry_path();
     let Ok(file) = File::open(&path) else {
@@ -69,6 +77,51 @@ fn replay_registry_open_positions() -> Vec<Pubkey> {
                 Err(_) => {
                     warn!(position = %e.position_pubkey, "position registry: invalid pubkey");
                 }
+            }
+        }
+    }
+    out
+}
+
+fn replay_registry_open_map() -> HashMap<Pubkey, bool> {
+    let path = registry_path();
+    let Ok(file) = File::open(&path) else {
+        return HashMap::new();
+    };
+    let reader = BufReader::new(file);
+
+    let mut last: HashMap<String, String> = HashMap::new(); // pos_str -> event
+    for line in reader.lines().filter_map(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let event = v
+            .get("event")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let position_pubkey = v
+            .get("position_pubkey")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if position_pubkey.is_empty() {
+            continue;
+        }
+        if event != "registry_open" && event != "registry_close" {
+            continue;
+        }
+        last.insert(position_pubkey, event);
+    }
+
+    let mut out: HashMap<Pubkey, bool> = HashMap::new();
+    for (pos_s, ev) in last {
+        match Pubkey::try_from(pos_s.as_str()) {
+            Ok(pk) => {
+                out.insert(pk, ev == "registry_open");
+            }
+            Err(_) => {
+                warn!(position = %pos_s, "position registry: invalid pubkey");
             }
         }
     }

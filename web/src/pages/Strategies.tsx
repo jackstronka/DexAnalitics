@@ -75,6 +75,13 @@ export default function Strategies() {
                   <span className="text-muted-foreground">Type:</span>
                   <span className="capitalize">{strategy.strategy_type.replace('_', ' ')}</span>
                 </div>
+                {strategy.parameters?.auto_start ? (
+                  <div className="text-xs">
+                    <span className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-muted-foreground">
+                      auto-start on boot
+                    </span>
+                  </div>
+                ) : null}
                 <div className="flex gap-2">
                   <Link to={`/strategies/${strategy.id}/edit`} className="flex-1">
                     <Button variant="secondary" size="sm" className="w-full">

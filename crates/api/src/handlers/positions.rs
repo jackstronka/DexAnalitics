@@ -3,11 +3,17 @@
 use crate::error::{ApiError, ApiResult};
 use crate::handlers::strategies::ensure_strategy_running_after_position_link;
 use crate::models::{
-    DecreaseLiquidityRequest, LinkPositionStrategyRequest, ListPositionsResponse, MessageResponse,
-    OpenPositionRequest, PnLResponse, PositionDiagnosticsResponse, PositionLastEvalSnapshot,
-    PositionOpenResponse, PositionResponse, PositionStatus, PositionStrategyDiagnostics,
-    RebalanceRequest, SwapBeforeOpenRequest, SwapBeforeOpenResponse, UncollectedFeesInfo,
+    ClosedPositionEntry, ClosedPositionsResponse, DecreaseLiquidityRequest,
+    LinkPositionStrategyRequest, ListPositionsResponse, MessageResponse, OpenPositionRequest,
+    PnLResponse, PositionDiagnosticsResponse, PositionLastEvalSnapshot, PositionOpenResponse,
+    PositionResponse, PositionStatus, PositionStrategyDiagnostics, PositionStreamPerformanceResponse,
+    PositionStreamLineageResponse, PositionStreamPnLResponse, RebalanceRequest, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
+    UncollectedFeesInfo, PositionLifecycleSummaryResponse, PositionLifecycleSessionSummary,
+    PositionLifecycleEvent, PositionExperimentConfigResponse,
 };
+use crate::services::position_stream_performance::compute_position_stream_performance;
+use crate::services::position_stream_lineage::compute_position_stream_lineage;
+use crate::services::position_stream_pnl::compute_position_stream_pnl;
 use crate::services::strategy_service::{
     append_position_address_to_strategy, remove_position_address_from_all_strategies,
 };
@@ -16,11 +22,12 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use tracing::{info, warn};
 
-use crate::position_registry_seed::registry_open_position_pubkeys;
+use crate::position_registry_seed::{registry_open_position_pubkeys, registry_position_open_map};
 use crate::services::PositionService;
 use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::position_valuation::{
@@ -29,6 +36,218 @@ use crate::services::position_valuation::{
     uncollected_fees_info_for_position,
 };
 use std::collections::HashSet;
+use axum::extract::Query;
+use serde::Deserialize;
+use clmm_lp_protocols::ledger::position_registry::registry_path;
+use clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use crate::services::price_fetch::fetch_mint_prices_usd;
+use std::collections::BTreeSet;
+use clmm_lp_domain::math::price_tick::tick_to_price;
+use rust_decimal::prelude::ToPrimitive;
+
+#[derive(Debug, Deserialize)]
+pub struct CostSessionQuery {
+    #[serde(default)]
+    cost_session_id: Option<String>,
+}
+
+/// Best-effort experiment config derived from `registry_open.details` and open-session lifecycle rows.
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/experiment-config",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    responses(
+        (status = 200, description = "Experiment config", body = PositionExperimentConfigResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_experiment_config(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionExperimentConfigResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    let path = registry_path();
+    if !path.exists() {
+        return Ok(Json(PositionExperimentConfigResponse {
+            position_address: pos.to_string(),
+            open_session_id: None,
+            open_details: None,
+            tick_lower: None,
+            tick_upper: None,
+            derived_lower: None,
+            derived_upper: None,
+            derived_initial_capital_usd: None,
+            note: Some(format!("Registry file missing on API host: {}", path.display())),
+        }));
+    }
+
+    let file = File::open(&path)
+        .map_err(|e| ApiError::internal(format!("open registry file: {e}")))?;
+    let reader = BufReader::new(file);
+
+    let mut open_details: Option<serde_json::Value> = None;
+    let mut open_sid: Option<String> = None;
+
+    for line in reader.lines().filter_map(Result::ok) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+            continue;
+        };
+        if v.get("event").and_then(|x| x.as_str()) != Some("registry_open") {
+            continue;
+        }
+        let p = v
+            .get("position_pubkey")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        if p != pos {
+            continue;
+        }
+        open_sid = v
+            .get("rebalance_session_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        open_details = v.get("details").cloned();
+    }
+
+    let tick_lower = open_details
+        .as_ref()
+        .and_then(|d| d.get("tick_lower"))
+        .and_then(|x| x.as_i64())
+        .map(|n| n as i32);
+    let tick_upper = open_details
+        .as_ref()
+        .and_then(|d| d.get("tick_upper"))
+        .and_then(|x| x.as_i64())
+        .map(|n| n as i32);
+
+    let derived_lower = tick_lower
+        .and_then(|t| tick_to_price(t).ok())
+        .and_then(|d| d.to_f64());
+    let derived_upper = tick_upper
+        .and_then(|t| tick_to_price(t).ok())
+        .and_then(|d| d.to_f64());
+
+    let derived_initial_capital_usd = if let Some(sid) = open_sid.as_deref() {
+        let ledger = ledger_read_path();
+        if !ledger.exists() {
+            None
+        } else {
+            let txt = std::fs::read_to_string(&ledger).unwrap_or_default();
+            let mut mint_deltas: std::collections::HashMap<String, rust_decimal::Decimal> =
+                std::collections::HashMap::new();
+            for line in txt.lines() {
+                let t = line.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+                    continue;
+                };
+                if v.get("rebalance_session_id").and_then(|x| x.as_str()).map(str::trim)
+                    != Some(sid)
+                {
+                    continue;
+                }
+                let Some(obj) = v.get("fee_payer_token_deltas").and_then(|x| x.as_object()) else {
+                    continue;
+                };
+                for (mint, dv) in obj {
+                    if let Some(s) = dv.as_str() {
+                        if let Ok(d) = rust_decimal::Decimal::from_str(s.trim()) {
+                            *mint_deltas.entry(mint.clone()).or_insert(rust_decimal::Decimal::ZERO) += d;
+                        }
+                    }
+                }
+            }
+
+            // Convert only pool leg mints (A and B) to USD at current free prices.
+            let pool_state = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
+                .get_pool_state(
+                    open_details
+                        .as_ref()
+                        .and_then(|d| d.get("pool_address"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(""),
+                )
+                .await;
+            // If pool not in details (it often isn't), fall back to resolving by reading last closed list? Keep best-effort.
+            let (mint_a, mint_b) = if let Ok(ps) = pool_state {
+                (ps.token_mint_a.to_string(), ps.token_mint_b.to_string())
+            } else {
+                // Fallback: cannot derive without pool mints.
+                return Ok(Json(PositionExperimentConfigResponse {
+                    position_address: pos.to_string(),
+                    open_session_id: open_sid,
+                    open_details,
+                    tick_lower,
+                    tick_upper,
+                    derived_lower,
+                    derived_upper,
+                    derived_initial_capital_usd: None,
+                    note: Some("Could not resolve pool mints to convert open-session deltas to USD; derived_initial_capital_usd unavailable.".to_string()),
+                }));
+            };
+            let mut mints = BTreeSet::new();
+            mints.insert(mint_a.clone());
+            mints.insert(mint_b.clone());
+            let (px, _src) = fetch_mint_prices_usd(&mints).await;
+            let pa = px.get(&mint_a).copied().unwrap_or(0.0);
+            let pb = px.get(&mint_b).copied().unwrap_or(0.0);
+            let da = mint_deltas.get(&mint_a).cloned().unwrap_or(rust_decimal::Decimal::ZERO);
+            let dbb = mint_deltas.get(&mint_b).cloned().unwrap_or(rust_decimal::Decimal::ZERO);
+            let spend_a = (-da).max(rust_decimal::Decimal::ZERO);
+            let spend_b = (-dbb).max(rust_decimal::Decimal::ZERO);
+            let usd = spend_a * rust_decimal::Decimal::from_f64_retain(pa).unwrap_or(rust_decimal::Decimal::ZERO)
+                + spend_b * rust_decimal::Decimal::from_f64_retain(pb).unwrap_or(rust_decimal::Decimal::ZERO);
+            usd.to_f64()
+        }
+    } else {
+        None
+    };
+
+    Ok(Json(PositionExperimentConfigResponse {
+        position_address: pos.to_string(),
+        open_session_id: open_sid,
+        open_details,
+        tick_lower,
+        tick_upper,
+        derived_lower,
+        derived_upper,
+        derived_initial_capital_usd,
+        note: None,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClosedPositionsQuery {
+    #[serde(default = "default_closed_limit")]
+    limit: usize,
+    /// How many newest closed rows to skip (pagination). `0` = newest page.
+    #[serde(default)]
+    offset: usize,
+}
+
+fn default_closed_limit() -> usize {
+    100
+}
+
+fn clamp_closed_limit(n: usize) -> usize {
+    n.clamp(1, 2000)
+}
 
 /// List all positions.
 #[utoipa::path(
@@ -43,6 +262,13 @@ pub async fn list_positions(
     State(state): State<AppState>,
 ) -> ApiResult<Json<ListPositionsResponse>> {
     let mut positions = state.monitor.get_positions().await;
+
+    // If a position is explicitly marked as closed in the registry, do not show it as "monitored/open"
+    // even if its account still exists on-chain (e.g. NFT mint metadata persists).
+    let reg_state = registry_position_open_map();
+    if !reg_state.is_empty() {
+        positions.retain(|p| reg_state.get(&p.address).copied().unwrap_or(true));
+    }
     let monitored: HashSet<Pubkey> = positions.iter().map(|p| p.address).collect();
 
     // Registry remembers opens across restarts; monitor can be empty or miss a PDA. Merge chain state
@@ -116,6 +342,19 @@ pub async fn list_positions(
             None => uncollected_fees_info_for_position(state.provider.clone(), p).await,
         };
 
+        let (token_a_label, token_b_label, token_mint_a, token_mint_b, token_price_a_usd, token_price_b_usd) =
+            match valuation.as_ref() {
+                Some(v) => (
+                    Some(v.token_a_label.clone()),
+                    Some(v.token_b_label.clone()),
+                    Some(v.token_mint_a.to_string()),
+                    Some(v.token_mint_b.to_string()),
+                    Some(v.price_a_usd),
+                    Some(v.price_b_usd),
+                ),
+                None => (None, None, None, None, None, None),
+            };
+
         responses.push(PositionResponse {
             address: p.address.to_string(),
             pool_address: p.pool.to_string(),
@@ -125,6 +364,12 @@ pub async fn list_positions(
             range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
             range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
             range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+            token_a_label,
+            token_b_label,
+            token_mint_a,
+            token_mint_b,
+            token_price_a_usd,
+            token_price_b_usd,
             uncollected_fees,
             liquidity: p.on_chain.liquidity.to_string(),
             in_range: in_range_fresh,
@@ -151,6 +396,432 @@ pub async fn list_positions(
     Ok(Json(ListPositionsResponse {
         total: responses.len(),
         positions: responses,
+    }))
+}
+
+/// List closed positions from the append-only registry (`registry.jsonl`).
+#[utoipa::path(
+    get,
+    path = "/positions/closed",
+    tag = "Positions",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max rows (1–2000, default 100)"),
+        ("offset" = Option<usize>, Query, description = "How many newest closed positions to skip (pagination)")
+    ),
+    responses(
+        (status = 200, description = "Closed positions (from registry)", body = ClosedPositionsResponse)
+    )
+)]
+pub async fn list_closed_positions(
+    State(_state): State<AppState>,
+    Query(q): Query<ClosedPositionsQuery>,
+) -> ApiResult<Json<ClosedPositionsResponse>> {
+    let path = registry_path();
+    if !path.exists() {
+        return Ok(Json(ClosedPositionsResponse {
+            total: 0,
+            items: Vec::new(),
+            note: Some(format!("Registry file missing on API host: {}", path.display())),
+        }));
+    }
+
+    // Replay registry: last event per position wins. Keep last open + last close timestamps for context.
+    #[derive(Debug, Clone)]
+    struct RowState {
+        last_event: String,
+        pool: String,
+        owner: String,
+        close_kind: Option<String>,
+        opened_ts: Option<String>,
+        closed_ts: Option<String>,
+        last_sid: Option<String>,
+    }
+
+    let file = File::open(&path)
+        .map_err(|e| ApiError::internal(format!("open registry file: {e}")))?;
+    let reader = BufReader::new(file);
+
+    let mut by_pos: HashMap<String, RowState> = HashMap::new();
+    for line in reader.lines().filter_map(Result::ok) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+            continue;
+        };
+        let event = v.get("event").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if event != "registry_open" && event != "registry_close" {
+            continue;
+        }
+        let pos = v
+            .get("position_pubkey")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        if pos.is_empty() {
+            continue;
+        }
+        let pool = v
+            .get("pool_address")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let owner = v
+            .get("owner_pubkey")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let ts = v.get("ts_utc").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+        let sid = v
+            .get("rebalance_session_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let entry = by_pos.entry(pos.to_string()).or_insert(RowState {
+            last_event: event.to_string(),
+            pool: pool.clone(),
+            owner: owner.clone(),
+            close_kind: None,
+            opened_ts: None,
+            closed_ts: None,
+            last_sid: None,
+        });
+        entry.last_event = event.to_string();
+        if !pool.is_empty() {
+            entry.pool = pool;
+        }
+        if !owner.is_empty() {
+            entry.owner = owner;
+        }
+        if let Some(sid) = sid {
+            entry.last_sid = Some(sid);
+        }
+        match event {
+            "registry_open" => {
+                if ts.is_some() {
+                    entry.opened_ts = ts;
+                }
+            }
+            "registry_close" => {
+                if ts.is_some() {
+                    entry.closed_ts = ts;
+                }
+                entry.close_kind = v
+                    .get("close_kind")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+            _ => {}
+        }
+    }
+
+    let mut closed: Vec<ClosedPositionEntry> = Vec::new();
+    for (pos, st) in by_pos {
+        if st.last_event != "registry_close" {
+            continue;
+        }
+        closed.push(ClosedPositionEntry {
+            position_address: pos,
+            pool_address: st.pool,
+            owner: st.owner,
+            close_kind: st.close_kind,
+            opened_ts_utc: st.opened_ts,
+            closed_ts_utc: st.closed_ts,
+            last_rebalance_session_id: st.last_sid,
+        });
+    }
+
+    // Newest first if close timestamp is present; else stable string sort.
+    closed.sort_by(|a, b| b.closed_ts_utc.cmp(&a.closed_ts_utc).then_with(|| a.position_address.cmp(&b.position_address)));
+
+    let total = closed.len();
+    let limit = clamp_closed_limit(q.limit);
+    let offset = q.offset;
+    let start = total.saturating_sub(offset).saturating_sub(limit);
+    let end = total.saturating_sub(offset);
+    let items = if start < end && end <= total {
+        closed[start..end].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(ClosedPositionsResponse {
+        total,
+        items,
+        note: None,
+    }))
+}
+
+/// Get lifecycle summary for a position: group lifecycle ledger rows by session id and compute aggregates.
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/lifecycle-summary",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)"),
+    ),
+    responses(
+        (status = 200, description = "Lifecycle breakdown + aggregates", body = PositionLifecycleSummaryResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_lifecycle_summary(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionLifecycleSummaryResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    // Reuse stream connectivity (IL edges + sessions). If DB disabled, this returns just the PDA.
+    let perf = compute_position_stream_performance(&state, pos).await?;
+    let positions = perf.positions.clone();
+    let sessions = perf.sessions.clone();
+
+    let ledger = ledger_read_path();
+    if !ledger.exists() {
+        return Ok(Json(PositionLifecycleSummaryResponse {
+            position_address: pos.to_string(),
+            positions,
+            sessions,
+            total_tx_fee_lamports: 0,
+            total_tx_fee_usd: Decimal::ZERO,
+            collect_events: 0,
+            collected_fee_token_a_ui: None,
+            collected_fee_token_b_ui: None,
+            collected_fees_usd: None,
+            realized_cashflow_usd: Decimal::ZERO,
+            session_summaries: Vec::new(),
+            note: Some(format!("Lifecycle ledger file missing on API host: {}", ledger.display())),
+        }));
+    }
+
+    // Parse lifecycle JSONL and keep rows that match either a stream session id or any position pubkey.
+    let txt = std::fs::read_to_string(&ledger)
+        .map_err(|e| ApiError::internal(format!("read lifecycle ledger: {e}")))?;
+    let mut grouped: HashMap<String, Vec<PositionLifecycleEvent>> = HashMap::new();
+
+    let mut total_tx_fee_lamports: u64 = 0;
+    let mut collect_events: u32 = 0;
+    let mut collected_a_ui: Decimal = Decimal::ZERO;
+    let mut collected_b_ui: Decimal = Decimal::ZERO;
+    let mut any_collected_a = false;
+    let mut any_collected_b = false;
+
+    // Realized cashflow: sum of fee_payer_token_deltas for pool leg mints requires mint prices.
+    // We can only do that reliably when we know pool leg mints; use stream PnL endpoint (baseline snapshot) when available.
+    // Best-effort fallback: keep it 0 with a note if prices cannot be resolved.
+    let mut mint_deltas_sum: HashMap<String, Decimal> = HashMap::new();
+    let mut pool_mints_by_pool: HashMap<String, (String, String)> = HashMap::new();
+    let mut mints_for_pricing: BTreeSet<String> = BTreeSet::new();
+
+    for line in txt.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+            continue;
+        };
+        let session_id = v
+            .get("rebalance_session_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let position_pubkey = v
+            .get("position_pubkey")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("position_pda").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let matches = if let Some(ref sid) = session_id {
+            sessions.iter().any(|x| x == sid)
+        } else if let Some(ref p) = position_pubkey {
+            positions.iter().any(|x| x == p)
+        } else {
+            false
+        };
+        if !matches {
+            continue;
+        }
+
+        let key = session_id.clone().unwrap_or_else(|| "_no_session".to_string());
+
+        let tx_fee_lamports = v.get("tx_fee_lamports").and_then(|x| x.as_u64());
+        if let Some(f) = tx_fee_lamports {
+            total_tx_fee_lamports = total_tx_fee_lamports.saturating_add(f);
+        }
+
+        let event_s = v.get("event").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+        let is_collect = event_s.as_deref() == Some("bot_collect_fees");
+        if is_collect {
+            collect_events = collect_events.saturating_add(1);
+        }
+
+        if let Some(deltas) = v.get("fee_payer_token_deltas").cloned() {
+            if let Some(obj) = deltas.as_object() {
+                // If this is a collect-fees tx, derive per-leg collected amounts by mint.
+                if is_collect {
+                    let pool_addr = v
+                        .get("pool_address")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    if let Some(pool_addr) = pool_addr {
+                        let (mint_a, mint_b) = if let Some(pair) = pool_mints_by_pool.get(&pool_addr).cloned() {
+                            pair
+                        } else {
+                            // Best-effort: resolve pool mints on demand (free RPC).
+                            match clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
+                                .get_pool_state(&pool_addr)
+                                .await
+                            {
+                                Ok(ps) => {
+                                    let a = ps.token_mint_a.to_string();
+                                    let b = ps.token_mint_b.to_string();
+                                    pool_mints_by_pool.insert(pool_addr.clone(), (a.clone(), b.clone()));
+                                    (a, b)
+                                }
+                                Err(_) => (String::new(), String::new()),
+                            }
+                        };
+
+                        if !mint_a.is_empty() {
+                            if let Some(dv) = obj.get(&mint_a) {
+                                if let Some(s) = dv.as_str() {
+                                    if let Ok(d) = Decimal::from_str(s.trim()) {
+                                        if d > Decimal::ZERO {
+                                            collected_a_ui += d;
+                                            any_collected_a = true;
+                                            mints_for_pricing.insert(mint_a.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !mint_b.is_empty() {
+                            if let Some(dv) = obj.get(&mint_b) {
+                                if let Some(s) = dv.as_str() {
+                                    if let Ok(d) = Decimal::from_str(s.trim()) {
+                                        if d > Decimal::ZERO {
+                                            collected_b_ui += d;
+                                            any_collected_b = true;
+                                            mints_for_pricing.insert(mint_b.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for (mint, dv) in obj {
+                    if let Some(s) = dv.as_str() {
+                        if let Ok(d) = Decimal::from_str(s.trim()) {
+                            let e = mint_deltas_sum.entry(mint.clone()).or_insert(Decimal::ZERO);
+                            *e += d;
+                        }
+                    }
+                }
+            }
+        }
+
+        let ev = PositionLifecycleEvent {
+            ts_utc: v.get("ts_utc").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            source: v.get("source").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            event: event_s,
+            operation: v.get("operation").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            signature: v.get("signature").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            pool_address: v.get("pool_address").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            position_pubkey,
+            rebalance_session_id: session_id,
+            tx_fee_lamports,
+            fee_payer_net_lamports_delta: v.get("fee_payer_net_lamports_delta").and_then(|x| x.as_i64()),
+            fee_payer_token_deltas: v.get("fee_payer_token_deltas").cloned(),
+        };
+        grouped.entry(key).or_default().push(ev);
+    }
+
+    // Session summaries: sort each session by ts_utc string (RFC3339, lexicographic works).
+    let mut session_summaries: Vec<PositionLifecycleSessionSummary> = Vec::new();
+    for (sid, mut events) in grouped {
+        events.sort_by(|a, b| a.ts_utc.cmp(&b.ts_utc));
+        let mut sum_fee: u64 = 0;
+        let mut rebalance_related: u32 = 0;
+        for e in &events {
+            if let Some(f) = e.tx_fee_lamports {
+                sum_fee = sum_fee.saturating_add(f);
+            }
+            if let Some(ref ev) = e.event {
+                if ev.contains("rebalance") || ev.contains("open_position") || ev.contains("close_position") {
+                    rebalance_related = rebalance_related.saturating_add(1);
+                }
+            }
+        }
+        session_summaries.push(PositionLifecycleSessionSummary {
+            session_id: sid,
+            events,
+            total_tx_fee_lamports: sum_fee,
+            rebalance_related_events: rebalance_related,
+        });
+    }
+    session_summaries.sort_by(|a, b| b.session_id.cmp(&a.session_id));
+
+    // Convert tx fee lamports to USD using free price fetch (SOL mint).
+    const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+    let mut mints = BTreeSet::new();
+    mints.insert(WSOL_MINT.to_string());
+    let (px, src) = fetch_mint_prices_usd(&mints).await;
+    let sol_usd = px.get(WSOL_MINT).copied().unwrap_or(0.0);
+    let total_tx_fee_usd = if sol_usd > 0.0 {
+        Decimal::from_f64_retain((total_tx_fee_lamports as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
+    } else {
+        Decimal::ZERO
+    };
+
+    // Best-effort: collected LP fees in USD (A/B legs at current mint USD prices).
+    //
+    // We only compute USD when all collect rows point to the same pool (so token A/B identity is stable).
+    let collected_fees_usd = if pool_mints_by_pool.len() == 1 && (any_collected_a || any_collected_b) {
+        let (_pool, (ma, mb)) = pool_mints_by_pool.iter().next().unwrap();
+        let mut mint_set = BTreeSet::new();
+        mint_set.insert(ma.clone());
+        mint_set.insert(mb.clone());
+        let (px2, _src2) = fetch_mint_prices_usd(&mint_set).await;
+        let pa = px2.get(ma).copied().unwrap_or(0.0);
+        let pb = px2.get(mb).copied().unwrap_or(0.0);
+        let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
+        let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
+        Some(collected_a_ui * pa_d + collected_b_ui * pb_d)
+    } else {
+        None
+    };
+
+    // Realized cashflow USD: best-effort using stream PnL (it knows baseline mints), otherwise 0.
+    let pnl = compute_position_stream_pnl(&state, pos).await.ok();
+    let realized_cashflow_usd = pnl.as_ref().map(|p| p.realized_cashflow_usd).unwrap_or(Decimal::ZERO);
+
+    let note = Some(format!(
+        "Lifecycle summary is best-effort from lifecycle JSONL. tx fees use SOL/USD ({src}). collected_fees (if present) use positive token deltas from bot_collect_fees × current mint USD. realized_cashflow is sourced from stream PnL when available."
+    ));
+
+    Ok(Json(PositionLifecycleSummaryResponse {
+        position_address: pos.to_string(),
+        positions,
+        sessions,
+        total_tx_fee_lamports,
+        total_tx_fee_usd,
+        collect_events,
+        collected_fee_token_a_ui: any_collected_a.then_some(collected_a_ui),
+        collected_fee_token_b_ui: any_collected_b.then_some(collected_b_ui),
+        collected_fees_usd,
+        realized_cashflow_usd,
+        session_summaries,
+        note,
     }))
 }
 
@@ -197,9 +868,45 @@ pub async fn get_position(
 
     let prices =
         fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&position)).await;
-    let valuation = compute_position_usd_valuation(state.provider.clone(), &position, &prices)
-        .await
-        .ok();
+    let valuation = compute_position_usd_valuation(state.provider.clone(), &position, &prices).await.ok();
+    if let (Some(db), Some(v)) = (state.db.as_ref(), valuation.as_ref()) {
+        // Best-effort snapshot for stream PnL/IL across rotated PDAs.
+        let raw = serde_json::json!({
+            "position": position.address.to_string(),
+            "pool": position.pool.to_string(),
+            "value_usd": v.value_usd,
+            "fees_usd": v.fees_usd,
+            "amount_a_ui": v.amount_a_ui,
+            "amount_b_ui": v.amount_b_ui,
+            "token_mint_a": v.token_mint_a.to_string(),
+            "token_mint_b": v.token_mint_b.to_string(),
+            "price_a_usd": v.price_a_usd,
+            "price_b_usd": v.price_b_usd,
+            "source": "get_position"
+        });
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO position_stream_valuation_snapshots
+              (position_pubkey, ts_utc, pool_pubkey, value_usd, amount_a_ui, amount_b_ui, fees_usd, token_mint_a, token_mint_b, price_a_usd, price_b_usd, price_source, raw_json)
+            VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (position_pubkey, ts_utc) DO NOTHING
+            "#,
+        )
+        .bind(position.address.to_string())
+        .bind(position.pool.to_string())
+        .bind(v.value_usd)
+        .bind(v.amount_a_ui)
+        .bind(v.amount_b_ui)
+        .bind(v.fees_usd)
+        .bind(v.token_mint_a.to_string())
+        .bind(v.token_mint_b.to_string())
+        .bind(Decimal::from_f64_retain(v.price_a_usd).unwrap_or(Decimal::ZERO))
+        .bind(Decimal::from_f64_retain(v.price_b_usd).unwrap_or(Decimal::ZERO))
+        .bind("free_prices")
+        .bind(raw)
+        .execute(db.pool())
+        .await;
+    }
     let value_usd = valuation
         .as_ref()
         .map(|v| v.value_usd)
@@ -233,6 +940,19 @@ pub async fn get_position(
         None => uncollected_fees_info_for_position(state.provider.clone(), &position).await,
     };
 
+    let (token_a_label, token_b_label, token_mint_a, token_mint_b, token_price_a_usd, token_price_b_usd) =
+        match valuation.as_ref() {
+            Some(v) => (
+                Some(v.token_a_label.clone()),
+                Some(v.token_b_label.clone()),
+                Some(v.token_mint_a.to_string()),
+                Some(v.token_mint_b.to_string()),
+                Some(v.price_a_usd),
+                Some(v.price_b_usd),
+            ),
+            None => (None, None, None, None, None, None),
+        };
+
     let response = PositionResponse {
         address: position.address.to_string(),
         pool_address: position.pool.to_string(),
@@ -242,6 +962,12 @@ pub async fn get_position(
         range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
         range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
         range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+        token_a_label,
+        token_b_label,
+        token_mint_a,
+        token_mint_b,
+        token_price_a_usd,
+        token_price_b_usd,
         uncollected_fees,
         liquidity: position.on_chain.liquidity.to_string(),
         in_range: in_range_fresh,
@@ -370,6 +1096,75 @@ pub async fn get_position_diagnostics(
         monitor_in_range,
         linked_strategies: linked,
     }))
+}
+
+/// Get "stream" performance aggregates for a position PDA (across rotated PDAs).
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/stream-performance",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    responses(
+        (status = 200, description = "Stream performance", body = PositionStreamPerformanceResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_stream_performance(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionStreamPerformanceResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    let resp = compute_position_stream_performance(&state, pos).await?;
+    Ok(Json(resp))
+}
+
+/// Get stream-level Net PnL / IL for a position PDA (across rotated PDAs).
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/stream-pnl",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    responses(
+        (status = 200, description = "Stream PnL/IL", body = PositionStreamPnLResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_stream_pnl(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionStreamPnLResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    let resp = compute_position_stream_pnl(&state, pos).await?;
+    Ok(Json(resp))
+}
+
+/// Get ordered stream lineage + per-node metrics for a position PDA.
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/stream-lineage",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    responses(
+        (status = 200, description = "Stream lineage (ordered chain + per-node metrics)", body = PositionStreamLineageResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_stream_lineage(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionStreamLineageResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    let resp = compute_position_stream_lineage(&state, pos).await?;
+    Ok(Json(resp))
 }
 
 /// Executes an Orca Whirlpool swap (ExactIn) inside the same pool (SWAP-only step).
@@ -614,6 +1409,7 @@ pub async fn open_position(
 pub async fn close_position(
     State(state): State<AppState>,
     Path(address): Path<String>,
+    Query(q): Query<CostSessionQuery>,
 ) -> ApiResult<Json<MessageResponse>> {
     let pubkey = Pubkey::from_str(&address)
         .map_err(|_| ApiError::bad_request("Invalid position address"))?;
@@ -655,7 +1451,12 @@ pub async fn close_position(
         svc.set_executor(exec);
     }
 
-    let op = svc.close_position(&address).await?;
+    let sid = q
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let op = svc.close_position(&address, sid).await?;
     if op.success {
         // Remove immediately so UI doesn't keep showing stale monitored entry.
         state.monitor.remove_position(&pubkey).await;
@@ -695,6 +1496,7 @@ pub async fn close_position(
 pub async fn collect_fees(
     State(state): State<AppState>,
     Path(address): Path<String>,
+    Query(q): Query<CostSessionQuery>,
 ) -> ApiResult<Json<MessageResponse>> {
     let pubkey = Pubkey::from_str(&address)
         .map_err(|_| ApiError::bad_request("Invalid position address"))?;
@@ -737,7 +1539,12 @@ pub async fn collect_fees(
         svc.set_executor(exec);
     }
 
-    let op = svc.collect_fees(&address).await?;
+    let sid = q
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let op = svc.collect_fees(&address, sid).await?;
     if op.success {
         Ok(Json(MessageResponse::new(format!(
             "Fees collected from position: {address}"

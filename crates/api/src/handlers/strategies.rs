@@ -27,6 +27,11 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+fn json_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
 /// Deserialize `parameters` from persisted strategy JSON. Overlays `position_addresses` and
 /// `executor_disabled_position_addresses` from the **raw** `parameters` object so linked PDAs are
 /// still returned when strict [`StrategyParameters`] deserialization fails (e.g. odd `Decimal`
@@ -708,7 +713,7 @@ async fn start_strategy_executor_core(
         };
 
         // Common: width and periodic / thresholds.
-        if let Some(range_width_pct) = params.get("range_width_pct").and_then(|v| v.as_f64()) {
+        if let Some(range_width_pct) = params.get("range_width_pct").and_then(json_f64) {
             decision_config.range_width_pct = Decimal::from_f64_retain(range_width_pct / 100.0)
                 .unwrap_or(decision_config.range_width_pct);
         }
@@ -727,16 +732,12 @@ async fn start_strategy_executor_core(
             decision_config.rebalance_on_range_exit_immediately = v;
         }
 
-        if let Some(threshold) = params.get("rebalance_threshold_pct")
-            && let Some(val) = threshold.as_f64()
-        {
+        if let Some(val) = params.get("rebalance_threshold_pct").and_then(json_f64) {
             decision_config.threshold_pct =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(decision_config.threshold_pct);
         }
 
-        if let Some(max_il) = params.get("max_il_pct")
-            && let Some(val) = max_il.as_f64()
-        {
+        if let Some(val) = params.get("max_il_pct").and_then(json_f64) {
             decision_config.il_close_threshold =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
         }

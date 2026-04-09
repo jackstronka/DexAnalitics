@@ -105,6 +105,8 @@ export const TOOLTIPS = {
     'Gdy włączone, executor nie wykonuje prawdziwych transakcji on-chain (tryb bezpieczny).',
   autoExecute:
     'Gdy włączone i dry-run wyłączone, wymaga portfela API (KEYPAIR_PATH) — realne tx.',
+  autoStart:
+    'Jeśli włączone, API może automatycznie uruchomić tę strategię po restarcie (wymaga też globalnie `CLMM_STRATEGY_AUTOSTART_ON_BOOT=1`).',
 } as const
 
 export function FieldLabel({
@@ -146,6 +148,7 @@ export function buildParameters(
     minRebalanceIntervalHours: number | ''
     periodicRequiresOutOfRange: boolean
     rebalanceOnRangeExitImmediately: boolean
+    autoStart: boolean
   },
 ): StrategyParameters {
   const e = FIELD_ENABLED[strategyType] ?? FIELD_ENABLED.static_range
@@ -167,6 +170,7 @@ export function buildParameters(
   // We always send them so the behavior is explicit and visible in the saved config.
   p.periodic_requires_out_of_range = state.periodicRequiresOutOfRange
   p.rebalance_on_range_exit_immediately = state.rebalanceOnRangeExitImmediately
+  p.auto_start = state.autoStart
 
   return p
 }

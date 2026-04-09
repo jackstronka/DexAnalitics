@@ -9,11 +9,13 @@ use crate::events::{
 use clmm_lp_execution::prelude::{
     CircuitBreaker, LifecycleTracker, PositionMonitor, StrategyExecutor, TransactionManager,
 };
+use clmm_lp_data::repositories::Database;
 use clmm_lp_protocols::prelude::{RpcConfig, RpcProvider};
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 use tokio::sync::{RwLock, broadcast};
 
 #[derive(Debug, Clone)]
@@ -27,6 +29,8 @@ pub struct PhantomNonceEntry {
 pub struct AppState {
     /// RPC provider.
     pub provider: Arc<RpcProvider>,
+    /// PostgreSQL connection wrapper (optional; API still serves read-only endpoints without it).
+    pub db: Option<Database>,
     /// Position monitor.
     pub monitor: Arc<PositionMonitor>,
     /// Transaction manager.
@@ -53,11 +57,13 @@ pub struct AppState {
     pub phantom_nonces: Arc<RwLock<HashMap<String, PhantomNonceEntry>>>,
     /// Async event bus for cross-component communication.
     pub event_bus: Arc<dyn EventBus>,
+    /// Best-effort throttling for DB ingest of JSONL ledgers (avoid re-reading files too often).
+    pub ledger_ingest_last_at: Arc<RwLock<Option<Instant>>>,
 }
 
 impl AppState {
     /// Creates a new application state.
-    pub fn new(rpc_config: RpcConfig, api_config: ApiConfig) -> Self {
+    pub fn new(rpc_config: RpcConfig, api_config: ApiConfig, db: Option<Database>) -> Self {
         // For safety, default to dry-run when DRY_RUN is not set.
         let dry_run = env::var("DRY_RUN")
             .ok()
@@ -124,6 +130,7 @@ impl AppState {
 
         Self {
             provider,
+            db,
             monitor,
             tx_manager,
             circuit_breaker,
@@ -137,6 +144,7 @@ impl AppState {
             dry_run,
             phantom_nonces: Arc::new(RwLock::new(HashMap::new())),
             event_bus,
+            ledger_ingest_last_at: Arc::new(RwLock::new(None)),
         }
     }
 

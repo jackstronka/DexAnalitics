@@ -64,6 +64,7 @@ export default function StrategyEdit() {
   // Semantics toggles (defaults = old behavior).
   const [periodicRequiresOutOfRange, setPeriodicRequiresOutOfRange] = useState(false)
   const [rebalanceOnRangeExitImmediately, setRebalanceOnRangeExitImmediately] = useState(true)
+  const [autoStart, setAutoStart] = useState(true)
 
   useEffect(() => {
     if (!strategy) {
@@ -78,6 +79,7 @@ export default function StrategyEdit() {
     setRebalanceThresholdPct(numOrEmpty(p.rebalance_threshold_pct))
     setMinRebalanceIntervalHours(numOrEmpty(p.min_rebalance_interval_hours))
     setPeriodicRequiresOutOfRange(Boolean(p.periodic_requires_out_of_range))
+    setAutoStart(p.auto_start === undefined ? true : Boolean(p.auto_start))
     // Default to old behavior when absent.
     setRebalanceOnRangeExitImmediately(
       p.rebalance_on_range_exit_immediately === undefined
@@ -164,6 +166,7 @@ export default function StrategyEdit() {
       minRebalanceIntervalHours,
       periodicRequiresOutOfRange,
       rebalanceOnRangeExitImmediately,
+      autoStart,
     })
 
     const parameters: StrategyParameters = {
@@ -412,6 +415,29 @@ export default function StrategyEdit() {
                     on-chain transactions (requires API wallet).
                   </p>
                 )}
+              </div>
+
+              <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <p className="text-sm font-medium text-foreground">Startup</p>
+                <div className="flex items-start gap-2">
+                  <input
+                    id="edit-auto-start"
+                    type="checkbox"
+                    checked={autoStart}
+                    onChange={(e) => setAutoStart(e.target.checked)}
+                    className="mt-0.5 rounded border-input"
+                  />
+                  <div className="flex-1">
+                    <FieldLabel
+                      htmlFor="edit-auto-start"
+                      label="Auto-start on API boot"
+                      tooltip={TOOLTIPS.autoStart}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Requires server env <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT=1</code>.
+                    </p>
+                  </div>
+                </div>
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">

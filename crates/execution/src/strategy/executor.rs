@@ -17,6 +17,7 @@ use clmm_lp_domain::prelude::{CheckpointSource, PositionFeeCheckpoint, PositionT
 use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -104,6 +105,13 @@ pub struct StrategyExecutor {
     pending_open_recovery_path: Mutex<Option<PathBuf>>,
     /// Optional notifier for executor-level alerts (e.g. rebalance incomplete).
     alert_notifier: Mutex<Option<Arc<MultiNotifier>>>,
+    /// Optional callback fired after a successful close+open cycle (old PDA → new PDA).
+    /// Used by the API layer to keep `strategies.json` position links in sync without manual steps.
+    reopen_hook: Mutex<Option<Arc<dyn Fn(solana_sdk::pubkey::Pubkey, solana_sdk::pubkey::Pubkey) + Send + Sync>>>,
+    /// Guardrail: when set, executor evaluates **only** these positions (prevents growth from stale monitor entries).
+    managed_allowlist: Arc<RwLock<Option<HashSet<Pubkey>>>>,
+    /// Guardrail: desired number of positions in `managed_allowlist` (fixed at strategy start).
+    managed_target_count: Arc<Mutex<Option<usize>>>,
 }
 
 impl StrategyExecutor {
@@ -146,21 +154,49 @@ impl StrategyExecutor {
             pending_open_recovery_path: Mutex::new(
                 std::env::var("CLMM_PENDING_OPEN_RECOVERY_PATH")
                     .ok()
+                    .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
-                    .map(PathBuf::from),
+                    .map(PathBuf::from)
+                    .or_else(|| Some(PathBuf::from("data/pending-open-recovery.json"))),
             ),
             alert_notifier: Mutex::new(None),
+            reopen_hook: Mutex::new(None),
+            managed_allowlist: Arc::new(RwLock::new(None)),
+            managed_target_count: Arc::new(Mutex::new(None)),
         }
     }
 
+    /// Guardrail: restrict evaluation to a fixed set of positions.
+    ///
+    /// This is intended to prevent “2 positions became 10” when `strategies.json` (or the monitor)
+    /// contains stale historical PDAs. When set, the executor will **only** act on these PDAs, and
+    /// a successful reopen will replace `old` with `new` inside this set.
+    pub async fn set_managed_allowlist(&self, positions: Vec<Pubkey>) {
+        let mut set = HashSet::new();
+        for p in positions {
+            set.insert(p);
+        }
+        let target = if set.is_empty() { None } else { Some(set.len()) };
+        *self.managed_target_count.lock().await = target;
+        *self.managed_allowlist.write().await = if target.is_some() { Some(set) } else { None };
+    }
+
+    /// Set an optional hook that runs after a successful rebalance close→open (old PDA → new PDA).
+    pub async fn set_reopen_hook(
+        &self,
+        hook: Option<Arc<dyn Fn(Pubkey, Pubkey) + Send + Sync>>,
+    ) {
+        *self.reopen_hook.lock().await = hook;
+    }
+
     /// Override pending-open recovery path (e.g. from CLI). `None` disables persistence.
-    pub fn set_pending_open_recovery_path(&self, path: Option<PathBuf>) {
-        *self.pending_open_recovery_path.blocking_lock() = path;
+    pub async fn set_pending_open_recovery_path(&self, path: Option<PathBuf>) {
+        *self.pending_open_recovery_path.lock().await = path;
     }
 
     /// Webhook / multi notifier for [`AlertType::RebalanceIncomplete`] and similar.
-    pub fn set_alert_notifier(&self, notifier: Option<Arc<MultiNotifier>>) {
-        *self.alert_notifier.blocking_lock() = notifier;
+    pub async fn set_alert_notifier(&self, notifier: Option<Arc<MultiNotifier>>) {
+        *self.alert_notifier.lock().await = notifier;
     }
 
     /// Shared handle for [`EmergencyExitManager`] or custom tooling.
@@ -381,6 +417,8 @@ impl StrategyExecutor {
         specified_mint: &solana_sdk::pubkey::Pubkey,
         amount_in: u64,
         slippage_bps: u16,
+        // Optional position PDA to attach to the lifecycle ledger row (useful for swap-mix during rebalances).
+        position_for_ledger: Option<solana_sdk::pubkey::Pubkey>,
         ledger_session_id: Option<String>,
     ) -> anyhow::Result<Option<solana_sdk::signature::Signature>> {
         self.rebalance_executor
@@ -389,6 +427,7 @@ impl StrategyExecutor {
                 specified_mint,
                 amount_in,
                 slippage_bps,
+                position_for_ledger,
                 ledger_session_id,
             )
             .await
@@ -470,6 +509,7 @@ impl StrategyExecutor {
         &self,
         position: &solana_sdk::pubkey::Pubkey,
         pool: &solana_sdk::pubkey::Pubkey,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<()> {
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             if let Some(cp) = self
@@ -480,7 +520,7 @@ impl StrategyExecutor {
             }
         }
         self.rebalance_executor
-            .execute_collect_fees_only(position, pool)
+            .execute_collect_fees_only(position, pool, ledger_session_id)
             .await?;
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             if let Some(cp) = self
@@ -502,6 +542,8 @@ impl StrategyExecutor {
         &self,
         position: &solana_sdk::pubkey::Pubkey,
         pool: &solana_sdk::pubkey::Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             if let Some(cp) = self
@@ -512,7 +554,7 @@ impl StrategyExecutor {
             }
         }
         self.rebalance_executor
-            .execute_full_close_only(position, pool)
+            .execute_full_close_only(position, pool, ledger_session_id, ledger_details)
             .await?;
         if self.config.fee_mode == PositionTruthMode::PositionTruth {
             // After close, position PDA may still exist briefly; best-effort capture.
@@ -666,7 +708,13 @@ impl StrategyExecutor {
 
         debug!(count = positions.len(), "Evaluating positions");
 
+        let allow = self.managed_allowlist.read().await.clone();
         for position in positions {
+            if let Some(ref allow) = allow {
+                if !allow.contains(&position.address) {
+                    continue;
+                }
+            }
             if self
                 .skip_evaluation_for
                 .read()
@@ -708,6 +756,26 @@ impl StrategyExecutor {
         &self,
         position: &crate::monitor::MonitoredPosition,
     ) -> anyhow::Result<()> {
+        // Always refresh the monitored snapshot before deciding.
+        //
+        // The API/UI may show a position as out-of-range based on a fresh pool tick, but the executor
+        // can otherwise keep a stale `position.in_range` and never trigger OOR logic.
+        let position = {
+            if let Err(e) = self.monitor.refresh_position(&position.address).await {
+                tracing::warn!(
+                    position = %position.address,
+                    error = %e,
+                    "evaluate_position: refresh_position failed; using last cached snapshot"
+                );
+                position.clone()
+            } else {
+                self.monitor
+                    .get_position(&position.address)
+                    .await
+                    .unwrap_or_else(|| position.clone())
+            }
+        };
+
         // Fetch current pool state
         let pool = self
             .pool_reader
@@ -785,7 +853,7 @@ impl StrategyExecutor {
             );
 
             if self.config.auto_execute {
-                self.execute_decision(position, &decision, &pool).await?;
+                self.execute_decision(&position, &decision, &pool).await?;
             }
         }
 
@@ -1019,6 +1087,26 @@ impl StrategyExecutor {
                     self.monitor.remove_position(&old_addr).await;
 
                     if let Some(new_pos) = result.new_position {
+                        // Guardrail: keep managed set size constant (replace old→new; never grow).
+                        if let Some(ref mut allow) = self.managed_allowlist.write().await.as_mut() {
+                            allow.remove(&old_addr);
+                            allow.insert(new_pos);
+                            if let Some(target) = *self.managed_target_count.lock().await {
+                                // Best-effort: if something went wrong and the set grew, trim it back.
+                                while allow.len() > target {
+                                    // Remove an arbitrary extra (not the newly opened).
+                                    if let Some(extra) = allow.iter().copied().find(|p| p != &new_pos) {
+                                        allow.remove(&extra);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(h) = self.reopen_hook.lock().await.clone() {
+                            // Best-effort: keep strategy links in sync in the API layer.
+                            h(old_addr, new_pos);
+                        }
                         self.lifecycle
                             .record_fee_checkpoint(PositionFeeCheckpoint {
                                 ts_utc: chrono::Utc::now().to_rfc3339(),
@@ -1076,7 +1164,7 @@ impl StrategyExecutor {
 
                 match self
                     .rebalance_executor
-                    .execute_full_close_only(&addr, &pool_pk)
+                    .execute_full_close_only(&addr, &pool_pk, None, Some(serde_json::json!({"close_kind":"strategy"})))
                     .await
                 {
                     Ok(()) => {
@@ -1134,7 +1222,7 @@ impl StrategyExecutor {
             Decision::CollectFees => {
                 if let Err(e) = self
                     .rebalance_executor
-                    .execute_collect_fees_only(&position.address, &position.pool)
+                    .execute_collect_fees_only(&position.address, &position.pool, None)
                     .await
                 {
                     error!(error = %e, "Collect fees failed");

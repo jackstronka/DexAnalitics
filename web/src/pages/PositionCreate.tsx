@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
-  getJupiterPricesUsd,
+  getMintPricesUsd,
   getOrcaToken,
   getPool,
   getPoolState,
@@ -16,6 +16,7 @@ import {
   openPosition,
   quoteOpenBudget,
   swapBeforeOpen as swapBeforeOpenTx,
+  type QuoteOpenBudgetResponse,
   type WalletBalancesResponse,
 } from '@/lib/api'
 import {
@@ -85,6 +86,78 @@ function estimateSwapInputRawExactIn(
   const raw = Math.round(fundUi * 10 ** fundDecimals)
   if (raw <= 0 || raw > Number.MAX_SAFE_INTEGER) return null
   return raw
+}
+
+function legUiFromQuote(q: QuoteOpenBudgetResponse, leg: 'a' | 'b'): number {
+  return leg === 'a' ? q.amount_a_ui : q.amount_b_ui
+}
+
+/**
+ * Dopasowuje `target_usd` tak, żeby `quoteOpenBudget` zwrócił na wybranej nodze (`leg`)
+ * ilość UI bliską `targetLegUi` (wyszukiwanie binarne po monotonicznym skalowaniu depozytu).
+ */
+async function solveTargetUsdForLegAmount(
+  poolAddress: string,
+  tickLower: number,
+  tickUpper: number,
+  leg: 'a' | 'b',
+  targetLegUi: number,
+  signal?: AbortSignal,
+): Promise<{ target_usd: number; quote: QuoteOpenBudgetResponse } | null> {
+  if (!Number.isFinite(targetLegUi) || targetLegUi <= 0) return null
+
+  const fetchQ = async (target_usd: number) => {
+    if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+    return quoteOpenBudget(poolAddress, {
+      tick_lower: tickLower,
+      tick_upper: tickUpper,
+      target_usd,
+    })
+  }
+
+  const g = (q: QuoteOpenBudgetResponse) => legUiFromQuote(q, leg)
+
+  // Znajdź hi: g(quote(hi)) >= targetLegUi
+  let hi = 0.01
+  let qHi = await fetchQ(hi)
+  let gHi = g(qHi)
+  let guard = 0
+  while (gHi < targetLegUi && hi < 1e9 && guard < 36) {
+    hi *= 2
+    qHi = await fetchQ(hi)
+    gHi = g(qHi)
+    guard++
+    if (signal?.aborted) return null
+  }
+  if (gHi < targetLegUi) {
+    return { target_usd: hi, quote: qHi }
+  }
+
+  let lo = 1e-8
+
+  const tolLeg = Math.max(1e-12, targetLegUi * 1e-7)
+  const tolUsd = 1e-9
+  for (let i = 0; i < 48; i++) {
+    const mid = (lo + hi) / 2
+    const qm = await fetchQ(mid)
+    if (signal?.aborted) return null
+    const gm = g(qm)
+    if (Math.abs(gm - targetLegUi) <= tolLeg) {
+      return { target_usd: mid, quote: qm }
+    }
+    if (gm < targetLegUi) lo = mid
+    else hi = mid
+    if (hi - lo <= tolUsd) {
+      const midF = (lo + hi) / 2
+      const qf = await fetchQ(midF)
+      if (signal?.aborted) return null
+      return { target_usd: midF, quote: qf }
+    }
+  }
+  const midF = (lo + hi) / 2
+  const qf = await fetchQ(midF)
+  if (signal?.aborted) return null
+  return { target_usd: midF, quote: qf }
 }
 
 function buildJupiterSwapUrl(inputMint: string, outputMint: string, amountRaw?: number | null): string {
@@ -166,6 +239,12 @@ export default function PositionCreate() {
   const [swapSignature, setSwapSignature] = useState<string | null>(null)
   const [swapStepError, setSwapStepError] = useState<string | null>(null)
   const [openStepError, setOpenStepError] = useState<string | null>(null)
+
+  /** Tryb „wspólna kwota USD”: edycja Amount A/B → przelicza docelowe USD i drugą nogę (debounce + binary search po API). */
+  const budgetLegDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const budgetLegAbortRef = useRef<AbortController | null>(null)
+  const [budgetLegSyncing, setBudgetLegSyncing] = useState(false)
+  const [budgetLegSyncError, setBudgetLegSyncError] = useState<string | null>(null)
 
   /** Editable price range (mint B per 1 mint A); when `syncPriceInputsFromTicks`, fields mirror ticks. */
   const [priceRangeLo, setPriceRangeLo] = useState('')
@@ -361,7 +440,7 @@ export default function PositionCreate() {
     queryKey: ['jupiter-prices', tokenA?.mint, tokenB?.mint],
     queryFn: async () => {
       const mints = [tokenA?.mint, tokenB?.mint].filter(Boolean) as string[]
-      return await getJupiterPricesUsd(mints)
+      return await getMintPricesUsd(mints)
     },
     // Ceny także poza trybem „budget” — linki Jupiter z wstępnie szacowaną kwotą swapu.
     enabled: !!tokenA?.mint && !!tokenB?.mint,
@@ -407,6 +486,86 @@ export default function PositionCreate() {
     enabled: budgetQuoteEnabled,
     staleTime: 10_000,
   })
+
+  const applyBudgetQuoteFromLeg = useCallback(
+    async (leg: 'a' | 'b', num: number) => {
+      const pool = poolAddress.trim()
+      const tl = Number(tickLower)
+      const tu = Number(tickUpper)
+      if (!pool || !Number.isFinite(tl) || !Number.isFinite(tu)) {
+        setBudgetLegSyncError('Ustaw pulę i ticki.')
+        return
+      }
+      if (budgetTickRangeInPrice === false) {
+        setBudgetLegSyncError('Cena poza zakresem ticków — najpierw ustaw in-range.')
+        return
+      }
+      const ac = new AbortController()
+      budgetLegAbortRef.current = ac
+      setBudgetLegSyncing(true)
+      setBudgetLegSyncError(null)
+      try {
+        const solved = await solveTargetUsdForLegAmount(pool, tl, tu, leg, num, ac.signal)
+        if (!solved) {
+          // Przerwany request (nowa edycja / unmount) zwraca `null` — nie pokazuj błędu „dopasowania”.
+          if (ac.signal.aborted) return
+          setBudgetLegSyncError('Nie można dopasować docelowej wartości USD do tej kwoty na nodze.')
+          return
+        }
+        const t = Number(solved.target_usd.toFixed(10))
+        queryClient.setQueryData<QuoteOpenBudgetResponse>(
+          ['quote-open-budget', pool, tickLower, tickUpper, t],
+          solved.quote,
+        )
+        setTotalUsd(t)
+        // Jedna spójna paczka z quote (SOL + USDC + USD), bez czekania na kolejny cykl useEffect.
+        if (Number.isFinite(solved.quote.amount_a_ui) && Number.isFinite(solved.quote.amount_b_ui)) {
+          setAmountAUi(Number(solved.quote.amount_a_ui.toFixed(8)))
+          setAmountBUi(Number(solved.quote.amount_b_ui.toFixed(8)))
+        }
+        setBudgetSubmitRaw({ a: solved.quote.token_max_a, b: solved.quote.token_max_b })
+      } catch (e: unknown) {
+        if (e instanceof DOMException && e.name === 'AbortError') return
+        setBudgetLegSyncError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBudgetLegSyncing(false)
+      }
+    },
+    [poolAddress, tickLower, tickUpper, budgetTickRangeInPrice, queryClient],
+  )
+
+  const scheduleBudgetLegSync = useCallback(
+    (leg: 'a' | 'b', rawValue: string) => {
+      if (budgetLegDebounceRef.current) clearTimeout(budgetLegDebounceRef.current)
+      budgetLegAbortRef.current?.abort()
+      setBudgetLegSyncError(null)
+
+      if (rawValue.trim() === '') return
+      const num = Number(rawValue)
+      if (!Number.isFinite(num) || num <= 0) return
+
+      budgetLegDebounceRef.current = setTimeout(() => {
+        void applyBudgetQuoteFromLeg(leg, num)
+      }, 420)
+    },
+    [applyBudgetQuoteFromLeg],
+  )
+
+  useEffect(() => {
+    return () => {
+      if (budgetLegDebounceRef.current) clearTimeout(budgetLegDebounceRef.current)
+      budgetLegAbortRef.current?.abort()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (mode !== 'budget') {
+      if (budgetLegDebounceRef.current) clearTimeout(budgetLegDebounceRef.current)
+      budgetLegAbortRef.current?.abort()
+      setBudgetLegSyncing(false)
+      setBudgetLegSyncError(null)
+    }
+  }, [mode])
 
   /** Caps z quote (u64) — submit bez strat float; UI pokazuje amount_*_ui. */
   const [budgetSubmitRaw, setBudgetSubmitRaw] = useState<{ a: number; b: number } | null>(null)
@@ -465,7 +624,7 @@ export default function PositionCreate() {
     const shortB = isInsufficientBalance(needB, haveB)
     const deficitA = shortA ? Math.max(0, needA - haveA) : 0
     const deficitB = shortB ? Math.max(0, needB - haveB) : 0
-    const px = pricesQ.data
+    const px = pricesQ.data?.prices
 
     let jupiterSwapToCoverA: string | null = null
     let jupiterSwapToCoverB: string | null = null
@@ -532,7 +691,7 @@ export default function PositionCreate() {
 
   /** Single-sided deficit: ExactIn swap in **this** pool (mint + raw amount) for `swap_before_open`. */
   const swapBeforeOpenPlan = useMemo(() => {
-    if (!fundingCheck.ready || !tokenA || !tokenB || !pricesQ.data || !balancesQ.data) {
+    if (!fundingCheck.ready || !tokenA || !tokenB || !pricesQ.data?.prices || !balancesQ.data) {
       return null
     }
     if (fundingCheck.shortA && fundingCheck.shortB) {
@@ -541,7 +700,7 @@ export default function PositionCreate() {
     if (!fundingCheck.shortA && !fundingCheck.shortB) {
       return null
     }
-    const px = pricesQ.data
+    const px = pricesQ.data.prices
     const capPct = 0.92
 
     if (fundingCheck.shortB && !fundingCheck.shortA) {
@@ -617,6 +776,43 @@ export default function PositionCreate() {
     const mul = 10 ** swapBeforeOpenInputMeta.decimals
     return swapBeforeOpenPlan.amount_in / mul
   }, [swapBeforeOpenPlan, swapBeforeOpenInputMeta])
+
+  const swapBeforeOpenEstimate = useMemo(() => {
+    if (!swapBeforeOpenPlan || !tokenA || !tokenB) return null
+    const px = pricesQ.data?.prices
+    if (!px) return null
+
+    const inMint = swapBeforeOpenPlan.specified_mint
+    const outMint = inMint === tokenA.mint ? tokenB.mint : tokenA.mint
+    const inSym = inMint === tokenA.mint ? tokenA.symbol : tokenB.symbol
+    const outSym = outMint === tokenA.mint ? tokenA.symbol : tokenB.symbol
+    const inDec = inMint === tokenA.mint ? tokenA.decimals : tokenB.decimals
+
+    const pIn = px[inMint]
+    const pOut = px[outMint]
+    if (!(pIn > 0) || !(pOut > 0)) return null
+
+    const inUi = swapBeforeOpenPlan.amount_in / 10 ** inDec
+    const inUsd = inUi * pIn
+    const outUi = inUsd / pOut
+    const outUsd = outUi * pOut
+
+    const deficitOutUi =
+      outMint === tokenA.mint ? (fundingCheck.shortA ? fundingCheck.deficitA : 0) : fundingCheck.shortB ? fundingCheck.deficitB : 0
+
+    return {
+      inMint,
+      outMint,
+      inSym,
+      outSym,
+      inUi,
+      inUsd,
+      outUi,
+      outUsd,
+      deficitOutUi,
+      priceSource: pricesQ.data?.source ?? 'prices',
+    }
+  }, [swapBeforeOpenPlan, tokenA, tokenB, pricesQ.data, fundingCheck])
 
   const swapCostEstimateQ = useQuery({
     queryKey: ['swap-cost-estimate', poolAddress.trim()],
@@ -1096,7 +1292,13 @@ export default function PositionCreate() {
                       step="0.01"
                       className="w-full max-w-xs rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={totalUsd}
-                      onChange={(e) => setTotalUsd(e.target.value === '' ? '' : Number(e.target.value))}
+                      onChange={(e) => {
+                        if (budgetLegDebounceRef.current) clearTimeout(budgetLegDebounceRef.current)
+                        budgetLegAbortRef.current?.abort()
+                        setBudgetLegSyncing(false)
+                        setBudgetLegSyncError(null)
+                        setTotalUsd(e.target.value === '' ? '' : Number(e.target.value))
+                      }}
                       placeholder="np. 3"
                     />
                     {budgetTickRangeInPrice === false ? (
@@ -1168,6 +1370,16 @@ export default function PositionCreate() {
                     Twoich tickach, tak żeby <strong>notional w pozycji był blisko</strong> wpisanej kwoty (w granicach
                     zaokrągleń). Pola Amount poniżej uzupełniają się z tego quote; wysyłane są surowe capy z API.
                   </p>
+                  {budgetLegSyncing || budgetLegSyncError ? (
+                    <div className="text-xs space-y-1 pt-1">
+                      {budgetLegSyncing ? (
+                        <p className="text-muted-foreground">
+                          Edycja Amount → dopasowuję <strong>docelową kwotę USD</strong> i drugą nogę (quote Orca)…
+                        </p>
+                      ) : null}
+                      {budgetLegSyncError ? <p className="text-destructive">{budgetLegSyncError}</p> : null}
+                    </div>
+                  ) : null}
                 </div>
               )}
 
@@ -1209,17 +1421,34 @@ export default function PositionCreate() {
                     step="0.000001"
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={amountAUi}
-                    onChange={(e) => setAmountAUi(e.target.value === '' ? '' : Number(e.target.value))}
+                    onChange={(e) => {
+                      const raw = e.target.value
+                      if (raw === '') {
+                        setAmountAUi('')
+                        if (budgetLegDebounceRef.current) clearTimeout(budgetLegDebounceRef.current)
+                        budgetLegAbortRef.current?.abort()
+                        return
+                      }
+                      const v = Number(raw)
+                      if (!Number.isFinite(v)) {
+                        setAmountAUi('')
+                        return
+                      }
+                      setAmountAUi(v)
+                      if (mode === 'budget') {
+                        scheduleBudgetLegSync('a', raw)
+                      }
+                    }}
                     required
                   />
                   {tokenA && (
                     <div className="text-[11px] text-muted-foreground mt-1">
                       {mode === 'budget' &&
-                      pricesQ.data?.[tokenA.mint] != null &&
+                      pricesQ.data?.prices?.[tokenA.mint] != null &&
                       amountAUi !== '' &&
                       Number.isFinite(Number(amountAUi)) ? (
                         <>
-                          ≈ {formatUSD(Number(amountAUi) * pricesQ.data[tokenA.mint])} USD (szac. wg ceny Jupiter)
+                          ≈ {formatUSD(Number(amountAUi) * pricesQ.data.prices[tokenA.mint])} USD (szac. wg {pricesQ.data.source})
                         </>
                       ) : (
                         <>raw u64 = round(amount × 10^{tokenA.decimals})</>
@@ -1256,17 +1485,34 @@ export default function PositionCreate() {
                     step="0.000001"
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={amountBUi}
-                    onChange={(e) => setAmountBUi(e.target.value === '' ? '' : Number(e.target.value))}
+                    onChange={(e) => {
+                      const raw = e.target.value
+                      if (raw === '') {
+                        setAmountBUi('')
+                        if (budgetLegDebounceRef.current) clearTimeout(budgetLegDebounceRef.current)
+                        budgetLegAbortRef.current?.abort()
+                        return
+                      }
+                      const v = Number(raw)
+                      if (!Number.isFinite(v)) {
+                        setAmountBUi('')
+                        return
+                      }
+                      setAmountBUi(v)
+                      if (mode === 'budget') {
+                        scheduleBudgetLegSync('b', raw)
+                      }
+                    }}
                     required
                   />
                   {tokenB && (
                     <div className="text-[11px] text-muted-foreground mt-1">
                       {mode === 'budget' &&
-                      pricesQ.data?.[tokenB.mint] != null &&
+                      pricesQ.data?.prices?.[tokenB.mint] != null &&
                       amountBUi !== '' &&
                       Number.isFinite(Number(amountBUi)) ? (
                         <>
-                          ≈ {formatUSD(Number(amountBUi) * pricesQ.data[tokenB.mint])} USD (szac. wg ceny Jupiter)
+                          ≈ {formatUSD(Number(amountBUi) * pricesQ.data.prices[tokenB.mint])} USD (szac. wg {pricesQ.data.source})
                         </>
                       ) : (
                         <>raw u64 = round(amount × 10^{tokenB.decimals})</>
@@ -1396,6 +1642,29 @@ export default function PositionCreate() {
                       (limit: do ~92% dostępnego salda).
                     </span>
                   </label>
+                  {swapBeforeOpenEstimate ? (
+                    <div className="text-xs text-foreground/90 rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-1.5">
+                      Plan (szacunek z {swapBeforeOpenEstimate.priceSource}): swap{' '}
+                      <span className="font-medium tabular-nums">
+                        ~{swapBeforeOpenEstimate.inUi.toLocaleString(undefined, { maximumFractionDigits: 8 })}{' '}
+                        {swapBeforeOpenEstimate.inSym}
+                      </span>{' '}
+                      (≈ <span className="font-medium tabular-nums">{formatUSD(swapBeforeOpenEstimate.inUsd)}</span>) → ~{' '}
+                      <span className="font-medium tabular-nums">
+                        {swapBeforeOpenEstimate.outUi.toLocaleString(undefined, { maximumFractionDigits: 8 })}{' '}
+                        {swapBeforeOpenEstimate.outSym}
+                      </span>{' '}
+                      (≈ <span className="font-medium tabular-nums">{formatUSD(swapBeforeOpenEstimate.outUsd)}</span>).{' '}
+                      {swapBeforeOpenEstimate.deficitOutUi > 0 ? (
+                        <>
+                          Deficyt: <span className="font-medium tabular-nums">
+                            {swapBeforeOpenEstimate.deficitOutUi.toLocaleString(undefined, { maximumFractionDigits: 8 })}{' '}
+                            {swapBeforeOpenEstimate.outSym}
+                          </span>.
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <p className="text-xs text-muted-foreground">
                     Ten krok wykona transakcję swapu w tej samej puli Orca na sieci Solana (backend).
                     Dopiero po potwierdzeniu będzie można otworzyć pozycję.

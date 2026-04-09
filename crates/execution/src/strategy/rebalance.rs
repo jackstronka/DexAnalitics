@@ -35,7 +35,37 @@ fn swap_mix_max_rounds() -> u32 {
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&n| (1..=20).contains(&n))
-        .unwrap_or(6)
+        .unwrap_or(10)
+}
+
+/// Swap-mix convergence tolerance (in USD notional). Prevents infinite dust loops due to fees/rounding.
+fn swap_mix_deficit_usd_epsilon() -> f64 {
+    std::env::var("CLMM_SWAP_MIX_DEFICIT_USD_EPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &f64| v.is_finite() && *v >= 0.0 && *v <= 5.0)
+        .unwrap_or(0.25)
+}
+
+/// Max fraction of the surplus leg to spend in **one** `swap_exact_in` during swap-mix.
+///
+/// Previously hardcoded at 0.92, which often left several % of the leg unused vs the deposit quote,
+/// forcing a **second** swap (extra `meta.fee`). Default leaves ~1.2% headroom for pool fee + rounding.
+fn swap_mix_spend_cap_pct() -> f64 {
+    std::env::var("CLMM_SWAP_MIX_SPEND_CAP_PCT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &f64| v.is_finite() && *v > 0.5 && *v <= 1.0)
+        .unwrap_or(0.988)
+}
+
+/// Multiplier on USD-derived `amount_in` (covers slippage / small price move between quote and tx).
+fn swap_mix_amount_in_buffer_pct() -> f64 {
+    std::env::var("CLMM_SWAP_MIX_AMOUNT_IN_BUFFER_PCT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &f64| v.is_finite() && *v >= 1.0 && *v <= 1.2)
+        .unwrap_or(1.03)
 }
 
 /// Guardrail: when enabled, do not close a position unless a reopen is feasible (preflight quote).
@@ -138,7 +168,15 @@ fn synthetic_prices_for_deposit_quote(
     }
     // If A is stablecoin: b_per_a is tokenB per 1 stable. USD per tokenB is 1 / b_per_a.
     if is_stable(mint_a) {
-        return (1.0, (1.0 / b_per_a).max(MIN_POSITIVE), "stable_a");
+        // We have observed upstreams where `pool_price` effectively behaves as "A per B" (inverse),
+        // which would make `b_per_a` huge and thus `1 / b_per_a` ~ 0.
+        // When the computed USD per tokenB looks unrealistically tiny, assume inverse convention.
+        let mut usd_per_b = (1.0 / b_per_a).max(MIN_POSITIVE);
+        if usd_per_b < INVERT_IF_LT {
+            usd_per_b = b_per_a.max(MIN_POSITIVE);
+            return (1.0, usd_per_b, "stable_a_inverted");
+        }
+        return (1.0, usd_per_b, "stable_a");
     }
 
     // Fallback: relative scale only (A=1).
@@ -182,6 +220,25 @@ mod synthetic_price_tests {
         );
         assert!(pb > 1.0);
         assert_eq!(mode, "stable_a");
+    }
+
+    #[test]
+    fn stable_a_inverts_huge_b_per_a() {
+        // Simulate USDC/SOL where upstream returns USDC per SOL (~80) even though A is stable.
+        // Without inversion this would yield USD per SOL ~= 0.0125 (nonsense).
+        let mint_a = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
+        let mint_b = Pubkey::new_unique();
+        let (_pa, pb, mode) = synthetic_prices_for_deposit_quote(
+            // Note: function applies UI scaling by 10^(dec_a - dec_b) = 10^-3 for 6 vs 9,
+            // so we pass 80_000 to yield b_per_a_ui ~= 80 after scaling.
+            Decimal::from_f64_retain(80_000.0).unwrap(),
+            &mint_a,
+            &mint_b,
+            6,
+            9,
+        );
+        assert!(pb > 1.0);
+        assert_eq!(mode, "stable_a_inverted");
     }
 }
 
@@ -292,7 +349,13 @@ impl RebalanceConfig {
     /// Default merged with `CLMM_REBALANCE_*` env overrides where applicable.
     #[must_use]
     pub fn from_env() -> Self {
+        let max_slippage_bps = std::env::var("CLMM_REBALANCE_MAX_SLIPPAGE_BPS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .filter(|v| (1..=10_000).contains(v))
+            .unwrap_or(Self::default().max_slippage_bps);
         Self {
+            max_slippage_bps,
             profitability_mode: rebalance_profitability_mode_from_env(),
             est_tx_cost_lamports: rebalance_est_tx_cost_lamports(),
             ..Self::default()
@@ -467,7 +530,7 @@ impl RebalanceExecutor {
         position: &Pubkey,
         pool: &Pubkey,
     ) -> anyhow::Result<(u64, u64)> {
-        self.collect_fees(position, pool).await
+        self.collect_fees(position, pool, None).await
     }
 
     /// Remove all liquidity, then usable for close.
@@ -495,7 +558,9 @@ impl RebalanceExecutor {
         position: &Pubkey,
         pool: &Pubkey,
     ) -> anyhow::Result<()> {
-        self.close_position(position, pool).await
+        // Keep emergency close consistent with the normal close policy:
+        // always collect fees immediately before closing.
+        self.execute_full_close_only(position, pool, None, None).await
     }
 
     /// Estimates transaction cost for rebalancing.
@@ -531,8 +596,6 @@ impl RebalanceExecutor {
         let mut swaps: u32 = 0;
         let mut last_round_details: Option<serde_json::Value> = None;
         const MIN_SWAP: u64 = 1;
-        const AMOUNT_IN_BUFFER_PCT: f64 = 1.02; // small buffer for pool price moves + fees
-        const SPEND_CAP_PCT: f64 = 0.92; // avoid spending 100% of a leg due to rounding/fees
 
         info!(
             op = "orca_rebalance",
@@ -546,6 +609,17 @@ impl RebalanceExecutor {
         );
 
         for round in 0..max_rounds {
+            let buffer_pct = swap_mix_amount_in_buffer_pct();
+            let spend_cap = {
+                let base = swap_mix_spend_cap_pct();
+                if round > 0 {
+                    // After the first swap, push harder so we rarely need a third tx fee.
+                    base.max(0.998).min(0.9995)
+                } else {
+                    base
+                }
+            };
+
             let pool_reader = WhirlpoolReader::new(self.provider.clone());
             let pool_state = pool_reader
                 .get_pool_state(&pool.to_string())
@@ -657,16 +731,46 @@ impl RebalanceExecutor {
             let deficit_a = q.amount_a.saturating_sub(wa);
             let deficit_b = q.amount_b.saturating_sub(wb);
 
+            // Treat tiny post-quote deficits as converged (dust / fees / rounding).
+            let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
+            let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
+            let deficit_usd = (deficit_a_ui * pa + deficit_b_ui * pb).max(0.0);
+            let eps_usd = swap_mix_deficit_usd_epsilon();
+            if deficit_usd.is_finite() && deficit_usd <= eps_usd {
+                info!(
+                    op = "orca_rebalance",
+                    stage = "swap_mix",
+                    pool = %pool,
+                    round,
+                    swaps_done = swaps,
+                    deficit_usd,
+                    eps_usd,
+                    "swap-mix: converged by deficit epsilon"
+                );
+                return Ok(swaps);
+            }
+
+            let native_lamports = self.provider.get_balance(owner).await.unwrap_or(0);
+            // Leave ~0.01 SOL for fees / rent when moving native SOL into wSOL ATA.
+            const NATIVE_SOL_RESERVE_LAMPORTS: u64 = 10_000_000;
+            let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+                .parse()
+                .expect("WSOL mint");
+            let can_wrap_native_sol_for_wsol_leg = pool_state.token_mint_a == wsol_mint_pk
+                && deficit_b > 0
+                && native_lamports
+                    > NATIVE_SOL_RESERVE_LAMPORTS.saturating_add(MIN_SWAP);
+
             if deficit_a > 0 && wb > MIN_SWAP {
                 // Swap B -> A to cover deficit in A (estimate using synthetic USD prices).
                 let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
                 let usd_need = (deficit_a_ui * pa).max(0.0);
-                let mut fund_b_ui = if pb > 0.0 { (usd_need / pb) * AMOUNT_IN_BUFFER_PCT } else { 0.0 };
+                let mut fund_b_ui = if pb > 0.0 { (usd_need / pb) * buffer_pct } else { 0.0 };
                 if !fund_b_ui.is_finite() || fund_b_ui <= 0.0 {
                     fund_b_ui = (wb as f64 / 10f64.powi(i32::from(dec_b))) * 0.5;
                 }
                 let raw_est = (fund_b_ui * 10f64.powi(i32::from(dec_b))).round() as i128;
-                let max_raw = ((wb as f64) * SPEND_CAP_PCT).floor() as i128;
+                let max_raw = ((wb as f64) * spend_cap).floor() as i128;
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wb)) as u64;
@@ -735,7 +839,9 @@ impl RebalanceExecutor {
                         "pa": pa,
                         "pb": pb,
                         "price_mode": price_mode,
-                        "amount_in_est_mode": "deficit_usd"
+                        "amount_in_est_mode": "deficit_usd",
+                        "spend_cap_pct": spend_cap,
+                        "amount_in_buffer_pct": buffer_pct,
                     }),
                 )
                 .await;
@@ -765,6 +871,7 @@ impl RebalanceExecutor {
                         &pool_state.token_mint_b,
                         amount_in,
                         self.config.max_slippage_bps,
+                        Some(*log_position),
                         None,
                     )
                     .await
@@ -824,16 +931,57 @@ impl RebalanceExecutor {
                 swaps += 1;
                 continue;
             }
-            if deficit_b > 0 && wa > MIN_SWAP {
+            if deficit_b > 0 && (wa > MIN_SWAP || can_wrap_native_sol_for_wsol_leg) {
                 // Swap A -> B to cover deficit in B (estimate using synthetic USD prices).
+                if pool_state.token_mint_a == wsol_mint_pk
+                    && wa <= MIN_SWAP
+                    && can_wrap_native_sol_for_wsol_leg
+                {
+                    let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
+                    let usd_need = (deficit_b_ui * pb).max(0.0);
+                    let mut fund_a_ui = if pa > 0.0 {
+                        (usd_need / pa) * buffer_pct
+                    } else {
+                        0.0
+                    };
+                    if !fund_a_ui.is_finite() || fund_a_ui <= 0.0 {
+                        fund_a_ui = (native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS) as f64
+                            / 1e9)
+                            * 0.25;
+                    }
+                    let raw_est_wrap =
+                        (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as u64;
+                    let wrap_amt = raw_est_wrap.min(
+                        native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS),
+                    );
+                    if wrap_amt >= MIN_SWAP {
+                        let wallet = self.require_wallet()?;
+                        let orca = WhirlpoolExecutor::new(self.provider.clone());
+                        info!(
+                            op = "orca_rebalance",
+                            stage = "swap_mix",
+                            pool = %pool,
+                            round,
+                            wrap_amt,
+                            native_lamports,
+                            wa_spl = wa,
+                            "swap-mix: pre-wrap native SOL into wSOL ATA (SPL wa was 0; Orca uses wSOL SPL)"
+                        );
+                        orca
+                            .submit_wsol_wrap_if_needed(wrap_amt, wallet.keypair())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("swap-mix wsol pre-wrap: {e}"))?;
+                        continue;
+                    }
+                }
                 let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
                 let usd_need = (deficit_b_ui * pb).max(0.0);
-                let mut fund_a_ui = if pa > 0.0 { (usd_need / pa) * AMOUNT_IN_BUFFER_PCT } else { 0.0 };
+                let mut fund_a_ui = if pa > 0.0 { (usd_need / pa) * buffer_pct } else { 0.0 };
                 if !fund_a_ui.is_finite() || fund_a_ui <= 0.0 {
                     fund_a_ui = (wa as f64 / 10f64.powi(i32::from(dec_a))) * 0.5;
                 }
                 let raw_est = (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as i128;
-                let max_raw = ((wa as f64) * SPEND_CAP_PCT).floor() as i128;
+                let max_raw = ((wa as f64) * spend_cap).floor() as i128;
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wa)) as u64;
@@ -902,7 +1050,9 @@ impl RebalanceExecutor {
                         "pa": pa,
                         "pb": pb,
                         "price_mode": price_mode,
-                        "amount_in_est_mode": "deficit_usd"
+                        "amount_in_est_mode": "deficit_usd",
+                        "spend_cap_pct": spend_cap,
+                        "amount_in_buffer_pct": buffer_pct,
                     }),
                 )
                 .await;
@@ -932,6 +1082,7 @@ impl RebalanceExecutor {
                         &pool_state.token_mint_a,
                         amount_in,
                         self.config.max_slippage_bps,
+                        Some(*log_position),
                         None,
                     )
                     .await
@@ -1273,7 +1424,7 @@ impl RebalanceExecutor {
 
         // Step 1: Collect fees if configured
         if self.config.collect_fees_first {
-            match self.collect_fees(&params.position, &params.pool).await {
+            match self.collect_fees(&params.position, &params.pool, None).await {
                 Ok(fees) => {
                     result.fees_collected = Some(fees);
                     result.tx_cost_lamports += 5000; // Approximate
@@ -1449,7 +1600,10 @@ impl RebalanceExecutor {
 
         // Step 3: Close old position (includes decreasing all liquidity + collecting remaining fees)
         result.liquidity_removed = params.current_liquidity;
-        if let Err(e) = self.close_position(&params.position, &params.pool).await {
+        if let Err(e) = self
+            .close_position(&params.position, &params.pool, None, Some(serde_json::json!({"close_kind":"rotation"})))
+            .await
+        {
             error!(
                 op = "orca_rebalance",
                 stage = "close_position",
@@ -1735,12 +1889,13 @@ impl RebalanceExecutor {
         &self,
         position: &Pubkey,
         pool: &Pubkey,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<()> {
         if self.is_dry_run() {
             info!("Dry run: would collect fees");
             return Ok(());
         }
-        self.collect_fees(position, pool).await?;
+        self.collect_fees(position, pool, ledger_session_id).await?;
         Ok(())
     }
 
@@ -1749,12 +1904,20 @@ impl RebalanceExecutor {
         &self,
         position: &Pubkey,
         pool: &Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         if self.is_dry_run() {
             info!("Dry run: would close position");
             return Ok(());
         }
-        self.close_position(position, pool).await
+        // Policy: always collect fees immediately before close.
+        // This makes fee earnings explicit in the lifecycle ledger (`bot_collect_fees`) and avoids
+        // mixing "principal vs fees" in the close outflow heuristics.
+        self.collect_fees(position, pool, ledger_session_id.clone())
+            .await?;
+        self.close_position(position, pool, ledger_session_id, ledger_details)
+            .await
     }
 
     /// Remove `liquidity_amount` from an existing position (partial exit). `token_min_*` = 0 (max slippage).
@@ -1781,14 +1944,26 @@ impl RebalanceExecutor {
     }
 
     /// Collects fees from a position.
-    async fn collect_fees(&self, position: &Pubkey, pool: &Pubkey) -> anyhow::Result<(u64, u64)> {
+    async fn collect_fees(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        ledger_session_id: Option<String>,
+    ) -> anyhow::Result<(u64, u64)> {
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
 
         let payer = wallet.keypair();
         let res = orca.collect_fees(position, pool, payer).await?;
-        self.ensure_execution_success("collect_fees", &res, Some(*pool), Some(*position), None)
-            .await?;
+        self.ensure_execution_success(
+            "collect_fees",
+            &res,
+            Some(*pool),
+            Some(*position),
+            ledger_session_id,
+            None,
+        )
+        .await?;
 
         // We currently don't parse fee amounts from on-chain state in this executor.
         // Returning (0,0) keeps lifecycle wiring intact while we tighten accounting later.
@@ -1820,6 +1995,7 @@ impl RebalanceExecutor {
             Some(*pool),
             Some(*position),
             None,
+            None,
         )
         .await?;
         debug!(
@@ -1831,14 +2007,27 @@ impl RebalanceExecutor {
     }
 
     /// Closes a position.
-    async fn close_position(&self, position: &Pubkey, pool: &Pubkey) -> anyhow::Result<()> {
+    async fn close_position(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
 
         let payer = wallet.keypair();
         let res = orca.close_position(position, pool, payer, None).await?;
-        self.ensure_execution_success("close_position", &res, Some(*pool), Some(*position), None)
-            .await?;
+        self.ensure_execution_success(
+            "close_position",
+            &res,
+            Some(*pool),
+            Some(*position),
+            ledger_session_id,
+            ledger_details,
+        )
+        .await?;
         debug!(position = %position, "Close position submitted");
         Ok(())
     }
@@ -1875,6 +2064,9 @@ impl RebalanceExecutor {
         specified_mint: &Pubkey,
         amount_in: u64,
         slippage_bps: u16,
+        // Optional position PDA to attach to the lifecycle ledger row for matching in UI summaries.
+        // Swap-mix flows have a "current position" (old PDA) even though the swap tx itself doesn't.
+        position_for_ledger: Option<Pubkey>,
         ledger_session_id: Option<String>,
     ) -> anyhow::Result<Option<Signature>> {
         if self.is_dry_run() {
@@ -1889,11 +2081,52 @@ impl RebalanceExecutor {
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
         let payer = wallet.keypair();
+
+        let reader = WhirlpoolReader::new(self.provider.clone());
+        let pool_state = reader.get_pool_state(&pool.to_string()).await.ok();
+        let dec_in = spl_mint_decimals(self.provider.as_ref(), specified_mint).await.unwrap_or(0);
+        let amount_in_ui = (amount_in as f64) / 10f64.powi(i32::from(dec_in));
+        let (token_a_s, token_b_s, other_out) = match &pool_state {
+            Some(s) => {
+                let ta = s.token_mint_a.to_string();
+                let tb = s.token_mint_b.to_string();
+                let other = if *specified_mint == s.token_mint_a {
+                    tb.clone()
+                } else if *specified_mint == s.token_mint_b {
+                    ta.clone()
+                } else {
+                    "specified_mint_not_in_pool".to_string()
+                };
+                (ta, tb, other)
+            }
+            None => (String::new(), String::new(), String::new()),
+        };
+        let swap_details = serde_json::json!({
+            "kind": "orca_whirlpool_swap_exact_in",
+            "pool": pool.to_string(),
+            "token_mint_a": token_a_s,
+            "token_mint_b": token_b_s,
+            "specified_mint": specified_mint.to_string(),
+            "other_mint_expected_output": other_out,
+            "amount_in_raw": amount_in,
+            "specified_mint_decimals": dec_in,
+            "amount_in_ui": amount_in_ui,
+            "slippage_bps": slippage_bps,
+            "note": "ExactIn: amount_out_min/actual not in ExecutionResult; use RPC getTransaction meta or extend Orca executor later."
+        });
+
         let res = orca
             .swap_exact_in(*pool, *specified_mint, amount_in, slippage_bps, payer)
             .await?;
         let sig = res.signature;
-        self.ensure_execution_success("swap_exact_in", &res, Some(*pool), None, ledger_session_id)
+        self.ensure_execution_success(
+            "swap_exact_in",
+            &res,
+            Some(*pool),
+            position_for_ledger,
+            ledger_session_id,
+            Some(swap_details),
+        )
             .await?;
         Ok(Some(sig))
     }
@@ -1970,12 +2203,19 @@ impl RebalanceExecutor {
             slippage_bps,
         };
         let res = orca.open_full_range_position(&params, payer).await?;
+        let details = serde_json::json!({
+            "slippage_bps": slippage_bps,
+            "amount_a_cap": amount_a,
+            "amount_b_cap": amount_b,
+            "open_kind": "full_range"
+        });
         self.ensure_execution_success(
             "open_full_range_position",
             &res,
             Some(*pool),
             None,
             ledger_session_id,
+            Some(details),
         )
         .await?;
         let new_position = res.created_position.ok_or_else(|| {
@@ -2024,8 +2264,23 @@ impl RebalanceExecutor {
         };
 
         let res = orca.open_position(&params, payer).await?;
-        self.ensure_execution_success("open_position", &res, Some(*pool), None, ledger_session_id)
-            .await?;
+        let details = serde_json::json!({
+            "tick_lower": tick_lower,
+            "tick_upper": tick_upper,
+            "slippage_bps": slippage_bps,
+            "amount_a_cap": amount_a,
+            "amount_b_cap": amount_b,
+            "open_kind": "tick_range"
+        });
+        self.ensure_execution_success(
+            "open_position",
+            &res,
+            Some(*pool),
+            None,
+            ledger_session_id,
+            Some(details),
+        )
+        .await?;
         let new_position = res.created_position.ok_or_else(|| {
             anyhow::anyhow!(
                 "open_position succeeded but did not return created_position; cannot continue safely"
@@ -2059,6 +2314,7 @@ impl RebalanceExecutor {
         pool: Option<Pubkey>,
         position: Option<Pubkey>,
         ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         validate_execution_result(op_name, result)?;
 
@@ -2078,11 +2334,19 @@ impl RebalanceExecutor {
                     position,
                     result.created_position,
                     ledger_session_id.clone(),
+                    ledger_details.clone(),
                 )
                 .await;
 
                 if op_name == "close_position" {
                     if let (Some(pool_pk), Some(pos_pk)) = (pool, position) {
+                        let close_kind = ledger_details
+                            .as_ref()
+                            .and_then(|d| d.get("close_kind"))
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| if s == "manual" { "manual" } else { "strategy" });
                         clmm_lp_protocols::ledger::position_registry::try_append_registry_close(
                             self.provider.as_ref(),
                             "orca_bot",
@@ -2091,6 +2355,7 @@ impl RebalanceExecutor {
                             &fee_payer,
                             &result.signature,
                             ledger_session_id.clone(),
+                            close_kind,
                         )
                         .await;
                     }
@@ -2106,6 +2371,7 @@ impl RebalanceExecutor {
                         &fee_payer,
                         &result.signature,
                         ledger_session_id,
+                        ledger_details.clone(),
                     )
                     .await;
                 }

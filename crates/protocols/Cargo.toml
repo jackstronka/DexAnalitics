@@ -13,7 +13,11 @@ description = { workspace = true }
 clmm-lp-domain = { workspace = true }
 solana-client = { workspace = true }
 solana-sdk = { workspace = true }
+solana-program = { workspace = true }
+solana-system-interface = { workspace = true }
+solana-program-pack = { workspace = true }
 spl-token = { workspace = true }
+spl-associated-token-account = { workspace = true }
 solana-transaction-status-client-types = "3.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

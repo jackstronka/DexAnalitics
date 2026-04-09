@@ -117,6 +117,7 @@ pub async fn fetch_swaps_for_optimize(query_arg: &str) -> Result<Option<Vec<Swap
 pub fn default_strategies(
     static_only: bool,
     indicator_strategies: bool,
+    snapshot_mode: bool,
     _il_max_pct: f64,
     _il_close_pct: Option<f64>,
     _il_grace_steps: u64,
@@ -153,18 +154,34 @@ pub fn default_strategies(
                     rebalance_steps: 48,
                 });
             }
-            // Last-closed-candle anchor: `(candle_steps, rebalance_steps)` in **simulation steps**.
-            // With `--resolution-seconds 900` (15 min/step), the grid below matches:
-            // - 15m candle: rebal 15/30/45/60m, 4h, 12h  → (1,1|2|3|4|16|48)
-            // - 30m candle: rebal 30/45/60m, 4h, 12h     → (2,2|3|4|16|48)
-            // - 45m candle: rebal 15/30/45/60m, 4h, 12h → (3,1|2|3|4|16|48)
-            // - 1h candle:  rebal 1h, 4h, 12h           → (4,4|16|48)
-            // Each rebalance pays `tx_cost` in `run_single` — frequent presets stress fee drag.
-            for &(candle_steps, rebalance_steps) in LAST_CANDLE_OPTIMIZE_GRID {
-                v.push(StratConfig::LastCandle {
-                    candle_steps,
-                    rebalance_steps,
-                });
+            if snapshot_mode {
+                // Snapshot mode has irregular step spacing; prefer wall-clock buckets.
+                // Candles: 15m, 30m, 45m, 1h. Rebalance: 15m, 30m, 45m, 1h, 4h, 12h.
+                const CANDLES: &[u64] = &[15 * 60, 30 * 60, 45 * 60, 60 * 60];
+                const REBALS: &[u64] = &[
+                    15 * 60,
+                    30 * 60,
+                    45 * 60,
+                    60 * 60,
+                    4 * 3600,
+                    12 * 3600,
+                ];
+                for &c in CANDLES {
+                    for &r in REBALS {
+                        v.push(StratConfig::LastCandleTime {
+                            candle_seconds: c,
+                            rebalance_seconds: r,
+                        });
+                    }
+                }
+            } else {
+                // Step-based last-candle (regular candle path).
+                for &(candle_steps, rebalance_steps) in LAST_CANDLE_OPTIMIZE_GRID {
+                    v.push(StratConfig::LastCandle {
+                        candle_steps,
+                        rebalance_steps,
+                    });
+                }
             }
         }
         v

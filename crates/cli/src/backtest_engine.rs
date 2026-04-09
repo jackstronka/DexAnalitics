@@ -75,6 +75,12 @@ pub enum StratConfig {
         candle_steps: u64,
         rebalance_steps: u64,
     },
+    /// Snapshot-friendly: candle and rebalance defined in wall-clock seconds.
+    /// Candle bounds use the last fully closed time bucket `[t-candle_seconds, t)`.
+    LastCandleTime {
+        candle_seconds: u64,
+        rebalance_seconds: u64,
+    },
 }
 
 /// Build step data (price, volume, share) for each candle.
@@ -326,6 +332,8 @@ pub fn run_single(
     let mut rebalance_count: u32 = 0;
     let mut steps_since_rebalance: u64 = 0;
     let mut in_range_steps: u64 = 0;
+    let mut secs_since_rebalance: u64 = 0;
+    let mut prev_ts: Option<u64> = None;
 
     // equity curve for max drawdown
     let mut peak_equity = capital_dec;
@@ -343,6 +351,10 @@ pub fn run_single(
             candle_steps,
             rebalance_steps,
         } => format!("last_candle_c{}_r{}", candle_steps, rebalance_steps),
+        StratConfig::LastCandleTime {
+            candle_seconds,
+            rebalance_seconds,
+        } => format!("last_candle_t{}_r{}", candle_seconds, rebalance_seconds),
     };
 
     let mut fee_share_model = if let Some(pool_l) = pool_active_liquidity.filter(|v| *v > 0) {
@@ -376,6 +388,11 @@ pub fn run_single(
         > 0;
 
     for (i, p) in step_data.iter().enumerate() {
+        if let Some(prev) = prev_ts {
+            secs_since_rebalance = secs_since_rebalance
+                .saturating_add(p.start_timestamp.saturating_sub(prev));
+        }
+        prev_ts = Some(p.start_timestamp);
         steps_since_rebalance += 1;
         let price_ab = p.price_ab.value;
         let in_range_float = price_ab >= current_lower_ab && price_ab <= current_upper_ab;
@@ -510,12 +527,17 @@ pub fn run_single(
             StratConfig::LastCandle {
                 rebalance_steps, ..
             } => steps_since_rebalance >= rebalance_steps,
+            StratConfig::LastCandleTime {
+                rebalance_seconds,
+                ..
+            } => secs_since_rebalance >= rebalance_seconds,
         };
 
         if should_rebalance && liquidity_l > 0 {
             total_rebalance_cost += tx_cost_dec;
             rebalance_count += 1;
             steps_since_rebalance = 0;
+            secs_since_rebalance = 0;
 
             // Re-deploy current position value minus tx cost; fees are NOT compounded here.
             let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
@@ -563,6 +585,42 @@ pub fn run_single(
                                     .price_ab
                                     .value
                             };
+                            let c = anchor.to_f64().unwrap_or(1.0);
+                            (
+                                Decimal::from_f64(c * (1.0 - half)).unwrap(),
+                                Decimal::from_f64(c * (1.0 + half)).unwrap(),
+                            )
+                        }
+                    } else {
+                        let anchor = step_data[0].price_ab.value;
+                        let c = anchor.to_f64().unwrap_or(1.0);
+                        (
+                            Decimal::from_f64(c * (1.0 - half)).unwrap(),
+                            Decimal::from_f64(c * (1.0 + half)).unwrap(),
+                        )
+                    }
+                }
+                StratConfig::LastCandleTime {
+                    candle_seconds, ..
+                } => {
+                    // Snapshot-friendly: use last fully closed wall-clock bucket `[t-candle_seconds, t)`.
+                    if let Some((start, end)) = indicators::last_closed_time_bucket_step_range(
+                        step_data,
+                        i,
+                        candle_seconds,
+                    ) {
+                        let slice = &step_data[start..=end];
+                        let mut lo_ab = slice[0].price_ab.value;
+                        let mut hi_ab = lo_ab;
+                        for p in &slice[1..] {
+                            let v = p.price_ab.value;
+                            lo_ab = lo_ab.min(v);
+                            hi_ab = hi_ab.max(v);
+                        }
+                        if lo_ab > Decimal::ZERO && lo_ab < hi_ab {
+                            (lo_ab, hi_ab)
+                        } else {
+                            let anchor = slice.last().map(|p| p.price_ab.value).unwrap_or(price_ab);
                             let c = anchor.to_f64().unwrap_or(1.0);
                             (
                                 Decimal::from_f64(c * (1.0 - half)).unwrap(),
@@ -760,6 +818,22 @@ pub fn parse_strategy_label(name: &str) -> Option<StratConfig> {
         });
     }
     if let Some(rest) = name.strip_prefix("last_candle_") {
+        if let Some(rest) = rest.strip_prefix('t') {
+            // time-based: last_candle_t{candle_seconds}_r{rebalance_seconds}
+            let mut candle_seconds: Option<u64> = None;
+            let mut rebalance_seconds: Option<u64> = None;
+            for part in rest.split('_') {
+                if candle_seconds.is_none() {
+                    candle_seconds = part.parse().ok();
+                } else if let Some(n) = part.strip_prefix('r') {
+                    rebalance_seconds = n.parse().ok();
+                }
+            }
+            return Some(StratConfig::LastCandleTime {
+                candle_seconds: candle_seconds?,
+                rebalance_seconds: rebalance_seconds?,
+            });
+        }
         let mut candle_steps: Option<u64> = None;
         let mut rebalance_steps: Option<u64> = None;
         for part in rest.split('_') {

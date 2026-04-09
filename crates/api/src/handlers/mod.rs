@@ -1,6 +1,7 @@
 //! Request handlers for API endpoints.
 
 pub mod analytics;
+pub mod backtests;
 pub mod bot_activity;
 pub mod health;
 pub mod orca;
@@ -28,6 +29,7 @@ mod pools_tests;
 mod tx_tests;
 
 pub use analytics::*;
+pub use backtests::*;
 pub use bot_activity::*;
 pub use health::*;
 pub use orca::*;

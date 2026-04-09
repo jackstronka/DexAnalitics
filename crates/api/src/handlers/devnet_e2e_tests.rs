@@ -30,7 +30,7 @@ fn devnet_state() -> AppState {
         primary_url: rpc,
         ..Default::default()
     };
-    AppState::new(rpc_config, ApiConfig::default())
+    AppState::new(rpc_config, ApiConfig::default(), None)
 }
 
 /// Manual smoke test for API->RPC path on devnet.
@@ -51,7 +51,7 @@ async fn devnet_pool_state_smoke() {
 async fn devnet_orca_list_pools_smoke() {
     let mut cfg = ApiConfig::default();
     cfg.orca_public_api_base_url = Some("https://api.orca.so/v2/solana".to_string());
-    let state = AppState::new(RpcConfig::default(), cfg);
+    let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_list_pools(State(state), Query(OrcaListPoolsQuery::default())).await;
     assert!(res.is_ok(), "orca list pools failed");
     let body = res.unwrap().0;
@@ -64,7 +64,7 @@ async fn devnet_orca_list_pools_smoke() {
 async fn devnet_orca_list_tokens_smoke() {
     let mut cfg = ApiConfig::default();
     cfg.orca_public_api_base_url = Some("https://api.orca.so/v2/solana".to_string());
-    let state = AppState::new(RpcConfig::default(), cfg);
+    let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_list_tokens(State(state), Query(OrcaListTokensQuery::default())).await;
     assert!(res.is_ok(), "orca list tokens failed");
     let body = res.unwrap().0;
@@ -77,7 +77,7 @@ async fn devnet_orca_list_tokens_smoke() {
 async fn devnet_orca_protocol_smoke() {
     let mut cfg = ApiConfig::default();
     cfg.orca_public_api_base_url = Some("https://api.orca.so/v2/solana".to_string());
-    let state = AppState::new(RpcConfig::default(), cfg);
+    let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_get_protocol(State(state)).await;
     assert!(res.is_ok(), "orca protocol failed");
 }
@@ -967,11 +967,11 @@ async fn devnet_bot_actions_smoke() {
         .await
         .expect("add_position");
 
-    exec.execute_collect_fees_only(&position, &pool)
+    exec.execute_collect_fees_only(&position, &pool, None)
         .await
         .expect("collect_fees_only");
 
-    exec.execute_full_close_only(&position, &pool)
+    exec.execute_full_close_only(&position, &pool, None, None)
         .await
         .expect("full_close_only");
 }

@@ -8,6 +8,7 @@ import ApiDataHint from '@/components/ApiDataHint'
 import { getOrcaPositionsByOwner, getPositions } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import { formatUSD, formatPercent, shortenAddress, formatUsdcPriceRange } from '@/lib/utils'
+import { PoolPairLabels } from '@/components/PoolPairLabels'
 
 function rangeCellClass(inRange: boolean | undefined) {
   if (inRange === true) {
@@ -98,16 +99,32 @@ export default function Positions() {
                 <tbody>
                   {positions.map((position) => (
                     <tr key={position.address} className="border-b last:border-0">
-                      <td className="py-4">
-                        <Link 
+                      <td className="py-4 max-w-[14rem]">
+                        <Link
                           to={`/positions/${position.address}`}
-                          className="font-medium hover:text-primary"
+                          className="block hover:text-primary space-y-1"
                         >
-                          {shortenAddress(position.address)}
+                          <PoolPairLabels
+                            labelA={position.token_a_label}
+                            labelB={position.token_b_label}
+                            mintA={position.token_mint_a}
+                            mintB={position.token_mint_b}
+                            priceA={position.token_price_a_usd}
+                            priceB={position.token_price_b_usd}
+                          />
+                          {position.token_a_label && position.token_b_label ? (
+                            <div className="text-[11px] text-muted-foreground font-mono">
+                              PDA {shortenAddress(position.address)}
+                            </div>
+                          ) : (
+                            <div className="font-medium font-mono text-sm">
+                              {shortenAddress(position.address)}
+                            </div>
+                          )}
                         </Link>
                       </td>
                       <td className="py-4 text-muted-foreground">
-                        {shortenAddress(position.pool_address)}
+                        <span className="font-mono text-xs">{shortenAddress(position.pool_address)}</span>
                       </td>
                       <td className="py-4">
                         <div className="space-y-0.5">
@@ -219,8 +236,8 @@ export default function Positions() {
                     <thead>
                       <tr className="border-b text-left text-sm text-muted-foreground">
                         <th className="pb-3 font-medium">Kind</th>
-                        <th className="pb-3 font-medium">Position</th>
-                        <th className="pb-3 font-medium">Pool</th>
+                        <th className="pb-3 font-medium">Pair (mints · USD)</th>
+                        <th className="pb-3 font-medium">Whirlpool</th>
                         <th className="pb-3 font-medium">Range (in / out)</th>
                         <th className="pb-3 font-medium text-right">Liquidity (raw)</th>
                       </tr>
@@ -229,18 +246,32 @@ export default function Positions() {
                       {chainQ.data!.entries.map((row) => (
                         <tr key={row.position_address} className="border-b last:border-0">
                           <td className="py-3 text-xs">{row.kind}</td>
-                          <td className="py-3 font-mono text-xs">
+                          <td className="py-3 text-xs max-w-[14rem]">
                             <Link
                               to={`/positions/${row.position_address}`}
-                              className="hover:text-primary"
+                              className="block hover:text-primary space-y-1"
                             >
-                              {shortenAddress(row.position_address)}
+                              <PoolPairLabels
+                                labelA={row.token_a_label}
+                                labelB={row.token_b_label}
+                                mintA={row.token_mint_a}
+                                mintB={row.token_mint_b}
+                                priceA={row.token_price_a_usd}
+                                priceB={row.token_price_b_usd}
+                              />
+                              {row.token_a_label && row.token_b_label ? (
+                                <div className="text-[11px] text-muted-foreground font-mono">
+                                  PDA {shortenAddress(row.position_address)}
+                                </div>
+                              ) : (
+                                <div className="font-mono font-medium">{shortenAddress(row.position_address)}</div>
+                              )}
+                              {row.position_bundle_address ? (
+                                <span className="block text-muted-foreground mt-0.5 text-[10px]">
+                                  bundle {shortenAddress(row.position_bundle_address)}
+                                </span>
+                              ) : null}
                             </Link>
-                            {row.position_bundle_address && (
-                              <span className="block text-muted-foreground mt-0.5">
-                                bundle {shortenAddress(row.position_bundle_address)}
-                              </span>
-                            )}
                           </td>
                           <td className="py-3 text-muted-foreground font-mono text-xs">
                             {shortenAddress(row.pool_address)}

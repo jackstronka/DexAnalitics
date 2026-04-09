@@ -476,15 +476,37 @@ pub fn print_candidate_sets(
         capital_dec,
     );
 
-    // Full grid audit: summarize each LastCandle variant (candle_steps × rebalance_steps)
-    // by its best-performing width/range (according to the caller's objective score).
-    let mut last_candle_best: std::collections::BTreeMap<(u64, u64), (f64, f64, f64, String, TrackerSummary, Decimal)> =
-        std::collections::BTreeMap::new();
+    // Full grid audit: summarize each LastCandle variant by its best-performing width/range.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+    enum LastCandleKey {
+        Steps { candle_steps: u64, rebalance_steps: u64 },
+        Time { candle_seconds: u64, rebalance_seconds: u64 },
+    }
+
+    let mut last_candle_best: std::collections::BTreeMap<
+        LastCandleKey,
+        (f64, f64, f64, String, TrackerSummary, Decimal),
+    > = std::collections::BTreeMap::new();
     for row in results.iter().cloned() {
         let name = row.3.as_str();
         let Some(cfg) = parse_strategy_label(name) else { continue };
-        let StratConfig::LastCandle { candle_steps, rebalance_steps } = cfg else { continue };
-        let key = (candle_steps, rebalance_steps);
+        let key = match cfg {
+            StratConfig::LastCandle {
+                candle_steps,
+                rebalance_steps,
+            } => LastCandleKey::Steps {
+                candle_steps,
+                rebalance_steps,
+            },
+            StratConfig::LastCandleTime {
+                candle_seconds,
+                rebalance_seconds,
+            } => LastCandleKey::Time {
+                candle_seconds,
+                rebalance_seconds,
+            },
+            _ => continue,
+        };
         match last_candle_best.get(&key) {
             None => {
                 last_candle_best.insert(key, row);
@@ -499,7 +521,7 @@ pub fn print_candidate_sets(
 
     if !last_candle_best.is_empty() {
         // In snapshot-path mode, steps are raw snapshot rows (irregular spacing); `resolution_seconds`
-        // is only an indexing hint. For a meaningful wall-clock label, derive step cadence from data.
+        // is only an indexing hint. For step-based labels derive cadence from data.
         let derived_step_seconds: u64 = audit_step_data
             .and_then(|v| {
                 if v.len() < 3 {
@@ -518,8 +540,7 @@ pub fn print_candidate_sets(
             })
             .unwrap_or_else(|| resolution_seconds.max(1));
 
-        let fmt_span = |steps: u64| -> String {
-            let secs = steps.saturating_mul(derived_step_seconds);
+        let fmt_seconds = |secs: u64| -> String {
             if secs < 3600 {
                 format!("{}m", secs / 60)
             } else if secs % 3600 == 0 {
@@ -528,15 +549,15 @@ pub fn print_candidate_sets(
                 format!("{:.1}h", (secs as f64) / 3600.0)
             }
         };
+        let fmt_steps = |steps: u64| -> String { fmt_seconds(steps.saturating_mul(derived_step_seconds)) };
 
         println!();
         println!("== Last-candle grid (best per variant) ==");
         let mut t = Table::new();
         t.add_row(row![
-            "candle_steps",
-            "candle_time",
-            "rebalance_steps",
-            "rebalance_time",
+            "variant",
+            "candle",
+            "rebalance",
             "best_width%",
             "Score",
             "vsHODL",
@@ -544,12 +565,27 @@ pub fn print_candidate_sets(
             "TIR%",
             "Rebals"
         ]);
-        for ((cs, rs), (wp, _lo_usd, _up_usd, _name, s, sc)) in last_candle_best.iter() {
+        for (key, (wp, _lo_usd, _up_usd, name, s, sc)) in last_candle_best.iter() {
+            let (candle_label, rebalance_label) = match *key {
+                LastCandleKey::Steps {
+                    candle_steps,
+                    rebalance_steps,
+                } => (
+                    format!("c{} ({})", candle_steps, fmt_steps(candle_steps)),
+                    format!("r{} ({})", rebalance_steps, fmt_steps(rebalance_steps)),
+                ),
+                LastCandleKey::Time {
+                    candle_seconds,
+                    rebalance_seconds,
+                } => (
+                    format!("{} (t{})", fmt_seconds(candle_seconds), candle_seconds),
+                    format!("{} (r{})", fmt_seconds(rebalance_seconds), rebalance_seconds),
+                ),
+            };
             t.add_row(row![
-                cs,
-                fmt_span(*cs),
-                rs,
-                fmt_span(*rs),
+                name,
+                candle_label,
+                rebalance_label,
                 format!("{:.2}", wp * 100.0),
                 format!("{:+.2}", round2(*sc)),
                 format!("{:+.2}", round2(s.vs_hodl)),

@@ -54,12 +54,19 @@ struct RegistryRow<'a> {
     event: &'a str,
     /// `cli` | `orca_bot`
     source: &'a str,
+    /// Extra classification for closes (e.g. `manual`, `strategy`, `rotation`).
+    /// Omitted for opens and legacy rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    close_kind: Option<&'a str>,
     position_pubkey: String,
     pool_address: String,
     owner_pubkey: String,
     signature: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     rebalance_session_id: Option<String>,
+    /// Optional structured snapshot of the position configuration at open (ticks, strategy params, UX intent, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
     rpc_url: String,
     accounting_note: &'static str,
 }
@@ -73,17 +80,21 @@ fn row(
     signature: &Signature,
     note: &'static str,
     rebalance_session_id: Option<String>,
+    details: Option<serde_json::Value>,
+    close_kind: Option<&'static str>,
 ) -> RegistryRow<'static> {
     RegistryRow {
         schema_version: 1,
         ts_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         event,
         source,
+        close_kind,
         position_pubkey: position.to_string(),
         pool_address: pool.to_string(),
         owner_pubkey: owner.to_string(),
         signature: signature.to_string(),
         rebalance_session_id: rebalance_session_id.or_else(rebalance_session_id_from_env),
+        details,
         rpc_url: String::new(),
         accounting_note: note,
     }
@@ -98,6 +109,7 @@ pub async fn try_append_registry_open(
     owner: &Pubkey,
     signature: &Signature,
     rebalance_session_id_override: Option<String>,
+    details: Option<serde_json::Value>,
 ) {
     if let Err(e) = append_open_inner(
         provider,
@@ -107,6 +119,7 @@ pub async fn try_append_registry_open(
         owner,
         signature,
         rebalance_session_id_override,
+        details,
     )
     .await
     {
@@ -122,6 +135,7 @@ async fn append_open_inner(
     owner: &Pubkey,
     signature: &Signature,
     rebalance_session_id_override: Option<String>,
+    details: Option<serde_json::Value>,
 ) -> Result<()> {
     let mut r = row(
         "registry_open",
@@ -132,6 +146,8 @@ async fn append_open_inner(
         signature,
         "Append-only; collectors may attach per-position jobs until registry_close for this position_pubkey.",
         rebalance_session_id_override,
+        details,
+        None,
     );
     r.rpc_url = provider.current_endpoint().await;
     append_jsonl(&r).context("registry_open jsonl")
@@ -146,6 +162,7 @@ pub async fn try_append_registry_close(
     owner: &Pubkey,
     signature: &Signature,
     rebalance_session_id_override: Option<String>,
+    close_kind: Option<&'static str>,
 ) {
     if let Err(e) = append_close_inner(
         provider,
@@ -155,6 +172,7 @@ pub async fn try_append_registry_close(
         owner,
         signature,
         rebalance_session_id_override,
+        close_kind,
     )
     .await
     {
@@ -170,6 +188,7 @@ async fn append_close_inner(
     owner: &Pubkey,
     signature: &Signature,
     rebalance_session_id_override: Option<String>,
+    close_kind: Option<&'static str>,
 ) -> Result<()> {
     let mut r = row(
         "registry_close",
@@ -180,6 +199,8 @@ async fn append_close_inner(
         signature,
         "Append-only; last registry_close vs registry_open per position_pubkey defines whether position is active.",
         rebalance_session_id_override,
+        None,
+        close_kind,
     );
     r.rpc_url = provider.current_endpoint().await;
     append_jsonl(&r).context("registry_close jsonl")

@@ -169,6 +169,24 @@ pub struct PositionResponse {
     /// e.g. `per 1 SOL` — only set when `range_*_usdc` are present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_usdc_quote: Option<String>,
+    /// Pool token A label (e.g. SOL) when valuation succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_a_label: Option<String>,
+    /// Pool token B label (e.g. USDC) when valuation succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_b_label: Option<String>,
+    /// Pool token A mint (base58).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_a: Option<String>,
+    /// Pool token B mint (base58).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_b: Option<String>,
+    /// Best-effort USD price for one UI unit of token A (free feeds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_price_a_usd: Option<f64>,
+    /// Best-effort USD price for one UI unit of token B.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_price_b_usd: Option<f64>,
     /// Per-token uncollected fees (on-chain), when pool + mint decimals could be resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uncollected_fees: Option<UncollectedFeesInfo>,
@@ -268,6 +286,154 @@ pub struct PnLResponse {
     pub net_pnl_pct: Decimal,
 }
 
+/// Stream-level aggregates for a position PDA (across close->open rotations).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionStreamPerformanceResponse {
+    /// Position PDA used as the entry point for graph traversal.
+    pub position_address: String,
+    /// All known PDAs connected to this stream (from IL ledger edges).
+    pub positions: Vec<String>,
+    /// All known `rebalance_session_id`s connected to this stream.
+    pub sessions: Vec<String>,
+    /// Total network fee across matching lifecycle rows (lamports).
+    pub total_tx_fee_lamports: u64,
+    /// Total network fee in USD (best-effort, SOL/USD from free price fetch).
+    #[schema(value_type = String)]
+    pub total_tx_fee_usd: Decimal,
+    /// Number of `bot_collect_fees` events included.
+    pub collect_events: u32,
+    /// Sum of `fee_payer_token_a_delta_ui` across collect events (token A UI units).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub collected_token_a_ui: Option<Decimal>,
+    /// Sum of `fee_payer_token_b_delta_ui` across collect events (token B UI units).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub collected_token_b_ui: Option<Decimal>,
+    /// Optional info about limitations / data quality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Stream-level Net PnL / IL across rotated position PDAs (best-effort).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionStreamPnLResponse {
+    /// Position PDA used as the entry point.
+    pub position_address: String,
+    /// Baseline snapshot timestamp (earliest known for the stream).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_ts_utc: Option<String>,
+    /// Current snapshot timestamp (latest known for the stream).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_ts_utc: Option<String>,
+    /// Baseline value in USD (from earliest valuation snapshot).
+    #[schema(value_type = String)]
+    pub baseline_value_usd: Decimal,
+    /// Current value in USD (from latest valuation snapshot).
+    #[schema(value_type = String)]
+    pub current_value_usd: Decimal,
+    /// HODL value in USD for the baseline basket at current prices (used for IL).
+    #[schema(value_type = String)]
+    pub hodl_value_usd: Decimal,
+    /// IL in USD (LP - HODL) for the baseline basket.
+    #[schema(value_type = String)]
+    pub il_usd: Decimal,
+    /// IL% (LP - HODL) / HODL.
+    #[schema(value_type = String)]
+    pub il_pct: Decimal,
+    /// Total network fees in USD (tx_fee_lamports × SOL/USD).
+    #[schema(value_type = String)]
+    pub tx_fees_usd: Decimal,
+    /// Realized cashflow estimate in USD from lifecycle `fee_payer_token_deltas` for pool leg mints.
+    #[schema(value_type = String)]
+    pub realized_cashflow_usd: Decimal,
+    /// Net PnL in USD: current_value + realized_cashflow - baseline_value - tx_fees.
+    #[schema(value_type = String)]
+    pub net_pnl_usd: Decimal,
+    /// Net PnL% vs baseline value.
+    #[schema(value_type = String)]
+    pub net_pnl_pct: Decimal,
+    /// Notes about data quality / limitations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One node (one PDA) in a rotated position stream lineage.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionStreamLineageNode {
+    /// Position PDA (base58).
+    pub position_address: String,
+    /// Earliest valuation snapshot timestamp for this PDA (best-effort open time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_ts_utc: Option<String>,
+    /// Latest valuation snapshot timestamp for this PDA (best-effort close/current time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_ts_utc: Option<String>,
+    /// Baseline value for this PDA (earliest known valuation snapshot).
+    #[schema(value_type = String)]
+    pub baseline_value_usd: Decimal,
+    /// Latest known value for this PDA (latest valuation snapshot).
+    #[schema(value_type = String)]
+    pub current_value_usd: Decimal,
+    /// Sum of Solana **network** tx fees (`meta.fee`) in lamports for all lifecycle rows for this PDA.
+    pub tx_fee_lamports: u64,
+    /// Network tx fees in USD (`tx_fee_lamports` × SOL/USD).
+    #[schema(value_type = String)]
+    pub tx_fees_usd: Decimal,
+    /// LP **fees collected** in USD: positive token deltas from `bot_collect_fees` rows for pool mints × current USD prices.
+    #[schema(value_type = String)]
+    pub fees_collected_usd: Decimal,
+    /// Count of `bot_collect_fees` ledger rows for this PDA.
+    pub collect_events: u32,
+    /// Realized cashflow estimate in USD from `fee_payer_token_deltas` (pool legs) for this PDA.
+    #[schema(value_type = String)]
+    pub realized_cashflow_usd: Decimal,
+    /// Net PnL estimate for this PDA: current_value + realized_cashflow - baseline_value - tx_fees.
+    #[schema(value_type = String)]
+    pub net_pnl_usd: Decimal,
+    /// Net PnL% vs baseline value.
+    #[schema(value_type = String)]
+    pub net_pnl_pct: Decimal,
+    /// Notes about data quality / limitations for this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Aggregated **network costs** and **LP fees collected** across the full rotation chain.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LineageChainCostSummary {
+    /// Sum of `tx_fee_lamports` over all PDAs in `chain`.
+    pub tx_fee_lamports_total: u64,
+    /// Sum of `tx_fees_usd` over all nodes.
+    #[schema(value_type = String)]
+    pub tx_fees_usd_total: Decimal,
+    /// Sum of `fees_collected_usd` over all nodes.
+    #[schema(value_type = String)]
+    pub fees_collected_usd_total: Decimal,
+    /// Sum of `collect_events` over all nodes.
+    pub collect_events_total: u32,
+}
+
+/// Ordered lineage for a position stream (root → … → current) plus per-node metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionStreamLineageResponse {
+    /// Entry point PDA (base58) used for traversal.
+    pub position_address: String,
+    /// Ordered chain of PDAs (best-effort).
+    pub chain: Vec<String>,
+    /// Same chain as `chain`, but enriched with per-node aggregates.
+    pub nodes: Vec<PositionStreamLineageNode>,
+    /// Optional stream totals (same as `GET /positions/{address}/stream-pnl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<PositionStreamPnLResponse>,
+    /// Whole-chain rollup of network tx costs vs LP fees collected (sum of per-node fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_cost_summary: Option<LineageChainCostSummary>,
+    /// Notes about lineage reconstruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// Position status.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -289,6 +455,142 @@ pub struct ListPositionsResponse {
     pub positions: Vec<PositionResponse>,
     /// Total count.
     pub total: usize,
+}
+
+/// One closed position entry from the append-only registry (`data/positions/registry.jsonl`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ClosedPositionEntry {
+    /// Position PDA (base58).
+    pub position_address: String,
+    /// Pool address (base58) as recorded on open/close.
+    pub pool_address: String,
+    /// Owner pubkey (base58) as recorded on open/close.
+    pub owner: String,
+    /// Close classification when known (`manual` vs `strategy` vs `rotation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_kind: Option<String>,
+    /// Open timestamp (ISO-8601 from registry row).
+    #[schema(value_type = Option<String>)]
+    pub opened_ts_utc: Option<String>,
+    /// Close timestamp (ISO-8601 from registry row).
+    #[schema(value_type = Option<String>)]
+    pub closed_ts_utc: Option<String>,
+    /// Correlation id when present (`rebalance_session_id` from registry rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_rebalance_session_id: Option<String>,
+}
+
+/// `GET /positions/closed` response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ClosedPositionsResponse {
+    pub total: usize,
+    pub items: Vec<ClosedPositionEntry>,
+    /// Notes about data quality / limitations (e.g. missing registry file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One lifecycle/ledger row (normalized) for UI summaries.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionLifecycleEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebalance_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_fee_lamports: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_payer_net_lamports_delta: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub fee_payer_token_deltas: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionLifecycleSessionSummary {
+    /// `rebalance_session_id` (or `_no_session` for rows without one).
+    pub session_id: String,
+    pub events: Vec<PositionLifecycleEvent>,
+    pub total_tx_fee_lamports: u64,
+    /// Count of events where `event` contains `rebalance` or `close+open` cycle signals (best-effort).
+    pub rebalance_related_events: u32,
+}
+
+/// `GET /positions/{address}/lifecycle-summary` response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionLifecycleSummaryResponse {
+    pub position_address: String,
+    /// All PDAs connected to this stream when IL edges are available; otherwise only the entry PDA.
+    pub positions: Vec<String>,
+    /// Sessions connected to the stream (from IL edges + lifecycle rows).
+    pub sessions: Vec<String>,
+    pub total_tx_fee_lamports: u64,
+    #[schema(value_type = String)]
+    pub total_tx_fee_usd: Decimal,
+    pub collect_events: u32,
+    /// Best-effort sum of **collected LP fees** (token A UI units) from `bot_collect_fees` rows.
+    ///
+    /// Derived from `fee_payer_token_deltas` (positive deltas) for the pool's token A mint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub collected_fee_token_a_ui: Option<Decimal>,
+    /// Best-effort sum of **collected LP fees** (token B UI units) from `bot_collect_fees` rows.
+    ///
+    /// Derived from `fee_payer_token_deltas` (positive deltas) for the pool's token B mint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub collected_fee_token_b_ui: Option<Decimal>,
+    /// Best-effort USD value of collected LP fees (A/B legs) at **current** mint prices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub collected_fees_usd: Option<Decimal>,
+    #[schema(value_type = String)]
+    pub realized_cashflow_usd: Decimal,
+    pub session_summaries: Vec<PositionLifecycleSessionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Best-effort canonical “experiment config” for a position (from `registry_open.details` + ledger).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionExperimentConfigResponse {
+    pub position_address: String,
+    /// `rebalance_session_id` recorded on `registry_open` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_session_id: Option<String>,
+    /// Raw `details` JSON stored on `registry_open`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub open_details: Option<serde_json::Value>,
+    /// `tick_lower` extracted from `open_details` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_lower: Option<i32>,
+    /// `tick_upper` extracted from `open_details` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_upper: Option<i32>,
+    /// Derived `lower` price (A/B) from `tick_lower` using `tick_to_price`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_lower: Option<f64>,
+    /// Derived `upper` price (A/B) from `tick_upper` using `tick_to_price`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_upper: Option<f64>,
+    /// Derived initial capital (USD) from open-session `fee_payer_token_deltas` (best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_initial_capital_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// On-chain Orca Whirlpool positions for a wallet (RPC scan; same source as `orca-positions-list` CLI).
@@ -330,6 +632,18 @@ pub struct OrcaOwnerPositionEntry {
     /// Pool spot tick inside `[tick_lower, tick_upper)` (same rule as monitor `in_range`).
     #[serde(default)]
     pub in_range: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_a_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_b_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_b: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_price_a_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_price_b_usd: Option<f64>,
 }
 
 // ============================================================================
@@ -565,6 +879,10 @@ pub struct StrategyParameters {
     /// Append IL / rebalance ledger lines (JSONL) to this file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub il_ledger_path: Option<String>,
+
+    /// If true, API will auto-start this strategy on boot when `CLMM_STRATEGY_AUTOSTART_ON_BOOT` is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_start: Option<bool>,
     /// When using `POST .../apply-optimize-result` with an agent envelope, cap `|Δ winner.width_pct|` vs `baseline_optimize_result` (same units as backtest: fraction, e.g. `0.02` = 2 percentage points).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_max_width_pct_delta: Option<f64>,
@@ -978,6 +1296,66 @@ pub struct SimulationResponse {
     pub rebalance_count: u32,
     /// How the price path and strategy were chosen (transparency for operators).
     pub methodology_note: String,
+}
+
+/// Request for `POST /backtests/from-closed-position`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFromClosedPositionRequest {
+    pub position_address: String,
+    /// Override: lower bound price (A/B). By default derived from `tick_lower` in registry details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower: Option<f64>,
+    /// Override: upper bound price (A/B). By default derived from `tick_upper` in registry details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper: Option<f64>,
+    /// Override: initial capital USD. By default derived from open-session token deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capital: Option<f64>,
+    /// Strategy string accepted by CLI (`static|periodic|threshold` etc.). Defaults to `static`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Optional start date (UTC) YYYY-MM-DD. If omitted, inferred from registry_open timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    /// Optional end date (UTC) YYYY-MM-DD exclusive. If omitted, inferred from registry_close timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    /// Fee source accepted by CLI (default `snapshots`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_source: Option<String>,
+    /// Price path source accepted by CLI (default `snapshots`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_path_source: Option<String>,
+    /// Snapshot protocol accepted by CLI (default `orca`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestJobStatusResponse {
+    pub id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestJobResponse {
+    pub id: String,
+    pub position_address: String,
+    pub pool_address: String,
+    pub status: String,
+    pub started_ts_utc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ============================================================================

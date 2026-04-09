@@ -502,7 +502,37 @@ impl RpcProvider {
                     .context("get_signature_statuses")?;
                 if let Some(Some(status)) = statuses.value.first() {
                     if let Some(err) = status.err.clone() {
-                        return Err(anyhow::anyhow!("transaction error: {err:?}"));
+                        let mut err_s = format!(
+                            "transaction error (endpoint={endpoint}, signature={sig}): {err:?}"
+                        );
+                        // Add program context for InstructionError(N, Custom(X)) and similar.
+                        if let solana_sdk::transaction::TransactionError::InstructionError(
+                            ix_index,
+                            ix_err,
+                        ) = &err
+                        {
+                            let ix_index = *ix_index as usize;
+                            let progs = format_instruction_program_ids(&tx);
+                            if !progs.is_empty() {
+                                err_s.push_str(&format!(" | ix_programs={progs}"));
+                            }
+                            if let Some(ci) = tx.message.instructions.get(ix_index) {
+                                let pid = tx
+                                    .message
+                                    .account_keys
+                                    .get(ci.program_id_index as usize)
+                                    .map(|p| p.to_string());
+                                if let Some(pid) = pid {
+                                    err_s.push_str(&format!(" | ix_program={ix_index}:{pid}"));
+                                }
+                            }
+                            if let solana_sdk::instruction::InstructionError::Custom(code) =
+                                ix_err
+                            {
+                                err_s.push_str(&format!(" | custom_code={code}"));
+                            }
+                        }
+                        return Err(anyhow::anyhow!("{err_s}"));
                     }
 
                     let ok = match self.config.commitment {

@@ -44,6 +44,7 @@ export default function StrategyCreate() {
   // Semantics toggles (defaults = old behavior).
   const [periodicRequiresOutOfRange, setPeriodicRequiresOutOfRange] = useState(false)
   const [rebalanceOnRangeExitImmediately, setRebalanceOnRangeExitImmediately] = useState(true)
+  const [autoStart, setAutoStart] = useState(true)
 
   const enabled = FIELD_ENABLED[strategyType]
 
@@ -119,6 +120,7 @@ export default function StrategyCreate() {
         minRebalanceIntervalHours,
         periodicRequiresOutOfRange,
         rebalanceOnRangeExitImmediately,
+        autoStart,
       }),
       // Zawsze wysyłaj pole — starsze API wymagały `pool_address` w body; pusty = brak puli (pool przy Open Position).
       pool_address: '',
@@ -376,6 +378,29 @@ export default function StrategyCreate() {
                         Enabled only for Periodic strategy type.
                       </p>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <p className="text-sm font-medium text-foreground">Startup</p>
+                <div className="flex items-start gap-2">
+                  <input
+                    id="create-auto-start"
+                    type="checkbox"
+                    checked={autoStart}
+                    onChange={(e) => setAutoStart(e.target.checked)}
+                    className="mt-0.5 rounded border-input"
+                  />
+                  <div className="flex-1">
+                    <FieldLabel
+                      htmlFor="create-auto-start"
+                      label="Auto-start on API boot"
+                      tooltip={TOOLTIPS.autoStart}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Requires server env <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT=1</code>.
+                    </p>
                   </div>
                 </div>
               </div>

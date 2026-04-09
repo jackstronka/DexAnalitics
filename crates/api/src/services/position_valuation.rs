@@ -39,6 +39,18 @@ pub struct PositionUsdValuation {
     pub fees_usd: Decimal,
     pub amount_a_raw: u64,
     pub amount_b_raw: u64,
+    /// Token A amount in UI units (human, decimals applied).
+    pub amount_a_ui: Decimal,
+    /// Token B amount in UI units (human, decimals applied).
+    pub amount_b_ui: Decimal,
+    /// Pool token A mint.
+    pub token_mint_a: Pubkey,
+    /// Pool token B mint.
+    pub token_mint_b: Pubkey,
+    /// USD price used for token A valuation (best-effort).
+    pub price_a_usd: f64,
+    /// USD price used for token B valuation (best-effort).
+    pub price_b_usd: f64,
     pub range_usdc: Option<TickRangeUsdc>,
     /// Spot is inside `[tick_lower, tick_upper)` using **fresh** pool tick from RPC.
     pub in_range: bool,
@@ -230,6 +242,77 @@ pub async fn range_usdc_and_in_range_for_pool_ticks(
         dec_b,
     );
     (range, in_range)
+}
+
+/// One pool RPC read: USDC range + in-range + token labels, mints, and USD spot prices (for user-friendly tables).
+pub struct PoolTicksEnrichment {
+    pub range_usdc: Option<TickRangeUsdc>,
+    pub in_range: bool,
+    pub token_a_label: Option<String>,
+    pub token_b_label: Option<String>,
+    pub token_mint_a: Option<String>,
+    pub token_mint_b: Option<String>,
+    pub token_price_a_usd: Option<f64>,
+    pub token_price_b_usd: Option<f64>,
+}
+
+impl Default for PoolTicksEnrichment {
+    fn default() -> Self {
+        Self {
+            range_usdc: None,
+            in_range: false,
+            token_a_label: None,
+            token_b_label: None,
+            token_mint_a: None,
+            token_mint_b: None,
+            token_price_a_usd: None,
+            token_price_b_usd: None,
+        }
+    }
+}
+
+pub async fn enrich_pool_ticks_for_display(
+    provider: Arc<RpcProvider>,
+    pool: &Pubkey,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> PoolTicksEnrichment {
+    let pool_reader = WhirlpoolReader::new(provider.clone());
+    let Some(pool_state) = pool_reader.get_pool_state(&pool.to_string()).await.ok() else {
+        return PoolTicksEnrichment {
+            range_usdc: None,
+            in_range: false,
+            token_a_label: None,
+            token_b_label: None,
+            token_mint_a: None,
+            token_mint_b: None,
+            token_price_a_usd: None,
+            token_price_b_usd: None,
+        };
+    };
+    let in_range = pool_state.is_tick_in_range(tick_lower, tick_upper);
+    let ma = pool_state.token_mint_a;
+    let mb = pool_state.token_mint_b;
+    let dec_a = fetch_mint_decimals(provider.as_ref(), &ma).await.ok();
+    let dec_b = fetch_mint_decimals(provider.as_ref(), &mb).await.ok();
+    let range_usdc = match (dec_a, dec_b) {
+        (Some(da), Some(db)) => compute_tick_range_usdc(tick_lower, tick_upper, &ma, &mb, da, db),
+        _ => None,
+    };
+    let mut mints = BTreeSet::new();
+    mints.insert(ma.to_string());
+    mints.insert(mb.to_string());
+    let prices_map = fetch_mint_prices_usd(&mints).await.0;
+    PoolTicksEnrichment {
+        range_usdc,
+        in_range,
+        token_a_label: Some(token_short_label(&ma)),
+        token_b_label: Some(token_short_label(&mb)),
+        token_mint_a: Some(ma.to_string()),
+        token_mint_b: Some(mb.to_string()),
+        token_price_a_usd: prices_map.get(&ma.to_string()).copied(),
+        token_price_b_usd: prices_map.get(&mb.to_string()).copied(),
+    }
 }
 
 /// Pool + ticks only (no `MonitoredPosition`); used by Orca RPC scan and callers that already have ticks.
@@ -481,6 +564,12 @@ pub async fn compute_position_usd_valuation(
         fees_usd,
         amount_a_raw,
         amount_b_raw,
+        amount_a_ui: Decimal::from_f64_retain(a_ui).unwrap_or(Decimal::ZERO),
+        amount_b_ui: Decimal::from_f64_retain(b_ui).unwrap_or(Decimal::ZERO),
+        token_mint_a: pool_state.token_mint_a,
+        token_mint_b: pool_state.token_mint_b,
+        price_a_usd: pa,
+        price_b_usd: pb,
         range_usdc,
         in_range,
         fees_owed_a_ui,

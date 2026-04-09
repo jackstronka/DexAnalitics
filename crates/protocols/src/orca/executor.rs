@@ -18,12 +18,38 @@ use orca_whirlpools::{
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
-    instruction::Instruction, pubkey::Pubkey, signature::Keypair, signature::Signature,
-    signer::Signer, transaction::Transaction,
+    instruction::Instruction,
+    pubkey::Pubkey,
+    signature::Keypair,
+    signature::Signature,
+    signer::Signer,
+    transaction::Transaction,
 };
+use solana_system_interface::instruction as system_instruction;
+use spl_associated_token_account::get_associated_token_address;
+use spl_associated_token_account::instruction::create_associated_token_account;
+use solana_program_pack::Pack;
+use spl_token::state::Account as SplTokenAccount;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+fn is_whirlpool_custom_code(err: &str, code: u32) -> bool {
+    // Errors are produced by `RpcProvider::send_and_confirm_transaction` and typically include:
+    // `... InstructionError(N, Custom(X)) ... | ix_program=...whirL... | custom_code=X`
+    // Be robust to formatting differences.
+    let needle = format!("custom_code={code}");
+    (err.contains(&needle) || err.contains(&format!("Custom({code})")))
+        && err.contains(WHIRLPOOL_PROGRAM_ID)
+}
+
+fn env_retry_attempts(var: &str, fallback: u8) -> u8 {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .filter(|&n| n >= 1 && n <= 50)
+        .unwrap_or(fallback)
+}
 
 /// Default min-out slippage for `close_position` when the caller passes `None` (basis points).
 /// Prefer keeping this **low** to limit worse-than-quoted token amounts; if Whirlpool returns
@@ -46,6 +72,24 @@ pub const WHIRLPOOL_PROGRAM_ID: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uct
 
 /// Token program ID.
 pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// Wrapped SOL mint (SPL).
+pub const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+/// Extra lamports to wrap beyond `token_max` so rounding / on-chain paths do not hit `InsufficientFunds`
+/// on the WSOL leg (Orca still debits SPL token balance, not “max - epsilon” in all CPI paths).
+fn wsol_deposit_target_with_buffer(needed_amount: u64) -> u64 {
+    if needed_amount == 0 {
+        return 0;
+    }
+    needed_amount
+        .saturating_add(needed_amount.saturating_mul(50) / 10_000)
+        .saturating_add(50_000)
+}
+
+fn wsol_deposit_target_exact(needed_amount: u64) -> u64 {
+    needed_amount
+}
 
 /// Associated token program ID.
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
@@ -188,6 +232,93 @@ impl WhirlpoolExecutor {
         Self { provider }
     }
 
+    async fn read_spl_token_amount_opt(&self, ata: &Pubkey) -> Result<u64> {
+        let opt = self
+            .provider
+            .get_multiple_accounts(&[*ata])
+            .await
+            .context("fetch SPL token account")?
+            .into_iter()
+            .next()
+            .flatten();
+        let Some(acct) = opt else {
+            return Ok(0);
+        };
+        let parsed = SplTokenAccount::unpack(&acct.data).context("unpack SPL token account")?;
+        Ok(parsed.amount)
+    }
+
+    /// Fail fast with a clear message if the **signing wallet** cannot cover raw deposit caps.
+    async fn preflight_open_liquidity_balances(
+        &self,
+        minimal: &crate::orca::whirlpool::WhirlpoolMinimal,
+        amount_a: u64,
+        amount_b: u64,
+        payer: &Keypair,
+    ) -> Result<()> {
+        let wsol = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let owner = payer.pubkey();
+
+        let check_non_wsol = |mint: Pubkey, need: u64, leg: &'static str| async move {
+            if need == 0 {
+                return Ok(());
+            }
+            let ata = get_associated_token_address(&owner, &mint);
+            let bal = self.read_spl_token_amount_opt(&ata).await?;
+            if bal < need {
+                anyhow::bail!(
+                    "open preflight: insufficient SPL balance on {leg} (mint {mint}): have {bal} raw, need {need} raw \
+                     — fund the API wallet’s token account for this mint or lower Amount. (owner {owner})"
+                );
+            }
+            Ok(())
+        };
+
+        let check_wsol = |need: u64, leg: &'static str| async move {
+            if need == 0 {
+                return Ok(());
+            }
+            let target = wsol_deposit_target_with_buffer(need);
+            let ata = get_associated_token_address(&owner, &wsol);
+            let current = self.read_spl_token_amount_opt(&ata).await?;
+            if current >= target {
+                return Ok(());
+            }
+            let topup = target - current;
+            let native = self
+                .provider
+                .get_balance(&owner)
+                .await
+                .context("fetch native SOL balance for WSOL preflight")?;
+            // Rent for new accounts in the same tx + signature fee — stay conservative.
+            const NATIVE_PAD_LAMPORTS: u64 = 2_500_000;
+            if native < topup.saturating_add(NATIVE_PAD_LAMPORTS) {
+                anyhow::bail!(
+                    "open preflight: not enough native SOL to wrap ~{topup} lamports into WSOL for {leg} \
+                     (target {target} lamports in wSOL ATA; have {current} wrapped; native SOL {native}). \
+                     Top up SOL on the API wallet or lower Amount. (owner {owner})"
+                );
+            }
+            Ok(())
+        };
+
+        if amount_a > 0 {
+            if minimal.token_mint_a == wsol {
+                check_wsol(amount_a, "token A").await?;
+            } else {
+                check_non_wsol(minimal.token_mint_a, amount_a, "token A").await?;
+            }
+        }
+        if amount_b > 0 {
+            if minimal.token_mint_b == wsol {
+                check_wsol(amount_b, "token B").await?;
+            } else {
+                check_non_wsol(minimal.token_mint_b, amount_b, "token B").await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Opens a new position in a Whirlpool.
     ///
     /// # Arguments
@@ -218,6 +349,41 @@ impl WhirlpoolExecutor {
             .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
         let rpc = RpcClient::new(endpoint);
 
+        let pool_acct = self
+            .provider
+            .get_account(&params.pool)
+            .await
+            .context("fetch whirlpool account (open preflight / WSOL wrap)")?;
+        let minimal = crate::orca::whirlpool::parse_whirlpool_minimal(&pool_acct.data)
+            .context("parse whirlpool mints (open preflight / WSOL wrap)")?;
+
+        self.preflight_open_liquidity_balances(
+            &minimal,
+            params.amount_a,
+            params.amount_b,
+            payer,
+        )
+        .await?;
+
+        // If a pool leg is WSOL, the operator often has enough native SOL but **0 WSOL tokens**.
+        // Orca SDK will use WSOL ATA for transfers; without pre-wrapping this fails with Tokenkeg `InsufficientFunds`.
+        let mut pre_ix: Vec<Instruction> = Vec::new();
+        if params.amount_a > 0 || params.amount_b > 0 {
+            let wsol = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+            if minimal.token_mint_a == wsol {
+                pre_ix.extend(
+                    self.ensure_wsol_ata_funded(params.amount_a, payer, true)
+                        .await?,
+                );
+            }
+            if minimal.token_mint_b == wsol {
+                pre_ix.extend(
+                    self.ensure_wsol_ata_funded(params.amount_b, payer, true)
+                        .await?,
+                );
+            }
+        }
+
         let opened = open_position_instructions_with_tick_bounds(
             &rpc,
             params.pool,
@@ -240,8 +406,10 @@ impl WhirlpoolExecutor {
             &whirlpool_program,
         );
 
+        let mut all_ix = pre_ix;
+        all_ix.extend(opened.instructions);
         let mut res = self
-            .send_transaction_with_signers(&opened.instructions, payer, &opened.additional_signers)
+            .send_transaction_with_signers(&all_ix, payer, &opened.additional_signers)
             .await?;
         if res.success {
             res.created_position = Some(position_pda);
@@ -270,6 +438,39 @@ impl WhirlpoolExecutor {
             .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
         let rpc = RpcClient::new(endpoint);
 
+        let pool_acct = self
+            .provider
+            .get_account(&params.pool)
+            .await
+            .context("fetch whirlpool account (open preflight / WSOL wrap)")?;
+        let minimal = crate::orca::whirlpool::parse_whirlpool_minimal(&pool_acct.data)
+            .context("parse whirlpool mints (open preflight / WSOL wrap)")?;
+
+        self.preflight_open_liquidity_balances(
+            &minimal,
+            params.amount_a,
+            params.amount_b,
+            payer,
+        )
+        .await?;
+
+        let mut pre_ix: Vec<Instruction> = Vec::new();
+        if params.amount_a > 0 || params.amount_b > 0 {
+            let wsol = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+            if minimal.token_mint_a == wsol {
+                pre_ix.extend(
+                    self.ensure_wsol_ata_funded(params.amount_a, payer, true)
+                        .await?,
+                );
+            }
+            if minimal.token_mint_b == wsol {
+                pre_ix.extend(
+                    self.ensure_wsol_ata_funded(params.amount_b, payer, true)
+                        .await?,
+                );
+            }
+        }
+
         let opened = open_full_range_position_instructions(
             &rpc,
             params.pool,
@@ -290,8 +491,10 @@ impl WhirlpoolExecutor {
             &whirlpool_program,
         );
 
+        let mut all_ix = pre_ix;
+        all_ix.extend(opened.instructions);
         let mut res = self
-            .send_transaction_with_signers(&opened.instructions, payer, &opened.additional_signers)
+            .send_transaction_with_signers(&all_ix, payer, &opened.additional_signers)
             .await?;
         if res.success {
             res.created_position = Some(position_pda);
@@ -299,12 +502,103 @@ impl WhirlpoolExecutor {
         Ok(res)
     }
 
+    async fn ensure_wsol_ata_funded(
+        &self,
+        needed_amount: u64,
+        payer: &Keypair,
+        with_buffer: bool,
+    ) -> Result<Vec<Instruction>> {
+        if needed_amount == 0 {
+            return Ok(Vec::new());
+        }
+
+        let target_amount = if with_buffer {
+            wsol_deposit_target_with_buffer(needed_amount)
+        } else {
+            wsol_deposit_target_exact(needed_amount)
+        };
+        if target_amount == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mint = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let owner = payer.pubkey();
+        let ata = get_associated_token_address(&owner, &mint);
+
+        let acct_opt = self
+            .provider
+            .get_multiple_accounts(&[ata])
+            .await
+            .context("fetch WSOL ATA account")?
+            .into_iter()
+            .next()
+            .flatten();
+
+        let mut ixs: Vec<Instruction> = Vec::new();
+
+        if acct_opt.is_none() {
+            ixs.push(create_associated_token_account(
+                &payer.pubkey(),
+                &owner,
+                &mint,
+                &spl_token::id(),
+            ));
+        }
+
+        let current_amount = if let Some(acct) = acct_opt {
+            let parsed = SplTokenAccount::unpack(&acct.data).context("unpack WSOL token account")?;
+            parsed.amount
+        } else {
+            0
+        };
+
+        if current_amount >= target_amount {
+            return Ok(ixs);
+        }
+
+        let topup = target_amount - current_amount;
+        ixs.push(system_instruction::transfer(&payer.pubkey(), &ata, topup));
+        ixs.push(
+            spl_token::instruction::sync_native(&spl_token::id(), &ata).context("build sync_native")?,
+        );
+        Ok(ixs)
+    }
+
+    /// Transfer native SOL into the owner's wSOL ATA + `sync_native` so SPL balance is usable by Orca swaps.
+    /// No-op if the ATA already holds `needed_wsol_lamports` (or `needed_wsol_lamports == 0`).
+    pub async fn submit_wsol_wrap_if_needed(
+        &self,
+        needed_wsol_lamports: u64,
+        payer: &Keypair,
+    ) -> Result<()> {
+        if needed_wsol_lamports == 0 {
+            return Ok(());
+        }
+        let ixs = self
+            .ensure_wsol_ata_funded(needed_wsol_lamports, payer, true)
+            .await?;
+        if ixs.is_empty() {
+            return Ok(());
+        }
+        let res = self
+            .send_transaction_with_signers(&ixs, payer, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("wsol wrap send: {e}"))?;
+        if !res.success {
+            let msg = res
+                .error
+                .unwrap_or_else(|| "wsol wrap transaction failed".to_string());
+            anyhow::bail!("wsol wrap failed: {msg}");
+        }
+        Ok(())
+    }
+
     /// Single-pool Orca swap (**ExactIn**) — same pool you will add liquidity to (e.g. rebalance token mix before open).
     pub async fn swap_exact_in(
         &self,
         pool: Pubkey,
         specified_mint: Pubkey,
-        amount: u64,
+        mut amount: u64,
         slippage_bps: u16,
         payer: &Keypair,
     ) -> Result<ExecutionResult> {
@@ -329,24 +623,81 @@ impl WhirlpoolExecutor {
             .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
         let rpc = RpcClient::new(endpoint);
 
-        let swap_ix: SwapInstructions = swap_instructions(
-            &rpc,
-            pool,
-            amount,
-            specified_mint,
-            SwapType::ExactIn,
-            Some(slippage_bps),
-            Some(payer.pubkey()),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("orca swap_instructions failed: {e}"))?;
+        let wsol = Pubkey::from_str(WSOL_MINT).map_err(|e| anyhow::anyhow!("wsol mint: {e}"))?;
+        let mut pre_ix: Vec<Instruction> = Vec::new();
+        if specified_mint == wsol {
+            // When the WSOL ATA is short, we wrap native SOL via a SystemProgram transfer into the ATA.
+            // Runtime evidence shows this can fail with:
+            // "Transfer: insufficient lamports X, need Y" (Instruction 0).
+            // To avoid repeated failures in swap-mix, clamp ExactIn amount to what the wallet can actually fund.
+            let owner = payer.pubkey();
+            let ata = get_associated_token_address(&owner, &wsol);
+            let current_wsol = self.read_spl_token_amount_opt(&ata).await.unwrap_or(0);
+            let native = self.provider.get_balance(&owner).await.unwrap_or(0);
+            // Leave headroom for fees/rent; this is intentionally conservative.
+            const NATIVE_SOL_RESERVE_LAMPORTS: u64 = 12_000_000;
+            let wrap_budget = native.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS);
+            let max_possible_in = current_wsol.saturating_add(wrap_budget);
+            if amount > max_possible_in {
+                amount = max_possible_in.max(1);
+            }
+            // Match `open_position`: Orca swap pulls **SPL wSOL** from the ATA; native SOL in the wallet is invisible.
+            pre_ix.extend(
+                // For swaps, avoid buffer-based wrap overshooting native SOL by a few lamports.
+                // We only need to cover the actual ExactIn amount.
+                self.ensure_wsol_ata_funded(amount, payer, false)
+                    .await
+                    .context("ensure wSOL ATA before ExactIn (specified_mint = wSOL)")?,
+            );
+        }
+        let _pre_ix_len = pre_ix.len();
 
-        self.send_transaction_with_signers(
-            &swap_ix.instructions,
-            payer,
-            &swap_ix.additional_signers,
-        )
-        .await
+        // Retry without raising slippage: rebuild instructions from fresh pool state.
+        // This addresses transient `min-out` / price-move windows that can surface as Custom(1)
+        // on the Whirlpool program for swap ix (runtime evidence).
+        let max_attempts: u8 = env_retry_attempts("WHIRLPOOL_SWAP_RETRY_ATTEMPTS", 8);
+        let mut last: Option<ExecutionResult> = None;
+        for attempt in 1..=max_attempts {
+            let swap_ix: SwapInstructions = swap_instructions(
+                &rpc,
+                pool,
+                amount,
+                specified_mint,
+                SwapType::ExactIn,
+                Some(slippage_bps),
+                Some(payer.pubkey()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("orca swap_instructions failed: {e}"))?;
+
+            let _swap_ix_len = swap_ix.instructions.len();
+            let mut all_ix = pre_ix.clone();
+            all_ix.extend(swap_ix.instructions);
+
+            let res = self
+                .send_transaction_with_signers(&all_ix, payer, &swap_ix.additional_signers)
+                .await?;
+
+            if res.success {
+                return Ok(res);
+            }
+
+            let err = res.error.clone().unwrap_or_default();
+            if is_whirlpool_custom_code(&err, 1) {
+                info!(
+                    attempt,
+                    max_attempts = max_attempts,
+                    error = %err,
+                    "swap_exact_in: Whirlpool custom_code=1; retrying with rebuilt instructions (same slippage)"
+                );
+                last = Some(res);
+                continue;
+            }
+
+            return Ok(res);
+        }
+
+        Ok(last.unwrap_or_else(|| ExecutionResult::failure(Signature::default(), "swap failed".into())))
     }
 
     /// Increases liquidity in an existing position.
@@ -511,13 +862,46 @@ impl WhirlpoolExecutor {
             .context("parse WhirlpoolPosition (borsh)")?;
 
         let slip = slippage_bps.or(Some(default_close_slippage_bps()));
-        let closed =
-            close_position_instructions(&rpc, parsed.position_mint, slip, Some(payer.pubkey()))
-                .await
-                .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
 
-        self.send_transaction_with_signers(&closed.instructions, payer, &closed.additional_signers)
+        // Retry without raising slippage: rebuild instructions from fresh pool state.
+        // Whirlpool can return 6018 (`TokenMinSubceeded`) for close when the pool moved between
+        // instruction construction and execution.
+        let max_attempts: u8 = env_retry_attempts("WHIRLPOOL_CLOSE_RETRY_ATTEMPTS", 8);
+        let mut last: Option<ExecutionResult> = None;
+        for attempt in 1..=max_attempts {
+            let closed = close_position_instructions(
+                &rpc,
+                parsed.position_mint,
+                slip,
+                Some(payer.pubkey()),
+            )
             .await
+            .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
+
+            let res = self
+                .send_transaction_with_signers(&closed.instructions, payer, &closed.additional_signers)
+                .await?;
+
+            if res.success {
+                return Ok(res);
+            }
+
+            let err = res.error.clone().unwrap_or_default();
+            if is_whirlpool_custom_code(&err, 6018) {
+                info!(
+                    attempt,
+                    max_attempts = max_attempts,
+                    error = %err,
+                    "close_position: Whirlpool custom_code=6018; retrying with rebuilt instructions (same slippage)"
+                );
+                last = Some(res);
+                continue;
+            }
+
+            return Ok(res);
+        }
+
+        Ok(last.unwrap_or_else(|| ExecutionResult::failure(Signature::default(), "close failed".into())))
     }
 
     /// Simulates a transaction without broadcasting.

@@ -92,7 +92,8 @@ enum BacktestObjectiveArg {
     /// Maximize **gross fees** only (ignores IL / vs HODL). Often picks **narrower** ranges than `vs_hodl` when volume concentrates while in-range.
     #[value(alias = "max_fees")]
     Fees,
-    /// Composite: fees - alpha*|IL|*capital - rebalance_cost (use --alpha)
+    /// Composite: `fees - alpha·IL_drag_usd - rebalance_cost` where `IL_drag_usd = max(0, -(final_il_pct·capital))`
+    /// (only underperformance vs HODL on LP **mark**, ex fees — same basis as column IL-like%). Use `--alpha`.
     #[value(alias = "composite")]
     Composite,
     /// Risk-adjusted **score** (not Sharpe): `final_pnl / (1 + max_drawdown)` using equity path drawdown in the backtest.
@@ -440,7 +441,7 @@ enum Commands {
         /// Max drawdown %% to keep (0-100, e.g. 10)
         #[arg(long)]
         max_drawdown: Option<f64>,
-        /// Alpha for composite objective: score = fees - alpha*|IL|*capital - cost
+        /// Alpha for composite objective: `fees - alpha*IL_drag_usd - rebalance_cost` with `IL_drag_usd = max(0, -(final_il_pct*capital))`
         #[arg(long, default_value_t = 1.0)]
         alpha: f64,
         /// Only run static strategy (faster, range-only grid)
@@ -941,7 +942,8 @@ enum Commands {
         /// IL / rebalance JSONL (same as `orca-bot-run --il-ledger-path`). Falls back to `CLMM_IL_LEDGER_PATH`.
         #[arg(long)]
         il_ledger: Option<std::path::PathBuf>,
-        /// Lifecycle JSONL (default: `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` or `data/ledger/orca_position_lifecycle.jsonl`).
+        /// Lifecycle JSONL (default: same read resolution as API — `ledger_read_path()`: optional
+        /// `CLMM_POSITION_LIFECYCLE_LEDGER_READ_PATH`, else enriched sibling if `CLMM_POSITION_LIFECYCLE_USE_ENRICHED`, else `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` / `data/ledger/orca_position_lifecycle.jsonl`).
         #[arg(long)]
         lifecycle_ledger: Option<std::path::PathBuf>,
     },
@@ -3345,6 +3347,7 @@ async fn main() -> Result<()> {
                 crate::commands::backtest_optimize::default_strategies(
                     *static_only,
                     *indicator_strategies,
+                    snapshots_only,
                     *il_max_pct,
                     *il_close_pct,
                     *il_grace_steps,
@@ -3369,10 +3372,12 @@ async fn main() -> Result<()> {
                     BacktestObjectiveArg::VsHodl => s.vs_hodl,
                     BacktestObjectiveArg::Fees => s.total_fees,
                     BacktestObjectiveArg::Composite => {
-                        let il_amt = (s.final_il_pct.abs() * capital_dec).min(capital_dec);
-                        s.total_fees
-                            - (Decimal::from_f64(*alpha).unwrap() * il_amt)
-                            - s.total_rebalance_cost
+                        // `final_il_pct` = (LP mark + rebalance costs paid − HODL) / capital (fees not in mark).
+                        // Penalize only **underperformance** vs HODL on that basis (one-sided IL drag in USD).
+                        let il_pct = s.final_il_pct * capital_dec;
+                        let il_drag_usd = Decimal::ZERO.max(-il_pct);
+                        let alpha_dec = Decimal::from_f64(*alpha).unwrap_or(Decimal::ONE);
+                        s.total_fees - alpha_dec * il_drag_usd - s.total_rebalance_cost
                     }
                     BacktestObjectiveArg::RiskAdj => {
                         let denom = Decimal::ONE + s.max_drawdown;

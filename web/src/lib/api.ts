@@ -13,6 +13,14 @@ export interface Position {
   range_upper_usdc?: string | number | null
   /** e.g. `per 1 SOL` */
   range_usdc_quote?: string | null
+  /** Pool leg labels when API valuation succeeded (e.g. SOL, USDC). */
+  token_a_label?: string | null
+  token_b_label?: string | null
+  token_mint_a?: string | null
+  token_mint_b?: string | null
+  /** USD per 1 UI unit of token A/B (best-effort free feeds). */
+  token_price_a_usd?: number | null
+  token_price_b_usd?: number | null
   liquidity: string
   in_range: boolean
   value_usd: string
@@ -47,6 +55,165 @@ export interface PositionDiagnosticsResponse {
   in_monitor: boolean
   monitor_in_range?: boolean | null
   linked_strategies: PositionStrategyDiagnostics[]
+}
+
+export interface PositionStreamPerformanceResponse {
+  position_address: string
+  positions: string[]
+  sessions: string[]
+  total_tx_fee_lamports: number
+  total_tx_fee_usd: string
+  collect_events: number
+  collected_token_a_ui?: string | null
+  collected_token_b_ui?: string | null
+  note?: string | null
+}
+
+export interface PositionStreamPnLResponse {
+  position_address: string
+  baseline_ts_utc?: string | null
+  current_ts_utc?: string | null
+  baseline_value_usd: string
+  current_value_usd: string
+  hodl_value_usd: string
+  il_usd: string
+  il_pct: string
+  tx_fees_usd: string
+  realized_cashflow_usd: string
+  net_pnl_usd: string
+  net_pnl_pct: string
+  note?: string | null
+}
+
+export interface PositionStreamLineageNode {
+  position_address: string
+  opened_ts_utc?: string | null
+  closed_ts_utc?: string | null
+  baseline_value_usd: string
+  current_value_usd: string
+  /** Sum of Solana network fees (lamports) for all txs logged for this PDA. */
+  tx_fee_lamports: number
+  tx_fees_usd: string
+  /** LP fees collected (USD): positive pool-leg deltas from bot_collect_fees × mint USD. */
+  fees_collected_usd: string
+  collect_events: number
+  realized_cashflow_usd: string
+  net_pnl_usd: string
+  net_pnl_pct: string
+  note?: string | null
+}
+
+/** Sums of per-node network costs vs LP fees across the full rotation chain. */
+export interface LineageChainCostSummary {
+  tx_fee_lamports_total: number
+  tx_fees_usd_total: string
+  fees_collected_usd_total: string
+  collect_events_total: number
+}
+
+export interface PositionStreamLineageResponse {
+  position_address: string
+  chain: string[]
+  nodes: PositionStreamLineageNode[]
+  totals?: PositionStreamPnLResponse | null
+  chain_cost_summary?: LineageChainCostSummary | null
+  note?: string | null
+}
+
+export interface ClosedPositionEntry {
+  position_address: string
+  pool_address: string
+  owner: string
+  close_kind?: string | null
+  opened_ts_utc?: string | null
+  closed_ts_utc?: string | null
+  last_rebalance_session_id?: string | null
+}
+
+export interface ClosedPositionsResponse {
+  total: number
+  items: ClosedPositionEntry[]
+  note?: string | null
+}
+
+export interface PositionLifecycleEvent {
+  ts_utc?: string | null
+  source?: string | null
+  event?: string | null
+  operation?: string | null
+  signature?: string | null
+  pool_address?: string | null
+  position_pubkey?: string | null
+  rebalance_session_id?: string | null
+  tx_fee_lamports?: number | null
+  fee_payer_net_lamports_delta?: number | null
+  fee_payer_token_deltas?: Record<string, string> | null
+}
+
+export interface PositionLifecycleSessionSummary {
+  session_id: string
+  events: PositionLifecycleEvent[]
+  total_tx_fee_lamports: number
+  rebalance_related_events: number
+}
+
+export interface PositionLifecycleSummaryResponse {
+  position_address: string
+  positions: string[]
+  sessions: string[]
+  total_tx_fee_lamports: number
+  total_tx_fee_usd: string
+  collect_events: number
+  collected_fee_token_a_ui?: string | null
+  collected_fee_token_b_ui?: string | null
+  collected_fees_usd?: string | null
+  realized_cashflow_usd: string
+  session_summaries: PositionLifecycleSessionSummary[]
+  note?: string | null
+}
+
+export interface BacktestFromClosedPositionRequest {
+  position_address: string
+  lower?: number
+  upper?: number
+  capital?: number
+  strategy?: string
+  start_date?: string
+  end_date?: string
+  fee_source?: string
+  price_path_source?: string
+  snapshot_protocol?: string
+}
+
+export interface BacktestJobStatusResponse {
+  id: string
+  status: string
+  note?: string | null
+}
+
+export interface BacktestJobResponse {
+  id: string
+  position_address: string
+  pool_address: string
+  status: string
+  started_ts_utc: string
+  finished_ts_utc?: string | null
+  exit_code?: number | null
+  stdout?: string | null
+  stderr?: string | null
+  note?: string | null
+}
+
+export interface PositionExperimentConfigResponse {
+  position_address: string
+  open_session_id?: string | null
+  open_details?: Record<string, unknown> | null
+  tick_lower?: number | null
+  tick_upper?: number | null
+  derived_lower?: number | null
+  derived_upper?: number | null
+  derived_initial_capital_usd?: number | null
+  note?: string | null
 }
 
 export interface PnL {
@@ -97,6 +264,8 @@ export interface StrategyParameters {
   periodic_requires_out_of_range?: boolean
   /** If true, range exit can trigger immediate close+open (rebalance). */
   rebalance_on_range_exit_immediately?: boolean
+  /** If true, API may auto-start this strategy on boot when server env enables it. */
+  auto_start?: boolean
   /** Populated when positions are linked (e.g. Open Position). */
   position_addresses?: string[]
   /** PDAs excluded from this strategy’s executor (automation off for those positions). */
@@ -323,17 +492,28 @@ async function fetchJsonLong<T>(url: string, options?: RequestInit): Promise<T> 
 // External (free) price sources
 // ============================================================================
 
+export type MintPricesUsdResponse = {
+  source: string
+  requested: number
+  returned: number
+  prices: Record<string, number>
+}
+
+export async function getMintPricesUsd(mints: string[]): Promise<MintPricesUsdResponse> {
+  const ids = [...new Set(mints.map((m) => m.trim()).filter(Boolean))]
+  if (ids.length === 0) return { source: 'none', requested: 0, returned: 0, prices: {} }
+  // Prefer server-side proxy to avoid browser CORS/adblock issues.
+  return await fetchJson<MintPricesUsdResponse>(
+    `/prices/jupiter?${new URLSearchParams({ ids: ids.join(',') })}`,
+  )
+}
+
 export async function getJupiterPricesUsd(mints: string[]): Promise<Record<string, number>> {
   const ids = [...new Set(mints.map((m) => m.trim()).filter(Boolean))]
   if (ids.length === 0) return {}
   // Prefer server-side proxy to avoid browser CORS/adblock issues.
   try {
-    const r = await fetchJson<{
-      source: string
-      requested: number
-      returned: number
-      prices: Record<string, number>
-    }>(`/prices/jupiter?${new URLSearchParams({ ids: ids.join(',') })}`)
+    const r = await getMintPricesUsd(ids)
     return r.prices ?? {}
   } catch {
     // Legacy public `price.jup.ag/v4` is often down; pricing is resolved server-side in `/prices/jupiter`.
@@ -369,6 +549,12 @@ export interface OrcaOwnerPositionEntry {
   position_mint?: string | null
   position_bundle_address?: string | null
   in_range?: boolean
+  token_a_label?: string | null
+  token_b_label?: string | null
+  token_mint_a?: string | null
+  token_mint_b?: string | null
+  token_price_a_usd?: number | null
+  token_price_b_usd?: number | null
 }
 
 export interface OrcaOwnerPositionsResponse {
@@ -385,9 +571,41 @@ export const getOrcaPositionsByOwner = (owner: string) =>
 
 // Positions
 export const getPositions = () => fetchJson<{ positions: Position[] }>('/positions')
+export const getClosedPositions = (limit = 100, offset = 0) =>
+  fetchJson<ClosedPositionsResponse>(
+    `/positions/closed?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`,
+  )
 export const getPosition = (address: string) => fetchJson<Position>(`/positions/${address}`)
 export const getPositionDiagnostics = (address: string) =>
   fetchJson<PositionDiagnosticsResponse>(`/positions/${encodeURIComponent(address)}/diagnostics`)
+export const getPositionStreamPerformance = (address: string) =>
+  fetchJson<PositionStreamPerformanceResponse>(
+    `/positions/${encodeURIComponent(address)}/stream-performance`,
+  )
+export const getPositionStreamPnL = (address: string) =>
+  fetchJson<PositionStreamPnLResponse>(`/positions/${encodeURIComponent(address)}/stream-pnl`)
+export const getPositionStreamLineage = (address: string) =>
+  fetchJson<PositionStreamLineageResponse>(
+    `/positions/${encodeURIComponent(address)}/stream-lineage`,
+  )
+export const getPositionLifecycleSummary = (address: string) =>
+  fetchJson<PositionLifecycleSummaryResponse>(
+    `/positions/${encodeURIComponent(address)}/lifecycle-summary`,
+  )
+
+export const runBacktestFromClosedPosition = (body: BacktestFromClosedPositionRequest) =>
+  fetchJsonLong<BacktestJobStatusResponse>('/backtests/from-closed-position', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const getBacktestJob = (id: string) =>
+  fetchJson<BacktestJobResponse>(`/backtests/${encodeURIComponent(id)}`)
+
+export const getPositionExperimentConfig = (address: string) =>
+  fetchJson<PositionExperimentConfigResponse>(
+    `/positions/${encodeURIComponent(address)}/experiment-config`,
+  )
 /** Orca swap in the **same pool** (ExactIn) before open — executed by API wallet, then open tx. */
 export interface SwapInPoolBeforeOpen {
   specified_mint: string
@@ -442,10 +660,20 @@ export const openPosition = (data: {
   method: 'POST',
   body: JSON.stringify(data),
 })
-export const closePosition = (address: string) => 
-  fetchJsonLong<{ message: string }>(`/positions/${address}`, { method: 'DELETE' })
-export const collectFees = (address: string) => 
-  fetchJsonLong<{ message: string }>(`/positions/${address}/collect`, { method: 'POST' })
+export const closePosition = (address: string, cost_session_id?: string) => {
+  const qs =
+    cost_session_id && cost_session_id.trim()
+      ? `?${new URLSearchParams({ cost_session_id: cost_session_id.trim() })}`
+      : ''
+  return fetchJsonLong<{ message: string }>(`/positions/${address}${qs}`, { method: 'DELETE' })
+}
+export const collectFees = (address: string, cost_session_id?: string) => {
+  const qs =
+    cost_session_id && cost_session_id.trim()
+      ? `?${new URLSearchParams({ cost_session_id: cost_session_id.trim() })}`
+      : ''
+  return fetchJsonLong<{ message: string }>(`/positions/${address}/collect${qs}`, { method: 'POST' })
+}
 export type RebalanceInputKind = 'ticks' | 'strategy_range' | 'price_band'
 
 /** POST /positions/:address/rebalance — tick bounds or auto range from strategy / price. */
@@ -642,15 +870,18 @@ export interface PendingOpenRecoveryResponse {
   data?: Record<string, unknown> | null
 }
 
-function qsBotActivity(limit: number, filter?: string): string {
+function qsBotActivity(limit: number, filter?: string, offset?: number): string {
   const p = new URLSearchParams()
   p.set('limit', String(limit))
+  if (typeof offset === 'number' && Number.isFinite(offset) && offset > 0) {
+    p.set('offset', String(Math.floor(offset)))
+  }
   if (filter && filter.trim()) p.set('filter', filter.trim())
   return p.toString()
 }
 
-export const getBotLedger = (limit = 200, filter?: string) =>
-  fetchJson<BotActivityJsonlResponse>(`/bot-activity/ledger?${qsBotActivity(limit, filter)}`)
+export const getBotLedger = (limit = 200, filter?: string, offset?: number) =>
+  fetchJson<BotActivityJsonlResponse>(`/bot-activity/ledger?${qsBotActivity(limit, filter, offset)}`)
 
 /** IL / rebalance JSONL (`event: rebalance`); API path from `CLMM_IL_LEDGER_PATH` (same as `orca-bot-run --il-ledger-path`). */
 export const getBotIlLedger = (limit = 200, filter?: string) =>

@@ -41,6 +41,7 @@ anyhow = { workspace = true }
 rust_decimal = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
+sqlx = { workspace = true }
 solana-sdk = { workspace = true }
 solana-program = { workspace = true }
 solana-client = { workspace = true }
@@ -56,6 +57,7 @@ orca_whirlpools = "7.0.2"
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2.1"
 spl-token = { workspace = true }
+num-traits = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.8.3"

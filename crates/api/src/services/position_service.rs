@@ -3,6 +3,7 @@
 use crate::error::ApiError;
 use crate::models::{OpenPositionRequest, RebalanceRequest, SwapBeforeOpenRequest};
 use crate::state::{AlertUpdate, AppState, PositionUpdate};
+use crate::services::strategy_service::append_position_address_to_strategy;
 use clmm_lp_execution::prelude::{RebalanceParams, RebalanceReason, StrategyExecutor};
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::orca::position_reader::PositionReader;
@@ -181,6 +182,7 @@ impl PositionService {
                 &specified_mint,
                 request.amount_in,
                 request.slippage_tolerance_bps,
+                None,
                 ledger_session.clone(),
             )
             .await
@@ -368,6 +370,7 @@ Top up the API wallet and retry."
                     &mint,
                     sw.amount_in,
                     request.slippage_tolerance_bps,
+                    None,
                     ledger_session.clone(),
                 )
                 .await
@@ -391,6 +394,16 @@ Top up the API wallet and retry."
             .await
             .map_err(classify_open_position_error)?;
 
+        if let Some(strategy_id) = request
+            .strategy_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            append_position_address_to_strategy(&self.state, &strategy_id, &opened_position.to_string())
+                .await?;
+        }
+
         let mut data = serde_json::json!({
             "position_pda": opened_position.to_string(),
         });
@@ -405,7 +418,11 @@ Top up the API wallet and retry."
     }
 
     /// Closes a position.
-    pub async fn close_position(&self, address: &str) -> Result<OperationResult, ApiError> {
+    pub async fn close_position(
+        &self,
+        address: &str,
+        cost_session_id: Option<String>,
+    ) -> Result<OperationResult, ApiError> {
         let position_pubkey = Pubkey::from_str(address)
             .map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
@@ -442,8 +459,12 @@ Top up the API wallet and retry."
         };
 
         let guard = executor.read().await;
+        let ledger_details = Some(serde_json::json!({
+            "close_kind": "manual",
+            "close_source": "api",
+        }));
         guard
-            .execute_full_close_only(&position_pubkey, &pool_pubkey)
+            .execute_full_close_only(&position_pubkey, &pool_pubkey, cost_session_id, ledger_details)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -451,7 +472,11 @@ Top up the API wallet and retry."
     }
 
     /// Collects fees from a position.
-    pub async fn collect_fees(&self, address: &str) -> Result<OperationResult, ApiError> {
+    pub async fn collect_fees(
+        &self,
+        address: &str,
+        cost_session_id: Option<String>,
+    ) -> Result<OperationResult, ApiError> {
         let position_pubkey = Pubkey::from_str(address)
             .map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
@@ -480,7 +505,7 @@ Top up the API wallet and retry."
 
         let guard = executor.read().await;
         guard
-            .execute_collect_fees_only(&position_pubkey, &position.pool)
+            .execute_collect_fees_only(&position_pubkey, &position.pool, cost_session_id)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -758,6 +783,34 @@ fn classify_open_position_error(err: anyhow::Error) -> ApiError {
     let raw = format!("{err:#}");
     let s = raw.to_lowercase();
 
+    // "custom program error: 0x1" is too opaque for operators.
+    // When the failing program is SPL Token, decode the custom code to a named TokenError.
+    if s.contains("custom program error: 0x") && s.contains("tokenkeg") {
+        if let Some(code) = parse_custom_program_error_hex_u32(&s) {
+            if let Some(name) = decode_spl_token_custom_error_name(code) {
+                return ApiError::bad_request(format!(
+                    "Open position failed: SPL Token program error {name} (custom 0x{code:x}). Detail: {raw}"
+                ));
+            }
+        }
+    }
+
+    // If it's still a custom program error, at least identify **which program** failed at which ix index.
+    // This avoids "0x1" ambiguity (Token vs Whirlpool vs Token-2022 etc.).
+    if s.contains("custom program error: 0x") {
+        let code = parse_custom_program_error_hex_u32(&s);
+        let ix = parse_instruction_error_index(&s);
+        let program = ix.and_then(|i| parse_ix_program_id(&raw, i));
+        if code.is_some() || ix.is_some() || program.is_some() {
+            let code_s = code.map(|c| format!("0x{c:x}")).unwrap_or_else(|| "?".to_string());
+            let ix_s = ix.map(|i| i.to_string()).unwrap_or_else(|| "?".to_string());
+            let prog_s = program.unwrap_or_else(|| "<unknown>".to_string());
+            return ApiError::bad_request(format!(
+                "Open position failed: custom program error {code_s} at instruction {ix_s} (program {prog_s}). Detail: {raw}"
+            ));
+        }
+    }
+
     if s.contains("wallet not set")
         || s.contains("requires executor")
         || s.contains("wallet/executor not configured")
@@ -810,6 +863,60 @@ Align ticks to pool tick_spacing and keep tick_lower < tick_upper. Detail: {raw}
     }
 
     ApiError::bad_request(format!("Open position failed: {raw}"))
+}
+
+fn parse_custom_program_error_hex_u32(s_lower: &str) -> Option<u32> {
+    // e.g. "custom program error: 0x1"
+    let i = s_lower.find("custom program error: 0x")?;
+    let mut j = i + "custom program error: 0x".len();
+    let start = j;
+    while j < s_lower.len() && s_lower.as_bytes()[j].is_ascii_hexdigit() {
+        j += 1;
+    }
+    if start == j {
+        return None;
+    }
+    u32::from_str_radix(&s_lower[start..j], 16).ok()
+}
+
+fn parse_instruction_error_index(s_lower: &str) -> Option<usize> {
+    // e.g. "instructionerror(3, custom(1))" (we lowercased the full chain)
+    let i = s_lower.find("instructionerror(")?;
+    let mut j = i + "instructionerror(".len();
+    let start = j;
+    while j < s_lower.len() && s_lower.as_bytes()[j].is_ascii_digit() {
+        j += 1;
+    }
+    if start == j {
+        return None;
+    }
+    s_lower[start..j].parse::<usize>().ok()
+}
+
+fn parse_ix_program_id(raw: &str, ix_index: usize) -> Option<String> {
+    // We keep this on the *raw* string (not lowercased) to preserve the program id for readability.
+    // Tail example:
+    // `ix_programs=0:111...,1:Tokenkeg...,2:whirl...,3:whirl...,4:Tokenkeg...`
+    let marker = "ix_programs=";
+    let i = raw.find(marker)?;
+    let tail = &raw[i + marker.len()..];
+    // Stop at whitespace/newline if present.
+    let tail = tail.split_whitespace().next().unwrap_or(tail);
+    for part in tail.split(',') {
+        let mut it = part.splitn(2, ':');
+        let idx_s = it.next()?.trim();
+        let pid = it.next()?.trim();
+        if idx_s.parse::<usize>().ok()? == ix_index {
+            return Some(pid.to_string());
+        }
+    }
+    None
+}
+
+fn decode_spl_token_custom_error_name(code: u32) -> Option<String> {
+    use num_traits::FromPrimitive;
+    use spl_token::error::TokenError;
+    TokenError::from_u32(code).map(|e| format!("{e:?}"))
 }
 
 fn parse_insufficient_lamports(s_lower: &str) -> Option<(u64, u64)> {
@@ -905,7 +1012,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_position_invalid_range() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let pool = Pubkey::new_unique();
         let mut req = sample_open_position_request(pool);
@@ -918,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_position_dry_run_returns_dry_run_data() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let pool = Pubkey::new_unique();
 
@@ -936,7 +1043,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_position_non_dry_run_without_executor_fails_fast() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let mut svc = PositionService::new(state);
         svc.set_dry_run(false);
         let pool = Pubkey::new_unique();
@@ -958,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     async fn decrease_liquidity_invalid_address() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let err = svc
             .decrease_liquidity("not-a-valid-pubkey", 1)
@@ -969,7 +1076,7 @@ mod tests {
 
     #[tokio::test]
     async fn decrease_liquidity_position_not_found() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let err = svc
             .decrease_liquidity(&Pubkey::new_unique().to_string(), 1)
@@ -980,10 +1087,10 @@ mod tests {
 
     #[tokio::test]
     async fn close_position_invalid_address() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let err = svc
-            .close_position("not-a-valid-pubkey")
+            .close_position("not-a-valid-pubkey", None)
             .await
             .expect_err("bad pubkey");
         assert!(matches!(err, ApiError::BadRequest(_)));
@@ -991,10 +1098,10 @@ mod tests {
 
     #[tokio::test]
     async fn collect_fees_invalid_address() {
-        let state = AppState::new(RpcConfig::default(), ApiConfig::default());
+        let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let err = svc
-            .collect_fees("not-a-valid-pubkey")
+            .collect_fees("not-a-valid-pubkey", None)
             .await
             .expect_err("bad pubkey");
         assert!(matches!(err, ApiError::BadRequest(_)));

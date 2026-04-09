@@ -150,14 +150,14 @@ pub async fn run_orca_bot(
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("data/pending-open-recovery.json"));
         ensure_parent_dir(&path)?;
-        executor.set_pending_open_recovery_path(Some(path));
+        executor.set_pending_open_recovery_path(Some(path)).await;
     }
 
     if let Ok(url) = std::env::var("CLMM_ALERT_WEBHOOK_URL") {
         if !url.is_empty() {
             let mut m = MultiNotifier::new();
             m.add(WebhookNotifier::new(url));
-            executor.set_alert_notifier(Some(Arc::new(m)));
+            executor.set_alert_notifier(Some(Arc::new(m))).await;
         }
     }
 
@@ -319,6 +319,7 @@ pub async fn run_orca_bot_open_and_run(
         &pool_pk,
         &fee_payer,
         &open.signature,
+        None,
         None,
     )
     .await;

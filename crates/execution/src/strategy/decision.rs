@@ -303,7 +303,13 @@ impl DecisionEngine {
 
         match strategy_decision {
             Decision::Hold => {
-                if cfg.auto_collect_fees && position.pnl.fees_usd > cfg.min_fees_to_collect {
+                // Fee collection is always executed as part of the close flow (close_pre),
+                // so auto-collect during normal strategy operation is optional and can create noise
+                // (e.g. tiny fees shortly after open). Keep it restricted to StaticRange semantics.
+                if cfg.strategy_mode == StrategyMode::StaticRange
+                    && cfg.auto_collect_fees
+                    && position.pnl.fees_usd > cfg.min_fees_to_collect
+                {
                     debug!("Fees exceed threshold, recommending collection");
                     Decision::CollectFees
                 } else {

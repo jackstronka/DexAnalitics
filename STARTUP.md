@@ -727,7 +727,7 @@ The **`backtest-optimize`** command finds a good range and strategy for a given 
 - Builds a **grid**: several range widths (e.g. 1%–15%) × strategies (**static**, **`oor_recenter`** (OOR-only + recenter), **threshold** 2%/3%/5%/7%/10%/15%, **periodic** 12h/24h/48h/72h, **il_limit**, **retouch_shift**), or **only static** with `--static-only` for a faster range-only search.
 - Runs backtests in **parallel** (rayon); with `--windows N` (N>1), splits history into N rolling windows and ranks by **average score** across windows for robustness.
 - Applies optional **filters**: `--min-time-in-range` (%), `--max-drawdown` (%) so low TIR or high drawdown configs are dropped.
-- Ranks by **objective**: `pnl`, `vs_hodl`, `fees`, `composite` (fees − α·|IL|·capital − cost, `--alpha`), or `risk_adj` (PnL / (1 + max_drawdown)).
+- Ranks by **objective**: `pnl`, `vs_hodl`, `fees`, `composite` (fees − α·IL_drag_usd − rebalance_cost; IL_drag = max(0, −final_il_pct·capital), `--alpha`), or `risk_adj` (PnL / (1 + max_drawdown)).
 - Prints the **best** (range + strategy) and a **table** with Score, PnL, vs HODL, **TIR%**, **IL%** (rounded to 2 decimals).
 
 **Przykład kanoniczny (snapshoty Orca + fee ze snapshotów)** — tak jak w `doc/ORCA_RUNBOOK.md` i skrypcie `scripts/export_optimize_merged_24_48_72_full.ps1`:
@@ -818,7 +818,7 @@ Store a small curated list of pool addresses we care about, so we can:
 **Raydium**
 - **SOL/USDT** (**0.01%**) : `3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF` (DefiLlama TVL: `36439c60-452b-434f-8c62-651060e7dd55`)
 
-1. **Define objective**: choose a clear function to maximize (e.g. `score = α · fees − β · |IL|`), reflecting the desired trade‑off between yield and risk.
+1. **Define objective**: choose a clear function to maximize (e.g. `score = fees − β · IL_drag − rebalance_cost` with IL_drag only when LP mark trails HODL), reflecting the desired trade‑off between yield and risk.
 2. **Optimize ranges offline (window-based)**: use historical prices + TVL/volume inputs to backtest many candidate ranges inside arbitrary time windows (e.g. 1d/7d/30d). For `static` positions: scan `lower/upper` candidates and pick the range with the highest **net score** (fees earned within TIR, minus IL penalty and estimated costs). For strategies with rebalances: include rebalancing logic so the optimizer can choose ranges that remain robust over time.
    - Output should be usable for *future* windows: once we have cached daily/hourly data, we can re-run the “find best range” process for any period without changing the core pipeline.
 3. **Multi‑protocol pool analytics (same assumptions)**: implement analytics for a curated set of pools across projects (**Raydium**, **Meteora**, and others). For each time window and for the same capital + entry/exit policy, compute the best configuration per protocol (best range / best strategy) and **rank protocols** by **best net result** (not just fees). Collect comparable metrics (e.g. daily/weekly **volume**, **TVL**, fee tier, volatility, historical time‑in‑range, stability of volume).

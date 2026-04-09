@@ -1,3 +1,210 @@
+## 2026-04-08 — backtest-optimize `composite`: one-sided IL drag + rebalance costs
+
+keywords: backtest-optimize, composite, final_il_pct, total_rebalance_cost, clmm-lp-cli, main.rs
+
+- **`--objective composite`** no longer uses `α·|IL|·capital` (which also penalized LP **better** than HODL on mark). Score is `total_fees − α·max(0, −(final_il_pct·capital)) − total_rebalance_cost` — same `final_il_pct` semantics as `run_single` (LP mark + rebalance paid vs HODL, ex fees).
+- **paths:** `crates/cli/src/main.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+## 2026-04-08 — Positions list: pair labels + mint USD instead of raw addresses
+
+keywords: web, PositionResponse, OrcaOwnerPositionEntry, token_mint_a, token_price_a_usd, enrich_pool_ticks_for_display, clmm-lp-api
+
+- `GET /positions` i `GET /positions/:address` zwracają opcjonalnie **`token_a_label` / `token_b_label`**, minty A/B oraz **`token_price_a_usd` / `token_price_b_usd`** (best-effort z waluacji).
+- `GET /orca/positions-by-owner` uzupełnia te same pola jednym odczytem puli + `fetch_mint_prices_usd` (`enrich_pool_ticks_for_display`).
+- Strona **Positions**: kolumna „Pair (mints · USD)” zamiast samego skrótu PDA; Whirlpool w osobnej kolumnie.
+- **Position Details**: nagłówek + karta „Token pair” używają tych samych pól; tabele ledger (IL + lifecycle) łączą **λ + ~USD** w jednej kolumnie; skróty PDA w IL „old → new”.
+- **Lifecycle timeline** (zakładka Logs): oś czasu scala **wszystkie PDA z `stream-lineage`** (`GET /bot-activity/ledger` per PDA + dedupe) oraz wiersze **IL ledger** per PDA (`il:` na osi, fiolet); sesje poniżej nadal tylko dla bieżącego adresu.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/orca_onchain.rs`, `crates/api/src/services/position_valuation.rs`, `web/src/pages/Positions.tsx`, `web/src/components/PoolPairLabels.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLifecycleTimeline.tsx`, `web/src/lib/api.ts`, `web/src/lib/utils.ts`
+
+## 2026-04-08 — stream lineage: per-PDA vs chain totals (network tx vs LP fees collected)
+
+keywords: stream_lineage, LineageChainCostSummary, tx_fee_lamports, fees_collected_usd, chain_cost_summary, bot_collect_fees, clmm-lp-api, web
+
+- `GET /positions/:address/stream-lineage` nodes include **`tx_fee_lamports`**, **`fees_collected_usd`**, **`collect_events`** (LP z `bot_collect_fees`), obok istniejącego **`tx_fees_usd`**.
+- Odpowiedź zawiera opcjonalnie **`chain_cost_summary`**: sumy lamportów/USD kosztów sieci oraz sumę LP fees i licznik collectów po całym łańcuchu rotacji.
+- **Closed position** i zakładka **Logs / rebalances** (aktywna pozycja): dwie karty podsumowania (ten PDA vs cały łańcuch) oraz kolumny tabeli **Sieć (tx)** / **LP zebrane**.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
+
+## 2026-04-08 — stream lineage: DB single-PDA fallback + session id for parent link
+
+keywords: position_stream_lineage, chain_from_lifecycle_best_effort, position_stream_edges, rebalance_session_id, clmm-lp-api
+
+- When PostgreSQL is enabled but **`position_stream_edges`** has no rows (IL ledger not ingested / empty), `GET /positions/:addr/stream-lineage` now **falls back** to the same lifecycle-JSONL chain as DB-off mode if that chain is longer.
+- Lifecycle parsing records **`rebalance_session_id`** and **`pool_pubkey`** aliases; linking a child `bot_open_*` to a parent `bot_close` accepts **matching session id** (in addition to swap-mix / `bot_collect_fees` / `bot_decrease_liquidity` between close→open).
+- **`position_open` / `position_close`** (CLI `orca-position-*`) are treated like **`bot_open_*` / `bot_close_position`** when building the chain and JSONL-only node metrics — previously only `bot_*` events were recognized, so mixed CLI+bot ledgers showed a single PDA.
+- **Closed position** web view includes the same **Position history (rotations)** table as the active position ledger tab.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-08 — swap-mix: tighter `amount_in` (fewer extra swap txs)
+
+keywords: swap_mix, CLMM_SWAP_MIX_SPEND_CAP_PCT, CLMM_SWAP_MIX_AMOUNT_IN_BUFFER_PCT, rebalance, orca_bot, clmm-lp-execution
+
+- `ensure_swap_mix_for_rebalance_open` no longer caps each leg at **92%** (`SPEND_CAP_PCT`); default **`CLMM_SWAP_MIX_SPEND_CAP_PCT=0.988`** with **`CLMM_SWAP_MIX_AMOUNT_IN_BUFFER_PCT=1.03`** so one `swap_exact_in` usually clears the deposit-quote deficit without a second network fee. Round **≥1** uses spend cap **≥0.998** to finish without a third tx when two steps are still needed.
+- Lifecycle `bot_swap_mix_round` diagnostics include `spend_cap_pct` / `amount_in_buffer_pct`.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `.env.example`
+
+## 2026-04-08 — lifecycle ledger: read path vs write path (enriched JSONL)
+
+keywords: orca_position_lifecycle.jsonl, fee_payer_token_deltas, ledger_read_path, CLMM_POSITION_LIFECYCLE_USE_ENRICHED, CLMM_POSITION_LIFECYCLE_LEDGER_READ_PATH, enrich-lifecycle-ledger, clmm-lp-protocols, clmm-lp-api
+
+- Bot/CLI **append** to the canonical file from [`ledger_path`] (`CLMM_POSITION_LIFECYCLE_LEDGER_PATH`, default `data/ledger/orca_position_lifecycle.jsonl`).
+- API and other **readers** use [`ledger_read_path`]: optional explicit `CLMM_POSITION_LIFECYCLE_LEDGER_READ_PATH`, or — when `CLMM_POSITION_LIFECYCLE_USE_ENRICHED=true` — the sibling `*.enriched.jsonl` from `enrich-lifecycle-ledger` if it exists, else the canonical path.
+- **paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/protocols/src/ledger/swap_cost_estimate.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/lifecycle_ledger_aggregates.rs`, `Makefile` target `enrich-lifecycle-ledger` → `cargo run -p clmm-lp-cli --bin enrich_lifecycle_ledger`
+
+## 2026-04-08 — fees collected shown for closed positions
+
+keywords: clmm-lp-api, web, lifecycle, collect_fees, pnl, ui
+
+- `GET /positions/:address/lifecycle-summary` now returns best-effort **collected LP fees** derived from `bot_collect_fees` rows’ `fee_payer_token_deltas` (positive deltas for pool mints), plus optional USD conversion at current mint prices when the pool is unambiguous.
+- Closed position detail UI displays a new **Fees collected** card (USD + A/B UI amounts).
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `web/src/lib/api.ts`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-08 — Position lineage history (rotated PDAs chain) in Position Detail
+
+keywords: stream_lineage, position_history, position_stream_edges, rebalance, rotated_pdas, clmm-lp-api, web
+
+- Added `GET /positions/:address/stream-lineage` returning an **ordered chain** (root → … → current) of position PDAs reconstructed from `position_stream_edges`, plus **per-node** best-effort aggregates (baseline/current valuation, tx fees, realized cashflow, net PnL).
+- `Position Details → Logs / rebalances` now shows a **Position history (rotations)** table with per-PDA metrics and a totals summary (reusing stream PnL totals).
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/routes.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-08 — strategy link preserved on rebalance + stable-aware sizing guard
+
+keywords: clmm-lp-api, clmm-lp-execution, strategies, rebalance, swap-mix, sizing, usdc
+
+- `POST /positions` now honors `strategy_id`: after a successful open, the new position PDA is appended to the strategy’s `parameters.position_addresses` so the UI does not lose the strategy link.
+- Rebalance swap-mix sizing: stablecoin-leg heuristic now detects inverted UI price conventions when `A` is stable (e.g. USDC/SOL) to avoid under-sizing `target_usd` and producing tiny reopened positions.
+- **paths:** `crates/api/src/services/position_service.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-04-08 — always collect fees before close
+
+keywords: clmm-lp-execution, orca, close, collect_fees, lifecycle, ledger
+
+- `execute_full_close_only` now **always** submits a `collect_fees` transaction immediately before `close_position`. This makes fee earnings explicit in the lifecycle ledger and keeps “fees earned” reporting consistent for closed positions.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+- Emergency close path (`emergency_close_position`) was aligned to the same policy by delegating to `execute_full_close_only`.
+
+## 2026-04-08 — swap tx fees show up in lifecycle summaries
+
+keywords: clmm-lp-execution, clmm-lp-api, ledger, lifecycle, swap, costs, ui
+
+- Swap transactions executed during rebalance swap-mix now attach the current position PDA to the lifecycle JSONL row, so `/positions/:address/lifecycle-summary` can match them and the web UI shows swap `signature` + `tx_fee_lamports` instead of `—`.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/services/position_service.rs`
+
+## 2026-04-08 — strategy autostart toggle in UI
+
+keywords: web, clmm-lp-api, strategies, autostart, ui
+
+- Strategy Create/Edit forms now expose `parameters.auto_start` (opt-in autostart). The Strategies list shows an “auto-start on boot” badge when enabled.
+- Note: autostart still requires server env `CLMM_STRATEGY_AUTOSTART_ON_BOOT=1`.
+- **paths:** `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/Strategies.tsx`, `web/src/lib/strategyFormShared.tsx`, `web/src/lib/api.ts`
+
+## 2026-04-08 — Stream performance across rotated position PDAs (DB + ledger ingest)
+
+keywords: stream_performance, position_stream_edges, position_stream_ledger_rows, rebalance_session_id, bot_collect_fees, tx_fee_lamports, clmm-lp-api, clmm-lp-data, web
+
+- Strategies can close→open new PDAs on each rebalance, so per-PDA monitor baselines are not enough. Added a **DB-backed “stream performance”** view that stitches PDAs via IL-ledger edges and aggregates lifecycle costs/collect deltas across the connected component.
+- `clmm-lp-api` now connects to Postgres via `DATABASE_URL` on boot (best-effort), runs idempotent migrations, ingests JSONL ledgers into tables, and exposes `GET /positions/:address/stream-performance`.
+- Dashboard `Position Details` shows stream-level totals (known PDAs/sessions, tx fee lamports+USD, collect event counts and deltas) alongside the existing per-PDA valuation/PnL fields.
+- **paths:** `crates/data/migrations/002_position_stream_performance.sql`, `crates/data/src/repositories/database.rs`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/routes.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
+
+## 2026-04-08 — Stream Net PnL + IL (valuation snapshots + token deltas)
+
+keywords: stream_pnl, stream_il, valuation_snapshots, fee_payer_token_deltas, preTokenBalances, postTokenBalances, clmm-lp-protocols, clmm-lp-api, clmm-lp-data, web
+
+- Lifecycle ledger rows now include **`fee_payer_token_deltas`**: mint→Δ(ui) derived from Solana `meta.preTokenBalances/postTokenBalances` for `owner=fee_payer` (best-effort). This makes stream cashflow accounting possible without paid providers.
+- API persists **valuation snapshots** (`position_stream_valuation_snapshots`) on `GET /positions/:address` so baselines survive restarts and rotated PDAs.
+- Added `GET /positions/:address/stream-pnl` returning best-effort **Net PnL** and **IL (LP vs HODL)** across the stitched stream; dashboard shows these figures under Position Details.
+- Valuation snapshots now persist pool leg **mints + USD prices used** (`token_mint_a/b`, `price_a_usd`, `price_b_usd`) so HODL/IL is computed deterministically without extra RPC reads.
+- **paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/data/migrations/003_stream_pnl_snapshots.sql`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_valuation.rs`, `crates/api/src/handlers/positions.rs`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-08 — Orca open preflight closures compile fix
+
+keywords: swap_exact_in, swap_mix, preflight, async closure, clmm-lp-protocols
+
+- **`preflight_open_liquidity_balances`**: inner `async` blocks needed **`async move`** with **`Pubkey` by value** and **`&'static str`** legs so the crate compiles under Rust 2024 (previous `|...| async {` captured references incorrectly).
+- **swap-mix dust**: `ensure_swap_mix_for_rebalance_open` treats tiny remaining deficits as converged using `CLMM_SWAP_MIX_DEFICIT_USD_EPS` (default **0.05 USD**) to avoid exhausting rounds on fee/rounding dust.
+
+## 2026-04-07 — Rebalance swap-mix + `swap_exact_in`: native SOL → wSOL (parity with open position)
+
+keywords: rebalance, swap_mix, swap_exact_in, wsol, wrap, sync_native, Orca, clmm-lp-protocols, clmm-lp-execution
+
+- Orca **ExactIn** debits the **wSOL SPL** ATA; **native SOL** in the fee payer does not count. `open_position` already used `ensure_wsol_ata_funded`; **`swap_exact_in` did not**, so swaps that specify wSOL could fail while manual/UI paths wrapped.
+- `WhirlpoolExecutor::swap_exact_in` now prepends the same WSOL ATA fund + `sync_native` ix when `specified_mint` is wSOL.
+- `ensure_swap_mix_for_rebalance_open`: if token A is wSOL, SPL `wa == 0`, but native SOL can fund a wrap, the executor runs **`submit_wsol_wrap_if_needed`** then `continue` so the next round sees wSOL in `wa` before A→B sizing.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-04-07 — PositionCreate budget mode: leg-edit abort vs „cannot match”, immediate quote sync
+
+keywords: PositionCreate, quote-open-budget, budget, AbortSignal, UX, web
+
+- Edycja Amount A/B przerywa poprzednie `solveTargetUsdForLegAmount`; gdy solver zwracał `null` po **abort**, UI pokazywał mylący komunikat „Nie można dopasować…” przy jednocześnie **starym** polu docelowego USD — teraz abort jest cichy.
+- Po udanym dopasowaniu kwoty SOL/USDC i **Docelowa wartość pozycji** ustawiane są od razu z tego samego `quote` (wraz z `budgetSubmitRaw`), żeby suma szacunków USD i pole USD pozostały zsynchronizowane.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-04-07 — Orca open: auto-wrap native SOL into WSOL ATA (fix Tokenkeg `InsufficientFunds`)
+
+keywords: orca, open_position, wsol, wrap, associated-token-account, Tokenkeg, InsufficientFunds, clmm-lp-protocols
+
+- When opening a position in a pool where one leg is **WSOL**, the Orca SDK debits the **WSOL token account**. Operators often have native SOL but **0 WSOL**, causing `SPL Token InsufficientFunds (custom 0x1)`.
+- The executor now preprends instructions to create/fund the WSOL ATA (and `sync_native`) up to the required cap before calling the Orca open instructions.
+- **paths:** `crates/protocols/src/orca/executor.rs`
+
+## 2026-04-07 — Orca open: SPL preflight + WSOL wrap buffer (clearer than on-chain `InsufficientFunds`)
+
+keywords: orca, open_position, preflight, USDC, WSOL, InsufficientFunds, clmm-lp-protocols
+
+- **Preflight** (RPC, before building the tx): for each pool leg, verify the **API signing wallet** has enough **raw SPL balance** for `amount_a` / `amount_b` (USDC etc.); WSOL legs check wrapped balance + native SOL for wrap + fee pad.
+- WSOL auto-wrap now targets **`token_max` + small buffer** (50 bps + 50k lamports) to reduce edge-case `InsufficientFunds` after `SyncNative`.
+- **paths:** `crates/protocols/src/orca/executor.rs`
+
+## 2026-04-08 — Guardrail: strategy manages fixed position set (no “2→10” explosion) + reopen auto-relink
+
+keywords: StrategyExecutor, guardrail, position_addresses, reopen, auto-link, strategies.json, registry.jsonl, clmm-lp-api, clmm-lp-execution
+
+- Strategy execution now supports a **managed allowlist**: on start, the API derives the set of managed PDAs from `registry.jsonl` (currently open) and `parameters.position_addresses` (if present). The executor **only evaluates** these PDAs.
+- On successful close→open, the executor **replaces** `old_pda → new_pda` inside the allowlist, keeping the managed set size constant (prevents accidental growth from stale/historical PDAs in monitor).
+- API also installs a best-effort reopen hook to update `data/strategies.json` by replacing `old_pda → new_pda` in the same strategy’s `position_addresses` so the UI stays linked without manual steps.
+- **paths:** `crates/execution/src/strategy/executor.rs`, `crates/api/src/services/strategy_service.rs`
+
+## 2026-04-07 — Logs: lifecycle table shows `position_pubkey`, newest-first per page, hint for `bot_close_position`
+
+keywords: Logs, Lifecycle ledger, position_pubkey, bot_close_position, web, JsonlTable
+
+- Kolumna pozycji używała klucza `position_pda`, podczas gdy ledger zapisuje `position_pubkey` — w UI było „—”. `JsonlTable` ma opcjonalny `getCellValue`; lifecycle łączy `position_pubkey ?? position_pda`.
+- W obrębie zwróconej strony wiersze są wyświetlane **od najnowszych** (odwrócenie względem kolejności w pliku).
+- Krótka podpowiedź w nagłówku: zamknięcie = `event: bot_close_position`.
+- **paths:** `web/src/pages/Logs.tsx`
+
+## 2026-04-07 — Open Position UI: budget mode — editing Amount A/B updates target USD + other leg
+
+keywords: PositionCreate, quote-open-budget, budget, UX, web
+
+- In **Wspólna kwota USD** mode, changing **Amount token A or B** (debounced) runs a **binary search on `target_usd`** against `POST /pools/:id/quote-open-budget` so the chosen leg matches the typed UI amount; then **Docelowa wartość pozycji** and the **other leg** refresh from the same Orca deposit quote.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-04-07 — Lifecycle ledger: `bot_swap_exact_in` rows include structured swap `details`
+
+keywords: bot_swap_exact_in, lifecycle, orca_position_lifecycle.jsonl, swap, ledger, clmm-lp-protocols, clmm-lp-execution
+
+- Confirmed swap rows (`event: bot_swap_exact_in`) now include optional JSON **`details`**: pool + `token_mint_a` / `token_mint_b`, `specified_mint`, `other_mint_expected_output`, `amount_in_raw`, `specified_mint_decimals`, `amount_in_ui`, `slippage_bps` (min/actual out still not on `ExecutionResult`; see `note` in payload).
+- **`paths:**` `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-04-07 — Pending-open recovery enabled by default + richer tx error context + slippage env override
+
+keywords: pending_open, recovery, clmm-pending-open, swap_exact_in, transaction error, ix_programs, slippage, orca, clmm-lp-execution, clmm-lp-protocols
+
+- `StrategyExecutor` now enables pending-open recovery by default using `data/pending-open-recovery.json` (unless overridden via `CLMM_PENDING_OPEN_RECOVERY_PATH`), so “close succeeded but reopen failed” can auto-retry on the next cycles without extra env wiring.
+- `RpcProvider::send_and_confirm_transaction` now enriches **confirmed tx failures** (`TransactionError::InstructionError(...)`) with `ix_programs`, `ix_program`, and `custom_code` to make `Custom(1)`-style errors actionable without server logs.
+- Added `CLMM_REBALANCE_MAX_SLIPPAGE_BPS` to override `RebalanceConfig.max_slippage_bps` (default remains 50 bps).
+
+## 2026-04-07 — API: strategy autostart on boot (opt-in)
+
+keywords: clmm-lp-api, strategy, executor, autostart, production
+
+- Added opt-in strategy autostart on API boot: when `CLMM_STRATEGY_AUTOSTART_ON_BOOT=true`, the API will automatically start strategies whose stored `parameters.auto_start=true`.
+- This keeps “running” behavior consistent after an API restart without auto-starting everything by default.
+
 # Engineering notes (code changes)
 
 **Purpose:** short, **append-only** entries whenever someone (or AI) makes a **non-trivial** code change. Optimized for **grep and semantic search**: each entry has a **`keywords:`** line with comma-separated tokens (crates, domains, CLI flags, protocols).
