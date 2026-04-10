@@ -1,3 +1,135 @@
+## 2026-04-10 — stream-lineage: baseline guardrail w DB (`amount_*_cap` z open)
+
+keywords: stream-lineage, baseline_open, position_stream_valuation_snapshots, amount_a_cap, amount_b_cap, WSOL, PositionDetail
+
+- **Problem:** Dla aktywnych PDA `start value` potrafił być mocno zaniżony (np. 1.8 vs 4.0), gdy snapshot `baseline_open` powstał z `fee_payer_token_deltas` bez jednej nogi (często WSOL/SOL).
+- **Fix:** W `node_metrics` (DB path) dodany fallback: przy podejrzanie niskim baseline czytamy pierwszy open row z `position_stream_ledger_rows.raw_json.details` i liczymy baseline z `amount_a_cap` + `amount_b_cap` po cenach free API; używamy większej z wartości.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-10 — stream-lineage collect_fees: pokazuj też nogę 0 (SOL/WSOL)
+
+keywords: stream-lineage, collect_fees, SOL, WSOL, zero-leg, PositionDetail
+
+- **Problem:** Przy collectach jednostronnych jedna noga (często SOL/WSOL) miała realnie `0`, ale API zwracało `null` i UI pokazywał `—`, co wyglądało jak brak danych.
+- **Fix:** Gdy `collect_events > 0` i znamy minty puli, API zwraca obie nogi LP (`fees_collected_token_{a,b}_ui`) także dla wartości `0` zamiast `null`.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-09 — stream-lineage: stabilniejsze LP fees (cache mintów puli + `collect_events`)
+
+keywords: stream-lineage, position_stream_lineage, get_pool_state, POOL_TOKEN_MINTS_CACHE, collect_events, public RPC
+
+- **Cause:** Przy wielu PDA `join_all(node_metrics)` odpala wiele równoległych `get_pool_state` — publiczny RPC często timeoutuje (2s). Wiersz `bot_collect_fees` był wtedy **pomijany** w agregacji, ale licznik `collect_events` nadal brał pełną liczbę wierszy SQL → UI: „1×”, `$0`, „Brak sumy USD”, przy kolejnym odświeżeniu inne dane.
+- **Fix:** Cache procesu `pool → (mint_a, mint_b)`, do 3 prób z backoffem, timeout 4s; `collect_events` = tylko wiersze po udanym rozwiązaniu puli (lifecycle + DB). Ceny mintów dla LP USD: timeout 5s. Frontend: lineage `refetchOnWindowFocus: false`, `staleTime` 60s.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-09 — `collect_fees`: obie nogi LP w ledgerze (`fee_owed_*` → JSONL → Postgres ingest)
+
+keywords: collect_fees, fee_owed, lp_collected_token_a_raw, lp_collected_token_b_raw, orca_position_lifecycle.jsonl, position_stream_ledger_rows, rebalance, tx_lifecycle, position_stream_lineage, migration 005
+
+- **Why:** Po harvestcie meta RPC często nie pokazuje pełnej mapy tokenów (np. WSOL); potrzebne są **obie** kwoty zebrane z pozycji (token A/B puli), nie tylko `(0,0)` z executora.
+- **Fix:** Przed tx odczyt `fees_owed_a` / `fees_owed_b` z konta pozycji; po sukcesie zapis do `orca_position_lifecycle.jsonl` jako `lp_collected_token_{a,b}_raw` (tylko `operation == collect_fees`). Migracja `005_ledger_lp_collected_raw.sql`; ingest `ingest_lifecycle_rows_best_effort` zapisuje kolumny w `position_stream_ledger_rows`; lineage/USD scala z tymi polami.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/data/migrations/005_ledger_lp_collected_raw.sql`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-09 — UI lineage LP fees: rename “raw” → “baz. jedn.” + note on WSOL in `fee_payer_token_deltas`
+
+keywords: ClosedPositionDetail, PositionDetail, stream-lineage, fee_payer_token_deltas, WSOL, UI
+
+- **Why:** Users read `(raw …)` next to SOL as if “raw” were a token class; field is integer smallest on-chain units (lamports etc.). Orca collect credits both legs but RPC meta often omits WSOL in the mint map — one leg visible, one not.
+- **Fix:** Show `(baz. jedn.: N)` only when `N` is present; tooltip explains; short copy under rotation tables about SPL-vs-WSOL in deltas.
+- **paths:** `web/src/lib/utils.ts`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-09 — `POST /backtests/from-closed-position`: registry close day → CLI `--end-date` (+1 UTC day)
+
+keywords: backtest, from-closed-position, snapshots.jsonl, registry, start-date, end-date, clmm-lp-api, clmm-lp-cli
+
+- **Cause:** CLI filters Orca snapshots with `ts >= start && ts < end` where `YYYY-MM-DD` is 00:00 UTC. Registry supplied the same date for open and close → `start == end` → zero rows → “No snapshot rows in the requested time window” while the job exit code could still be 0.
+- **Fix:** When `end_date` is **not** overridden in the JSON body, infer exclusive upper bound as **the calendar day after** the registry close date. Explicit `end_date` in the request is still passed through unchanged (already “exclusive” in CLI terms).
+- **Also:** CLI prints a short hint when the window is empty (zero-width vs missing file data).
+- **paths:** `crates/api/src/handlers/backtests.rs`, `crates/api/src/models.rs`, `crates/cli/src/main.rs`
+
+## 2026-04-09 — `GET /positions/closed`: pagination slice aligned with newest-first sort
+
+keywords: closed positions, registry.jsonl, list_closed_positions, pagination, clmm-lp-api
+
+- **Bug:** After sorting closed rows newest-first, the slice used `total - offset - limit` … `total - offset`, so the default page (`offset=0`) returned the **oldest** window when `total > limit`, contradicting OpenAPI (“skip newest”).
+- **Fix:** `items = closed[offset .. min(offset + limit, total)]` with `offset` clamped to `total`.
+- **paths:** `crates/api/src/handlers/positions.rs`
+
+## 2026-04-09 — strategy autostart: refuse `auto_execute` without signing keypair (align with HTTP start)
+
+keywords: strategy, autostart, StrategyService, KEYPAIR_PATH, SOLANA_KEYPAIR_PATH, WALLET_KEYPAIR_PATH, RebalanceExecutor, clmm-lp-api
+
+- **Bug:** `CLMM_STRATEGY_AUTOSTART_ON_BOOT` + `StrategyService::start_strategy` allowed `auto_execute=true` with no `KEYPAIR_PATH` / `SOLANA_KEYPAIR_PATH` / `WALLET_KEYPAIR_PATH` → executor started, then rebalance failed with `Wallet not set on RebalanceExecutor`. HTTP `POST /strategies/{id}/start` already returned 400 in that case.
+- **Fix:** same validation in `strategy_service.rs`: `auto_execute=true` and `!dry_run` requires a loaded wallet or `bad_request` (strategy stays not running).
+- **paths:** `crates/api/src/services/strategy_service.rs`
+
+## 2026-04-09 — `POST /backtests/from-closed-position`: resolve `clmm-lp-cli` (PATH / `CLMM_LP_CLI_PATH` / `target*`)
+
+keywords: backtest, from-closed-position, clmm-lp-cli, CLMM_LP_CLI_PATH, CLMM_REPO_ROOT, CLMM_API_TARGET_DIR, subprocess, clmm-lp-api
+
+- **Issue:** `program not found` when API spawned `clmm-lp-cli` (Windows dev: binary not on PATH, or API uses custom `--target-dir` e.g. `target-dev-api`).
+- **Fix:** resolve executable in order: `CLMM_LP_CLI_PATH` → sibling of `current_exe` → `CLMM_REPO_ROOT/target/{debug,release}` → `CLMM_REPO_ROOT/$CLMM_API_TARGET_DIR/{debug,release}` → `CARGO_TARGET_DIR/{debug,release}` → else clear stderr hint.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `.env.example`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-09 — `POST /backtests/from-closed-position`: kapitał — fallbacki (ledger open / DB snapshot) + UI `capital` z lineage
+
+keywords: backtest, from-closed-position, capital, orca_position_lifecycle.jsonl, registry, position_stream_valuation_snapshots, ClosedPositionDetail, clmm-lp-api
+
+- **Bug:** 400 gdy brak `rebalance_session_id` na registry albo delty w JSON jako liczby zamiast stringów — `capital` wychodził 0.
+- **Fix:** parsowanie `fee_payer_token_deltas` jak string lub number; kolejność: sesja z registry → **pierwszy wiersz open** dla tego PDA → **`value_usd` pierwszego snapshotu** w DB; jeden `get_pool_state` przed wyliczeniami. Web: jeśli `stream-lineage` ma `baseline_value_usd` dla wpisu, wysyła `capital`.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-09 — stream-lineage: zebrane LP fees — noga SOL (`fee_payer_token_*_delta_ui` + ścieżka DB)
+
+keywords: stream-lineage, bot_collect_fees, fee_payer_token_a_delta_ui, WSOL, position_stream_lineage, position_stream_ledger_rows, clmm-lp-api
+
+- **Problem:** UI potrafiło pokazać `SOL: —` przy niezerowej sumie USD / drugiej nodze: agregacja brała tylko `fee_payer_token_deltas` (pomijała wiersze bez mapy), a **`node_metrics` z Postgresa** w ogóle nie wypełniał `fees_collected_token_*`.
+- **Fix:** Na wiersz `bot_collect_fees` scalać **max(Δ z mapy po mincie, `fee_payer_token_a_delta_ui` / `b`)** w kolejności min puli; to samo z pól JSONL; zwracany `BTreeMap` napędza USD i UI; DB path ustawia token UI + raw jak ścieżka lifecycle.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-09 — `stream-lineage`: avoid 120s UI timeout (ingest + SQL BFS + self-seed × chain)
+
+keywords: stream-lineage, position_stream_edges, maybe_ingest_ledgers, node_metrics, clmm-lp-api
+
+- **Cause:** `compute_position_stream_lineage` called `maybe_ingest_ledgers` (full JSONL scan + per-line INSERT), BFS did **one SQL query per graph node**, and each node without DB snapshots tried **on-chain self-seed** (~2s) sequentially → closed position × long chain → UI timeout.
+- **Fix:** lineage calls `compute_position_stream_performance(..., skip_ledger_ingest=true)`; edges loaded **once** and BFS in memory; per-node metrics use **`skip_snapshot_self_seed`** → lifecycle JSONL when no snapshots; **parallel** `node_metrics` via `join_all`.
+- **paths:** `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_pnl.rs`
+
+## 2026-04-09 — diagnostics: auto-heal strategy link after rotation (registry parent walk)
+
+keywords: strategy, position_addresses, reopen_hook, diagnostics, registry.jsonl, heal_rotated_strategy_link, clmm-lp-api
+
+- **Problem:** After rebalance/rotate, `parameters.position_addresses` could still list the **closed** PDA when `reopen_hook` did not persist (bot outside API, spawn error, etc.) → UI showed no linked strategy.
+- **Fix:** `GET /positions/:address/diagnostics` if no link: infer **parent** PDA via `registry.jsonl` (then lifecycle), find strategy(ies) still holding that parent, `replace_position_address_in_strategy`, sync **managed allowlist** + `executor_disabled` on running executors.
+- **Also:** `replace_position_address_in_strategy` now updates `executor_disabled_position_addresses` when a PDA rotates; registry chain windows aligned to **60m**.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/handlers/positions.rs`
+
+## 2026-04-09 — `GET /positions/closed`: fix N× RPC before pagination (UI 15s timeout)
+
+keywords: closed-positions, registry.jsonl, list_closed_positions, WhirlpoolReader, web, api
+
+- **Bug:** handler called `get_pool_state` for **every** closed row in registry *before* sorting/pagination, so hundreds of sequential RPCs could exceed the default **15s** browser timeout.
+- **Fix:** build closed list from registry only, paginate, then resolve **unique pool addresses on that page** once each. Frontend `getClosedPositions` uses **60s** timeout as a safety margin.
+- **More:** query `enrich_pools=false` skips pool RPC entirely (registry-only). Dashboard **staged** fetch (`fast` then enrich) + **prefetch** on sidebar idle/hover for instant paint.
+- **paths:** `crates/api/src/handlers/positions.rs`, `web/src/lib/api.ts`, `web/src/pages/ClosedPositions.tsx`, `web/src/components/Layout.tsx`
+
+## 2026-04-09 — backfill DB valuation snapshots from lifecycle (current free prices)
+
+keywords: position_stream_valuation_snapshots, backfill, lifecycle, stream_pnl, closed-positions, clmm-lp-api, postgres
+
+- Added `POST /positions/backfill-valuation-snapshots` to convert historical lifecycle open/close token deltas into **synthetic** rows in `position_stream_valuation_snapshots`.
+- Rows are tagged with `price_source="lifecycle_current_prices"` and value is computed using **current free mint prices** (approximate-by-design; enables DB-backed `stream-pnl` even for old/closed positions).
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/routes.rs`
+
+## 2026-04-09 — collected/uncollected fees: show token + raw units (avoid misleading $0)
+
+keywords: fees, bot_collect_fees, stream_lineage, lifecycle_summary, lamports, base-units, clmm-lp-api, web
+
+- `GET /positions/:address/stream-lineage` nodes + `chain_cost_summary` now include **collected LP fees** also as **token A/B UI units** and **raw smallest units** (`fees_collected_token_*_{ui,raw}`), in addition to `fees_collected_usd`.
+- UI no longer prints `$0.0000` for collected fees when `collect_events>0` but USD valuation is unavailable (e.g. JSONL-only mode); shows `—` and the **token + raw** amounts instead.
+- **Positions** list shows uncollected fees in token UI plus **raw** (`pnl.fees_earned_a/b`) for quick sanity checks.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/lib/api.ts`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/Positions.tsx`
+
 ## 2026-04-08 — backtest-optimize `composite`: one-sided IL drag + rebalance costs
 
 keywords: backtest-optimize, composite, final_il_pct, total_rebalance_cost, clmm-lp-cli, main.rs

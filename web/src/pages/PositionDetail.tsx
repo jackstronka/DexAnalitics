@@ -23,15 +23,21 @@ import {
   setStrategyPositionExecutor,
   getJupiterPricesUsd,
   linkPositionStrategy,
+  suggestPositionStrategy,
 } from '@/lib/api'
 import type { Strategy } from '@/lib/api'
 import {
+  FEE_BASE_UNITS_TOOLTIP,
+  formatDate,
+  formatFeeBaseUnitsClause,
+  formatLineageFeesCollectedUsdMain,
+  formatPercentFixed,
+  formatPrincipalDeltaUsdOrDash,
+  formatUsdField,
   formatUsdFixed,
   formatUsdUncollectedFees,
-  formatPercentFixed,
-  shortenAddress,
-  formatDate,
   formatUsdcPriceRange,
+  shortenAddress,
 } from '@/lib/utils'
 
 /** Wrapped SOL mint — network fees are in native SOL (lamports). */
@@ -161,11 +167,6 @@ function usdOrDash(v: string | number, digits = 3): string {
   return formatUsdFixed(n, digits)
 }
 
-function parseUsdNum(v: string | number): number | null {
-  const n = typeof v === 'number' ? v : parseFloat(String(v))
-  return Number.isFinite(n) ? n : null
-}
-
 function rowEvent(r: LedgerRow): string {
   const e = r.event
   return typeof e === 'string' ? e : '—'
@@ -203,6 +204,14 @@ export default function PositionDetail() {
     staleTime: 15_000,
   })
 
+  const suggestQ = useQuery({
+    queryKey: ['position-suggest-strategy', address],
+    queryFn: () => suggestPositionStrategy(address!),
+    enabled: !!address,
+    retry: 0,
+    staleTime: 30_000,
+  })
+
   const { data: streamPerf } = useQuery({
     queryKey: ['position-stream-performance', address],
     queryFn: () => getPositionStreamPerformance(address!),
@@ -219,13 +228,15 @@ export default function PositionDetail() {
     staleTime: 30_000,
   })
 
-  const { data: streamLineage } = useQuery({
+  const lineageQ = useQuery({
     queryKey: ['position-stream-lineage', address],
     queryFn: () => getPositionStreamLineage(address!),
     enabled: !!address,
     retry: 0,
-    staleTime: 30_000,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
+  const streamLineage = lineageQ.data
 
   const chainSet = useMemo(() => {
     const addr = address?.trim() ?? ''
@@ -344,6 +355,16 @@ export default function PositionDetail() {
   useEffect(() => {
     setStrategyPick(linkedStrategies[0]?.id ?? '')
   }, [linkedStrategies])
+
+  useEffect(() => {
+    if (linkedStrategies.length > 0) {
+      return
+    }
+    const sid = suggestQ.data?.strategy_id
+    if (typeof sid === 'string' && sid.trim().length > 0) {
+      setStrategyPick(sid.trim())
+    }
+  }, [linkedStrategies.length, suggestQ.data?.strategy_id])
 
   const linkStrategyMutation = useMutation({
     mutationFn: (strategy_id: string | null) => linkPositionStrategy(address!, { strategy_id }),
@@ -667,6 +688,11 @@ export default function PositionDetail() {
                         Link, switch, or remove strategy for this position (updates{' '}
                         <code className="text-[10px]">parameters.position_addresses</code>).
                       </p>
+                      {linkedStrategies.length === 0 && suggestQ.data?.reason ? (
+                        <p className="text-[11px] text-muted-foreground text-left sm:text-right">
+                          Suggestion: {suggestQ.data.reason}
+                        </p>
+                      ) : null}
                       <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 items-stretch sm:items-center">
                         <select
                           className="rounded-md border border-input bg-background px-2 py-2 text-sm min-w-0 flex-1 sm:max-w-xs"
@@ -1045,7 +1071,23 @@ export default function PositionDetail() {
         </Tabs.Content>
 
         <Tabs.Content value="ledger" className="mt-4 space-y-4">
-          {streamLineage ? (
+          {lineageQ.isPending ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Position history (rotations)</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">Loading lineage…</CardContent>
+            </Card>
+          ) : lineageQ.isError ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Position history (rotations)</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-destructive">
+                {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
+              </CardContent>
+            </Card>
+          ) : streamLineage ? (
             <Card>
               <CardHeader>
                 <CardTitle>Position history (rotations)</CardTitle>
@@ -1057,6 +1099,15 @@ export default function PositionDetail() {
                 {streamLineage.note ? (
                   <p className="text-[11px] text-muted-foreground leading-snug">{streamLineage.note}</p>
                 ) : null}
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  <span className="font-medium">LP zebrane:</span> przy <code className="text-[10px]">collect_fees</code> Orca
+                  przenosi oba tokeny puli, ale <code className="text-[10px]">fee_payer_token_deltas</code> z meta RPC często
+                  zawiera tylko jeden mint SPL (np. whETH) — WSOL bywa pominięty. W nawiasie pokazujemy{' '}
+                  <span title={FEE_BASE_UNITS_TOOLTIP} className="cursor-help border-b border-dotted border-muted-foreground/40">
+                    baz. jedn.
+                  </span>{' '}
+                  = najmniejsze jednostki on-chain (np. lamporty), nie osobny token „raw”.
+                </p>
 
                 {streamLineage.nodes.length > 0 ? (
                   <div className="overflow-x-auto rounded-md border">
@@ -1106,12 +1157,7 @@ export default function PositionDetail() {
                               {usdOrDash(n.current_value_usd, 3)}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {(() => {
-                                const a = parseUsdNum(n.baseline_value_usd)
-                                const b = parseUsdNum(n.current_value_usd)
-                                if (a === null || b === null) return '—'
-                                return formatUsdFixed(b - a, 3)
-                              })()}
+                              {formatPrincipalDeltaUsdOrDash(n.baseline_value_usd, n.current_value_usd, 3)}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px] leading-tight">
                               {(n.tx_fee_lamports ?? 0).toLocaleString()} λ
@@ -1119,20 +1165,73 @@ export default function PositionDetail() {
                               <span className="text-muted-foreground">{formatUsdFixed(parseFloat(String(n.tx_fees_usd)), 4)}</span>
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]">
-                              {formatUsdFixed(parseFloat(String(n.fees_collected_usd ?? '0')), 4)}
-                              <span className="text-muted-foreground"> · {n.collect_events ?? 0}×</span>
+                              {(() => {
+                                const collects = n.collect_events ?? 0
+                                const usdNum = parseFloat(String(n.fees_collected_usd ?? '').trim() || '0')
+                                const hasTokenVals =
+                                  n.fees_collected_token_a_ui != null ||
+                                  n.fees_collected_token_b_ui != null ||
+                                  n.fees_collected_token_a_raw != null ||
+                                  n.fees_collected_token_b_raw != null
+                                const showLegRows =
+                                  collects > 0 && (hasTokenVals || n.token_a_label || n.token_b_label)
+                                return (
+                                  <>
+                                    <span>{formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)}</span>
+                                    <span className="text-muted-foreground"> · {collects}×</span>
+                                    {showLegRows ? (
+                                      <div className="text-muted-foreground mt-1 leading-tight">
+                                        {n.token_a_label ? (
+                                          <div>
+                                            {n.token_a_label}: {String(n.fees_collected_token_a_ui ?? '—')}
+                                            {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw) ? (
+                                              <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                                {' '}
+                                                {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw)}
+                                              </span>
+                                            ) : null}
+                                          </div>
+                                        ) : null}
+                                        {n.token_b_label ? (
+                                          <div>
+                                            {n.token_b_label}: {String(n.fees_collected_token_b_ui ?? '—')}
+                                            {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw) ? (
+                                              <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                                {' '}
+                                                {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw)}
+                                              </span>
+                                            ) : null}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                    {collects > 0 && usdNum === 0 && !hasTokenVals ? (
+                                      <div className="text-muted-foreground mt-1 leading-tight text-[10px]">
+                                        Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.
+                                      </div>
+                                    ) : null}
+                                  </>
+                                )
+                              })()}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {formatUsdFixed(n.realized_cashflow_usd, 3)}
+                              {formatUsdField(n.realized_cashflow_usd, 3)}
                             </td>
                             <td
                               className={
-                                parseFloat(n.net_pnl_pct) >= 0
-                                  ? 'px-2 py-1 whitespace-nowrap font-mono text-green-500'
-                                  : 'px-2 py-1 whitespace-nowrap font-mono text-red-500'
+                                (() => {
+                                  const pct = parseFloat(String(n.net_pnl_pct ?? ''))
+                                  return Number.isFinite(pct) && pct >= 0
+                                    ? 'px-2 py-1 whitespace-nowrap font-mono text-green-500'
+                                    : 'px-2 py-1 whitespace-nowrap font-mono text-red-500'
+                                })()
                               }
                             >
-                              {formatUsdFixed(n.net_pnl_usd, 3)} ({formatPercentFixed(n.net_pnl_pct, 3)})
+                              {formatUsdField(n.net_pnl_usd, 3)} (
+                              {Number.isFinite(parseFloat(String(n.net_pnl_pct ?? '')))
+                                ? formatPercentFixed(n.net_pnl_pct, 3)
+                                : '—'}
+                              )
                             </td>
                           </tr>
                         ))}
@@ -1200,7 +1299,14 @@ export default function PositionDetail() {
                 ) : null}
               </CardContent>
             </Card>
-          ) : null}
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Position history (rotations)</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">No lineage response.</CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardHeader>

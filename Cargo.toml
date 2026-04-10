@@ -47,8 +47,10 @@ solana-sdk = "3.0"
 solana-program = "3.0"
 solana-system-interface = { version = "=3.1.0", features = ["bincode"] }
 solana-program-pack = "3.1.0"
-spl-token = "9.0"
-spl-associated-token-account = "8.0.0"
+# Client-side crates: avoid exporting on-chain `entrypoint` symbols on native targets (Windows linkers
+# will otherwise see duplicate `entrypoint` across multiple SPL program crates).
+spl-token = { version = "9.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "8.0.0", features = ["no-entrypoint"] }
 axum = "0.8"
 rust_decimal = "1.39"
 u256 = "0.1"

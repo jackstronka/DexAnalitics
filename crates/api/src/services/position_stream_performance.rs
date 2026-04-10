@@ -164,15 +164,26 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .get("fee_payer_token_b_delta_ui")
             .and_then(decimal_from_value);
         let token_deltas = v.get("fee_payer_token_deltas").cloned();
+        let lp_a = v.get("lp_collected_token_a_raw").and_then(|x| {
+            x.as_i64()
+                .or_else(|| x.as_u64().map(|n| n as i64))
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        });
+        let lp_b = v.get("lp_collected_token_b_raw").and_then(|x| {
+            x.as_i64()
+                .or_else(|| x.as_u64().map(|n| n as i64))
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        });
 
         // Signature is the idempotency key when present. When absent, we still store best-effort rows.
         sqlx::query(
             r#"
             INSERT INTO position_stream_ledger_rows (
               signature, ts_utc, source, event, rebalance_session_id, position_pubkey, pool_pubkey,
-              tx_fee_lamports, fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui, fee_payer_token_deltas, raw_json
+              tx_fee_lamports, fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui, fee_payer_token_deltas,
+              lp_collected_token_a_raw, lp_collected_token_b_raw, raw_json
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             ON CONFLICT (signature) DO UPDATE SET
               ts_utc = COALESCE(EXCLUDED.ts_utc, position_stream_ledger_rows.ts_utc),
               source = COALESCE(EXCLUDED.source, position_stream_ledger_rows.source),
@@ -184,6 +195,8 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
               fee_payer_token_a_delta_ui = COALESCE(EXCLUDED.fee_payer_token_a_delta_ui, position_stream_ledger_rows.fee_payer_token_a_delta_ui),
               fee_payer_token_b_delta_ui = COALESCE(EXCLUDED.fee_payer_token_b_delta_ui, position_stream_ledger_rows.fee_payer_token_b_delta_ui),
               fee_payer_token_deltas = COALESCE(EXCLUDED.fee_payer_token_deltas, position_stream_ledger_rows.fee_payer_token_deltas),
+              lp_collected_token_a_raw = COALESCE(EXCLUDED.lp_collected_token_a_raw, position_stream_ledger_rows.lp_collected_token_a_raw),
+              lp_collected_token_b_raw = COALESCE(EXCLUDED.lp_collected_token_b_raw, position_stream_ledger_rows.lp_collected_token_b_raw),
               raw_json = EXCLUDED.raw_json
             "#,
         )
@@ -198,6 +211,8 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
         .bind(fee_a)
         .bind(fee_b)
         .bind(token_deltas)
+        .bind(lp_a)
+        .bind(lp_b)
         .bind(v)
         .execute(db.pool())
         .await?;
@@ -205,10 +220,12 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
     Ok(())
 }
 
-async fn maybe_ingest_ledgers(state: &AppState) {
-    if state.db.is_none() {
+async fn maybe_ingest_ledgers(state: &AppState, skip: bool) {
+    if skip || state.db.is_none() {
         return;
     }
+    // Ingest can scan entire JSONL and issue one INSERT per line — never block hot read paths
+    // like `stream-lineage` (UI 120s timeouts). Lineage skips ingest; other callers still ingest.
     let min_interval = Duration::from_secs(10);
     {
         let g = state.ledger_ingest_last_at.read().await;
@@ -240,40 +257,61 @@ async fn stream_component_positions_and_sessions(
         return Ok((vec![start_position.to_string()], Vec::new()));
     };
 
+    // One round-trip: load all edges, BFS in memory. The old per-node SQL BFS could issue
+    // thousands of queries for a large connected component and exceed HTTP timeouts.
+    let edge_rows = sqlx::query(
+        r#"SELECT rebalance_session_id, old_position, new_position FROM position_stream_edges"#,
+    )
+    .fetch_all(db.pool())
+    .await?;
+
+    let mut edges_mem: Vec<(String, String, String)> = Vec::with_capacity(edge_rows.len());
+    for r in edge_rows {
+        let sid: String = r.try_get("rebalance_session_id").unwrap_or_default();
+        let oldp: String = r.try_get("old_position").unwrap_or_default();
+        let newp: String = r.try_get("new_position").unwrap_or_default();
+        if oldp.trim().is_empty() || newp.trim().is_empty() {
+            continue;
+        }
+        edges_mem.push((sid, oldp, newp));
+    }
+
+    use std::collections::HashMap;
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for (_sid, oldp, newp) in &edges_mem {
+        adj.entry(oldp.clone()).or_default().push(newp.clone());
+        adj.entry(newp.clone()).or_default().push(oldp.clone());
+    }
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut q: VecDeque<String> = VecDeque::new();
     seen.insert(start_position.to_string());
     q.push_back(start_position.to_string());
 
-    let mut sessions: BTreeSet<String> = BTreeSet::new();
-
     while let Some(cur) = q.pop_front() {
         if seen.len() >= max_nodes {
             break;
         }
-
-        let rows = sqlx::query(
-            r#"
-            SELECT rebalance_session_id, old_position, new_position
-            FROM position_stream_edges
-            WHERE old_position = $1 OR new_position = $1
-            "#,
-        )
-        .bind(&cur)
-        .fetch_all(db.pool())
-        .await?;
-
-        for r in rows {
-            let sid: String = r.try_get("rebalance_session_id")?;
-            let oldp: String = r.try_get("old_position")?;
-            let newp: String = r.try_get("new_position")?;
-            sessions.insert(sid);
-
-            for next in [oldp, newp] {
-                if seen.insert(next.clone()) {
-                    q.push_back(next);
-                }
+        let Some(neighbors) = adj.get(&cur) else {
+            continue;
+        };
+        for nxt in neighbors {
+            if seen.len() >= max_nodes {
+                break;
             }
+            if seen.insert(nxt.clone()) {
+                q.push_back(nxt.clone());
+            }
+        }
+    }
+
+    let mut sessions: BTreeSet<String> = BTreeSet::new();
+    for (sid, oldp, newp) in &edges_mem {
+        if sid.trim().is_empty() {
+            continue;
+        }
+        if seen.contains(oldp) && seen.contains(newp) {
+            sessions.insert(sid.clone());
         }
     }
 
@@ -284,11 +322,15 @@ async fn stream_component_positions_and_sessions(
 }
 
 /// Compute best-effort stream-level aggregates for a position PDA.
+///
+/// When `skip_ledger_ingest` is true (e.g. `stream-lineage`), skip JSONL→DB ingest so the handler
+/// stays fast; edges/ledger already in Postgres are still used.
 pub async fn compute_position_stream_performance(
     state: &AppState,
     position_address: &str,
+    skip_ledger_ingest: bool,
 ) -> Result<PositionStreamPerformanceResponse, crate::error::ApiError> {
-    maybe_ingest_ledgers(state).await;
+    maybe_ingest_ledgers(state, skip_ledger_ingest).await;
 
     let max_nodes = 2000;
     let (positions, sessions) = stream_component_positions_and_sessions(state, position_address, max_nodes)

@@ -3,19 +3,25 @@
 use crate::error::{ApiError, ApiResult};
 use crate::handlers::strategies::ensure_strategy_running_after_position_link;
 use crate::models::{
-    ClosedPositionEntry, ClosedPositionsResponse, DecreaseLiquidityRequest,
-    LinkPositionStrategyRequest, ListPositionsResponse, MessageResponse, OpenPositionRequest,
-    PnLResponse, PositionDiagnosticsResponse, PositionLastEvalSnapshot, PositionOpenResponse,
-    PositionResponse, PositionStatus, PositionStrategyDiagnostics, PositionStreamPerformanceResponse,
-    PositionStreamLineageResponse, PositionStreamPnLResponse, RebalanceRequest, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
-    UncollectedFeesInfo, PositionLifecycleSummaryResponse, PositionLifecycleSessionSummary,
-    PositionLifecycleEvent, PositionExperimentConfigResponse,
+    BackfillValuationSnapshotsRequest, BackfillValuationSnapshotsResponse, ClosedPositionEntry,
+    ClosedPositionsResponse, DecreaseLiquidityRequest, LinkPositionStrategyRequest,
+    ListPositionsResponse, MessageResponse, OpenPositionRequest, PnLResponse,
+    PositionDiagnosticsResponse, PositionExperimentConfigResponse, PositionLastEvalSnapshot,
+    PositionLifecycleEvent, PositionLifecycleSessionSummary, PositionLifecycleSummaryResponse,
+    PositionOpenResponse, PositionResponse, PositionStatus, PositionStrategyDiagnostics,
+    PositionStreamLineageResponse, PositionStreamPerformanceResponse, PositionStreamPnLResponse,
+    RebalanceRequest, SuggestStrategyLinkResponse, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
+    UncollectedFeesInfo,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
-use crate::services::position_stream_lineage::compute_position_stream_lineage;
+use crate::services::position_stream_lineage::{
+    backfill_valuation_snapshots_from_lifecycle_current_prices, compute_position_stream_lineage,
+    infer_parent_position_from_lifecycle_best_effort,
+};
 use crate::services::position_stream_pnl::compute_position_stream_pnl;
 use crate::services::strategy_service::{
-    append_position_address_to_strategy, remove_position_address_from_all_strategies,
+    append_position_address_to_strategy, heal_rotated_strategy_link_best_effort,
+    remove_position_address_from_all_strategies,
 };
 use crate::state::{AppState, PositionUpdate};
 use axum::{
@@ -23,7 +29,11 @@ use axum::{
     extract::{Path, State},
 };
 use rust_decimal::Decimal;
+use rust_decimal::MathematicalOps;
+use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::program_pack::Pack;
+use spl_token::state::Mint;
 use std::str::FromStr;
 use tracing::{info, warn};
 
@@ -46,7 +56,26 @@ use std::io::{BufRead, BufReader};
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use std::collections::BTreeSet;
 use clmm_lp_domain::math::price_tick::tick_to_price;
-use rust_decimal::prelude::ToPrimitive;
+
+fn token_short_label(mint: &str) -> String {
+    match mint.trim() {
+        "So11111111111111111111111111111111111111112" => "SOL".to_string(),
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" => "USDC".to_string(),
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" => "USDT".to_string(),
+        "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs" => "whETH".to_string(),
+        _ => mint.trim().to_string(),
+    }
+}
+
+async fn fetch_mint_decimals_best_effort(
+    provider: &clmm_lp_protocols::rpc::RpcProvider,
+    mint_s: &str,
+) -> Option<u8> {
+    let pk = Pubkey::from_str(mint_s).ok()?;
+    let account = provider.get_account(&pk).await.ok()?;
+    let mint_state = Mint::unpack(&account.data).ok()?;
+    Some(mint_state.decimals)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CostSessionQuery {
@@ -239,10 +268,17 @@ pub struct ClosedPositionsQuery {
     /// How many newest closed rows to skip (pagination). `0` = newest page.
     #[serde(default)]
     offset: usize,
+    /// When `false`, skip Whirlpool pool RPC (no mint labels); registry replay only — fastest.
+    #[serde(default = "default_enrich_pools")]
+    enrich_pools: bool,
 }
 
 fn default_closed_limit() -> usize {
     100
+}
+
+fn default_enrich_pools() -> bool {
+    true
 }
 
 fn clamp_closed_limit(n: usize) -> usize {
@@ -354,6 +390,14 @@ pub async fn list_positions(
                 ),
                 None => (None, None, None, None, None, None),
             };
+        let (range_lower_price, range_upper_price, range_price_quote) = match valuation.as_ref() {
+            Some(v) => (
+                Some(v.range_price.lower),
+                Some(v.range_price.upper),
+                Some(v.range_price.quote.clone()),
+            ),
+            None => (None, None, None),
+        };
 
         responses.push(PositionResponse {
             address: p.address.to_string(),
@@ -364,6 +408,9 @@ pub async fn list_positions(
             range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
             range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
             range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+            range_lower_price,
+            range_upper_price,
+            range_price_quote,
             token_a_label,
             token_b_label,
             token_mint_a,
@@ -406,14 +453,15 @@ pub async fn list_positions(
     tag = "Positions",
     params(
         ("limit" = Option<usize>, Query, description = "Max rows (1–2000, default 100)"),
-        ("offset" = Option<usize>, Query, description = "How many newest closed positions to skip (pagination)")
+        ("offset" = Option<usize>, Query, description = "How many newest closed positions to skip (pagination)"),
+        ("enrich_pools" = Option<bool>, Query, description = "Fetch pool mints for pair labels (default true); false = registry only, no RPC")
     ),
     responses(
         (status = 200, description = "Closed positions (from registry)", body = ClosedPositionsResponse)
     )
 )]
 pub async fn list_closed_positions(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(q): Query<ClosedPositionsQuery>,
 ) -> ApiResult<Json<ClosedPositionsResponse>> {
     let path = registry_path();
@@ -528,6 +576,10 @@ pub async fn list_closed_positions(
         closed.push(ClosedPositionEntry {
             position_address: pos,
             pool_address: st.pool,
+            token_mint_a: None,
+            token_mint_b: None,
+            token_a_label: None,
+            token_b_label: None,
             owner: st.owner,
             close_kind: st.close_kind,
             opened_ts_utc: st.opened_ts,
@@ -539,21 +591,62 @@ pub async fn list_closed_positions(
     // Newest first if close timestamp is present; else stable string sort.
     closed.sort_by(|a, b| b.closed_ts_utc.cmp(&a.closed_ts_utc).then_with(|| a.position_address.cmp(&b.position_address)));
 
+    // `closed` is sorted newest-first; skip `offset` from the head, then take up to `limit`.
     let total = closed.len();
     let limit = clamp_closed_limit(q.limit);
-    let offset = q.offset;
-    let start = total.saturating_sub(offset).saturating_sub(limit);
-    let end = total.saturating_sub(offset);
-    let items = if start < end && end <= total {
-        closed[start..end].to_vec()
+    let offset = q.offset.min(total);
+    let end = offset.saturating_add(limit).min(total);
+    let mut items = if offset < end {
+        closed[offset..end].to_vec()
     } else {
         Vec::new()
     };
 
+    let note = if q.enrich_pools {
+        None
+    } else {
+        Some(
+            "enrich_pools=false: registry-only rows; pair labels omitted (no pool RPC).".to_string(),
+        )
+    };
+
+    if q.enrich_pools {
+        // Pair labels need pool mints; **only** resolve pools for this page (not every closed row).
+        // Previously we did one RPC per registry row before pagination → N× slow and UI 15s timeouts.
+        let mut unique_pools: HashSet<String> = HashSet::new();
+        for e in &items {
+            let p = e.pool_address.trim();
+            if !p.is_empty() {
+                unique_pools.insert(p.to_string());
+            }
+        }
+        let reader = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone());
+        let mut pool_mints: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        for pool in unique_pools {
+            let (ma, mb) = match reader.get_pool_state(&pool).await {
+                Ok(ps) => (Some(ps.token_mint_a.to_string()), Some(ps.token_mint_b.to_string())),
+                Err(_) => (None, None),
+            };
+            pool_mints.insert(pool, (ma, mb));
+        }
+        for e in &mut items {
+            let p = e.pool_address.trim();
+            if p.is_empty() {
+                continue;
+            }
+            if let Some((ma, mb)) = pool_mints.get(p) {
+                e.token_mint_a = ma.clone();
+                e.token_mint_b = mb.clone();
+                e.token_a_label = ma.as_deref().map(token_short_label);
+                e.token_b_label = mb.as_deref().map(token_short_label);
+            }
+        }
+    }
+
     Ok(Json(ClosedPositionsResponse {
         total,
         items,
-        note: None,
+        note,
     }))
 }
 
@@ -578,7 +671,7 @@ pub async fn get_position_lifecycle_summary(
     Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
     // Reuse stream connectivity (IL edges + sessions). If DB disabled, this returns just the PDA.
-    let perf = compute_position_stream_performance(&state, pos).await?;
+    let perf = compute_position_stream_performance(&state, pos, false).await?;
     let positions = perf.positions.clone();
     let sessions = perf.sessions.clone();
 
@@ -592,7 +685,9 @@ pub async fn get_position_lifecycle_summary(
             total_tx_fee_usd: Decimal::ZERO,
             collect_events: 0,
             collected_fee_token_a_ui: None,
+            collected_fee_token_a_raw: None,
             collected_fee_token_b_ui: None,
+            collected_fee_token_b_raw: None,
             collected_fees_usd: None,
             realized_cashflow_usd: Decimal::ZERO,
             session_summaries: Vec::new(),
@@ -611,6 +706,8 @@ pub async fn get_position_lifecycle_summary(
     let mut collected_b_ui: Decimal = Decimal::ZERO;
     let mut any_collected_a = false;
     let mut any_collected_b = false;
+    let mut collected_fee_token_a_raw: Option<u64> = None;
+    let mut collected_fee_token_b_raw: Option<u64> = None;
 
     // Realized cashflow: sum of fee_payer_token_deltas for pool leg mints requires mint prices.
     // We can only do that reliably when we know pool leg mints; use stream PnL endpoint (baseline snapshot) when available.
@@ -796,6 +893,30 @@ pub async fn get_position_lifecycle_summary(
         let pb = px2.get(mb).copied().unwrap_or(0.0);
         let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
         let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
+
+        // Also expose collected fees in smallest units (raw/base units), so UI can always sanity-check
+        // amounts even when USD pricing is unavailable.
+        let decimal_ui_to_raw_u64 = |v: Decimal, decimals: u8| -> Option<u64> {
+            if v <= Decimal::ZERO {
+                return Some(0);
+            }
+            let scale = Decimal::from(10u64).checked_powu(u64::from(decimals))?;
+            (v * scale).round().to_u64()
+        };
+
+        let dec_a = fetch_mint_decimals_best_effort(&state.provider, ma).await;
+        let dec_b = fetch_mint_decimals_best_effort(&state.provider, mb).await;
+        collected_fee_token_a_raw = dec_a.and_then(|d| {
+            any_collected_a
+                .then_some(collected_a_ui)
+                .and_then(|x| decimal_ui_to_raw_u64(x, d))
+        });
+        collected_fee_token_b_raw = dec_b.and_then(|d| {
+            any_collected_b
+                .then_some(collected_b_ui)
+                .and_then(|x| decimal_ui_to_raw_u64(x, d))
+        });
+
         Some(collected_a_ui * pa_d + collected_b_ui * pb_d)
     } else {
         None
@@ -817,7 +938,9 @@ pub async fn get_position_lifecycle_summary(
         total_tx_fee_usd,
         collect_events,
         collected_fee_token_a_ui: any_collected_a.then_some(collected_a_ui),
+        collected_fee_token_a_raw,
         collected_fee_token_b_ui: any_collected_b.then_some(collected_b_ui),
+        collected_fee_token_b_raw,
         collected_fees_usd,
         realized_cashflow_usd,
         session_summaries,
@@ -952,6 +1075,14 @@ pub async fn get_position(
             ),
             None => (None, None, None, None, None, None),
         };
+    let (range_lower_price, range_upper_price, range_price_quote) = match valuation.as_ref() {
+        Some(v) => (
+            Some(v.range_price.lower),
+            Some(v.range_price.upper),
+            Some(v.range_price.quote.clone()),
+        ),
+        None => (None, None, None),
+    };
 
     let response = PositionResponse {
         address: position.address.to_string(),
@@ -962,6 +1093,9 @@ pub async fn get_position(
         range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
         range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
         range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+        range_lower_price,
+        range_upper_price,
+        range_price_quote,
         token_a_label,
         token_b_label,
         token_mint_a,
@@ -993,30 +1127,11 @@ pub async fn get_position(
     Ok(Json(response))
 }
 
-/// Get "why didn't this position rebalance?" diagnostics.
-#[utoipa::path(
-    get,
-    path = "/positions/{address}/diagnostics",
-    tag = "Positions",
-    params(
-        ("address" = String, Path, description = "Position address")
-    ),
-    responses(
-        (status = 200, description = "Diagnostics", body = PositionDiagnosticsResponse),
-        (status = 400, description = "Invalid address")
-    )
-)]
-pub async fn get_position_diagnostics(
-    State(state): State<AppState>,
-    Path(address): Path<String>,
-) -> ApiResult<Json<PositionDiagnosticsResponse>> {
-    let pubkey = Pubkey::from_str(&address)
-        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
-
-    let monitored = state.monitor.get_position(&pubkey).await;
-    let in_monitor = monitored.is_some();
-    let monitor_in_range = monitored.as_ref().map(|p| p.in_range);
-
+async fn linked_strategies_for_position_diagnostics(
+    state: &AppState,
+    pubkey: &Pubkey,
+    address_trim: &str,
+) -> Vec<PositionStrategyDiagnostics> {
     let strategies = state.strategies.read().await;
     let mut linked: Vec<PositionStrategyDiagnostics> = Vec::new();
     for s in strategies.values() {
@@ -1026,7 +1141,7 @@ pub async fn get_position_diagnostics(
             .and_then(|v| v.as_array());
         let is_linked = position_addresses.is_some_and(|arr| {
             arr.iter()
-                .any(|v| v.as_str().map(str::trim) == Some(address.trim()))
+                .any(|v| v.as_str().map(str::trim) == Some(address_trim))
         });
         if !is_linked {
             continue;
@@ -1037,7 +1152,7 @@ pub async fn get_position_diagnostics(
             .and_then(|v| v.as_array())
             .is_some_and(|arr| {
                 arr.iter()
-                    .any(|v| v.as_str().map(str::trim) == Some(address.trim()))
+                    .any(|v| v.as_str().map(str::trim) == Some(address_trim))
             });
 
         let strategy_type = s
@@ -1060,7 +1175,7 @@ pub async fn get_position_diagnostics(
             let exec_opt = { state.executors.read().await.get(&s.id).cloned() };
             if let Some(exec) = exec_opt {
                 let g = exec.read().await;
-                g.last_evaluation_for_position(&pubkey)
+                g.last_evaluation_for_position(pubkey)
                     .await
                     .map(|snap| PositionLastEvalSnapshot {
                         ts_utc: snap.ts_utc,
@@ -1088,6 +1203,52 @@ pub async fn get_position_diagnostics(
             automation_disabled_for_position: disabled,
             last_eval,
         });
+    }
+    linked
+}
+
+/// Get "why didn't this position rebalance?" diagnostics.
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/diagnostics",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position address")
+    ),
+    responses(
+        (status = 200, description = "Diagnostics", body = PositionDiagnosticsResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn get_position_diagnostics(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<PositionDiagnosticsResponse>> {
+    let pubkey = Pubkey::from_str(&address)
+        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    let monitored = state.monitor.get_position(&pubkey).await;
+    let in_monitor = monitored.is_some();
+    let monitor_in_range = monitored.as_ref().map(|p| p.in_range);
+
+    let address_trim = address.trim();
+    let mut linked =
+        linked_strategies_for_position_diagnostics(&state, &pubkey, address_trim).await;
+    if linked.is_empty() {
+        match heal_rotated_strategy_link_best_effort(&state, address_trim).await {
+            Ok(Some(_)) => {
+                linked =
+                    linked_strategies_for_position_diagnostics(&state, &pubkey, address_trim).await;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    position = %address_trim,
+                    "heal_rotated_strategy_link_best_effort failed (diagnostics still returned)"
+                );
+            }
+        }
     }
 
     Ok(Json(PositionDiagnosticsResponse {
@@ -1117,7 +1278,7 @@ pub async fn get_position_stream_performance(
 ) -> ApiResult<Json<PositionStreamPerformanceResponse>> {
     let pos = address.trim();
     Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
-    let resp = compute_position_stream_performance(&state, pos).await?;
+    let resp = compute_position_stream_performance(&state, pos, false).await?;
     Ok(Json(resp))
 }
 
@@ -1164,6 +1325,25 @@ pub async fn get_position_stream_lineage(
     let pos = address.trim();
     Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
     let resp = compute_position_stream_lineage(&state, pos).await?;
+    Ok(Json(resp))
+}
+
+/// Backfill synthetic DB valuation snapshots from lifecycle JSONL using current free prices.
+#[utoipa::path(
+    post,
+    path = "/positions/backfill-valuation-snapshots",
+    tag = "Positions",
+    request_body = BackfillValuationSnapshotsRequest,
+    responses(
+        (status = 200, description = "Backfill executed", body = BackfillValuationSnapshotsResponse),
+        (status = 503, description = "DB disabled")
+    )
+)]
+pub async fn backfill_valuation_snapshots(
+    State(state): State<AppState>,
+    Json(request): Json<BackfillValuationSnapshotsRequest>,
+) -> ApiResult<Json<BackfillValuationSnapshotsResponse>> {
+    let resp = backfill_valuation_snapshots_from_lifecycle_current_prices(&state, &request).await?;
     Ok(Json(resp))
 }
 
@@ -1752,4 +1932,76 @@ pub async fn link_position_strategy(
             "Position unlinked from all strategies".to_string(),
         )))
     }
+}
+
+/// Suggest which strategy this position should be linked to (best-effort).
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/suggest-strategy",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    responses(
+        (status = 200, description = "Suggestion (may be null)", body = SuggestStrategyLinkResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn suggest_position_strategy(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<crate::models::SuggestStrategyLinkResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    // If already linked, do not suggest.
+    let strategies = state.strategies.read().await;
+    let already_linked = strategies.values().any(|s| {
+        let params = s.config.get("parameters");
+        let position_addresses = params
+            .and_then(|p| p.get("position_addresses"))
+            .and_then(|v| v.as_array());
+        position_addresses.is_some_and(|arr| {
+            arr.iter()
+                .any(|v| v.as_str().map(str::trim) == Some(pos))
+        })
+    });
+    drop(strategies);
+    if already_linked {
+        return Ok(Json(crate::models::SuggestStrategyLinkResponse {
+            strategy_id: None,
+            reason: "Position already linked to a strategy.".to_string(),
+        }));
+    }
+
+    let Some(parent) = infer_parent_position_from_lifecycle_best_effort(pos).await else {
+        return Ok(Json(crate::models::SuggestStrategyLinkResponse {
+            strategy_id: None,
+            reason: "No parent PDA inferred from lifecycle ledger (missing open/close correlation).".to_string(),
+        }));
+    };
+
+    // Find a strategy that contains the parent PDA.
+    let strategies = state.strategies.read().await;
+    for s in strategies.values() {
+        let params = s.config.get("parameters");
+        let position_addresses = params
+            .and_then(|p| p.get("position_addresses"))
+            .and_then(|v| v.as_array());
+        let has_parent = position_addresses.is_some_and(|arr| {
+            arr.iter()
+                .any(|v| v.as_str().map(str::trim) == Some(parent.trim()))
+        });
+        if has_parent {
+            return Ok(Json(crate::models::SuggestStrategyLinkResponse {
+                strategy_id: Some(s.id.clone()),
+                reason: format!("Inferred parent PDA {parent} is linked to strategy {}.", s.id),
+            }));
+        }
+    }
+
+    Ok(Json(crate::models::SuggestStrategyLinkResponse {
+        strategy_id: None,
+        reason: format!("Inferred parent PDA {parent} but no strategy contains it in parameters.position_addresses."),
+    }))
 }

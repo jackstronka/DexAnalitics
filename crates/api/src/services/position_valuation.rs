@@ -33,6 +33,15 @@ pub struct TickRangeUsdc {
     pub quote: String,
 }
 
+/// Tick range expressed as **token B per 1 token A** in UI units (decimals applied).
+#[derive(Debug, Clone)]
+pub struct TickRangePrice {
+    pub lower: Decimal,
+    pub upper: Decimal,
+    /// e.g. `whETH per 1 SOL`
+    pub quote: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PositionUsdValuation {
     pub value_usd: Decimal,
@@ -52,6 +61,8 @@ pub struct PositionUsdValuation {
     /// USD price used for token B valuation (best-effort).
     pub price_b_usd: f64,
     pub range_usdc: Option<TickRangeUsdc>,
+    /// Generic range in UI price units (token B per 1 token A).
+    pub range_price: TickRangePrice,
     /// Spot is inside `[tick_lower, tick_upper)` using **fresh** pool tick from RPC.
     pub in_range: bool,
     /// Human-token uncollected fees (Whirlpool `fee_owed_*` × 10^-decimals).
@@ -129,6 +140,8 @@ fn token_short_label(mint: &Pubkey) -> String {
         "So11111111111111111111111111111111111111112" => "SOL".to_string(),
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" => "USDC".to_string(),
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" => "USDT".to_string(),
+        // whETH (Wormhole bridged ETH on Solana) — common Orca pools use this mint.
+        "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs" => "whETH".to_string(),
         s => {
             if s.len() > 10 {
                 format!("{}…{}", &s[..4], &s[s.len().saturating_sub(4)..])
@@ -136,6 +149,24 @@ fn token_short_label(mint: &Pubkey) -> String {
                 s.to_string()
             }
         }
+    }
+}
+
+fn compute_tick_range_price(
+    tick_lower: i32,
+    tick_upper: i32,
+    dec_a: u8,
+    dec_b: u8,
+    token_a_label: &str,
+    token_b_label: &str,
+) -> TickRangePrice {
+    let v_lo = b_per_a_ui_decimal(tick_lower, dec_a, dec_b);
+    let v_hi = b_per_a_ui_decimal(tick_upper, dec_a, dec_b);
+    let (lower, upper) = if v_lo <= v_hi { (v_lo, v_hi) } else { (v_hi, v_lo) };
+    TickRangePrice {
+        lower,
+        upper,
+        quote: format!("{token_b_label} per 1 {token_a_label}"),
     }
 }
 
@@ -247,6 +278,7 @@ pub async fn range_usdc_and_in_range_for_pool_ticks(
 /// One pool RPC read: USDC range + in-range + token labels, mints, and USD spot prices (for user-friendly tables).
 pub struct PoolTicksEnrichment {
     pub range_usdc: Option<TickRangeUsdc>,
+    pub range_price: Option<TickRangePrice>,
     pub in_range: bool,
     pub token_a_label: Option<String>,
     pub token_b_label: Option<String>,
@@ -260,6 +292,7 @@ impl Default for PoolTicksEnrichment {
     fn default() -> Self {
         Self {
             range_usdc: None,
+            range_price: None,
             in_range: false,
             token_a_label: None,
             token_b_label: None,
@@ -281,6 +314,7 @@ pub async fn enrich_pool_ticks_for_display(
     let Some(pool_state) = pool_reader.get_pool_state(&pool.to_string()).await.ok() else {
         return PoolTicksEnrichment {
             range_usdc: None,
+            range_price: None,
             in_range: false,
             token_a_label: None,
             token_b_label: None,
@@ -293,10 +327,23 @@ pub async fn enrich_pool_ticks_for_display(
     let in_range = pool_state.is_tick_in_range(tick_lower, tick_upper);
     let ma = pool_state.token_mint_a;
     let mb = pool_state.token_mint_b;
+    let token_a_label = token_short_label(&ma);
+    let token_b_label = token_short_label(&mb);
     let dec_a = fetch_mint_decimals(provider.as_ref(), &ma).await.ok();
     let dec_b = fetch_mint_decimals(provider.as_ref(), &mb).await.ok();
     let range_usdc = match (dec_a, dec_b) {
         (Some(da), Some(db)) => compute_tick_range_usdc(tick_lower, tick_upper, &ma, &mb, da, db),
+        _ => None,
+    };
+    let range_price = match (dec_a, dec_b) {
+        (Some(da), Some(db)) => Some(compute_tick_range_price(
+            tick_lower,
+            tick_upper,
+            da,
+            db,
+            &token_a_label,
+            &token_b_label,
+        )),
         _ => None,
     };
     let mut mints = BTreeSet::new();
@@ -305,9 +352,10 @@ pub async fn enrich_pool_ticks_for_display(
     let prices_map = fetch_mint_prices_usd(&mints).await.0;
     PoolTicksEnrichment {
         range_usdc,
+        range_price,
         in_range,
-        token_a_label: Some(token_short_label(&ma)),
-        token_b_label: Some(token_short_label(&mb)),
+        token_a_label: Some(token_a_label),
+        token_b_label: Some(token_b_label),
         token_mint_a: Some(ma.to_string()),
         token_mint_b: Some(mb.to_string()),
         token_price_a_usd: prices_map.get(&ma.to_string()).copied(),
@@ -351,8 +399,14 @@ pub async fn uncollected_fees_info_for_position(
     position: &MonitoredPosition,
 ) -> Option<UncollectedFeesInfo> {
     let pool_reader = WhirlpoolReader::new(provider.clone());
+    let position_reader = PositionReader::new(provider.clone());
     let pool_state = pool_reader
         .get_pool_state(&position.pool.to_string())
+        .await
+        .ok()?;
+    // Refresh `fee_owed_*` from chain so UI doesn't show $0.000 for hours.
+    let fresh = position_reader
+        .get_position(&position.address.to_string())
         .await
         .ok()?;
     let dec_a = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_a)
@@ -361,8 +415,8 @@ pub async fn uncollected_fees_info_for_position(
     let dec_b = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_b)
         .await
         .ok()?;
-    let fees_a_ui = ui_amount(position.on_chain.fees_owed_a, dec_a);
-    let fees_b_ui = ui_amount(position.on_chain.fees_owed_b, dec_b);
+    let fees_a_ui = ui_amount(fresh.fees_owed_a, dec_a);
+    let fees_b_ui = ui_amount(fresh.fees_owed_b, dec_b);
     Some(UncollectedFeesInfo {
         token_a_label: token_short_label(&pool_state.token_mint_a),
         token_b_label: token_short_label(&pool_state.token_mint_b),
@@ -456,8 +510,15 @@ pub async fn compute_position_usd_valuation(
     let in_range =
         pool_state.is_tick_in_range(position.on_chain.tick_lower, position.on_chain.tick_upper);
 
+    // Fees owed (`fee_owed_*`) are often stale in the in-memory monitor; refresh from chain so UI
+    // matches Orca/wallet dashboards.
+    let on_chain_fresh = position_reader
+        .get_position(&position.address.to_string())
+        .await
+        .map_err(|e| ApiError::internal(format!("position fetch failed: {e}")))?;
+
     let (amount_a_raw, amount_b_raw) = position_reader.calculate_token_amounts(
-        &position.on_chain,
+        &on_chain_fresh,
         pool_state.tick_current,
         pool_state.sqrt_price,
     );
@@ -521,8 +582,8 @@ pub async fn compute_position_usd_valuation(
 
     let a_ui = ui_amount(amount_a_raw, dec_a);
     let b_ui = ui_amount(amount_b_raw, dec_b);
-    let fees_a_ui = ui_amount(position.on_chain.fees_owed_a, dec_a);
-    let fees_b_ui = ui_amount(position.on_chain.fees_owed_b, dec_b);
+    let fees_a_ui = ui_amount(on_chain_fresh.fees_owed_a, dec_a);
+    let fees_b_ui = ui_amount(on_chain_fresh.fees_owed_b, dec_b);
 
     let value_usd_f = a_ui * pa + b_ui * pb;
 
@@ -544,8 +605,16 @@ pub async fn compute_position_usd_valuation(
 
     let token_a_label = token_short_label(&pool_state.token_mint_a);
     let token_b_label = token_short_label(&pool_state.token_mint_b);
+    let range_price = compute_tick_range_price(
+        position.on_chain.tick_lower,
+        position.on_chain.tick_upper,
+        dec_a,
+        dec_b,
+        &token_a_label,
+        &token_b_label,
+    );
 
-    if (position.on_chain.fees_owed_a > 0 || position.on_chain.fees_owed_b > 0)
+    if (on_chain_fresh.fees_owed_a > 0 || on_chain_fresh.fees_owed_b > 0)
         && fees_usd.is_zero()
     {
         tracing::warn!(
@@ -553,8 +622,8 @@ pub async fn compute_position_usd_valuation(
             mint_b = %pool_state.token_mint_b,
             pa,
             pb,
-            fee_owed_a = position.on_chain.fees_owed_a,
-            fee_owed_b = position.on_chain.fees_owed_b,
+            fee_owed_a = on_chain_fresh.fees_owed_a,
+            fee_owed_b = on_chain_fresh.fees_owed_b,
             "non-zero fee_owed but USD fees 0 — check price feed for pool mints (unwrap_or 0.0 if missing)"
         );
     }
@@ -571,6 +640,7 @@ pub async fn compute_position_usd_valuation(
         price_a_usd: pa,
         price_b_usd: pb,
         range_usdc,
+        range_price,
         in_range,
         fees_owed_a_ui,
         fees_owed_b_ui,

@@ -7,7 +7,15 @@ import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
 import { getOrcaPositionsByOwner, getPositions } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
-import { formatUSD, formatPercent, shortenAddress, formatUsdcPriceRange } from '@/lib/utils'
+import {
+  formatUSD,
+  formatPercentFixed,
+  formatNumber,
+  shortenAddress,
+  formatUsdcPriceRange,
+  formatInvertedTokenPriceRange,
+  formatUsdUncollectedFees,
+} from '@/lib/utils'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
 
 function rangeCellClass(inRange: boolean | undefined) {
@@ -92,7 +100,7 @@ export default function Positions() {
                     <th className="pb-3 font-medium">Range (in / out)</th>
                     <th className="pb-3 font-medium text-right">Value</th>
                     <th className="pb-3 font-medium text-right">PnL</th>
-                    <th className="pb-3 font-medium text-right">Fees</th>
+                    <th className="pb-3 font-medium text-right">Fees (uncollected)</th>
                     <th className="pb-3 font-medium text-center">Status</th>
                   </tr>
                 </thead>
@@ -133,7 +141,13 @@ export default function Positions() {
                               position.range_lower_usdc ?? undefined,
                               position.range_upper_usdc ?? undefined,
                               position.range_usdc_quote ?? undefined,
-                            ) ?? `${position.tick_lower} → ${position.tick_upper}`}
+                            ) ??
+                              formatInvertedTokenPriceRange(
+                                position.range_lower_price ?? undefined,
+                                position.range_upper_price ?? undefined,
+                                position.range_price_quote ?? undefined,
+                              ) ??
+                              `${position.tick_lower} → ${position.tick_upper}`}
                           </span>
                           <span className="text-[11px] text-muted-foreground">
                             {rangeStatusLabel(position.in_range)}
@@ -146,10 +160,24 @@ export default function Positions() {
                       <td className={`py-4 text-right ${
                         parseFloat(position.pnl.net_pnl_pct) >= 0 ? 'text-green-500' : 'text-red-500'
                       }`}>
-                        {formatPercent(position.pnl.net_pnl_pct)}
+                        {formatPercentFixed(position.pnl.net_pnl_pct, 3)}
                       </td>
                       <td className="py-4 text-right text-green-500">
-                        {formatUSD(position.pnl.fees_earned_usd)}
+                        <div className="space-y-0.5">
+                          <div>{formatUsdUncollectedFees(position.pnl.fees_earned_usd)}</div>
+                          {position.uncollected_fees ? (
+                            <div className="text-[10px] text-muted-foreground font-mono">
+                              {position.uncollected_fees.token_a_label}:{' '}
+                              {formatNumber(position.uncollected_fees.amount_a, 6)} ·{' '}
+                              {position.uncollected_fees.token_b_label}:{' '}
+                              {formatNumber(position.uncollected_fees.amount_b, 6)}
+                              <div className="mt-0.5">
+                                raw A {position.pnl.fees_earned_a.toLocaleString()} · raw B{' '}
+                                {position.pnl.fees_earned_b.toLocaleString()}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="py-4 text-center">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium ${
@@ -283,7 +311,13 @@ export default function Positions() {
                                   row.range_lower_usdc ?? undefined,
                                   row.range_upper_usdc ?? undefined,
                                   row.range_usdc_quote ?? undefined,
-                                ) ?? `${row.tick_lower} → ${row.tick_upper}`}
+                                ) ??
+                                  formatInvertedTokenPriceRange(
+                                    row.range_lower_price ?? undefined,
+                                    row.range_upper_price ?? undefined,
+                                    row.range_price_quote ?? undefined,
+                                  ) ??
+                                  `${row.tick_lower} → ${row.tick_upper}`}
                               </span>
                               <span className="text-[11px] text-muted-foreground">
                                 {rangeStatusLabel(row.in_range)}

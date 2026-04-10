@@ -1950,9 +1950,20 @@ impl RebalanceExecutor {
         pool: &Pubkey,
         ledger_session_id: Option<String>,
     ) -> anyhow::Result<(u64, u64)> {
+        if self.is_dry_run() {
+            debug!(position = %position, "Dry run: skipping collect_fees");
+            return Ok((0, 0));
+        }
         let wallet = self.require_wallet()?;
-        let orca = WhirlpoolExecutor::new(self.provider.clone());
+        let reader = PositionReader::new(self.provider.clone());
+        let pos_state = reader
+            .get_position(&position.to_string())
+            .await
+            .context("collect_fees: read position for fee_owed")?;
+        let fee_owed_a = pos_state.fees_owed_a;
+        let fee_owed_b = pos_state.fees_owed_b;
 
+        let orca = WhirlpoolExecutor::new(self.provider.clone());
         let payer = wallet.keypair();
         let res = orca.collect_fees(position, pool, payer).await?;
         self.ensure_execution_success(
@@ -1962,13 +1973,18 @@ impl RebalanceExecutor {
             Some(*position),
             ledger_session_id,
             None,
+            Some(fee_owed_a),
+            Some(fee_owed_b),
         )
         .await?;
 
-        // We currently don't parse fee amounts from on-chain state in this executor.
-        // Returning (0,0) keeps lifecycle wiring intact while we tighten accounting later.
-        debug!(position = %position, "Collect fees submitted");
-        Ok((0, 0))
+        debug!(
+            position = %position,
+            fee_owed_a = fee_owed_a,
+            fee_owed_b = fee_owed_b,
+            "Collect fees succeeded (amounts = pre-tx position fee_owed_a/b)"
+        );
+        Ok((fee_owed_a, fee_owed_b))
     }
 
     /// Decreases liquidity on-chain (`token_min_*` = 0 — set stricter mins when wiring slippage).
@@ -1994,6 +2010,8 @@ impl RebalanceExecutor {
             &res,
             Some(*pool),
             Some(*position),
+            None,
+            None,
             None,
             None,
         )
@@ -2026,6 +2044,8 @@ impl RebalanceExecutor {
             Some(*position),
             ledger_session_id,
             ledger_details,
+            None,
+            None,
         )
         .await?;
         debug!(position = %position, "Close position submitted");
@@ -2126,6 +2146,8 @@ impl RebalanceExecutor {
             position_for_ledger,
             ledger_session_id,
             Some(swap_details),
+            None,
+            None,
         )
             .await?;
         Ok(Some(sig))
@@ -2216,6 +2238,8 @@ impl RebalanceExecutor {
             None,
             ledger_session_id,
             Some(details),
+            None,
+            None,
         )
         .await?;
         let new_position = res.created_position.ok_or_else(|| {
@@ -2279,6 +2303,8 @@ impl RebalanceExecutor {
             None,
             ledger_session_id,
             Some(details),
+            None,
+            None,
         )
         .await?;
         let new_position = res.created_position.ok_or_else(|| {
@@ -2315,6 +2341,8 @@ impl RebalanceExecutor {
         position: Option<Pubkey>,
         ledger_session_id: Option<String>,
         ledger_details: Option<serde_json::Value>,
+        lp_collected_token_a_raw: Option<u64>,
+        lp_collected_token_b_raw: Option<u64>,
     ) -> anyhow::Result<()> {
         validate_execution_result(op_name, result)?;
 
@@ -2335,6 +2363,8 @@ impl RebalanceExecutor {
                     result.created_position,
                     ledger_session_id.clone(),
                     ledger_details.clone(),
+                    lp_collected_token_a_raw,
+                    lp_collected_token_b_raw,
                 )
                 .await;
 

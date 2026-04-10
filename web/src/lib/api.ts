@@ -1,6 +1,7 @@
 // API client for Bociarz LP backend
 
 const API_BASE = '/api/v1'
+const API_KEY = (import.meta as any).env?.VITE_API_KEY as string | undefined
 
 export interface Position {
   address: string
@@ -13,6 +14,11 @@ export interface Position {
   range_upper_usdc?: string | number | null
   /** e.g. `per 1 SOL` */
   range_usdc_quote?: string | null
+  /** Token B per 1 token A in UI units (generic, non-USDC pairs too). */
+  range_lower_price?: string | number | null
+  range_upper_price?: string | number | null
+  /** e.g. `whETH per 1 SOL` */
+  range_price_quote?: string | null
   /** Pool leg labels when API valuation succeeded (e.g. SOL, USDC). */
   token_a_label?: string | null
   token_b_label?: string | null
@@ -21,6 +27,13 @@ export interface Position {
   /** USD per 1 UI unit of token A/B (best-effort free feeds). */
   token_price_a_usd?: number | null
   token_price_b_usd?: number | null
+  /** Uncollected fees (on-chain fee_owed_*), in UI token units. */
+  uncollected_fees?: {
+    token_a_label: string
+    token_b_label: string
+    amount_a: string
+    amount_b: string
+  } | null
   liquidity: string
   in_range: boolean
   value_usd: string
@@ -87,6 +100,10 @@ export interface PositionStreamPnLResponse {
 
 export interface PositionStreamLineageNode {
   position_address: string
+  token_a_label?: string | null
+  token_b_label?: string | null
+  token_mint_a?: string | null
+  token_mint_b?: string | null
   opened_ts_utc?: string | null
   closed_ts_utc?: string | null
   baseline_value_usd: string
@@ -96,6 +113,13 @@ export interface PositionStreamLineageNode {
   tx_fees_usd: string
   /** LP fees collected (USD): positive pool-leg deltas from bot_collect_fees × mint USD. */
   fees_collected_usd: string
+  /** Best-effort collected fee (token A UI units). */
+  fees_collected_token_a_ui?: string | null
+  /** Best-effort collected fee (token B UI units). */
+  fees_collected_token_b_ui?: string | null
+  /** Same as `fees_collected_token_*_ui` but in smallest units (base units; for SOL mint this is lamports). */
+  fees_collected_token_a_raw?: number | null
+  fees_collected_token_b_raw?: number | null
   collect_events: number
   realized_cashflow_usd: string
   net_pnl_usd: string
@@ -108,6 +132,10 @@ export interface LineageChainCostSummary {
   tx_fee_lamports_total: number
   tx_fees_usd_total: string
   fees_collected_usd_total: string
+  fees_collected_token_a_ui_total?: string | null
+  fees_collected_token_b_ui_total?: string | null
+  fees_collected_token_a_raw_total?: number | null
+  fees_collected_token_b_raw_total?: number | null
   collect_events_total: number
 }
 
@@ -123,6 +151,10 @@ export interface PositionStreamLineageResponse {
 export interface ClosedPositionEntry {
   position_address: string
   pool_address: string
+  token_mint_a?: string | null
+  token_mint_b?: string | null
+  token_a_label?: string | null
+  token_b_label?: string | null
   owner: string
   close_kind?: string | null
   opened_ts_utc?: string | null
@@ -134,6 +166,11 @@ export interface ClosedPositionsResponse {
   total: number
   items: ClosedPositionEntry[]
   note?: string | null
+}
+
+export interface SuggestStrategyLinkResponse {
+  strategy_id?: string | null
+  reason: string
 }
 
 export interface PositionLifecycleEvent {
@@ -165,7 +202,9 @@ export interface PositionLifecycleSummaryResponse {
   total_tx_fee_usd: string
   collect_events: number
   collected_fee_token_a_ui?: string | null
+  collected_fee_token_a_raw?: number | null
   collected_fee_token_b_ui?: string | null
+  collected_fee_token_b_raw?: number | null
   collected_fees_usd?: string | null
   realized_cashflow_usd: string
   session_summaries: PositionLifecycleSessionSummary[]
@@ -442,6 +481,7 @@ async function fetchJsonWithTimeout<T>(
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        ...(API_KEY && API_KEY.trim().length > 0 ? { 'X-API-Key': API_KEY.trim() } : {}),
         ...options?.headers,
       },
     })
@@ -545,6 +585,9 @@ export interface OrcaOwnerPositionEntry {
   range_lower_usdc?: string | number | null
   range_upper_usdc?: string | number | null
   range_usdc_quote?: string | null
+  range_lower_price?: string | number | null
+  range_upper_price?: string | number | null
+  range_price_quote?: string | null
   liquidity: string
   position_mint?: string | null
   position_bundle_address?: string | null
@@ -571,13 +614,49 @@ export const getOrcaPositionsByOwner = (owner: string) =>
 
 // Positions
 export const getPositions = () => fetchJson<{ positions: Position[] }>('/positions')
-export const getClosedPositions = (limit = 100, offset = 0) =>
-  fetchJson<ClosedPositionsResponse>(
-    `/positions/closed?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`,
-  )
+// Registry replay is fast; pool mint enrichment is one RPC per unique pool on this page only,
+// but keep UI timeout above default 15s for slow RPC / large offsets.
+export const getClosedPositions = (
+  limit = 100,
+  offset = 0,
+  enrichPools: boolean = true,
+) => {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  })
+  if (!enrichPools) {
+    params.set('enrich_pools', 'false')
+  }
+  return fetchJsonWithTimeout<ClosedPositionsResponse>(`/positions/closed?${params}`, 60_000)
+}
+
+/** React Query: one key for registry-only vs enriched list. */
+export const closedPositionsListQueryKey = (
+  limit: number,
+  offset: number,
+  enrichPools: boolean,
+) => ['closed-positions', limit, offset, enrichPools] as const
+
+export function closedPositionsListQueryOptions(
+  limit = 100,
+  offset = 0,
+  enrichPools = true,
+) {
+  return {
+    queryKey: closedPositionsListQueryKey(limit, offset, enrichPools),
+    queryFn: () => getClosedPositions(limit, offset, enrichPools),
+    staleTime: 1000 * 60 * 5,
+    retry: 1 as const,
+  }
+}
 export const getPosition = (address: string) => fetchJson<Position>(`/positions/${address}`)
 export const getPositionDiagnostics = (address: string) =>
   fetchJson<PositionDiagnosticsResponse>(`/positions/${encodeURIComponent(address)}/diagnostics`)
+export const suggestPositionStrategy = (address: string) =>
+  fetchJson<SuggestStrategyLinkResponse>(
+    `/positions/${encodeURIComponent(address)}/suggest-strategy`,
+  )
 export const getPositionStreamPerformance = (address: string) =>
   fetchJson<PositionStreamPerformanceResponse>(
     `/positions/${encodeURIComponent(address)}/stream-performance`,
@@ -585,8 +664,11 @@ export const getPositionStreamPerformance = (address: string) =>
 export const getPositionStreamPnL = (address: string) =>
   fetchJson<PositionStreamPnLResponse>(`/positions/${encodeURIComponent(address)}/stream-pnl`)
 export const getPositionStreamLineage = (address: string) =>
-  fetchJson<PositionStreamLineageResponse>(
+  // Lineage reconstruction can be slow when DB is disabled and API scans JSONL.
+  // Keep this above the default 15s UI timeout to avoid false "no lineage" states.
+  fetchJsonWithTimeout<PositionStreamLineageResponse>(
     `/positions/${encodeURIComponent(address)}/stream-lineage`,
+    120_000,
   )
 export const getPositionLifecycleSummary = (address: string) =>
   fetchJson<PositionLifecycleSummaryResponse>(

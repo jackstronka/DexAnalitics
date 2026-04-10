@@ -334,6 +334,10 @@ fn rebalance_event_name(operation: &str) -> &'static str {
 ///
 /// When `rebalance_session_id_override` is set, it is written as `rebalance_session_id` on the row
 /// (API / UI correlation for swap + open). Otherwise [`rebalance_session_id_from_env`] is used.
+///
+/// `lp_collected_token_{a,b}_raw`: for `collect_fees` only — `fee_owed_a` / `fee_owed_b` from the
+/// Whirlpool **position** account immediately before the harvest tx (pool token A/B order). Records
+/// both LP legs even when RPC `pre/postTokenBalances` omit WSOL. For other operations, pass `None`.
 pub async fn try_append_rebalance_executor_tx_cost(
     provider: &RpcProvider,
     fee_payer: &Pubkey,
@@ -345,6 +349,8 @@ pub async fn try_append_rebalance_executor_tx_cost(
     rebalance_session_id_override: Option<String>,
     // Extra structured fields for operators (e.g. swap mints + amount_in for swap_exact_in).
     details: Option<serde_json::Value>,
+    lp_collected_token_a_raw: Option<u64>,
+    lp_collected_token_b_raw: Option<u64>,
 ) {
     if let Err(e) = append_rebalance_inner(
         provider,
@@ -356,6 +362,8 @@ pub async fn try_append_rebalance_executor_tx_cost(
         created_position,
         rebalance_session_id_override,
         details,
+        lp_collected_token_a_raw,
+        lp_collected_token_b_raw,
     )
     .await
     {
@@ -373,6 +381,8 @@ async fn append_rebalance_inner(
     created_position: Option<Pubkey>,
     rebalance_session_id_override: Option<String>,
     details: Option<serde_json::Value>,
+    lp_collected_token_a_raw: Option<u64>,
+    lp_collected_token_b_raw: Option<u64>,
 ) -> Result<()> {
     let (tx_fee, slot, pre, post, delta, tx_json) =
         enrich_tx_costs(provider, signature, fee_payer).await;
@@ -404,10 +414,21 @@ async fn append_rebalance_inner(
         fee_payer_net_lamports_delta: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         fee_payer_token_deltas: Option<serde_json::Value>,
+        /// Pool leg A/B raw amounts harvested (from position `fee_owed_*` before tx), when `operation == collect_fees`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lp_collected_token_a_raw: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lp_collected_token_b_raw: Option<u64>,
         accounting_note: &'static str,
         slot: Option<u64>,
         rpc_url: String,
     }
+
+    let (lp_a, lp_b) = if operation == "collect_fees" {
+        (lp_collected_token_a_raw, lp_collected_token_b_raw)
+    } else {
+        (None, None)
+    };
 
     let rec = Row {
         schema_version: 2,
@@ -426,7 +447,9 @@ async fn append_rebalance_inner(
         fee_payer_post_lamports: post,
         fee_payer_net_lamports_delta: delta,
         fee_payer_token_deltas,
-        accounting_note: "tx_fee_lamports=network fee only; fee_payer_net_lamports_delta includes fee+rent+token/SOL legs affecting fee payer. fee_payer_token_deltas is a mint->Δ(ui) map derived from meta pre/postTokenBalances (owner=fee payer). Sum rows with same rebalance_session_id for swap+rebalance total.",
+        lp_collected_token_a_raw: lp_a,
+        lp_collected_token_b_raw: lp_b,
+        accounting_note: "tx_fee_lamports=network fee only; fee_payer_net_lamports_delta includes fee+rent+token/SOL legs affecting fee payer. fee_payer_token_deltas is a mint->Δ(ui) map derived from meta pre/postTokenBalances (owner=fee payer). For collect_fees, lp_collected_token_{a,b}_raw = position fee_owed_{a,b} read immediately before harvest (both pool legs). Sum rows with same rebalance_session_id for swap+rebalance total.",
         slot,
         rpc_url,
     };

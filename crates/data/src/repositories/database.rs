@@ -86,14 +86,36 @@ impl Database {
         ];
 
         for migration_sql in migrations {
+            // This runner is intentionally simple and statement-based, but we must NOT split on
+            // semicolons that appear in SQL comments. Strip full-line comments first.
+            let without_comments = migration_sql
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("--")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
             // Split by semicolons and execute each statement separately.
-            for statement in migration_sql.split(';') {
+            for statement in without_comments.split(';') {
                 let trimmed = statement.trim();
-                // Skip empty statements and comments-only blocks.
-                if trimmed.is_empty() || trimmed.starts_with("--") && !trimmed.contains("CREATE") {
+                if trimmed.is_empty() {
                     continue;
                 }
-                sqlx::query(trimmed).execute(self.pool.as_ref()).await?;
+                if let Err(e) = sqlx::query(trimmed).execute(self.pool.as_ref()).await {
+                    let preview = if trimmed.len() > 320 {
+                        format!("{}…", &trimmed[..320])
+                    } else {
+                        trimmed.to_string()
+                    };
+                    tracing::warn!(
+                        error = %e,
+                        statement_preview = %preview,
+                        "DB migrate statement failed"
+                    );
+                    return Err(e);
+                }
             }
         }
         Ok(())

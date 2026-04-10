@@ -73,6 +73,9 @@ pub async fn orca_positions_by_owner(
                     range_lower_usdc: None,
                     range_upper_usdc: None,
                     range_usdc_quote: None,
+                    range_lower_price: None,
+                    range_upper_price: None,
+                    range_price_quote: None,
                     liquidity: d.liquidity.to_string(),
                     position_mint: Some(d.position_mint.to_string()),
                     position_bundle_address: None,
@@ -98,6 +101,9 @@ pub async fn orca_positions_by_owner(
                         range_lower_usdc: None,
                         range_upper_usdc: None,
                         range_usdc_quote: None,
+                        range_lower_price: None,
+                        range_upper_price: None,
+                        range_price_quote: None,
                         liquidity: d.liquidity.to_string(),
                         position_mint: Some(d.position_mint.to_string()),
                         position_bundle_address: Some(bundle_addr.clone()),
@@ -130,10 +136,14 @@ pub async fn orca_positions_by_owner(
             Err(_) => crate::services::position_valuation::PoolTicksEnrichment::default(),
         };
         let range = enrich.range_usdc;
+        let range_price = enrich.range_price;
         enriched.push(OrcaOwnerPositionEntry {
             range_lower_usdc: range.as_ref().map(|r| r.lower),
             range_upper_usdc: range.as_ref().map(|r| r.upper),
             range_usdc_quote: range.as_ref().map(|r| r.quote.clone()),
+            range_lower_price: range_price.as_ref().map(|r| r.lower),
+            range_upper_price: range_price.as_ref().map(|r| r.upper),
+            range_price_quote: range_price.as_ref().map(|r| r.quote.clone()),
             in_range: enrich.in_range,
             token_a_label: enrich.token_a_label,
             token_b_label: enrich.token_b_label,

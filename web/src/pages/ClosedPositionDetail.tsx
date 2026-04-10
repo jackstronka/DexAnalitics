@@ -3,8 +3,19 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { PoolPairLabels } from '@/components/PoolPairLabels'
 import { getBacktestJob, getPositionExperimentConfig, getPositionLifecycleSummary, getPositionStreamLineage, runBacktestFromClosedPosition } from '@/lib/api'
-import { formatDate, formatPercentFixed, formatUsdFixed, shortenAddress } from '@/lib/utils'
+import {
+  FEE_BASE_UNITS_TOOLTIP,
+  formatDate,
+  formatFeeBaseUnitsClause,
+  formatLineageFeesCollectedUsdMain,
+  formatPercentFixed,
+  formatPrincipalDeltaUsdOrDash,
+  formatUsdField,
+  formatUsdFixed,
+  shortenAddress,
+} from '@/lib/utils'
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 
@@ -12,11 +23,6 @@ function usdOrDash(v: string | number, digits = 3): string {
   const n = typeof v === 'string' ? parseFloat(v) : v
   if (!Number.isFinite(n) || n === 0) return '—'
   return formatUsdFixed(n, digits)
-}
-
-function parseUsdNum(v: string | number): number | null {
-  const n = typeof v === 'string' ? parseFloat(v) : v
-  return Number.isFinite(n) ? n : null
 }
 
 export default function ClosedPositionDetail() {
@@ -45,6 +51,15 @@ export default function ClosedPositionDetail() {
   const entryNode = streamLineage?.nodes.find((n) => n.position_address === pos)
   const chainCost = streamLineage?.chain_cost_summary
 
+  const formatUsdCollectedOrDash = (usd: string | null | undefined, collects: number | null | undefined) => {
+    const v = parseFloat(String(usd ?? '0'))
+    const c = collects ?? 0
+    if (!Number.isFinite(v)) return '—'
+    // In JSONL-only mode we can have token deltas but no reliable USD valuation; avoid misleading "$0.0000".
+    if (c > 0 && v === 0) return '—'
+    return formatUsdFixed(v, 4)
+  }
+
   const cfgQ = useQuery({
     queryKey: ['position-experiment-config', pos],
     queryFn: () => getPositionExperimentConfig(pos),
@@ -57,12 +72,19 @@ export default function ClosedPositionDetail() {
 
   const runBacktestM = useMutation({
     mutationFn: async () => {
+      const raw = entryNode?.baseline_value_usd
+      let capital: number | undefined
+      if (raw != null && String(raw).trim() !== '') {
+        const n = parseFloat(String(raw))
+        if (Number.isFinite(n) && n > 0) capital = n
+      }
       return await runBacktestFromClosedPosition({
         position_address: pos,
         strategy: 'static',
         fee_source: 'snapshots',
         price_path_source: 'snapshots',
         snapshot_protocol: 'orca',
+        ...(capital != null ? { capital } : {}),
       })
     },
     onSuccess: (r) => setBacktestJobId(r.id),
@@ -89,6 +111,18 @@ export default function ClosedPositionDetail() {
           </Link>
           <div className="min-w-0">
             <h1 className="text-2xl font-bold truncate">Closed position</h1>
+            {entryNode?.token_a_label || entryNode?.token_b_label || entryNode?.token_mint_a || entryNode?.token_mint_b ? (
+              <div className="mt-1">
+                <PoolPairLabels
+                  labelA={entryNode?.token_a_label}
+                  labelB={entryNode?.token_b_label}
+                  mintA={entryNode?.token_mint_a}
+                  mintB={entryNode?.token_mint_b}
+                  priceA={null}
+                  priceB={null}
+                />
+              </div>
+            ) : null}
             <p className="text-sm text-muted-foreground font-mono truncate">{pos}</p>
           </div>
         </div>
@@ -141,12 +175,48 @@ export default function ClosedPositionDetail() {
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
                   <div className="text-xs text-muted-foreground uppercase tracking-wide">Prowizje LP zebrane</div>
                   <div className="font-mono text-lg mt-0.5">
-                    {formatUsdFixed(parseFloat(String(entryNode.fees_collected_usd ?? '0')), 4)}
+                    {formatUsdCollectedOrDash(entryNode.fees_collected_usd, entryNode.collect_events)}
                     <span className="text-muted-foreground text-sm font-sans">
                       {' '}
                       · {entryNode.collect_events ?? 0}× collect
                     </span>
                   </div>
+                  {(entryNode.fees_collected_token_a_ui != null ||
+                    entryNode.fees_collected_token_b_ui != null ||
+                    entryNode.fees_collected_token_a_raw != null ||
+                    entryNode.fees_collected_token_b_raw != null) &&
+                  (entryNode.token_a_label || entryNode.token_b_label) ? (
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {entryNode.token_a_label ? (
+                        <div>
+                          {entryNode.token_a_label}:{' '}
+                          <span className="font-mono text-foreground/90">
+                            {String(entryNode.fees_collected_token_a_ui ?? '—')}
+                          </span>
+                          {formatFeeBaseUnitsClause(entryNode.fees_collected_token_a_raw) ? (
+                            <span className="font-mono text-muted-foreground" title={FEE_BASE_UNITS_TOOLTIP}>
+                              {' '}
+                              {formatFeeBaseUnitsClause(entryNode.fees_collected_token_a_raw)}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {entryNode.token_b_label ? (
+                        <div>
+                          {entryNode.token_b_label}:{' '}
+                          <span className="font-mono text-foreground/90">
+                            {String(entryNode.fees_collected_token_b_ui ?? '—')}
+                          </span>
+                          {formatFeeBaseUnitsClause(entryNode.fees_collected_token_b_raw) ? (
+                            <span className="font-mono text-muted-foreground" title={FEE_BASE_UNITS_TOOLTIP}>
+                              {' '}
+                              {formatFeeBaseUnitsClause(entryNode.fees_collected_token_b_raw)}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -154,10 +224,25 @@ export default function ClosedPositionDetail() {
                 {lineageQ.isPending ? 'Ładowanie lineage…' : 'Brak węzła lineage dla tego adresu.'}
               </p>
             )}
-            {data?.collected_fee_token_a_ui != null || data?.collected_fee_token_b_ui != null ? (
+            {data?.collected_fee_token_a_ui != null ||
+            data?.collected_fee_token_b_ui != null ||
+            data?.collected_fee_token_a_raw != null ||
+            data?.collected_fee_token_b_raw != null ? (
               <p className="text-xs text-muted-foreground">
-                Tokeny (lifecycle summary): A {String(data?.collected_fee_token_a_ui ?? '—')} · B{' '}
-                {String(data?.collected_fee_token_b_ui ?? '—')}
+                Tokeny (lifecycle summary): A {String(data?.collected_fee_token_a_ui ?? '—')}
+                {formatFeeBaseUnitsClause(data?.collected_fee_token_a_raw) ? (
+                  <span title={FEE_BASE_UNITS_TOOLTIP}>
+                    {' '}
+                    {formatFeeBaseUnitsClause(data?.collected_fee_token_a_raw)}
+                  </span>
+                ) : null}{' '}
+                · B {String(data?.collected_fee_token_b_ui ?? '—')}
+                {formatFeeBaseUnitsClause(data?.collected_fee_token_b_raw) ? (
+                  <span title={FEE_BASE_UNITS_TOOLTIP}>
+                    {' '}
+                    {formatFeeBaseUnitsClause(data?.collected_fee_token_b_raw)}
+                  </span>
+                ) : null}
               </p>
             ) : null}
           </CardContent>
@@ -184,12 +269,48 @@ export default function ClosedPositionDetail() {
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
                   <div className="text-xs text-muted-foreground uppercase tracking-wide">Prowizje LP zebrane — suma</div>
                   <div className="font-mono text-lg mt-0.5">
-                    {formatUsdFixed(parseFloat(chainCost.fees_collected_usd_total), 4)}
+                    {formatUsdCollectedOrDash(chainCost.fees_collected_usd_total, chainCost.collect_events_total)}
                     <span className="text-muted-foreground text-sm font-sans">
                       {' '}
                       · {chainCost.collect_events_total}× collect (łącznie)
                     </span>
                   </div>
+                  {(chainCost.fees_collected_token_a_ui_total != null ||
+                    chainCost.fees_collected_token_b_ui_total != null ||
+                    chainCost.fees_collected_token_a_raw_total != null ||
+                    chainCost.fees_collected_token_b_raw_total != null) &&
+                  (entryNode?.token_a_label || entryNode?.token_b_label) ? (
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {entryNode?.token_a_label ? (
+                        <div>
+                          {entryNode.token_a_label}:{' '}
+                          <span className="font-mono text-foreground/90">
+                            {String(chainCost.fees_collected_token_a_ui_total ?? '—')}
+                          </span>
+                          {formatFeeBaseUnitsClause(chainCost.fees_collected_token_a_raw_total) ? (
+                            <span className="font-mono text-muted-foreground" title={FEE_BASE_UNITS_TOOLTIP}>
+                              {' '}
+                              {formatFeeBaseUnitsClause(chainCost.fees_collected_token_a_raw_total)}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {entryNode?.token_b_label ? (
+                        <div>
+                          {entryNode.token_b_label}:{' '}
+                          <span className="font-mono text-foreground/90">
+                            {String(chainCost.fees_collected_token_b_ui_total ?? '—')}
+                          </span>
+                          {formatFeeBaseUnitsClause(chainCost.fees_collected_token_b_raw_total) ? (
+                            <span className="font-mono text-muted-foreground" title={FEE_BASE_UNITS_TOOLTIP}>
+                              {' '}
+                              {formatFeeBaseUnitsClause(chainCost.fees_collected_token_b_raw_total)}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -257,6 +378,13 @@ export default function ClosedPositionDetail() {
               zapisuje <code className="text-[11px]">position_open</code> / <code className="text-[11px]">position_close</code>, bot —{' '}
               <code className="text-[11px]">bot_*</code>; oba są łączone.
             </p>
+            <p className="text-[11px] text-muted-foreground font-normal leading-snug">
+              Kolumna <span className="font-medium">LP zebrane</span>: Orca przy{' '}
+              <code className="text-[10px]">collect_fees</code> przenosi oba tokeny puli, ale w{' '}
+              <code className="text-[10px]">fee_payer_token_deltas</code> (meta RPC) często widać tylko jeden mint SPL
+              (np. whETH) — wpis WSOL bywa pominięty albo poniżej progu, więc w UI może zostać tylko jedna noga mimo że
+              on-chain są dwie strumienie opłat.
+            </p>
           </CardHeader>
           <CardContent className="space-y-3">
             {streamLineage.note ? (
@@ -281,8 +409,8 @@ export default function ClosedPositionDetail() {
                       <th className="px-2 py-1 text-left">position</th>
                       <th className="px-2 py-1 text-left">opened</th>
                       <th className="px-2 py-1 text-left">closed</th>
-                      <th className="px-2 py-1 text-left">start</th>
-                      <th className="px-2 py-1 text-left">end</th>
+                      <th className="px-2 py-1 text-left">start value</th>
+                      <th className="px-2 py-1 text-left">end value</th>
                       <th className="px-2 py-1 text-left">principal Δ</th>
                       <th className="px-2 py-1 text-left">Sieć (tx)</th>
                       <th className="px-2 py-1 text-left">LP zebrane</th>
@@ -315,12 +443,7 @@ export default function ClosedPositionDetail() {
                         <td className="px-2 py-1 whitespace-nowrap font-mono">{usdOrDash(n.baseline_value_usd, 3)}</td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono">{usdOrDash(n.current_value_usd, 3)}</td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono">
-                          {(() => {
-                            const a = parseUsdNum(n.baseline_value_usd)
-                            const b = parseUsdNum(n.current_value_usd)
-                            if (a === null || b === null) return '—'
-                            return formatUsdFixed(b - a, 3)
-                          })()}
+                          {formatPrincipalDeltaUsdOrDash(n.baseline_value_usd, n.current_value_usd, 3)}
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px] leading-tight">
                           {(n.tx_fee_lamports ?? 0).toLocaleString()} λ
@@ -328,17 +451,70 @@ export default function ClosedPositionDetail() {
                           <span className="text-muted-foreground">{formatUsdFixed(parseFloat(String(n.tx_fees_usd)), 4)}</span>
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]">
-                          {formatUsdFixed(parseFloat(String(n.fees_collected_usd ?? '0')), 4)}
-                          <span className="text-muted-foreground"> · {n.collect_events ?? 0}×</span>
+                          {(() => {
+                            const collects = n.collect_events ?? 0
+                            const usdNum = parseFloat(String(n.fees_collected_usd ?? '').trim() || '0')
+                            const hasTokenVals =
+                              n.fees_collected_token_a_ui != null ||
+                              n.fees_collected_token_b_ui != null ||
+                              n.fees_collected_token_a_raw != null ||
+                              n.fees_collected_token_b_raw != null
+                            const showLegRows =
+                              collects > 0 && (hasTokenVals || n.token_a_label || n.token_b_label)
+                            return (
+                              <>
+                                <span>{formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)}</span>
+                                <span className="text-muted-foreground"> · {collects}×</span>
+                                {showLegRows ? (
+                                  <div className="text-muted-foreground mt-1 leading-tight">
+                                    {n.token_a_label ? (
+                                      <div>
+                                        {n.token_a_label}: {String(n.fees_collected_token_a_ui ?? '—')}
+                                        {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw) ? (
+                                          <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                            {' '}
+                                            {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw)}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                    {n.token_b_label ? (
+                                      <div>
+                                        {n.token_b_label}: {String(n.fees_collected_token_b_ui ?? '—')}
+                                        {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw) ? (
+                                          <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                            {' '}
+                                            {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw)}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                                {collects > 0 && usdNum === 0 && !hasTokenVals ? (
+                                  <div className="text-muted-foreground mt-1 leading-tight text-[10px]">
+                                    Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.
+                                  </div>
+                                ) : null}
+                              </>
+                            )
+                          })()}
                         </td>
                         <td
                           className={
-                            parseFloat(n.net_pnl_pct) >= 0
-                              ? 'px-2 py-1 whitespace-nowrap font-mono text-green-500'
-                              : 'px-2 py-1 whitespace-nowrap font-mono text-red-500'
+                            (() => {
+                              const pct = parseFloat(String(n.net_pnl_pct ?? ''))
+                              return Number.isFinite(pct) && pct >= 0
+                                ? 'px-2 py-1 whitespace-nowrap font-mono text-green-500'
+                                : 'px-2 py-1 whitespace-nowrap font-mono text-red-500'
+                            })()
                           }
                         >
-                          {formatUsdFixed(n.net_pnl_usd, 3)} ({formatPercentFixed(n.net_pnl_pct, 3)})
+                          {formatUsdField(n.net_pnl_usd, 3)} (
+                          {Number.isFinite(parseFloat(String(n.net_pnl_pct ?? '')))
+                            ? formatPercentFixed(n.net_pnl_pct, 3)
+                            : '—'}
+                          )
                         </td>
                       </tr>
                     ))}
@@ -357,7 +533,15 @@ export default function ClosedPositionDetail() {
           <CardHeader>
             <CardTitle>Position history (rotations)</CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">No lineage response.</CardContent>
+          <CardContent className="text-sm text-muted-foreground">
+            {lineageQ.isError ? (
+              <span className="text-destructive">
+                {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
+              </span>
+            ) : (
+              'No lineage response.'
+            )}
+          </CardContent>
         </Card>
       )}
 
@@ -474,6 +658,11 @@ export default function ClosedPositionDetail() {
             <CardTitle>Backtest (from closed position)</CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Uruchamia <code className="text-[11px]">clmm-lp-cli backtest</code> jako subprocess na hoście API (best-effort).
+              Gdy stream-lineage ma <span className="text-foreground/90">baseline USD</span> dla tego PDA, jest wysyłany jako{' '}
+              <code className="text-[11px]">capital</code> — inaczej API próbuje ledgera / snapshotu DB. Na hoście musi być dostępny{' '}
+              <code className="text-[11px]">clmm-lp-cli</code> (PATH,{' '}
+              <code className="text-[11px]">CLMM_LP_CLI_PATH</code>, ten sam <code className="text-[11px]">target/</code> co API lub{' '}
+              <code className="text-[11px]">CLMM_REPO_ROOT</code> + <code className="text-[11px]">CLMM_API_TARGET_DIR</code>).
             </p>
           </div>
           <Button

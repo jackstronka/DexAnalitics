@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 /// Reserved map key for an executor created on demand when a strategy is not running.
 pub const API_POSITION_OPS_EXECUTOR_ID: &str = "__api_position_ops__";
 
-/// Load the signing wallet from `KEYPAIR_PATH` or `SOLANA_KEYPAIR_PATH` when set.
+/// Load the signing wallet from `KEYPAIR_PATH`, `SOLANA_KEYPAIR_PATH`, or `WALLET_KEYPAIR_PATH` (first non-empty wins).
 pub fn load_wallet_from_env() -> Result<Option<Arc<Wallet>>, ApiError> {
     // Track which env var we picked for better diagnostics.
     let (keypair_env, keypair_path) = match env::var("KEYPAIR_PATH")

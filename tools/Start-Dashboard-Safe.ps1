@@ -92,6 +92,17 @@ if ($apiUp) {
 # Start Vite in this window (no kill-port, no touching API ports)
 Set-Location $WebDir
 $env:API_UPSTREAM = "http://127.0.0.1:8081"
+
+# If the API enforces X-API-Key, expose it to Vite as a client env var.
+# Vite only forwards env vars prefixed with VITE_ to the frontend.
+if (-not $env:VITE_API_KEY -or $env:VITE_API_KEY.Trim().Length -eq 0) {
+  if ($env:CLMM_API_KEY -and $env:CLMM_API_KEY.Trim().Length -gt 0) {
+    $env:VITE_API_KEY = $env:CLMM_API_KEY.Trim()
+  } elseif ($env:API_KEY -and $env:API_KEY.Trim().Length -gt 0) {
+    $env:VITE_API_KEY = $env:API_KEY.Trim()
+  }
+}
+
 Write-Host "[Start-Dashboard-Safe] Starting Vite on :3000 (proxy -> $env:API_UPSTREAM)..." -ForegroundColor Cyan
 npx vite
 

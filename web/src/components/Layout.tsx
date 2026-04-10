@@ -14,11 +14,11 @@ import {
   ScrollText,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import ApiBackendBanner from '@/components/ApiBackendBanner'
 import DevWalletBar from '@/components/DevWalletBar'
-import { getHealth } from '@/lib/api'
+import { closedPositionsListQueryOptions, getHealth } from '@/lib/api'
 import { connectWebSockets, disconnectWebSockets } from '@/lib/websocket'
 
 const navigation = [
@@ -38,6 +38,7 @@ const navigation = [
 export default function Layout() {
   const location = useLocation()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const queryClient = useQueryClient()
 
   const healthQ = useQuery({
     queryKey: ['health'],
@@ -50,6 +51,29 @@ export default function Layout() {
     connectWebSockets()
     return () => disconnectWebSockets()
   }, [])
+
+  // Warm closed-positions cache after API is up (idle) so /positions/closed opens instantly.
+  useEffect(() => {
+    if (!healthQ.isSuccess) return
+    const prefetchClosed = () => {
+      void queryClient.prefetchQuery(closedPositionsListQueryOptions(100, 0, false))
+      void queryClient.prefetchQuery(closedPositionsListQueryOptions(100, 0, true))
+    }
+    const w = globalThis as Window & typeof globalThis
+    let idleId: number | undefined
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    if (typeof w.requestIdleCallback === 'function') {
+      idleId = w.requestIdleCallback(prefetchClosed, { timeout: 4000 })
+    } else {
+      timeoutId = setTimeout(prefetchClosed, 1200)
+    }
+    return () => {
+      if (idleId !== undefined && typeof w.cancelIdleCallback === 'function') {
+        w.cancelIdleCallback(idleId)
+      }
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+    }
+  }, [healthQ.isSuccess, queryClient])
 
   return (
     <div className="flex h-screen">
@@ -97,6 +121,11 @@ export default function Layout() {
                   }
                 `}
                 onClick={() => setSidebarOpen(false)}
+                onMouseEnter={() => {
+                  if (item.href !== '/positions/closed') return
+                  void queryClient.prefetchQuery(closedPositionsListQueryOptions(100, 0, false))
+                  void queryClient.prefetchQuery(closedPositionsListQueryOptions(100, 0, true))
+                }}
               >
                 <item.icon className="h-5 w-5" />
                 {item.name}

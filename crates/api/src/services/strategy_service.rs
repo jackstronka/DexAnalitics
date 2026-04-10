@@ -242,7 +242,13 @@ impl StrategyService {
         if !dry_run {
             match crate::services::position_executor::load_wallet_from_env() {
                 Ok(Some(wallet)) => executor.set_wallet(wallet),
-                Ok(None) => {}
+                Ok(None) => {
+                    if auto_execute {
+                        return Err(ApiError::bad_request(
+                            "auto_execute=true requires KEYPAIR_PATH, SOLANA_KEYPAIR_PATH, or WALLET_KEYPAIR_PATH (e.g. in .env at API cwd)",
+                        ));
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -721,6 +727,23 @@ pub async fn replace_position_address_in_strategy(
         changed = true;
     }
 
+    // Keep per-position automation skip list in sync when a PDA rotates.
+    if let Some(arr_val) = params_obj.get_mut("executor_disabled_position_addresses") {
+        if let Some(arr) = arr_val.as_array_mut() {
+            for v in arr.iter_mut() {
+                if v.as_str().map(|s| s.trim()) == Some(old_pos) {
+                    *v = serde_json::json!(new_pos);
+                    changed = true;
+                }
+            }
+            let before_d = arr.len();
+            arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(old_pos));
+            if arr.len() != before_d {
+                changed = true;
+            }
+        }
+    }
+
     if changed {
         strategy.updated_at = chrono::Utc::now();
         let snapshot = strategies.clone();
@@ -734,4 +757,135 @@ pub async fn replace_position_address_in_strategy(
         );
     }
     Ok(())
+}
+
+async fn strategy_ids_holding_position_address(state: &AppState, pda: &str) -> Vec<String> {
+    let pda = pda.trim();
+    if pda.is_empty() {
+        return Vec::new();
+    }
+    let strategies = state.strategies.read().await;
+    let mut out = Vec::new();
+    for s in strategies.values() {
+        let Some(arr) = s
+            .config
+            .get("parameters")
+            .and_then(|p| p.get("position_addresses"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        if arr
+            .iter()
+            .any(|v| v.as_str().map(str::trim) == Some(pda))
+        {
+            out.push(s.id.clone());
+        }
+    }
+    out
+}
+
+/// Recompute managed allowlist (registry-open ∩ configured addresses) for a **running** executor.
+pub async fn sync_managed_allowlist_from_registry_for_strategy(
+    state: &AppState,
+    strategy_id: &str,
+) -> Result<(), ApiError> {
+    let exec_opt = { state.executors.read().await.get(strategy_id).cloned() };
+    let Some(exec) = exec_opt else {
+        return Ok(());
+    };
+    let strategies = state.strategies.read().await;
+    let Some(strategy) = strategies.get(strategy_id) else {
+        return Ok(());
+    };
+    let open = registry_open_position_pubkeys();
+    let managed_allow: Vec<solana_sdk::pubkey::Pubkey> = {
+        let configured: Vec<solana_sdk::pubkey::Pubkey> = strategy
+            .config
+            .get("parameters")
+            .and_then(|p| p.get("position_addresses"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|s| solana_sdk::pubkey::Pubkey::from_str(s.trim()).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !configured.is_empty() {
+            let set: std::collections::HashSet<_> = configured.into_iter().collect();
+            open.into_iter().filter(|p| set.contains(p)).collect()
+        } else {
+            open
+        }
+    };
+    drop(strategies);
+    let g = exec.read().await;
+    g.set_managed_allowlist(managed_allow).await;
+    Ok(())
+}
+
+/// When the UI shows an active PDA but `parameters.position_addresses` still lists a **closed**
+/// parent (reopen_hook missed: external bot, API restart, or spawn error), walk registry/lifecycle
+/// parents and replace the first matching PDA in strategy config.
+pub async fn heal_rotated_strategy_link_best_effort(
+    state: &AppState,
+    new_position: &str,
+) -> Result<Option<Vec<String>>, ApiError> {
+    let new_pos = new_position.trim();
+    if new_pos.is_empty() {
+        return Ok(None);
+    }
+
+    if !strategy_ids_holding_position_address(state, new_pos).await.is_empty() {
+        return Ok(None);
+    }
+
+    let mut cur = new_pos.to_string();
+    for _ in 0..32 {
+        let Some(parent) =
+            crate::services::position_stream_lineage::infer_rotation_parent_best_effort(&cur).await
+        else {
+            break;
+        };
+        let parent = parent.trim().to_string();
+        if parent.is_empty() || parent == cur {
+            break;
+        }
+        let holders = strategy_ids_holding_position_address(state, &parent).await;
+        if !holders.is_empty() {
+            let mut healed = Vec::new();
+            for sid in &holders {
+                replace_position_address_in_strategy(state, sid, &parent, new_pos).await?;
+                healed.push(sid.clone());
+            }
+            for sid in &healed {
+                if let Err(e) = sync_managed_allowlist_from_registry_for_strategy(state, sid).await {
+                    warn!(
+                        strategy_id = %sid,
+                        error = %e,
+                        "heal_rotated_strategy_link: sync managed allowlist failed"
+                    );
+                }
+                if let Err(e) =
+                    crate::handlers::strategies::sync_executor_disabled_from_config(state, sid).await
+                {
+                    warn!(
+                        strategy_id = %sid,
+                        error = %e,
+                        "heal_rotated_strategy_link: sync executor_disabled failed"
+                    );
+                }
+            }
+            info!(
+                new_pos = %new_pos,
+                parent = %parent,
+                strategies = ?healed,
+                "Healed strategy link after rotation (position_addresses + executor allowlist)"
+            );
+            return Ok(Some(healed));
+        }
+        cur = parent;
+    }
+    Ok(None)
 }

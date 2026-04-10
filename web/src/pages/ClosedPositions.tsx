@@ -3,24 +3,43 @@ import { Link } from 'react-router-dom'
 import { RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { getClosedPositions } from '@/lib/api'
+import { closedPositionsListQueryOptions } from '@/lib/api'
 import { shortenAddress, formatDate } from '@/lib/utils'
+import { PoolPairLabels } from '@/components/PoolPairLabels'
+
+const CLOSED_PAGE_LIMIT = 100
+const CLOSED_PAGE_OFFSET = 0
 
 export default function ClosedPositions() {
-  const q = useQuery({
-    queryKey: ['closed-positions', 100, 0],
-    queryFn: () => getClosedPositions(100, 0),
-    staleTime: 30_000,
-    retry: 1,
+  // Staged load: registry-only first (no RPC), then enrich pair labels in the background.
+  const fastQ = useQuery(closedPositionsListQueryOptions(CLOSED_PAGE_LIMIT, CLOSED_PAGE_OFFSET, false))
+  const fullQ = useQuery({
+    ...closedPositionsListQueryOptions(CLOSED_PAGE_LIMIT, CLOSED_PAGE_OFFSET, true),
+    placeholderData: fastQ.data,
   })
 
-  const items = q.data?.items ?? []
+  const items = (fullQ.data ?? fastQ.data)?.items ?? []
+  const enrichingPairs = Boolean(fullQ.isFetching && fullQ.isPlaceholderData)
+  const showInitialLoad = fastQ.isPending && !fastQ.data
+  const loadError =
+    fastQ.isError && !fastQ.data
+      ? fastQ.error
+      : fullQ.isError && !fastQ.data
+        ? fullQ.error
+        : null
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Closed positions</h1>
-        <Button variant="outline" size="sm" onClick={() => q.refetch()}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            void fastQ.refetch()
+            void fullQ.refetch()
+          }}
+        >
           <RefreshCw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
@@ -32,16 +51,24 @@ export default function ClosedPositions() {
           <p className="text-sm text-muted-foreground font-normal">
             Źródło: append-only <code className="text-[11px]">registry.jsonl</code>. Ta lista działa nawet bez DB.
           </p>
-          {q.data?.note ? (
-            <p className="text-xs text-muted-foreground font-normal">{q.data.note}</p>
+          {enrichingPairs ? (
+            <p className="text-xs text-muted-foreground font-normal">Ładowanie par tokenów (RPC)…</p>
+          ) : null}
+          {fullQ.data?.note ? (
+            <p className="text-xs text-muted-foreground font-normal">{fullQ.data.note}</p>
+          ) : null}
+          {fullQ.isError && fastQ.isSuccess && items.length > 0 ? (
+            <p className="text-xs text-amber-700 dark:text-amber-500 font-normal">
+              Nie udało się wczytać etykiet par (RPC); widać dane z rejestru. Użyj Refresh albo sprawdź RPC.
+            </p>
           ) : null}
         </CardHeader>
         <CardContent>
-          {q.isPending ? (
+          {showInitialLoad ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
-          ) : q.isError ? (
+          ) : loadError ? (
             <div className="text-center py-8 text-muted-foreground">
-              {(q.error instanceof Error ? q.error.message : String(q.error)) ?? 'Failed.'}
+              {(loadError instanceof Error ? loadError.message : String(loadError)) ?? 'Failed.'}
             </div>
           ) : items.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">No closed positions found.</div>
@@ -51,7 +78,7 @@ export default function ClosedPositions() {
                 <thead>
                   <tr className="border-b text-left text-sm text-muted-foreground">
                     <th className="pb-3 font-medium">Position</th>
-                    <th className="pb-3 font-medium">Pool</th>
+                    <th className="pb-3 font-medium">Pair</th>
                     <th className="pb-3 font-medium">Owner</th>
                     <th className="pb-3 font-medium">Close kind</th>
                     <th className="pb-3 font-medium">Opened</th>
@@ -70,7 +97,17 @@ export default function ClosedPositions() {
                           {shortenAddress(p.position_address)}
                         </Link>
                       </td>
-                      <td className="py-4 text-muted-foreground">{shortenAddress(p.pool_address)}</td>
+                      <td className="py-4">
+                        <PoolPairLabels
+                          labelA={p.token_a_label}
+                          labelB={p.token_b_label}
+                          mintA={p.token_mint_a}
+                          mintB={p.token_mint_b}
+                        />
+                        <div className="text-[10px] text-muted-foreground font-mono mt-1">
+                          {shortenAddress(p.pool_address, 4)}
+                        </div>
+                      </td>
                       <td className="py-4 text-muted-foreground">{shortenAddress(p.owner)}</td>
                       <td className="py-4 text-muted-foreground">
                         {p.close_kind ? (

@@ -34,6 +34,10 @@ fn create_base_router(state: AppState) -> Router {
         .route("/positions/{address}", get(handlers::get_position))
         .route("/positions/{address}/pnl", get(handlers::get_position_pnl))
         .route(
+            "/positions/{address}/suggest-strategy",
+            get(handlers::suggest_position_strategy),
+        )
+        .route(
             "/positions/{address}/stream-performance",
             get(handlers::get_position_stream_performance),
         )
@@ -42,16 +46,8 @@ fn create_base_router(state: AppState) -> Router {
             get(handlers::get_position_stream_pnl),
         )
         .route(
-            "/positions/{address}/stream-lineage",
-            get(handlers::get_position_stream_lineage),
-        )
-        .route(
             "/positions/{address}/diagnostics",
             get(handlers::get_position_diagnostics),
-        )
-        .route(
-            "/positions/{address}/lifecycle-summary",
-            get(handlers::get_position_lifecycle_summary),
         )
         .route(
             "/positions/{address}/experiment-config",
@@ -156,6 +152,11 @@ fn create_onchain_router(state: AppState) -> Router {
             "/positions/swap-before-open",
             post(handlers::swap_before_open),
         )
+        // Backfill can scan lifecycle JSONL + write many DB rows.
+        .route(
+            "/positions/backfill-valuation-snapshots",
+            post(handlers::backfill_valuation_snapshots),
+        )
         .route(
             "/positions/{address}/strategy",
             post(handlers::link_position_strategy),
@@ -169,6 +170,15 @@ fn create_onchain_router(state: AppState) -> Router {
         .route(
             "/positions/{address}/rebalance",
             post(handlers::rebalance_position),
+        )
+        // Long-running reads (JSONL scans / lineage reconstruction)
+        .route(
+            "/positions/{address}/stream-lineage",
+            get(handlers::get_position_stream_lineage),
+        )
+        .route(
+            "/positions/{address}/lifecycle-summary",
+            get(handlers::get_position_lifecycle_summary),
         )
         // Unsiged tx flow routes (submit can take long)
         .route("/tx/submit-signed", post(handlers::tx_submit_signed))

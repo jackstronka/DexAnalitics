@@ -16,6 +16,7 @@ use serde_json::Value;
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use tokio::time::{timeout, Duration};
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
@@ -65,7 +66,7 @@ pub async fn compute_position_stream_pnl(
     };
 
     // Reuse stream connectivity from the existing endpoint implementation.
-    let perf = compute_position_stream_performance(state, position_address).await?;
+    let perf = compute_position_stream_performance(state, position_address, false).await?;
     let positions = perf.positions;
     let sessions = perf.sessions;
 
@@ -101,7 +102,15 @@ pub async fn compute_position_stream_pnl(
     if baseline_row.is_none() {
         // Best-effort self-seed: compute a valuation snapshot for the entry PDA now.
         // This avoids the UI showing zeros unless the user manually visited `GET /positions/:address` first.
-        if let Ok(pos) = monitored_position_from_chain(state.provider.clone(), &solana_sdk::pubkey::Pubkey::from_str(position_address).map_err(|_| ApiError::bad_request("Invalid position address"))?).await {
+        let pk = solana_sdk::pubkey::Pubkey::from_str(position_address)
+            .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+        // Closed positions often no longer exist on-chain; don't block lineage on a slow/failed RPC.
+        if let Ok(Ok(pos)) = timeout(
+            Duration::from_secs(2),
+            monitored_position_from_chain(state.provider.clone(), &pk),
+        )
+        .await
+        {
             let prices = fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
             if let Ok(v) = compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await {
                 let raw = serde_json::json!({

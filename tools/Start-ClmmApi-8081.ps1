@@ -12,12 +12,19 @@ try { & (Join-Path $RepoRoot "tools\\Stop-ClmmApi.ps1") | Out-Null } catch {}
 $env:API_PORT = "8081"
 $env:CLMM_REPO_ROOT = $RepoRoot
 
+# Build/run isolation: use a dedicated Cargo target dir so rebuilds don't fail with
+# "failed to remove ...\\target\\debug\\clmm-lp-api.exe" when another instance is running.
+if (-not $env:CLMM_API_TARGET_DIR -or $env:CLMM_API_TARGET_DIR.Trim().Length -eq 0) {
+  $env:CLMM_API_TARGET_DIR = "target-dev-api"
+}
+
 # If the script runner is configured to use a non-default port, align API env override.
 if ($env:CLMM_SCRIPT_RUNNER_PORT -and $env:CLMM_SCRIPT_RUNNER_PORT -match '^\d+$') {
   $env:SCRIPT_RUNNER_URL = "http://127.0.0.1:$($env:CLMM_SCRIPT_RUNNER_PORT)"
 }
 
 Write-Host "[Start-ClmmApi-8081] Starting API on :8081 (does not touch :8080)..." -ForegroundColor Cyan
+Write-Host "[Start-ClmmApi-8081] Cargo target dir: $env:CLMM_API_TARGET_DIR" -ForegroundColor DarkGray
 
 $logDir = Join-Path $RepoRoot "tools\\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -32,7 +39,7 @@ Start-Process -FilePath "pwsh" `
     "-ExecutionPolicy",
     "Bypass",
     "-Command",
-    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; cargo run -q -p clmm-lp-api --bin clmm-lp-api 2>&1 | Tee-Object -FilePath '$logPath' }"
+    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; `$env:CLMM_API_TARGET_DIR='$($env:CLMM_API_TARGET_DIR)'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] cargo target dir: ' + `$env:CLMM_API_TARGET_DIR) -ForegroundColor DarkGray; cargo run -q -p clmm-lp-api --bin clmm-lp-api --target-dir `$env:CLMM_API_TARGET_DIR 2>&1 | Tee-Object -FilePath '$logPath' }"
   ) `
   -WorkingDirectory $RepoRoot `
   -WindowStyle Normal

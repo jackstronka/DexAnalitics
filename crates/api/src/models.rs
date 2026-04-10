@@ -169,6 +169,17 @@ pub struct PositionResponse {
     /// e.g. `per 1 SOL` — only set when `range_*_usdc` are present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_usdc_quote: Option<String>,
+    /// Generic lower bound in UI price units (token B per 1 token A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_lower_price: Option<Decimal>,
+    /// Generic upper bound (see `range_lower_price`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_upper_price: Option<Decimal>,
+    /// e.g. `whETH per 1 SOL` — only set when `range_*_price` are present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_price_quote: Option<String>,
     /// Pool token A label (e.g. SOL) when valuation succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_a_label: Option<String>,
@@ -358,11 +369,64 @@ pub struct PositionStreamPnLResponse {
     pub note: Option<String>,
 }
 
+/// Request to backfill synthetic valuation snapshots for rotated streams from lifecycle JSONL.
+///
+/// This is meant as a **best-effort** bridge for older/closed positions where DB snapshots were not
+/// collected historically: we convert lifecycle open/close leg deltas into two DB snapshots (open + close)
+/// using **current free USD prices**, tagged by `price_source`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct BackfillValuationSnapshotsRequest {
+    /// Max number of distinct position PDAs to process (stable order by first-seen open time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_positions: Option<u32>,
+    /// When true, performs all computations but does NOT write to DB.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Response for `POST /positions/backfill-valuation-snapshots`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BackfillValuationSnapshotsResponse {
+    pub ok: bool,
+    /// Distinct PDAs found in lifecycle (after filtering).
+    pub positions_considered: u32,
+    /// How many PDAs had a usable open row (baseline snapshot candidate).
+    pub positions_with_open: u32,
+    /// How many PDAs had a usable close row (end snapshot candidate).
+    pub positions_with_close: u32,
+    /// Total rows inserted into `position_stream_valuation_snapshots`.
+    pub rows_inserted: u32,
+    /// Source tag used for `price_source`.
+    pub price_source: String,
+    /// Optional info about skipped rows / limitations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Suggest a strategy link for a position (best-effort).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SuggestStrategyLinkResponse {
+    /// Strategy id to link to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    /// Human-readable reason for the suggestion (or why none was found).
+    pub reason: String,
+}
+
 /// One node (one PDA) in a rotated position stream lineage.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PositionStreamLineageNode {
     /// Position PDA (base58).
     pub position_address: String,
+    /// Optional token labels/mints for the pool legs (best-effort; enables pair display for closed PDAs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_a_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_b_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_b: Option<String>,
     /// Earliest valuation snapshot timestamp for this PDA (best-effort open time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_ts_utc: Option<String>,
@@ -383,6 +447,19 @@ pub struct PositionStreamLineageNode {
     /// LP **fees collected** in USD: positive token deltas from `bot_collect_fees` rows for pool mints × current USD prices.
     #[schema(value_type = String)]
     pub fees_collected_usd: Decimal,
+    /// Best-effort collected LP fees for pool token A (UI units) from `bot_collect_fees` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub fees_collected_token_a_ui: Option<Decimal>,
+    /// Best-effort collected LP fees for pool token B (UI units).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub fees_collected_token_b_ui: Option<Decimal>,
+    /// Same as `fees_collected_token_*_ui`, but in smallest units (SPL base units; for SOL mint this is lamports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fees_collected_token_a_raw: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fees_collected_token_b_raw: Option<u64>,
     /// Count of `bot_collect_fees` ledger rows for this PDA.
     pub collect_events: u32,
     /// Realized cashflow estimate in USD from `fee_payer_token_deltas` (pool legs) for this PDA.
@@ -410,6 +487,19 @@ pub struct LineageChainCostSummary {
     /// Sum of `fees_collected_usd` over all nodes.
     #[schema(value_type = String)]
     pub fees_collected_usd_total: Decimal,
+    /// Best-effort collected LP fees (token A UI units) summed across chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub fees_collected_token_a_ui_total: Option<Decimal>,
+    /// Best-effort collected LP fees (token B UI units) summed across chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub fees_collected_token_b_ui_total: Option<Decimal>,
+    /// Same as `*_ui_total` but in smallest units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fees_collected_token_a_raw_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fees_collected_token_b_raw_total: Option<u64>,
     /// Sum of `collect_events` over all nodes.
     pub collect_events_total: u32,
 }
@@ -464,6 +554,18 @@ pub struct ClosedPositionEntry {
     pub position_address: String,
     /// Pool address (base58) as recorded on open/close.
     pub pool_address: String,
+    /// Pool leg mint A (base58) when resolvable from pool on-chain (best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_a: Option<String>,
+    /// Pool leg mint B (base58) when resolvable from pool on-chain (best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_mint_b: Option<String>,
+    /// Short label for token A (e.g. SOL, USDC) when recognized (best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_a_label: Option<String>,
+    /// Short label for token B (e.g. SOL, USDC) when recognized (best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_b_label: Option<String>,
     /// Owner pubkey (base58) as recorded on open/close.
     pub owner: String,
     /// Close classification when known (`manual` vs `strategy` vs `rotation`).
@@ -546,12 +648,18 @@ pub struct PositionLifecycleSummaryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub collected_fee_token_a_ui: Option<Decimal>,
+    /// Same as `collected_fee_token_a_ui`, but in smallest units (SPL base units; for SOL mint this is lamports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collected_fee_token_a_raw: Option<u64>,
     /// Best-effort sum of **collected LP fees** (token B UI units) from `bot_collect_fees` rows.
     ///
     /// Derived from `fee_payer_token_deltas` (positive deltas) for the pool's token B mint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub collected_fee_token_b_ui: Option<Decimal>,
+    /// Same as `collected_fee_token_b_ui`, but in smallest units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collected_fee_token_b_raw: Option<u64>,
     /// Best-effort USD value of collected LP fees (A/B legs) at **current** mint prices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
@@ -623,6 +731,17 @@ pub struct OrcaOwnerPositionEntry {
     pub range_upper_usdc: Option<Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_usdc_quote: Option<String>,
+    /// Generic lower bound in UI price units (token B per 1 token A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_lower_price: Option<Decimal>,
+    /// Generic upper bound (see `range_lower_price`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub range_upper_price: Option<Decimal>,
+    /// e.g. `whETH per 1 SOL` — only set when `range_*_price` are present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_price_quote: Option<String>,
     /// Raw liquidity (u128 as decimal string).
     pub liquidity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1317,7 +1436,8 @@ pub struct BacktestFromClosedPositionRequest {
     /// Optional start date (UTC) YYYY-MM-DD. If omitted, inferred from registry_open timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
-    /// Optional end date (UTC) YYYY-MM-DD exclusive. If omitted, inferred from registry_close timestamp.
+    /// Optional end date (UTC) `YYYY-MM-DD` — forwarded to CLI as the exclusive upper bound (`ts < end`).
+    /// If omitted, the API uses the registry close **calendar day** and passes **the next day** to the CLI so intraday snapshots on the close day are not dropped (same calendar day as `--start-date` would otherwise yield an empty window).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_date: Option<String>,
     /// Fee source accepted by CLI (default `snapshots`).

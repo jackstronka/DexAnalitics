@@ -1470,6 +1470,15 @@ async fn main() -> Result<()> {
                 prebuilt_snapshot_fee_index = prep.per_step_fees_usd;
                 if prep.step_data.is_empty() {
                     println!("âťŚ No snapshot rows in the requested time window.");
+                    if start_time >= end_time {
+                        println!(
+                            "   Hint: with --price-path-source snapshots, YYYY-MM-DD bounds are midnight UTC and rows must satisfy start <= ts < end. Same calendar day for --start-date and --end-date is an empty window; set --end-date to the day after the last day you want included."
+                        );
+                    } else {
+                        println!(
+                            "   Hint: ensure data/pool-snapshots/orca/<POOL>/snapshots.jsonl has lines in this range (collect snapshots for that pool), or widen the window."
+                        );
+                    }
                     return Ok(());
                 }
                 if let Some(ref p) = orca_snapshot_jsonl_override {
