@@ -1,3 +1,11 @@
+## 2026-04-13 — Stream lineage: rotation-only linking (registry + lifecycle)
+
+keywords: api, position-stream-lineage, registry.jsonl, lifecycle, rebalance_session_id, rotation, infer_parent, strategy_service, position_stream_edges
+
+- **What:** Position stream chain and `infer_parent_position_from_*` no longer stitch PDAs on time/pool/payer alone. Registry requires matching non-empty `rebalance_session_id` on open and close; lifecycle requires rotation signals via `lifecycle_rotation_parent_before_open` (shared session, `close_kind=rotation`, or bot rows tied to the closed PDA). Forward lifecycle links only follow opens whose inferred parent is the PDA that just closed. With Postgres edges, lineage uses **`build_lineage_chain_from_db_edges`** (walk backward from the requested PDA, then forward) instead of root-forward `build_linear_chain`, and **skips JSONL/registry fallback when any `position_stream_edges` row touches the entry** (forked graphs no longer yield `[entry]` + inflated JSONL). **`suppress_jsonl_rotation_stitch`** blocks registry/JSONL extension when the latest open is CLI `position_open`, or when no prior close in the same pool/fee payer shares the open’s `rebalance_session_id` within 60m (UI `bot_open_position` + fresh `cost_session_id` no longer inherits unrelated bot history when IL edges are missing).
+- **Why:** Manual opens in the same pool were incorrectly attached to unrelated prior closes/chains; runtime logs showed `db_chain_from_edges_len: 1` with `chain_len: 4` when the DB graph forked.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
 ## 2026-04-13 — WSOL/USDC valuation aligns with pool tick
 
 keywords: api, valuation, wsol, usdc, position-value, price-source, open-position

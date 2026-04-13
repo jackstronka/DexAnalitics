@@ -424,6 +424,118 @@ fn is_lifecycle_close_event(ev: Option<&str>) -> bool {
     matches!(ev, Some("bot_close_position") | Some("position_close"))
 }
 
+/// Latest open row for `entry` uses `position_open` (CLI / `orca-position-open`), not `bot_open_*`.
+/// Without a `position_stream_edges` row on this PDA, JSONL/registry rotation heuristics would
+/// still stitch same-pool bot history — operators expect a **fresh** manual position to stand alone.
+fn lifecycle_entry_open_is_manual_cli(rows: &[LifecycleRow], entry: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    let mut best: Option<(DateTime<Utc>, bool)> = None;
+    for r in rows.iter() {
+        if r.position_pubkey.as_deref().map(str::trim) != Some(entry) {
+            continue;
+        }
+        if !is_lifecycle_open_event(r.event.as_deref()) {
+            continue;
+        }
+        let Some(ts) = r.ts_utc else {
+            continue;
+        };
+        let manual = r.event.as_deref() == Some("position_open");
+        if best.as_ref().is_none_or(|(bts, _)| ts >= *bts) {
+            best = Some((ts, manual));
+        }
+    }
+    best.is_some_and(|(_, manual)| manual)
+}
+
+/// True when the **latest** open row for `entry` shares a non-empty `rebalance_session_id` with some
+/// **close** row in the same pool + fee payer strictly before that open (60m lookback).
+///
+/// UI/API opens attach a fresh `cost_session_id` per request; that id does **not** match prior
+/// strategy `bot_close_position` rows, so JSONL/registry rotation stitching must not inherit unrelated
+/// pool history. True strategy rotations (close → open, same session) still match here.
+fn lifecycle_open_has_prior_close_same_session(rows: &[LifecycleRow], entry: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    let mut open_row: Option<&LifecycleRow> = None;
+    let mut best_ts: Option<DateTime<Utc>> = None;
+    for r in rows.iter() {
+        if r.position_pubkey.as_deref().map(str::trim) != Some(entry) {
+            continue;
+        }
+        if !is_lifecycle_open_event(r.event.as_deref()) {
+            continue;
+        }
+        let Some(ts) = r.ts_utc else {
+            continue;
+        };
+        if best_ts.is_none() || ts >= best_ts.unwrap() {
+            best_ts = Some(ts);
+            open_row = Some(r);
+        }
+    }
+    let Some(o) = open_row else {
+        return false;
+    };
+    let Some(open_ts) = o.ts_utc else {
+        return false;
+    };
+    let Some(sid) = o
+        .rebalance_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let Some(pool) = o.pool_address.as_deref() else {
+        return false;
+    };
+    let Some(payer) = o.fee_payer_pubkey.as_deref() else {
+        return false;
+    };
+    let window_start = open_ts - chrono::Duration::minutes(60);
+    for r in rows.iter() {
+        let Some(ts) = r.ts_utc else {
+            continue;
+        };
+        if ts < window_start || ts >= open_ts {
+            continue;
+        }
+        if r.pool_address.as_deref() != Some(pool) {
+            continue;
+        }
+        if r.fee_payer_pubkey.as_deref() != Some(payer) {
+            continue;
+        }
+        if !is_lifecycle_close_event(r.event.as_deref()) {
+            continue;
+        }
+        let Some(csid) = r
+            .rebalance_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if csid == sid {
+            return true;
+        }
+    }
+    false
+}
+
+/// No registry/JSONL rotation chain when CLI manual open, or when open is not session-anchored to a prior close.
+fn suppress_jsonl_rotation_stitch(rows: &[LifecycleRow], entry: &str) -> bool {
+    lifecycle_entry_open_is_manual_cli(rows, entry) || !lifecycle_open_has_prior_close_same_session(rows, entry)
+}
+
 struct LifecycleRowsCache {
     mtime: Option<SystemTime>,
     rows: Arc<Vec<LifecycleRow>>,
@@ -790,6 +902,95 @@ fn attach_collect_zero_diagnostics(
     }
 }
 
+/// Parent PDA for a **rotation** into `o`: only when lifecycle shows explicit rotation evidence
+/// (matching non-empty `rebalance_session_id`, executor `close_kind=rotation`, or bot activity tied
+/// to the closed parent PDA — never “any swap in pool with empty position_pubkey”).
+fn lifecycle_rotation_parent_before_open<'a>(
+    rows: &'a [LifecycleRow],
+    o: &'a LifecycleRow,
+) -> Option<&'a str> {
+    let open_ts = o.ts_utc?;
+    let pool = o.pool_address.as_deref()?;
+    let payer = o.fee_payer_pubkey.as_deref()?;
+    let open_rebalance_session_id = o.rebalance_session_id.as_deref();
+    let window_start = open_ts - chrono::Duration::minutes(60);
+    let mut best: Option<&LifecycleRow> = None;
+    for r in rows.iter() {
+        let Some(ts) = r.ts_utc else { continue };
+        if ts < window_start || ts > open_ts {
+            continue;
+        }
+        if r.pool_address.as_deref() != Some(pool) {
+            continue;
+        }
+        if r.fee_payer_pubkey.as_deref() != Some(payer) {
+            continue;
+        }
+        if !is_lifecycle_close_event(r.event.as_deref()) {
+            continue;
+        }
+        let parent_pda = r.position_pubkey.as_deref().unwrap_or("");
+        if parent_pda.is_empty() {
+            continue;
+        }
+        let mut has_rotation_signal = false;
+        if let Some(d) = r.details.as_ref().and_then(|x| x.as_object()) {
+            if d.get("close_kind")
+                .and_then(|x| x.as_str())
+                .is_some_and(|s| s.trim() == "rotation")
+            {
+                has_rotation_signal = true;
+            }
+        }
+        if let (Some(osid), Some(csid)) = (open_rebalance_session_id, r.rebalance_session_id.as_deref())
+        {
+            if !osid.is_empty() && osid == csid {
+                has_rotation_signal = true;
+            }
+        }
+        if !has_rotation_signal {
+            for rr in rows.iter() {
+                let Some(t2) = rr.ts_utc else { continue };
+                if t2 < ts || t2 > open_ts {
+                    continue;
+                }
+                if rr.pool_address.as_deref() != Some(pool) {
+                    continue;
+                }
+                if rr.fee_payer_pubkey.as_deref() != Some(payer) {
+                    continue;
+                }
+                let ev = rr.event.as_deref().unwrap_or("");
+                if ev.starts_with("bot_swap_") || ev.starts_with("bot_swap") {
+                    if rr.position_pubkey.as_deref() == Some(parent_pda) {
+                        has_rotation_signal = true;
+                        break;
+                    }
+                }
+                if ev == "bot_reopen_preflight_failed" {
+                    if rr.position_pubkey.as_deref() == Some(parent_pda) {
+                        has_rotation_signal = true;
+                        break;
+                    }
+                }
+                if matches!(ev, "bot_collect_fees" | "bot_decrease_liquidity")
+                    && rr.position_pubkey.as_deref() == Some(parent_pda)
+                {
+                    has_rotation_signal = true;
+                    break;
+                }
+            }
+        }
+        if !has_rotation_signal {
+            continue;
+        }
+        if best.is_none() || ts > best.and_then(|b| b.ts_utc).unwrap_or(ts) {
+            best = Some(r);
+        }
+    }
+    best.and_then(|r| r.position_pubkey.as_deref())
+}
+
 fn chain_from_lifecycle_best_effort_rows(
     rows: &[LifecycleRow],
     entry: &str,
@@ -829,106 +1030,6 @@ fn chain_from_lifecycle_best_effort_rows(
         None
     }
 
-    // Helper: parent lookup for a given OPEN (pool+payer, within 10 minutes backwards).
-    fn find_parent_from_open<'a>(
-        rows: &'a [LifecycleRow],
-        open_ts: DateTime<Utc>,
-        pool: &str,
-        payer: &str,
-        open_rebalance_session_id: Option<&str>,
-    ) -> Option<&'a str> {
-        let window_start = open_ts - chrono::Duration::minutes(60);
-        let mut best: Option<&LifecycleRow> = None;
-        for r in rows.iter() {
-            let Some(ts) = r.ts_utc else { continue };
-            if ts < window_start || ts > open_ts {
-                continue;
-            }
-            if r.pool_address.as_deref() != Some(pool) {
-                continue;
-            }
-            if r.fee_payer_pubkey.as_deref() != Some(payer) {
-                continue;
-            }
-            if !is_lifecycle_close_event(r.event.as_deref()) {
-                continue;
-            }
-            // Guardrail: don't link a manual "start" open to a random prior close.
-            // Only accept a parent when we observe *rotation-like* activity between close→open
-            // (typically swap-mix / swap txs the bot does to reopen into the new range).
-            let parent_pda = r.position_pubkey.as_deref().unwrap_or("");
-            if parent_pda.is_empty() {
-                continue;
-            }
-            let mut has_rotation_signal = false;
-            // Strong explicit signal: close row declares it was a rotation (bot close before reopen).
-            // This is emitted by the executor and is reliable even when the bot does *no swaps* between close→open.
-            if let Some(d) = r.details.as_ref().and_then(|x| x.as_object()) {
-                if d.get("close_kind")
-                    .and_then(|x| x.as_str())
-                    .is_some_and(|s| s.trim() == "rotation")
-                {
-                    has_rotation_signal = true;
-                }
-            }
-            // Strongest: same rebalance_session_id on close and open (bot stamps both when CLMM_REBALANCE_SESSION_ID is set).
-            if let (Some(osid), Some(csid)) = (open_rebalance_session_id, r.rebalance_session_id.as_deref())
-            {
-                if !osid.is_empty() && osid == csid {
-                    has_rotation_signal = true;
-                }
-            }
-            if !has_rotation_signal {
-                for rr in rows.iter() {
-                    let Some(t2) = rr.ts_utc else { continue };
-                    if t2 < ts || t2 > open_ts {
-                        continue;
-                    }
-                    if rr.pool_address.as_deref() != Some(pool) {
-                        continue;
-                    }
-                    if rr.fee_payer_pubkey.as_deref() != Some(payer) {
-                        continue;
-                    }
-                    // swaps / mix diagnostics are strong indicators this was a close→open rotation flow
-                    let ev = rr.event.as_deref().unwrap_or("");
-                    if ev.starts_with("bot_swap_") || ev.starts_with("bot_swap") {
-                        // tie to the closed position when possible
-                        if rr.position_pubkey.as_deref() == Some(parent_pda) {
-                            has_rotation_signal = true;
-                            break;
-                        }
-                        // or accept pool+payer swaps even if position key isn't repeated on that row
-                        if rr.position_pubkey.is_none() {
-                            has_rotation_signal = true;
-                            break;
-                        }
-                    }
-                    if ev == "bot_reopen_preflight_failed" {
-                        if rr.position_pubkey.as_deref() == Some(parent_pda) {
-                            has_rotation_signal = true;
-                            break;
-                        }
-                    }
-                    // Typical rebalance sequence before close (same position PDA).
-                    if matches!(ev, "bot_collect_fees" | "bot_decrease_liquidity")
-                        && rr.position_pubkey.as_deref() == Some(parent_pda)
-                    {
-                        has_rotation_signal = true;
-                        break;
-                    }
-                }
-            }
-            if !has_rotation_signal {
-                continue;
-            }
-            if best.is_none() || ts > best.and_then(|b| b.ts_utc).unwrap_or(ts) {
-                best = Some(r);
-            }
-        }
-        best.and_then(|r| r.position_pubkey.as_deref())
-    }
-
     // Anchor: prefer OPEN row (lets us go backwards); otherwise fall back to CLOSE.
     let mut anchor: Option<(usize, &LifecycleRow)> = find_open_row(&rows, entry);
     if anchor.is_none() {
@@ -954,20 +1055,7 @@ fn chain_from_lifecycle_best_effort_rows(
     let mut cur_pos = entry.to_string();
     for _ in 0..max_hops {
         let Some((_oi, o)) = find_open_row(&rows, &cur_pos) else { break };
-        let (Some(open_ts), Some(pool), Some(payer)) = (
-            o.ts_utc,
-            o.pool_address.as_deref(),
-            o.fee_payer_pubkey.as_deref(),
-        ) else {
-            break;
-        };
-        let Some(parent) = find_parent_from_open(
-            &rows,
-            open_ts,
-            pool,
-            payer,
-            o.rebalance_session_id.as_deref(),
-        ) else {
+        let Some(parent) = lifecycle_rotation_parent_before_open(rows, o) else {
             break;
         };
         if !seen.insert(parent.to_string()) {
@@ -1013,6 +1101,12 @@ fn chain_from_lifecycle_best_effort_rows(
                 continue;
             }
             if !is_lifecycle_open_event(r.event.as_deref()) {
+                continue;
+            }
+            let Some(parent) = lifecycle_rotation_parent_before_open(rows, r) else {
+                continue;
+            };
+            if parent != cur {
                 continue;
             }
             next_open = Some((i, r));
@@ -1112,7 +1206,8 @@ fn registry_rows_best_effort() -> Vec<RegistryRow> {
 }
 
 /// Immediate parent PDA: `registry_close` for the position closed just before this PDA's `registry_open`
-/// (same pool + owner; prefers matching `rebalance_session_id`; 60m window).
+/// (same pool + owner; 60m window) **only** when `rebalance_session_id` is non-empty and matches on both rows.
+/// Manual opens without a shared session id are not linked to unrelated prior closes.
 pub fn infer_parent_position_from_registry_best_effort(entry: &str) -> Option<String> {
     let rows = registry_rows_best_effort();
     infer_parent_position_from_registry_rows(&rows, entry)
@@ -1160,13 +1255,11 @@ fn infer_parent_position_from_registry_rows(rows: &[RegistryRow], entry: &str) -
         if let (Some(osid), Some(csid)) =
             (o.rebalance_session_id.as_deref(), r.rebalance_session_id.as_deref())
         {
-            if !osid.is_empty() && osid == csid {
-                best = Some((r, ts));
-                break;
+            if !osid.is_empty() && !csid.is_empty() && osid == csid {
+                if best.as_ref().is_none_or(|(_, bts)| ts > *bts) {
+                    best = Some((r, ts));
+                }
             }
-        }
-        if best.as_ref().is_none_or(|(_, bts)| ts > *bts) {
-            best = Some((r, ts));
         }
     }
     let (c, _) = best?;
@@ -1262,13 +1355,11 @@ fn chain_from_registry_best_effort_rows(rows: &[RegistryRow], entry: &str, max_h
             if let (Some(osid), Some(csid)) =
                 (o.rebalance_session_id.as_deref(), r.rebalance_session_id.as_deref())
             {
-                if !osid.is_empty() && osid == csid {
-                    best = Some((r, ts));
-                    break;
+                if !osid.is_empty() && !csid.is_empty() && osid == csid {
+                    if best.as_ref().is_none_or(|(_, bts)| ts > *bts) {
+                        best = Some((r, ts));
+                    }
                 }
-            }
-            if best.as_ref().is_none_or(|(_, bts)| ts > *bts) {
-                best = Some((r, ts));
             }
         }
         let Some((c, _)) = best else { break };
@@ -1309,13 +1400,11 @@ fn chain_from_registry_best_effort_rows(rows: &[RegistryRow], entry: &str, max_h
             if let (Some(csid), Some(osid)) =
                 (c.rebalance_session_id.as_deref(), r.rebalance_session_id.as_deref())
             {
-                if !csid.is_empty() && csid == osid {
-                    next = Some((r, ts));
-                    break;
+                if !csid.is_empty() && !osid.is_empty() && csid == osid {
+                    if next.as_ref().is_none_or(|(_, nts)| ts < *nts) {
+                        next = Some((r, ts));
+                    }
                 }
-            }
-            if next.as_ref().is_none_or(|(_, nts)| ts < *nts) {
-                next = Some((r, ts));
             }
         }
         let Some((o, _)) = next else { break };
@@ -1657,79 +1746,82 @@ fn rollup_lineage_chain_costs(nodes: &[PositionStreamLineageNode]) -> Option<Lin
     })
 }
 
-fn build_linear_chain(
+/// Build **entry-centric** lineage from persisted `position_stream_edges`.
+///
+/// The old root-forward walk could miss `entry` when the directed graph forks (e.g. `A→B` and `A→C`):
+/// traversal followed one branch, hit `if !chain.contains(entry) { vec![entry] }`, and JSONL fallback
+/// then stitched an overly long “history”. We instead walk **backward** from `entry` to oldest
+/// ancestor, then **forward** to newest descendant along best-effort timestamps.
+fn build_lineage_chain_from_db_edges(
     positions: &[String],
     edges: &[(Option<DateTime<Utc>>, String, String, String)],
     entry: &str,
+    max_hops: usize,
 ) -> Vec<String> {
     let pos_set: HashSet<&str> = positions.iter().map(|s| s.as_str()).collect();
-
-    // Adjacency old -> list of (ts, new).
-    let mut out: HashMap<&str, Vec<(Option<DateTime<Utc>>, &str)>> = HashMap::new();
-    let mut indeg: HashMap<&str, usize> = HashMap::new();
-    for p in pos_set.iter() {
-        indeg.insert(*p, 0);
-    }
-    for (ts, old, newp, _sid) in edges {
-        if !pos_set.contains(old.as_str()) || !pos_set.contains(newp.as_str()) {
-            continue;
-        }
-        out.entry(old.as_str())
-            .or_default()
-            .push((*ts, newp.as_str()));
-        *indeg.entry(newp.as_str()).or_insert(0) += 1;
+    if !pos_set.contains(entry) {
+        return vec![entry.to_string()];
     }
 
-    for v in out.values_mut() {
-        v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
-    }
-
-    // Pick a root: in-degree 0 is ideal. If none (cycle/noise), fall back to entry.
-    let mut roots: Vec<&str> = indeg
-        .iter()
-        .filter_map(|(p, d)| if *d == 0 { Some(*p) } else { None })
-        .collect();
-    roots.sort();
-    let root = if roots.is_empty() {
-        entry
-    } else if roots.len() == 1 {
-        roots[0]
-    } else {
-        // Prefer the root with earliest outgoing edge timestamp (if any).
-        let mut best = roots[0];
-        let mut best_ts = None;
-        for r in &roots {
-            let ts = out
-                .get(r)
-                .and_then(|v| v.first())
-                .and_then(|x| x.0);
-            if best_ts.is_none() || (ts.is_some() && ts < best_ts) {
-                best = *r;
-                best_ts = ts;
+    let mut ancestors: Vec<String> = Vec::new();
+    let mut seen_b: HashSet<String> = HashSet::new();
+    seen_b.insert(entry.to_string());
+    let mut cur = entry.to_string();
+    for _ in 0..max_hops {
+        let mut preds: Vec<(Option<DateTime<Utc>>, &str)> = Vec::new();
+        for (ts, old, newp, _sid) in edges {
+            if newp != &cur || !pos_set.contains(old.as_str()) {
+                continue;
             }
+            preds.push((*ts, old.as_str()));
         }
-        best
-    };
-
-    // Walk forward following the earliest edge each time; stop on missing / loop.
-    let mut chain: Vec<String> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut cur = root;
-    while pos_set.contains(cur) && seen.insert(cur) {
-        chain.push(cur.to_string());
-        let Some(nexts) = out.get(cur) else { break };
-        let Some((_, next)) = nexts.iter().find(|(_, n)| !seen.contains(*n)) else {
+        if preds.is_empty() {
             break;
-        };
-        cur = *next;
+        }
+        let pred = preds
+            .iter()
+            .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
+            .map(|(_ts, p)| *p)
+            .expect("preds non-empty");
+        let pred = pred.to_string();
+        if !seen_b.insert(pred.clone()) {
+            break;
+        }
+        cur = pred.clone();
+        ancestors.push(pred);
+    }
+    ancestors.reverse();
+
+    let mut chain = ancestors;
+    chain.push(entry.to_string());
+
+    let mut seen_f: HashSet<String> = chain.iter().cloned().collect();
+    cur = entry.to_string();
+    for _ in 0..max_hops {
+        let mut succs: Vec<(Option<DateTime<Utc>>, &str)> = Vec::new();
+        for (ts, old, newp, _sid) in edges {
+            if old != &cur || !pos_set.contains(newp.as_str()) {
+                continue;
+            }
+            succs.push((*ts, newp.as_str()));
+        }
+        if succs.is_empty() {
+            break;
+        }
+        let succ = succs
+            .iter()
+            .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
+            .map(|(_ts, s)| *s)
+            .expect("succs non-empty");
+        let succ = succ.to_string();
+        if !seen_f.insert(succ.clone()) {
+            break;
+        }
+        cur = succ.clone();
+        chain.push(succ);
     }
 
-    // Ensure entry is included: if traversal missed it, fall back to trivial chain.
-    if !chain.iter().any(|p| p == entry) {
-        vec![entry.to_string()]
-    } else {
-        chain
-    }
+    chain
 }
 
 async fn sol_usd() -> (f64, String) {
@@ -2664,7 +2756,12 @@ pub async fn compute_position_stream_lineage(
 
     let Some(db) = state.db.as_ref() else {
         let rows = lifecycle_rows_cached_best_effort().await;
-        let chain = chain_from_lifecycle_best_effort_rows(&rows, entry, 25);
+        let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
+        let chain = if stitch_suppressed {
+            vec![entry.to_string()]
+        } else {
+            chain_from_lifecycle_best_effort_rows(&rows, entry, 25)
+        };
         let mut nodes = Vec::new();
         for p in &chain {
             nodes.push(node_metrics_from_lifecycle_best_effort(state, &rows, p).await?);
@@ -2692,7 +2789,7 @@ pub async fn compute_position_stream_lineage(
             totals,
             chain_cost_summary,
             note: Some(
-                "DB is disabled; chain reconstructed best-effort from lifecycle JSONL (close→open in same pool+fee payer, 10min window)."
+                "DB is disabled; chain reconstructed best-effort from lifecycle JSONL (rotation signals: matching rebalance_session_id, close_kind=rotation, or bot activity tied to the closed PDA; 60m window)."
                     .to_string(),
             ),
         });
@@ -2723,25 +2820,35 @@ pub async fn compute_position_stream_lineage(
         edges.push((ts, oldp, newp, sid));
     }
 
-    let mut chain = build_linear_chain(&perf.positions, &edges, entry);
+    let pos_set: HashSet<&str> = perf.positions.iter().map(|s| s.as_str()).collect();
+    let entry_touches_db_edge = edges.iter().any(|(_, o, n, _)| {
+        (o == entry || n == entry) && pos_set.contains(o.as_str()) && pos_set.contains(n.as_str())
+    });
+
+    let mut chain = build_lineage_chain_from_db_edges(&perf.positions, &edges, entry, 100);
 
     // IL ledger → `position_stream_edges` is optional; without ingested edges the DB graph is a
     // single PDA even when `orca_position_lifecycle.jsonl` has the full close→open chain.
-    if chain.len() <= 1 {
-        // First fallback: registry.jsonl (cheaper and usually complete for open/close sequences).
-        let reg_rows = registry_rows_best_effort();
-        if !reg_rows.is_empty() {
-            let rc = chain_from_registry_best_effort_rows(&reg_rows, entry, 50);
-            if rc.len() > chain.len() {
-                chain = rc;
+    //
+    // If **any** persisted edge touches `entry`, trust the DB entry-centric chain only — JSONL/registry
+    // extensions previously re-stitched unrelated pool history (e.g. after a forked edge graph).
+    if chain.len() <= 1 && !entry_touches_db_edge {
+        let rows_fb = lifecycle_rows_cached_best_effort().await;
+        if !suppress_jsonl_rotation_stitch(&rows_fb, entry) {
+            // First fallback: registry.jsonl (cheaper and usually complete for open/close sequences).
+            let reg_rows = registry_rows_best_effort();
+            if !reg_rows.is_empty() {
+                let rc = chain_from_registry_best_effort_rows(&reg_rows, entry, 50);
+                if rc.len() > chain.len() {
+                    chain = rc;
+                }
             }
-        }
 
-        // Second fallback: lifecycle JSONL (richer, but may omit some PDAs depending on collector config).
-        let rows = lifecycle_rows_cached_best_effort().await;
-        let lc = chain_from_lifecycle_best_effort_rows(&rows, entry, 25);
-        if lc.len() > chain.len() {
-            chain = lc;
+            // Second fallback: lifecycle JSONL (richer, but may omit some PDAs depending on collector config).
+            let lc = chain_from_lifecycle_best_effort_rows(&rows_fb, entry, 25);
+            if lc.len() > chain.len() {
+                chain = lc;
+            }
         }
     }
 
@@ -3217,16 +3324,14 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
     })
 }
 
-/// Best-effort inference: for a given position PDA (entry), try to find its immediate parent PDA
-/// from lifecycle JSONL by matching the closest preceding `bot_close_position`/`position_close`
-/// in the same pool and by the same fee payer.
+/// Best-effort inference: parent PDA only when lifecycle shows a **rotation** into this open
+/// (same rules as stream-lineage `lifecycle_rotation_parent_before_open`).
 pub async fn infer_parent_position_from_lifecycle_best_effort(entry: &str) -> Option<String> {
     let entry = entry.trim();
     if entry.is_empty() {
         return None;
     }
     let rows = lifecycle_rows_cached_best_effort().await;
-    // Find the earliest open row for entry.
     let mut open_row: Option<&LifecycleRow> = None;
     for r in rows.iter() {
         if r.position_pubkey.as_deref() != Some(entry) {
@@ -3241,38 +3346,7 @@ pub async fn infer_parent_position_from_lifecycle_best_effort(entry: &str) -> Op
         }
     }
     let o = open_row?;
-    let open_ts = o.ts_utc?;
-    let pool = o.pool_address.as_deref()?.trim();
-    let payer = o.fee_payer_pubkey.as_deref()?.trim();
-    if pool.is_empty() || payer.is_empty() {
-        return None;
-    }
-
-    // Search for the latest close row before open_ts within 10 minutes window.
-    let window_start = open_ts - chrono::Duration::minutes(10);
-    let mut best: Option<(DateTime<Utc>, String)> = None;
-    for r in rows.iter() {
-        let Some(ts) = r.ts_utc else { continue };
-        if ts < window_start || ts > open_ts {
-            continue;
-        }
-        if r.pool_address.as_deref() != Some(pool) {
-            continue;
-        }
-        if r.fee_payer_pubkey.as_deref() != Some(payer) {
-            continue;
-        }
-        if !is_lifecycle_close_event(r.event.as_deref()) {
-            continue;
-        }
-        let Some(parent) = r.position_pubkey.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(bts, _)| ts > *bts) {
-            best = Some((ts, parent.to_string()));
-        }
-    }
-    best.map(|(_, p)| p)
+    lifecycle_rotation_parent_before_open(&rows, o).map(std::string::ToString::to_string)
 }
 
 #[cfg(test)]
@@ -3326,6 +3400,195 @@ mod tests {
                 note: n.note.clone(),
             })
             .collect()
+    }
+
+    fn empty_lifecycle_row() -> LifecycleRow {
+        LifecycleRow {
+            ts_utc: None,
+            event: None,
+            pool_address: None,
+            position_pubkey: None,
+            fee_payer_pubkey: None,
+            rebalance_session_id: None,
+            tx_fee_lamports: None,
+            fee_payer_token_deltas: None,
+            fee_payer_token_a_delta_ui: None,
+            fee_payer_token_b_delta_ui: None,
+            lp_collected_token_a_raw: None,
+            lp_collected_token_b_raw: None,
+            details: None,
+        }
+    }
+
+    #[test]
+    fn db_edges_fork_walks_entry_branch_not_sibling() {
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(1);
+        let edges = vec![
+            (Some(t0), "A".to_string(), "B".to_string(), String::new()),
+            (Some(t1), "A".to_string(), "C".to_string(), String::new()),
+        ];
+        let positions = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        assert_eq!(
+            build_lineage_chain_from_db_edges(&positions, &edges, "C", 10),
+            vec!["A".to_string(), "C".to_string()]
+        );
+        assert_eq!(
+            build_lineage_chain_from_db_edges(&positions, &edges, "B", 10),
+            vec!["A".to_string(), "B".to_string()]
+        );
+    }
+
+    #[test]
+    fn db_edges_linear_includes_ancestors_and_descendants() {
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(1);
+        let edges = vec![
+            (Some(t0), "A".to_string(), "B".to_string(), String::new()),
+            (Some(t1), "B".to_string(), "C".to_string(), String::new()),
+        ];
+        let positions = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        assert_eq!(
+            build_lineage_chain_from_db_edges(&positions, &edges, "B", 10),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+        assert_eq!(
+            build_lineage_chain_from_db_edges(&positions, &edges, "A", 10),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+    }
+
+    #[test]
+    fn jsonl_stitch_suppressed_when_open_session_not_on_prior_close() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::minutes(5);
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("strategy-sid".to_string()),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("ui-cost-session-new".to_string()),
+                ..empty_lifecycle_row()
+            },
+        ];
+        assert!(
+            !lifecycle_open_has_prior_close_same_session(&rows, "posB"),
+            "fresh UI session must not anchor to old close"
+        );
+        assert!(suppress_jsonl_rotation_stitch(&rows, "posB"));
+    }
+
+    #[test]
+    fn jsonl_stitch_allowed_when_session_matches_prior_close() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::minutes(1);
+        let sid = Some("one-rotation".to_string());
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: sid.clone(),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: sid,
+                ..empty_lifecycle_row()
+            },
+        ];
+        assert!(lifecycle_open_has_prior_close_same_session(&rows, "posB"));
+        assert!(!suppress_jsonl_rotation_stitch(&rows, "posB"));
+    }
+
+    #[test]
+    fn lifecycle_chain_skips_unrelated_close_without_rotation_signal() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = DateTime::parse_from_rfc3339("2026-04-13T10:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("position_open".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                ..empty_lifecycle_row()
+            },
+        ];
+        let chain = chain_from_lifecycle_best_effort_rows(&rows, "posB", 25);
+        assert_eq!(chain, vec!["posB".to_string()]);
+    }
+
+    #[test]
+    fn lifecycle_chain_links_session_matched_close_open() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = DateTime::parse_from_rfc3339("2026-04-13T10:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sid = Some("sess-rot-1".to_string());
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: sid.clone(),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: sid,
+                ..empty_lifecycle_row()
+            },
+        ];
+        assert_eq!(
+            chain_from_lifecycle_best_effort_rows(&rows, "posB", 25),
+            vec!["posA".to_string(), "posB".to_string()]
+        );
+        assert_eq!(
+            chain_from_lifecycle_best_effort_rows(&rows, "posA", 25),
+            vec!["posA".to_string(), "posB".to_string()]
+        );
     }
 
     #[test]

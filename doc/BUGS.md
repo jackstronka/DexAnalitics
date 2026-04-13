@@ -28,6 +28,52 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260413-06 — Stan portfela na „nowa pozycja” bywa nieaktualny / trzeba odświeżyć
+
+status: open  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-13  
+fixed_in:   
+keywords: position-create, wallet-balances, api-signer, stale-data, react-query, race, owner-pubkey
+
+- **Symptom:** Przy wejściu na flow otwarcia nowej pozycji odczyt „Stan portfela” bywa niepełny lub wygląda na opóźniony względem tego, co widać na stronie Wallet; czasem dopiero pełne odświeżenie strony pokazuje oczekiwane salda.
+- **Root cause (analiza kodu):** W `PositionCreate` `effectiveOwnerPk` jest liczone jako `apiSigner.pubkey ?? ownerPk` (`ownerPk` = wybrany portfel z listy keypairów w localStorage). Dopóki zapytanie `GET /wallets/api-signer` się nie zakończy, używane jest **tymczasowo** `ownerPk`, więc `useQuery(['wallet-balances', effectiveOwnerPk])` może najpierw pobrać salda **innego** klucza niż ten, którym realnie podpisuje open (API signer). Po dojściu odpowiedzi api-signer klucz query się zmienia i następuje drugi fetch — użytkownik może złapać „złą” chwilę UI lub porównywać z Wallet (tam **zawsze** `ownerPk`, bez api-signer). Dodatkowo `staleTime: 20_000` i globalne `refetchOnWindowFocus: false` sprzyjają pokazywaniu cache bez natychmiastowego ponownego odczytu przy nawigacji.
+- **Fix:** Do wdrożenia: np. nie włączać `wallet-balances` na PositionCreate dopóki `api-signer` nie jest `isFetched` (gdy signer jest skonfigurowany), albo jedno zapytanie łączone; ewent. `refetchOnMount: 'always'` / krótszy `staleTime` tylko dla tej strony; jasny komunikat „ładowanie portfela podpisującego…” zamiast chwilowych sald z niewłaściwego ownera.
+- **Guards/tests:** Test E2E lub jednostkowy: kolejność rozwiązań query (wallets vs api-signer) nie powinna wyświetlać sald dla złego pubkey; regresja: po swap/open invalidate trafia w ten sam `effectiveOwnerPk`.
+- **Paths:** `web/src/pages/PositionCreate.tsx` (`effectiveOwnerPk`, `apiSignerQ`, `effectiveBalancesQ`), `web/src/pages/Wallet.tsx` (porównanie: samo `ownerPk`), `web/src/main.tsx` (domyślne opcje React Query), `crates/api/src/handlers/wallets.rs` (`GET /wallets/api-signer`)
+
+### BUG-20260413-07 — Performance „Value” vs Position history (start/end): duża rozbieżność (~2×) na otwartej pozycji
+
+status: open  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-13  
+fixed_in:   
+keywords: position-detail, performance, stream-lineage, value-usd, snapshots, valuation-drift, UI-consistency
+
+- **Symptom:** Na `/positions/<PDA>` (otwarta pozycja) karta **Performance → Value** pokazuje np. **~$3.88**, a w **Position history (rotations)** kolumny **start value** i **end value** obie np. **~$1.80** z etykietą `exact` — użytkownik widzi pozornie „dwukrotnie mniej” w tabeli niż w Performance.
+- **Root cause (analiza kodu):** Ta metryka „wartość USD” jest liczona w **dwóch miejscach** (nie jest jednym cache): karta Performance vs wiersz lineage. Karta Performance bierze `value_usd` z `GET /positions/{address}`: świeże `compute_position_usd_valuation` na stanie z monitora/RPC (`handlers/positions.rs`). Tabela lineage w `GET /positions/{address}/stream-lineage` dla węzła w ścieżce DB w `node_metrics` ustawia **baseline** i **current** z tabeli `position_stream_valuation_snapshots` (pierwszy vs ostatni wiersz wg sortowania SQL), a niekoniecznie z tą samą chwilą ani tą samą logiką co bieżąca karta. Dla **świeżo otwartej** pozycji często jest **jeden** (lub kilka) snapshotów — **start i end mogą wskazywać ten sam zapis**, z wartością zapisaną wcześniej (inny moment/ceny/jedna noga w delcie) podczas gdy karta już pokazuje nowszą wycenę. Etykieta `exact` w UI pochodzi z `raw_json.valuation_quality` snapshotu lub z ścieżki lifecycle — opisuje **jakość wejścia cen**, nie gwarancję zgodności z kartą Performance.
+- **Fix:** Do wdrożenia: dla węzłów **otwartych** (`closed_ts_utc` puste) ustawiać `current_value_usd` (ew. spójnie `baseline` przy braku sensownego open snapshot) tą samą ścieżką co `get_position` / `compute_position_usd_valuation`, albo w UI wyraźnie oznaczyć tabelę jako „wartości ze snapshotów ledgera” vs „bieżąca wartość” w Performance; opcjonalnie dopisywać nowy snapshot przy każdym `get_position` i używać **najnowszego** wiersza jako `current` dla aktywnej pozycji.
+- **Guards/tests:** Test regresyjny: mock DB z jednym snapshotem o wartości X i mock on-chain valuation Y — lineage dla otwartej pozycji nie powinien pokazywać obu kolumn jako X gdy API detail zwraca Y (po fixie); albo snapshot current nadpisany live.
+- **Paths:** `web/src/pages/PositionDetail.tsx` (Performance vs tabela lineage), `crates/api/src/handlers/positions.rs` (`get_position`, zapis snapshotów), `crates/api/src/services/position_stream_lineage.rs` (`node_metrics`, zapytania `position_stream_valuation_snapshots`), `crates/api/src/services/position_valuation.rs`
+
+### BUG-20260413-05 — Stream lineage chained manual opens to unrelated rotation history
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-13  
+fixed_in: local  
+keywords: position-stream-lineage, rotation, registry.jsonl, lifecycle, rebalance_session_id, false-parent, manual-open
+
+- **Symptom:** A newly opened position in the same pool as prior activity appeared in **Position history (rotations)** as continuing an old PDA chain instead of a standalone node.
+- **Root cause:** Registry fallback linked `registry_open` → `registry_close` by time/pool/owner even when `rebalance_session_id` did not match (or was empty). Lifecycle fallback linked opens to the latest close in a short window without requiring rotation evidence; forward close→open used the first qualifying open, not the true successor; lifecycle parent inference treated loose swap rows as rotation.
+- **Root cause (runtime `debug-c45ac3.log`, H-lineage):** With DB enabled, `db_chain_from_edges_len` stayed **1** while JSONL fallback inflated `chain_len` to **3–4** — `build_linear_chain` walked from a single graph root and **omitted `entry` on forked `position_stream_edges`** (`A→B` and `A→C`), fell back to `[entry]`, then registry/lifecycle re-stitched a long pool history.
+- **Fix:** Registry parent/chain only when both rows carry the same non-empty `rebalance_session_id`. Lifecycle uses `lifecycle_rotation_parent_before_open` (session match, `close_kind=rotation`, or bot activity tied to the closed PDA); forward links require that helper to return the closed PDA; `infer_parent_position_from_lifecycle_best_effort` delegates to the same helper. DB mode uses **`build_lineage_chain_from_db_edges`** (backward from `entry`, then forward); **JSONL/registry fallback is skipped when any persisted edge touches `entry`**. **JSONL/registry fallback also requires `lifecycle_open_has_prior_close_same_session`** (latest open’s `rebalance_session_id` must match a prior close in the same pool/payer within 60m) so UI `bot_open_position` + fresh `cost_session_id` does not inherit unrelated pool history; `position_open` (CLI) still suppresses stitching.
+- **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`.
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`
+
 ### BUG-20260413-04 — Open target USD looked too low after success
 
 status: fixed  
