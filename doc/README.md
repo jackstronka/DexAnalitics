@@ -23,6 +23,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`ROADMAP.md`](ROADMAP.md) | Roadmap produktowy: shadow strategies per position, historia przypisań strategia ↔ pozycja |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | Async event bus v2: decision matrix, event contract, rollout |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | Solana indexing concepts (RPC vs WebSocket vs Geyser), “token” misconception, relation to swap sync |
+| [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | **Base + Aerodrome Slipstream (CLMM) live:** oficjalne źródła, fazy 0–5, wielość deployów, bezpieczeństwo, Go-live checklist; fee-only unstaked; endpoint `GET /api/v1/evm/base/aerodrome-slipstream/pools/{pool}/slot0` + `BASE_RPC_URL` |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | **Append-only log of non-trivial code changes** — each entry has `keywords:` for grep / AI search |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | Local-first MVP for an AI narrator / stream agent (YouTube) |
 
@@ -91,6 +92,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 
 | File | Keywords |
 | ---- | -------- |
+| [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | aerodrome, slipstream, base, live, alloy, rpc, gauges-v3, WETH, USDC, cbBTC, CL100, deployment phases |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | stream, narrator, obs, studio, agent |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | async, event bus, kafka, nats, redis, rollout |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |

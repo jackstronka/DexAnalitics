@@ -18,13 +18,14 @@ use crate::models::{
     QuoteOpenBudgetResponse, RebalanceRequest,
     RunScriptRequest, ScriptCatalogItem, ScriptRunRecord, ScriptsListResponse, SimulationRequest,
     SimulationResponse, SlackActivitySummaryRequest, SlackActivitySummaryResponse,
+    SlipstreamSlot0Response,
     StrategyPerformanceResponse, StrategyPositionExecutorRequest, StrategyResponse,
     SubmitSignedTxRequest, SubmitSignedTxResponse, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
     SwapCostEstimateResponse, SwapInPoolBeforeOpen, UncollectedFeesInfo, WalletBalancesResponse,
     WalletEntry, WalletTokenBalance, WalletsListResponse, PositionLifecycleSummaryResponse,
     PositionLifecycleSessionSummary, PositionLifecycleEvent,
-    BacktestFromClosedPositionRequest, BacktestJobResponse, BacktestJobStatusResponse,
-    PositionExperimentConfigResponse,
+    BacktestFromClosedPositionRequest, BacktestFromOpenPositionRequest, BacktestJobResponse, BacktestJobStatusResponse,
+    PositionExperimentConfigResponse, StrandedRebalanceItem, StrandedRebalancesResponse,
 };
 use utoipa::OpenApi;
 
@@ -58,7 +59,8 @@ use utoipa::OpenApi;
         (name = "Bot activity", description = "Orca JSONL ledger + registry (CLI/bot history); Slack digest"),
         (name = "Scripts", description = "tools/*.ps1 manifest, run history, localhost runner proxy"),
         (name = "Wallets", description = "Local keypairs directory + on-chain balances"),
-        (name = "Prices", description = "Free external price sources (server-side fetch)")
+        (name = "Prices", description = "Free external price sources (server-side fetch)"),
+        (name = "Evm", description = "Base chain JSON-RPC read helpers (Aerodrome Slipstream)")
     ),
     paths(
         // Health endpoints
@@ -125,12 +127,15 @@ use utoipa::OpenApi;
         handlers::get_portfolio_analytics,
         handlers::run_simulation,
         handlers::backtest_from_closed_position,
+        handlers::backtest_from_open_position,
         handlers::get_backtest_job,
         // Bot activity
         handlers::get_bot_ledger,
         handlers::get_bot_il_ledger,
         handlers::get_bot_registry,
         handlers::get_pending_open_recovery,
+        handlers::get_stranded_rebalances,
+        handlers::reconcile_stranded_rebalances,
         handlers::post_bot_slack_summary,
         // Scripts
         handlers::list_scripts,
@@ -140,6 +145,7 @@ use utoipa::OpenApi;
         handlers::get_wallet_balances,
         // Prices
         handlers::get_jupiter_prices,
+        handlers::get_aerodrome_slipstream_pool_slot0,
     ),
     components(
         schemas(
@@ -210,11 +216,14 @@ use utoipa::OpenApi;
             SimulationRequest,
             SimulationResponse,
             BacktestFromClosedPositionRequest,
+            BacktestFromOpenPositionRequest,
             BacktestJobStatusResponse,
             BacktestJobResponse,
             // Bot activity
             BotActivityJsonlResponse,
             BotRegistryJsonlResponse,
+            StrandedRebalanceItem,
+            StrandedRebalancesResponse,
             SlackActivitySummaryRequest,
             SlackActivitySummaryResponse,
             // Scripts
@@ -229,6 +238,8 @@ use utoipa::OpenApi;
             WalletTokenBalance,
             // Prices
             JupiterPricesResponse,
+            // Base EVM / Slipstream
+            SlipstreamSlot0Response,
         )
     ),
     modifiers(&SecurityAddon)

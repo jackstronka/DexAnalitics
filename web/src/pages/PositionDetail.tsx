@@ -13,6 +13,7 @@ import {
   getPositionStreamPerformance,
   getPositionStreamPnL,
   getPositionStreamLineage,
+  getBacktestJob,
   closePosition,
   collectFees,
   rebalancePosition,
@@ -23,6 +24,7 @@ import {
   setStrategyPositionExecutor,
   getJupiterPricesUsd,
   linkPositionStrategy,
+  runBacktestFromOpenPosition,
   suggestPositionStrategy,
 } from '@/lib/api'
 import type { Strategy } from '@/lib/api'
@@ -167,6 +169,15 @@ function usdOrDash(v: string | number, digits = 3): string {
   return formatUsdFixed(n, digits)
 }
 
+function valuationQualityLabel(q?: string | null): string | null {
+  const v = (q ?? '').trim().toLowerCase()
+  if (!v) return null
+  if (v === 'exact') return 'exact'
+  if (v === 'fallback') return 'fallback'
+  if (v === 'missing_inputs') return 'missing'
+  return v
+}
+
 function rowEvent(r: LedgerRow): string {
   const e = r.event
   return typeof e === 'string' ? e : '—'
@@ -182,12 +193,34 @@ function rowTs(r: LedgerRow): string {
   return typeof t === 'string' ? t : '—'
 }
 
+function rowCollectDetails(r: LedgerRow): string {
+  const ev = typeof r.event === 'string' ? r.event : ''
+  if (!ev.includes('collect_fees')) return '—'
+  const rawA = r.lp_collected_token_a_raw
+  const rawB = r.lp_collected_token_b_raw
+  const asNum = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string') {
+      const n = Number(v)
+      if (Number.isFinite(n)) return n
+    }
+    return null
+  }
+  const a = asNum(rawA)
+  const b = asNum(rawB)
+  if (a === null && b === null) return 'collect tx (brak leg values)'
+  const aStr = a === null ? '—' : a.toLocaleString()
+  const bStr = b === null ? '—' : b.toLocaleString()
+  return `A raw: ${aStr}, B raw: ${bStr}`
+}
+
 export default function PositionDetail() {
   const { address } = useParams<{ address: string }>()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [actionError, setActionError] = useState<string | null>(null)
   const [actionInfo, setActionInfo] = useState<string | null>(null)
+  const [backtestJobId, setBacktestJobId] = useState<string | null>(null)
 
   const { data: position, isLoading, isError, error } = useQuery({
     queryKey: ['position', address],
@@ -428,10 +461,11 @@ export default function PositionDetail() {
 
   const collectMutation = useMutation({
     mutationFn: () => collectFees(address!),
-    onSuccess: () => {
+    onSuccess: (data) => {
       setActionError(null)
-      setActionInfo('Collect requested.')
+      setActionInfo(data?.message ?? 'Collect requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
+      void queryClient.invalidateQueries({ queryKey: ['position-stream-lineage', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
     },
@@ -494,19 +528,70 @@ export default function PositionDetail() {
     },
   })
 
+  const runBacktestM = useMutation({
+    mutationFn: async () => {
+      const raw = streamLineage?.nodes.find((n) => n.position_address === address)?.baseline_value_usd
+      let capital: number | undefined
+      if (raw != null && String(raw).trim() !== '') {
+        const n = parseFloat(String(raw))
+        if (Number.isFinite(n) && n > 0) capital = n
+      }
+      return await runBacktestFromOpenPosition({
+        position_address: address!,
+        strategy: 'static',
+        fee_source: 'snapshots',
+        price_path_source: 'snapshots',
+        snapshot_protocol: 'orca',
+        ...(capital != null ? { capital } : {}),
+      })
+    },
+    onSuccess: (r) => setBacktestJobId(r.id),
+  })
+
+  const backtestJobQ = useQuery({
+    queryKey: ['backtest-job-open', backtestJobId],
+    queryFn: () => getBacktestJob(backtestJobId!),
+    enabled: !!backtestJobId,
+    refetchInterval: backtestJobId ? 2000 : false,
+    staleTime: 0,
+    retry: 0,
+  })
+
   if (isLoading) {
     return <div className="text-center py-8">Loading...</div>
   }
 
   if (isError) {
     const msg = error instanceof Error ? error.message : String(error)
+    const looksLikeRpcOrUpstream =
+      /\b(BAD_GATEWAY|Bad gateway|502|503|504|408|HTTP 408|RPC|timed out|timeout|ECONNREFUSED|fetch failed|Solana RPC error)\b/i.test(
+        msg,
+      )
+    const looksLikeNotFoundOnChain =
+      /\b(404|NOT_FOUND|Not found:|account not found|On-chain position account not found)\b/i.test(msg)
     return (
       <div className="text-center py-8 space-y-3 max-w-lg mx-auto px-4">
         <p className="text-destructive font-medium">Nie udało się pobrać pozycji z API</p>
         <p className="text-sm text-muted-foreground break-words font-mono">{msg}</p>
+        {looksLikeRpcOrUpstream ? (
+          <p className="text-xs text-muted-foreground text-left">
+            To wygląda na problem <strong className="text-foreground">RPC / sieci / limitu</strong>, a nie na pewny brak
+            pozycji. Sprawdź <code className="text-[11px]">RPC_URL</code> po stronie API, spróbuj ponownie za chwilę albo
+            inny endpoint. HTTP <strong className="text-foreground">502 Bad gateway</strong> z tego endpointu oznacza w
+            praktyce „błąd po drodze do Solany”, nie „zamknięta pozycja”.
+          </p>
+        ) : null}
+        {looksLikeNotFoundOnChain && !looksLikeRpcOrUpstream ? (
+          <p className="text-xs text-muted-foreground text-left">
+            Komunikat wskazuje, że dla <strong className="text-foreground">tego klastra RPC</strong> konto pozycji nie
+            istnieje (np. pozycja zamknięta, zły adres, mainnet vs devnet) albo wklejono adres{' '}
+            <strong className="text-foreground">poolu</strong> zamiast PDA pozycji.
+          </p>
+        ) : null}
         <p className="text-xs text-muted-foreground">
-          Przy HTTP 502 / braku odpowiedzi backend nie działa albo Vite proxy (`API_UPSTREAM`) nie trafia w port API —
-          to <strong className="text-foreground">nie</strong> znaczy, że pozycji nie ma on-chain.
+          Przy HTTP 502 z proxy / pustej odpowiedzi: backend nie działa albo Vite{' '}
+          <code className="text-[11px]">API_UPSTREAM</code> nie trafia w port API — to{' '}
+          <strong className="text-foreground">nie</strong> znaczy automatycznie, że pozycji nie ma on-chain.
         </p>
         <Link to="/positions">
           <Button variant="outline" size="sm">
@@ -1068,6 +1153,51 @@ export default function PositionDetail() {
               </div>
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between gap-4">
+              <div>
+                <CardTitle>Backtest (from open position)</CardTitle>
+                <p className="text-sm text-muted-foreground font-normal">
+                  Uruchamia <code className="text-[11px]">clmm-lp-cli backtest</code> dla aktualnie otwartej pozycji
+                  (start z registry_open). Jeśli baseline dla tego PDA jest dostępny, API użyje go jako{' '}
+                  <code className="text-[11px]">capital</code>.
+                </p>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => runBacktestM.mutate()}
+                disabled={runBacktestM.isPending || !address}
+              >
+                Run backtest
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {runBacktestM.isError && (runBacktestM.error as Error)?.message !== 'Cancelled' ? (
+                <div className="text-sm text-destructive">
+                  {(runBacktestM.error as Error)?.message ?? 'Backtest failed'}
+                </div>
+              ) : null}
+              {backtestJobId ? (
+                <div className="text-sm text-muted-foreground">
+                  Job: <span className="font-mono">{backtestJobId}</span>{' '}
+                  {backtestJobQ.data ? `(${backtestJobQ.data.status})` : ''}
+                </div>
+              ) : (
+                <div className="text-sm text-muted-foreground">No job yet.</div>
+              )}
+              {backtestJobQ.data?.stderr ? (
+                <pre className="text-xs whitespace-pre-wrap bg-muted p-3 rounded-md overflow-auto max-h-64">
+{backtestJobQ.data.stderr}
+                </pre>
+              ) : null}
+              {backtestJobQ.data?.stdout ? (
+                <pre className="text-xs whitespace-pre-wrap bg-muted p-3 rounded-md overflow-auto max-h-64">
+{backtestJobQ.data.stdout}
+                </pre>
+              ) : null}
+            </CardContent>
+          </Card>
         </Tabs.Content>
 
         <Tabs.Content value="ledger" className="mt-4 space-y-4">
@@ -1152,9 +1282,19 @@ export default function PositionDetail() {
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
                               {usdOrDash(n.baseline_value_usd, 3)}
+                              {valuationQualityLabel(n.baseline_valuation_quality) ? (
+                                <span className="ml-1 rounded border border-border/60 px-1 py-0 text-[10px] text-muted-foreground">
+                                  {valuationQualityLabel(n.baseline_valuation_quality)}
+                                </span>
+                              ) : null}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
                               {usdOrDash(n.current_value_usd, 3)}
+                              {valuationQualityLabel(n.current_valuation_quality) ? (
+                                <span className="ml-1 rounded border border-border/60 px-1 py-0 text-[10px] text-muted-foreground">
+                                  {valuationQualityLabel(n.current_valuation_quality)}
+                                </span>
+                              ) : null}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
                               {formatPrincipalDeltaUsdOrDash(n.baseline_value_usd, n.current_value_usd, 3)}
@@ -1208,6 +1348,18 @@ export default function PositionDetail() {
                                     {collects > 0 && usdNum === 0 && !hasTokenVals ? (
                                       <div className="text-muted-foreground mt-1 leading-tight text-[10px]">
                                         Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.
+                                      </div>
+                                    ) : null}
+                                    {n.collect_zero_diagnostics ? (
+                                      <div
+                                        className="text-muted-foreground mt-1 leading-tight text-[10px]"
+                                        title={n.collect_zero_diagnostics.methodology_note}
+                                      >
+                                        dlaczego 0: in-range~{n.collect_zero_diagnostics.in_range_time_share_pct_est ?? '—'}%
+                                        {' · '}
+                                        swapy~{n.collect_zero_diagnostics.swap_events_in_window_est}
+                                        {' · '}
+                                        udział~{n.collect_zero_diagnostics.position_share_pct_est ?? '—'}%
                                       </div>
                                     ) : null}
                                   </>
@@ -1411,6 +1563,7 @@ export default function PositionDetail() {
                       <th className="py-1 pr-2">Time</th>
                       <th className="py-1 pr-2">Source</th>
                       <th className="py-1 pr-2">Event</th>
+                      <th className="py-1 pr-2">Collect values</th>
                       <th className="py-1 pr-2">Tx fee (λ · ~USD)</th>
                     </tr>
                   </thead>
@@ -1420,6 +1573,7 @@ export default function PositionDetail() {
                         <td className="py-1 pr-2 whitespace-nowrap">{rowTs(r)}</td>
                         <td className="py-1 pr-2">{rowSource(r)}</td>
                         <td className="py-1 pr-2 font-mono">{rowEvent(r)}</td>
+                        <td className="py-1 pr-2 font-mono text-[11px]">{rowCollectDetails(r)}</td>
                         <td className="py-1 pr-2">
                           <LamportsFeeCell lamportsRaw={r.tx_fee_lamports} solUsd={solUsd} />
                         </td>

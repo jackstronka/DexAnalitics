@@ -1,5 +1,6 @@
 //! Request handlers for API endpoints.
 
+pub mod aerodrome_slipstream;
 pub mod analytics;
 pub mod backtests;
 pub mod bot_activity;
@@ -28,6 +29,7 @@ mod pools_tests;
 #[cfg(test)]
 mod tx_tests;
 
+pub use aerodrome_slipstream::*;
 pub use analytics::*;
 pub use backtests::*;
 pub use bot_activity::*;

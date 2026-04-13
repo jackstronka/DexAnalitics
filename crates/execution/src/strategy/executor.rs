@@ -758,21 +758,27 @@ impl StrategyExecutor {
     ) -> anyhow::Result<()> {
         // Always refresh the monitored snapshot before deciding.
         //
-        // The API/UI may show a position as out-of-range based on a fresh pool tick, but the executor
-        // can otherwise keep a stale `position.in_range` and never trigger OOR logic.
-        let position = {
-            if let Err(e) = self.monitor.refresh_position(&position.address).await {
+        // Important safety guard: if refresh fails OR refresh removed the position (e.g. manual close),
+        // skip evaluation instead of using stale cached data. Acting on stale snapshots can trigger an
+        // unintended close+open cycle right after the operator manually closed a position.
+        let position = match self.monitor.refresh_position(&position.address).await {
+            Ok(()) => match self.monitor.get_position(&position.address).await {
+                Some(p) => p,
+                None => {
+                    tracing::info!(
+                        position = %position.address,
+                        "evaluate_position: position removed from monitor after refresh; skipping"
+                    );
+                    return Ok(());
+                }
+            },
+            Err(e) => {
                 tracing::warn!(
                     position = %position.address,
                     error = %e,
-                    "evaluate_position: refresh_position failed; using last cached snapshot"
+                    "evaluate_position: refresh_position failed; skipping this cycle to avoid stale actions"
                 );
-                position.clone()
-            } else {
-                self.monitor
-                    .get_position(&position.address)
-                    .await
-                    .unwrap_or_else(|| position.clone())
+                return Ok(());
             }
         };
 

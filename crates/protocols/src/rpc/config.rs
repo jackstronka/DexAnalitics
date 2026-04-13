@@ -134,12 +134,22 @@ impl RpcConfig {
         self
     }
 
-    /// Returns all endpoint URLs in priority order.
+    /// Returns all endpoint URLs in priority order (deduplicated by string equality; first wins).
+    ///
+    /// Duplicate primary + fallback entries produced confusing RPC rotation logs (`from` == `to`)
+    /// and wasted retries.
     #[must_use]
     pub fn all_endpoints(&self) -> Vec<&str> {
-        let mut endpoints = vec![self.primary_url.as_str()];
-        endpoints.extend(self.fallback_urls.iter().map(String::as_str));
-        endpoints
+        let raw: Vec<&str> = std::iter::once(self.primary_url.as_str())
+            .chain(self.fallback_urls.iter().map(String::as_str))
+            .collect();
+        let mut out: Vec<&str> = Vec::new();
+        for url in raw {
+            if !out.iter().copied().any(|u| u == url) {
+                out.push(url);
+            }
+        }
+        out
     }
 
     /// Creates a devnet configuration.
@@ -222,6 +232,15 @@ mod tests {
         let endpoints = config.all_endpoints();
         assert_eq!(endpoints.len(), 3);
         assert_eq!(endpoints[0], "https://primary.com");
+    }
+
+    #[test]
+    fn all_endpoints_dedupes_primary_repeated_in_fallbacks() {
+        let mut config = RpcConfig::new("https://solana-rpc.publicnode.com");
+        config.fallback_urls.clear();
+        let config = config.with_fallback("https://solana-rpc.publicnode.com");
+        let endpoints = config.all_endpoints();
+        assert_eq!(endpoints.len(), 1, "duplicate URL should collapse: {endpoints:?}");
     }
 
     #[test]

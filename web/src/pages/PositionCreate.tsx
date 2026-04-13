@@ -11,6 +11,7 @@ import {
   getPoolState,
   getSwapCostEstimate,
   getStrategies,
+  getApiSignerWallet,
   getWalletBalances,
   getWallets,
   openPosition,
@@ -33,28 +34,19 @@ import { formatUSD, shortenAddress } from '@/lib/utils'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
+const WSOL_ATA_RENT_LAMPORTS_EST = 2_039_280
 
 /** Porównanie UI: mała tolerancja na błąd zaokrągleń float. */
 const BALANCE_EPS = 1e-8
 
 /**
- * Łączne saldo w jednostkach UI dla mintu (dla WSOL: native SOL + ewentualne konto WSOL).
+ * Saldo tokenowe w jednostkach UI dla mintu (bez native SOL).
  */
 function getAvailableUiAmount(
   mint: string,
   balances: WalletBalancesResponse | undefined,
 ): number | null {
   if (!balances) return null
-  if (mint === WSOL_MINT) {
-    let n = parseFloat(balances.sol)
-    if (!Number.isFinite(n)) n = 0
-    const row = balances.tokens.find((t) => t.mint === mint)
-    if (row) {
-      const w = parseFloat(row.ui_amount)
-      if (Number.isFinite(w)) n += w
-    }
-    return n
-  }
   const row = balances.tokens.find((t) => t.mint === mint)
   if (!row) return 0
   const v = parseFloat(row.ui_amount)
@@ -63,6 +55,11 @@ function getAvailableUiAmount(
 
 function isInsufficientBalance(needUi: number, haveUi: number): boolean {
   return needUi > haveUi + BALANCE_EPS
+}
+
+function hasTokenAccount(mint: string, balances: WalletBalancesResponse | undefined): boolean {
+  if (!balances) return false
+  return balances.tokens.some((t) => t.mint === mint)
 }
 
 /**
@@ -86,6 +83,41 @@ function estimateSwapInputRawExactIn(
   const raw = Math.round(fundUi * 10 ** fundDecimals)
   if (raw <= 0 || raw > Number.MAX_SAFE_INTEGER) return null
   return raw
+}
+
+/**
+ * Fallback estimator from Whirlpool spot price (UI B-per-A) when USD feed is noisy.
+ * Returns ExactIn raw amount of funding leg with +5% buffer.
+ */
+function estimateSwapInputRawFromPoolPrice(
+  deficitAUi: number,
+  deficitBUi: number,
+  fundIsTokenA: boolean,
+  tokenADecimals: number,
+  tokenBDecimals: number,
+  poolPriceRaw: number,
+): number | null {
+  if (!Number.isFinite(poolPriceRaw) || poolPriceRaw <= 0) return null
+  const bPerAUi = uiPriceFromRawPriceRatio(poolPriceRaw, tokenADecimals, tokenBDecimals)
+  if (!Number.isFinite(bPerAUi) || (bPerAUi ?? 0) <= 0) return null
+  const p = bPerAUi as number
+  const buffer = 1.05
+
+  // Funding with token A to cover token B deficit.
+  if (fundIsTokenA && deficitBUi > 0) {
+    const fundAUi = (deficitBUi / p) * buffer
+    const raw = Math.round(fundAUi * 10 ** tokenADecimals)
+    if (!Number.isFinite(raw) || raw <= 0 || raw > Number.MAX_SAFE_INTEGER) return null
+    return raw
+  }
+  // Funding with token B to cover token A deficit.
+  if (!fundIsTokenA && deficitAUi > 0) {
+    const fundBUi = deficitAUi * p * buffer
+    const raw = Math.round(fundBUi * 10 ** tokenBDecimals)
+    if (!Number.isFinite(raw) || raw <= 0 || raw > Number.MAX_SAFE_INTEGER) return null
+    return raw
+  }
+  return null
 }
 
 function legUiFromQuote(q: QuoteOpenBudgetResponse, leg: 'a' | 'b'): number {
@@ -170,7 +202,7 @@ function buildJupiterSwapUrl(inputMint: string, outputMint: string, amountRaw?: 
   return u.toString()
 }
 
-/** SPL balance for mint; for WSOL mint falls back to native `sol` if brak konta tokenowego w liście. */
+/** SPL token balance for mint (without native SOL fallback). */
 function formatBalanceLine(
   mint: string,
   balances: WalletBalancesResponse | undefined,
@@ -185,12 +217,6 @@ function formatBalanceLine(
       return { amount: v.toLocaleString(undefined, { maximumFractionDigits: 8 }) }
     }
     return { amount: row.ui_amount || '0' }
-  }
-  if (mint === WSOL_MINT) {
-    const s = parseFloat(balances.sol)
-    if (Number.isFinite(s) && s > 0) {
-      return { amount: s.toLocaleString(undefined, { maximumFractionDigits: 6 }), note: 'native SOL' }
-    }
   }
   return { amount: '0' }
 }
@@ -237,6 +263,7 @@ export default function PositionCreate() {
   // 2-step SWAP then OPEN state
   const [swapCostSessionId, setSwapCostSessionId] = useState<string | null>(null)
   const [swapSignature, setSwapSignature] = useState<string | null>(null)
+  const [swapStepInfo, setSwapStepInfo] = useState<string | null>(null)
   const [swapStepError, setSwapStepError] = useState<string | null>(null)
   const [openStepError, setOpenStepError] = useState<string | null>(null)
 
@@ -291,10 +318,17 @@ export default function PositionCreate() {
     return picked?.pubkey ?? devPk ?? walletsQ.data?.wallets[0]?.pubkey ?? null
   }, [walletsQ.data?.wallets, devPk])
 
-  const balancesQ = useQuery({
-    queryKey: ['wallet-balances', ownerPk ?? ''],
-    queryFn: () => getWalletBalances(ownerPk!),
-    enabled: !!ownerPk,
+  const apiSignerQ = useQuery({
+    queryKey: ['api-signer-wallet'],
+    queryFn: getApiSignerWallet,
+    staleTime: 20_000,
+  })
+  const effectiveOwnerPk = apiSignerQ.data?.pubkey?.trim() || ownerPk
+  const usesApiSignerBalances = !!apiSignerQ.data?.configured && !!apiSignerQ.data?.pubkey
+  const effectiveBalancesQ = useQuery({
+    queryKey: ['wallet-balances', effectiveOwnerPk ?? ''],
+    queryFn: () => getWalletBalances(effectiveOwnerPk!),
+    enabled: !!effectiveOwnerPk,
     staleTime: 20_000,
   })
 
@@ -428,12 +462,12 @@ export default function PositionCreate() {
   ])
 
   const walletLineA = useMemo(
-    () => (mintA ? formatBalanceLine(mintA, balancesQ.data) : null),
-    [mintA, balancesQ.data],
+    () => (mintA ? formatBalanceLine(mintA, effectiveBalancesQ.data) : null),
+    [mintA, effectiveBalancesQ.data],
   )
   const walletLineB = useMemo(
-    () => (mintB ? formatBalanceLine(mintB, balancesQ.data) : null),
-    [mintB, balancesQ.data],
+    () => (mintB ? formatBalanceLine(mintB, effectiveBalancesQ.data) : null),
+    [mintB, effectiveBalancesQ.data],
   )
 
   const pricesQ = useQuery({
@@ -594,15 +628,25 @@ export default function PositionCreate() {
       blocked: false,
       shortA: false,
       shortB: false,
+      shortOperationalSol: false,
+      mode: mode as 'manual' | 'budget',
       deficitA: 0,
       deficitB: 0,
+      deficitOperationalSol: 0,
       haveA: null as number | null,
       haveB: null as number | null,
+      nativeSol: null as number | null,
+      needA: 0,
+      needB: 0,
+      needSolLegUi: 0,
+      requiredNativeForOpenUi: 0,
+      minOpenSolUi: 0,
       jupiterSwapToCoverA: null as string | null,
       jupiterSwapToCoverB: null as string | null,
+      jupiterSwapToCoverSol: null as string | null,
       jupiterGeneric: 'https://jup.ag/swap' as string,
     }
-    if (!ownerPk || !tokenA || !tokenB || !balancesQ.data) {
+    if (!effectiveOwnerPk || !tokenA || !tokenB || !effectiveBalancesQ.data) {
       return empty
     }
     if (
@@ -613,10 +657,16 @@ export default function PositionCreate() {
     ) {
       return empty
     }
-    const needA = Number(amountAUi)
-    const needB = Number(amountBUi)
-    const haveA = getAvailableUiAmount(tokenA.mint, balancesQ.data)
-    const haveB = getAvailableUiAmount(tokenB.mint, balancesQ.data)
+    let needA = Number(amountAUi)
+    let needB = Number(amountBUi)
+    // W trybie USD submit używa capów `token_max_*` z quote, więc walidacja
+    // musi opierać się na tych samych wartościach (a nie tylko na amount_*_ui).
+    if (mode === 'budget' && budgetSubmitRaw != null) {
+      needA = budgetSubmitRaw.a / 10 ** tokenA.decimals
+      needB = budgetSubmitRaw.b / 10 ** tokenB.decimals
+    }
+    const haveA = getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data)
+    const haveB = getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data)
     if (haveA === null || haveB === null) {
       return empty
     }
@@ -624,10 +674,29 @@ export default function PositionCreate() {
     const shortB = isInsufficientBalance(needB, haveB)
     const deficitA = shortA ? Math.max(0, needA - haveA) : 0
     const deficitB = shortB ? Math.max(0, needB - haveB) : 0
+    const nativeSol = parseFloat(effectiveBalancesQ.data.sol)
+    const nativeSolUi = Number.isFinite(nativeSol) ? nativeSol : 0
+    const minOpenSolUi = (apiSignerQ.data?.min_open_lamports ?? 0) / 1e9
+    const needSolLegUi =
+      tokenA.mint === WSOL_MINT
+        ? needA
+        : tokenB.mint === WSOL_MINT
+          ? needB
+          : 0
+    const wsolAccountExists = hasTokenAccount(WSOL_MINT, effectiveBalancesQ.data)
+    const wsolAtaRentUi = !wsolAccountExists && needSolLegUi > 0 ? WSOL_ATA_RENT_LAMPORTS_EST / 1e9 : 0
+    // Keep UI estimate aligned with current backend preflight model:
+    // required native SOL = WSOL leg need + open pad (+ ATA rent if missing account).
+    const requiredNativeForOpenUi = needSolLegUi + minOpenSolUi + wsolAtaRentUi
+    const shortOperationalSol = nativeSolUi + BALANCE_EPS < requiredNativeForOpenUi
+    const deficitOperationalSol = shortOperationalSol
+      ? Math.max(0, requiredNativeForOpenUi - nativeSolUi)
+      : 0
     const px = pricesQ.data?.prices
 
     let jupiterSwapToCoverA: string | null = null
     let jupiterSwapToCoverB: string | null = null
+    let jupiterSwapToCoverSol: string | null = null
 
     if (shortA && shortB) {
       // Brak obu tokenów — nie da się zbudować sensownego ExactIn bez trzeciej nogi; ogólny link.
@@ -636,12 +705,22 @@ export default function PositionCreate() {
         blocked: true,
         shortA,
         shortB,
+        shortOperationalSol,
+        mode,
         deficitA,
         deficitB,
+        deficitOperationalSol,
         haveA,
         haveB,
+        nativeSol: nativeSolUi,
+        needA,
+        needB,
+        needSolLegUi,
+        requiredNativeForOpenUi,
+        minOpenSolUi,
         jupiterSwapToCoverA: null,
         jupiterSwapToCoverB: null,
+        jupiterSwapToCoverSol: null,
         jupiterGeneric: 'https://jup.ag/swap',
       }
     }
@@ -666,32 +745,61 @@ export default function PositionCreate() {
       jupiterSwapToCoverB = buildJupiterSwapUrl(tokenA.mint, tokenB.mint, raw)
     }
 
+    if (shortOperationalSol) {
+      const candidateInputMint =
+        !shortA && tokenA.mint !== WSOL_MINT
+          ? tokenA.mint
+          : !shortB && tokenB.mint !== WSOL_MINT
+            ? tokenB.mint
+            : tokenA.mint !== WSOL_MINT
+              ? tokenA.mint
+              : tokenB.mint !== WSOL_MINT
+                ? tokenB.mint
+                : null
+      jupiterSwapToCoverSol = candidateInputMint
+        ? buildJupiterSwapUrl(candidateInputMint, WSOL_MINT, null)
+        : 'https://jup.ag/swap?outputMint=So11111111111111111111111111111111111111112'
+    }
+
     return {
       ready: true,
-      blocked: shortA || shortB,
+      blocked: shortA || shortB || shortOperationalSol,
       shortA,
       shortB,
+      shortOperationalSol,
+      mode,
       deficitA,
       deficitB,
+      deficitOperationalSol,
       haveA,
       haveB,
+      nativeSol: nativeSolUi,
+      needA,
+      needB,
+      needSolLegUi,
+      requiredNativeForOpenUi,
+      minOpenSolUi,
       jupiterSwapToCoverA,
       jupiterSwapToCoverB,
+      jupiterSwapToCoverSol,
       jupiterGeneric: 'https://jup.ag/swap',
     }
   }, [
-    ownerPk,
+    effectiveOwnerPk,
     tokenA,
     tokenB,
-    balancesQ.data,
+    mode,
+    budgetSubmitRaw,
+    effectiveBalancesQ.data,
     amountAUi,
     amountBUi,
     pricesQ.data,
+    apiSignerQ.data?.min_open_lamports,
   ])
 
   /** Single-sided deficit: ExactIn swap in **this** pool (mint + raw amount) for `swap_before_open`. */
   const swapBeforeOpenPlan = useMemo(() => {
-    if (!fundingCheck.ready || !tokenA || !tokenB || !pricesQ.data?.prices || !balancesQ.data) {
+    if (!fundingCheck.ready || !tokenA || !tokenB || !effectiveBalancesQ.data) {
       return null
     }
     if (fundingCheck.shortA && fundingCheck.shortB) {
@@ -700,21 +808,31 @@ export default function PositionCreate() {
     if (!fundingCheck.shortA && !fundingCheck.shortB) {
       return null
     }
-    const px = pricesQ.data.prices
+    const px = pricesQ.data?.prices
     const capPct = 0.92
+    const poolPriceRaw = Number(poolStateQ.data?.price ?? poolQ.data?.price)
 
     if (fundingCheck.shortB && !fundingCheck.shortA) {
-      const rawEst = estimateSwapInputRawExactIn(
+      const rawEstUsd = estimateSwapInputRawExactIn(
         tokenA.mint,
         tokenA.decimals,
         tokenB.mint,
         fundingCheck.deficitB,
         px,
       )
-      if (rawEst == null) {
+      const rawEstPool = estimateSwapInputRawFromPoolPrice(
+        fundingCheck.deficitA,
+        fundingCheck.deficitB,
+        true,
+        tokenA.decimals,
+        tokenB.decimals,
+        poolPriceRaw,
+      )
+      const rawEst = Math.max(rawEstUsd ?? 0, rawEstPool ?? 0)
+      if (rawEst <= 0) {
         return null
       }
-      const haveA = getAvailableUiAmount(tokenA.mint, balancesQ.data)
+      const haveA = getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data)
       if (haveA == null) {
         return null
       }
@@ -731,17 +849,26 @@ export default function PositionCreate() {
     }
 
     if (fundingCheck.shortA && !fundingCheck.shortB) {
-      const rawEst = estimateSwapInputRawExactIn(
+      const rawEstUsd = estimateSwapInputRawExactIn(
         tokenB.mint,
         tokenB.decimals,
         tokenA.mint,
         fundingCheck.deficitA,
         px,
       )
-      if (rawEst == null) {
+      const rawEstPool = estimateSwapInputRawFromPoolPrice(
+        fundingCheck.deficitA,
+        fundingCheck.deficitB,
+        false,
+        tokenA.decimals,
+        tokenB.decimals,
+        poolPriceRaw,
+      )
+      const rawEst = Math.max(rawEstUsd ?? 0, rawEstPool ?? 0)
+      if (rawEst <= 0) {
         return null
       }
-      const haveB = getAvailableUiAmount(tokenB.mint, balancesQ.data)
+      const haveB = getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data)
       if (haveB == null) {
         return null
       }
@@ -758,7 +885,7 @@ export default function PositionCreate() {
     }
 
     return null
-  }, [fundingCheck, tokenA, tokenB, pricesQ.data, balancesQ.data])
+  }, [fundingCheck, tokenA, tokenB, pricesQ.data, effectiveBalancesQ.data, poolQ.data?.price, poolStateQ.data?.price])
 
   const swapBeforeOpenInputMeta = useMemo(() => {
     if (!swapBeforeOpenPlan || !tokenA || !tokenB) return null
@@ -862,7 +989,8 @@ export default function PositionCreate() {
     onSuccess: (data) => {
       setSwapSignature(data.swap_signature ?? null)
       setSwapCostSessionId(data.cost_session_id ?? swapCostSessionId)
-      queryClient.invalidateQueries({ queryKey: ['wallet-balances', ownerPk ?? ''] })
+      setSwapStepInfo(data.message ?? null)
+      queryClient.invalidateQueries({ queryKey: ['wallet-balances', effectiveOwnerPk ?? ''] })
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
@@ -909,7 +1037,8 @@ export default function PositionCreate() {
       return
     }
 
-    if (fundingCheck.ready && fundingCheck.blocked) {
+    const blockByTokenDeficit = fundingCheck.ready && (fundingCheck.shortA || fundingCheck.shortB)
+    if (blockByTokenDeficit) {
       if (swapBeforeOpen) {
         // Two-step flow: open is allowed only after swap succeeded.
         if (!swapSignature) {
@@ -971,6 +1100,7 @@ export default function PositionCreate() {
     const id = makeCostSessionId()
     setSwapCostSessionId(id)
     setSwapSignature(null)
+    setSwapStepInfo(null)
     setSwapStepError(null)
 
     swapMutation.mutate({
@@ -1383,25 +1513,32 @@ export default function PositionCreate() {
                 </div>
               )}
 
-              {poolQ.data && mintA && mintB && !ownerPk && (
+              {poolQ.data && mintA && mintB && !effectiveOwnerPk && (
                 <p className="text-xs text-amber-600/90">
                   Brak adresu portfela — salda nie będą widoczne. Ustaw{' '}
                   <code className="text-[11px]">VITE_DEV_WALLET_PUBKEY</code> albo wybierz portfel na stronie
                   Wallet.
                 </p>
               )}
+              {poolQ.data && mintA && mintB && usesApiSignerBalances ? (
+                <p className="text-xs text-muted-foreground">
+                  Walidacja sald używa portfela API signer (
+                  <code className="text-[11px]">{shortenAddress(effectiveOwnerPk ?? '', 6)}</code>), bo z niego backend
+                  wysyła transakcje open/swap.
+                </p>
+              ) : null}
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <label className="block text-sm font-medium mb-1">
                     Amount {tokenA?.symbol ?? 'Token A'}
                   </label>
-                  {mintA && ownerPk && (
+                  {mintA && effectiveOwnerPk && (
                     <div className="text-xs text-muted-foreground mb-1.5">
                       Stan portfela:{' '}
-                      {balancesQ.isLoading ? (
+                      {effectiveBalancesQ.isLoading ? (
                         <span>…</span>
-                      ) : balancesQ.isError ? (
+                      ) : effectiveBalancesQ.isError ? (
                         <span className="text-destructive">nie udało się odczytać</span>
                       ) : (
                         <>
@@ -1460,12 +1597,12 @@ export default function PositionCreate() {
                   <label className="block text-sm font-medium mb-1">
                     Amount {tokenB?.symbol ?? 'Token B'}
                   </label>
-                  {mintB && ownerPk && (
+                  {mintB && effectiveOwnerPk && (
                     <div className="text-xs text-muted-foreground mb-1.5">
                       Stan portfela:{' '}
-                      {balancesQ.isLoading ? (
+                      {effectiveBalancesQ.isLoading ? (
                         <span>…</span>
-                      ) : balancesQ.isError ? (
+                      ) : effectiveBalancesQ.isError ? (
                         <span className="text-destructive">nie udało się odczytać</span>
                       ) : (
                         <>
@@ -1560,6 +1697,16 @@ export default function PositionCreate() {
                           {tokenA?.symbol} → {tokenB?.symbol}, potem otwórz pozycję.
                         </p>
                       ) : null}
+                      {fundingCheck.shortOperationalSol ? (
+                        <p className="text-muted-foreground">
+                          Brakuje operacyjnego SOL na open (rent + fee buffer). Szacowany deficyt:{' '}
+                          <span className="font-mono tabular-nums">
+                            {fundingCheck.deficitOperationalSol.toFixed(6)}
+                          </span>{' '}
+                          SOL (native: {fundingCheck.nativeSol?.toFixed(6)} SOL, wymagane minimum po finansowaniu pozycji:{' '}
+                          {((apiSignerQ.data?.min_open_lamports ?? 0) / 1e9).toFixed(6)} SOL).
+                        </p>
+                      ) : null}
                     </>
                   )}
                   <p className="text-xs text-muted-foreground">
@@ -1596,6 +1743,16 @@ export default function PositionCreate() {
                             className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
                           >
                             Jupiter: {tokenA?.symbol} → {tokenB?.symbol}
+                          </a>
+                        ) : null}
+                        {fundingCheck.jupiterSwapToCoverSol ? (
+                          <a
+                            href={fundingCheck.jupiterSwapToCoverSol}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                          >
+                            Jupiter: swap to SOL
                           </a>
                         ) : null}
                       </>
@@ -1694,12 +1851,17 @@ export default function PositionCreate() {
               ) : null}
             </div>
 
-            {(swapSignature || swapStepError) && (
+            {(swapSignature || swapStepInfo || swapStepError) && (
               <div className="pt-2 space-y-2">
                 {swapSignature ? (
                   <div className="rounded-md border border-emerald-600/40 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-200 break-all">
                     <span className="font-medium">Swap potwierdzony:</span>{' '}
                     <code className="text-[11px] bg-muted/50 px-1 rounded">{swapSignature}</code>
+                  </div>
+                ) : null}
+                {swapStepInfo ? (
+                  <div className="rounded-md border border-border/50 bg-muted/30 px-3 py-2 text-xs text-foreground/90 break-words">
+                    {swapStepInfo}
                   </div>
                 ) : null}
                 {swapStepError ? (

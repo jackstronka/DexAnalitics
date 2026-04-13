@@ -2,7 +2,8 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    BacktestFromClosedPositionRequest, BacktestJobResponse, BacktestJobStatusResponse,
+    BacktestFromClosedPositionRequest, BacktestFromOpenPositionRequest, BacktestJobResponse,
+    BacktestJobStatusResponse,
 };
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -536,6 +537,216 @@ pub async fn backtest_from_closed_position(
             cmd.arg("--end-date").arg(ed);
         }
 
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let out = cmd.output().await;
+        let mut w = JOBS.write().await;
+        let Some(mut cur) = w.get(&job_id).cloned() else {
+            return;
+        };
+        match out {
+            Ok(o) => {
+                cur.exit_code = o.status.code();
+                cur.status = if o.status.success() {
+                    "succeeded".to_string()
+                } else {
+                    "failed".to_string()
+                };
+                cur.stdout = Some(String::from_utf8_lossy(&o.stdout).to_string());
+                cur.stderr = Some(String::from_utf8_lossy(&o.stderr).to_string());
+                cur.finished_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+            }
+            Err(e) => {
+                cur.status = "failed".to_string();
+                cur.stderr = Some(format!("failed to spawn backtest subprocess: {e}"));
+                cur.finished_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+            }
+        }
+        w.insert(job_id.clone(), cur);
+    });
+
+    Ok(Json(BacktestJobStatusResponse {
+        id,
+        status: job.status,
+        note: job.note,
+    }))
+}
+
+/// Spawn a historical backtest for an open position using current open config.
+#[utoipa::path(
+    post,
+    path = "/backtests/from-open-position",
+    tag = "Analytics",
+    request_body = BacktestFromOpenPositionRequest,
+    responses(
+        (status = 200, description = "Backtest job started", body = BacktestJobStatusResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
+pub async fn backtest_from_open_position(
+    State(state): State<AppState>,
+    Json(req): Json<BacktestFromOpenPositionRequest>,
+) -> ApiResult<Json<BacktestJobStatusResponse>> {
+    let position = req.position_address.trim();
+    if position.is_empty() {
+        return Err(ApiError::bad_request("position_address is required"));
+    }
+
+    let (opened_ts, _closed_ts, pool_address, open_sid, details) = registry_lookup(position)
+        .ok_or_else(|| {
+        ApiError::not_found("Position not found in registry (missing open row)")
+    })?;
+
+    let start_date = req
+        .start_date
+        .clone()
+        .or_else(|| opened_ts.as_deref().and_then(iso_date));
+    let end_date_for_cli = req.end_date.clone().or_else(|| {
+        let d = chrono::Utc::now().date_naive();
+        d.succ_opt().map(|x| x.format("%Y-%m-%d").to_string())
+    });
+
+    let (mut lower, mut upper) = (req.lower, req.upper);
+    if lower.is_none() || upper.is_none() {
+        let tick_lower = details
+            .as_ref()
+            .and_then(|d| d.get("tick_lower"))
+            .and_then(|x| x.as_i64())
+            .map(|n| n as i32);
+        let tick_upper = details
+            .as_ref()
+            .and_then(|d| d.get("tick_upper"))
+            .and_then(|x| x.as_i64())
+            .map(|n| n as i32);
+        if let (Some(tl), Some(tu)) = (tick_lower, tick_upper) {
+            let lp = tick_to_price(tl).ok().and_then(|d| d.to_f64());
+            let up = tick_to_price(tu).ok().and_then(|d| d.to_f64());
+            if lower.is_none() {
+                lower = lp;
+            }
+            if upper.is_none() {
+                upper = up;
+            }
+        }
+    }
+    let lower = lower.unwrap_or(0.0);
+    let upper = upper.unwrap_or(0.0);
+    if lower <= 0.0 || upper <= 0.0 || lower >= upper {
+        return Err(ApiError::bad_request(
+            "Could not derive lower/upper from registry details; provide lower/upper overrides",
+        ));
+    }
+
+    let pool_state = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
+        .get_pool_state(&pool_address)
+        .await
+        .map_err(|e| ApiError::internal(format!("get_pool_state failed: {e}")))?;
+    let mint_a = pool_state.token_mint_a.to_string();
+    let mint_b = pool_state.token_mint_b.to_string();
+    let mut mints = BTreeSet::new();
+    mints.insert(mint_a.clone());
+    mints.insert(mint_b.clone());
+    let (px, _src) = fetch_mint_prices_usd(&mints).await;
+    let pa = px.get(&mint_a).copied().unwrap_or(0.0);
+    let pb = px.get(&mint_b).copied().unwrap_or(0.0);
+
+    let capital = if let Some(c) = req.capital {
+        c.max(0.0)
+    } else {
+        let mut cap = 0.0_f64;
+        let ledger = clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path();
+        if ledger.exists() && let Ok(txt) = std::fs::read_to_string(&ledger) {
+            if let Some(ref sid) = open_sid {
+                let sid = sid.trim();
+                if !sid.is_empty() {
+                    cap = capital_from_ledger_session(&txt, sid, &mint_a, &mint_b, pa, pb);
+                }
+            }
+            if cap <= 0.0 {
+                cap = capital_from_ledger_first_open(&txt, position, &mint_a, &mint_b, pa, pb);
+            }
+        }
+        if cap <= 0.0 && let Some(ref db) = state.db && let Some(c) = capital_from_db_first_snapshot_usd(db, position).await {
+            cap = c;
+        }
+        cap
+    };
+    if capital <= 0.0 {
+        return Err(ApiError::bad_request(
+            "Could not derive capital (USD). Pass JSON field \"capital\", or ensure lifecycle ledger has fee_payer_token_deltas on an open row for this PDA and/or DB has position_stream_valuation_snapshots for this PDA.",
+        ));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let job = BacktestJobResponse {
+        id: id.clone(),
+        position_address: position.to_string(),
+        pool_address: pool_address.clone(),
+        status: "running".to_string(),
+        started_ts_utc: chrono::Utc::now().to_rfc3339(),
+        finished_ts_utc: None,
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        note: Some(
+            "Runs `clmm-lp-cli backtest` from an active position config; best-effort and requires local snapshot data."
+                .to_string(),
+        ),
+    };
+    {
+        let mut w = JOBS.write().await;
+        w.insert(id.clone(), job.clone());
+    }
+
+    let repo_root = state.config.repo_root.clone();
+    let strategy = req.strategy.clone().unwrap_or_else(|| "static".to_string());
+    let fee_source = req.fee_source.clone().unwrap_or_else(|| "snapshots".to_string());
+    let price_path_source = req
+        .price_path_source
+        .clone()
+        .unwrap_or_else(|| "snapshots".to_string());
+    let snapshot_protocol = req
+        .snapshot_protocol
+        .clone()
+        .unwrap_or_else(|| "orca".to_string());
+
+    let job_id = id.clone();
+    tokio::spawn(async move {
+        let cli_path = match resolve_clmm_lp_cli_path(repo_root.as_deref()) {
+            Ok(p) => p,
+            Err(msg) => {
+                let mut w = JOBS.write().await;
+                let Some(mut cur) = w.get(&job_id).cloned() else {
+                    return;
+                };
+                cur.status = "failed".to_string();
+                cur.stderr = Some(msg);
+                cur.finished_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+                w.insert(job_id, cur);
+                return;
+            }
+        };
+        let mut cmd = Command::new(&cli_path);
+        cmd.arg("backtest");
+        cmd.arg("--symbol-a").arg("A");
+        cmd.arg("--mint-a").arg(&mint_a);
+        cmd.arg("--symbol-b").arg("B");
+        cmd.arg("--mint-b").arg(&mint_b);
+        cmd.arg("--lower").arg(format!("{lower}"));
+        cmd.arg("--upper").arg(format!("{upper}"));
+        cmd.arg("--capital").arg(format!("{capital}"));
+        cmd.arg("--strategy").arg(strategy);
+        cmd.arg("--fee-source").arg(fee_source);
+        cmd.arg("--price-path-source").arg(price_path_source);
+        cmd.arg("--snapshot-protocol").arg(snapshot_protocol);
+        cmd.arg("--snapshot-pool-address").arg(&pool_address);
+        if let Some(sd) = start_date.as_deref() {
+            cmd.arg("--start-date").arg(sd);
+        }
+        if let Some(ed) = end_date_for_cli.as_deref() {
+            cmd.arg("--end-date").arg(ed);
+        }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 

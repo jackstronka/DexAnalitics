@@ -3,7 +3,9 @@
 use crate::error::ApiError;
 use crate::models::{OpenPositionRequest, RebalanceRequest, SwapBeforeOpenRequest};
 use crate::state::{AlertUpdate, AppState, PositionUpdate};
+use crate::services::position_valuation::{map_position_fetch_error, uncollected_fees_info_for_position};
 use crate::services::strategy_service::append_position_address_to_strategy;
+use crate::services::position_executor::wallet_config_diagnostic;
 use clmm_lp_execution::prelude::{RebalanceParams, RebalanceReason, StrategyExecutor};
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::orca::position_reader::PositionReader;
@@ -171,7 +173,10 @@ impl PositionService {
 
         let Some(executor) = &self.executor else {
             return Ok(OperationResult::failure(
-                "Swap requires executor and wallet configuration",
+                format!(
+                    "Swap requires executor and wallet configuration. {}",
+                    wallet_config_diagnostic()
+                ),
             ));
         };
 
@@ -325,7 +330,10 @@ impl PositionService {
 
         let Some(executor) = &self.executor else {
             return Ok(OperationResult::failure(
-                "Position opening requires executor and wallet configuration",
+                format!(
+                    "Position opening requires executor and wallet configuration. {}",
+                    wallet_config_diagnostic()
+                ),
             ));
         };
 
@@ -336,7 +344,6 @@ impl PositionService {
             .filter(|s| !s.is_empty());
 
         let guard = executor.read().await;
-
         // Guardrail: fail fast if API wallet doesn't have enough SOL to cover rent/fees.
         // This avoids long opaque simulation errors when accounts must be created.
         if let Some(wallet_pk) = guard.wallet_pubkey() {
@@ -352,7 +359,7 @@ Have {have} lamports (~{have_sol:.6} SOL), require at least {min_lamports} lampo
 Top up the API wallet and retry."
                         )));
                     }
-                    Ok(_) => {}
+                    Ok(_have) => {}
                     Err(e) => {
                         warn!(error = %e, "Failed to precheck API wallet SOL balance; continuing with open");
                     }
@@ -440,7 +447,7 @@ Top up the API wallet and retry."
                 let on_chain = reader
                     .get_position(address)
                     .await
-                    .map_err(|e| ApiError::not_found(format!("Position not found: {e}")))?;
+                    .map_err(map_position_fetch_error)?;
                 (on_chain.pool, on_chain.liquidity)
             };
 
@@ -454,7 +461,10 @@ Top up the API wallet and retry."
 
         let Some(executor) = &self.executor else {
             return Ok(OperationResult::failure(
-                "Position closing requires executor and wallet configuration",
+                format!(
+                    "Position closing requires executor and wallet configuration. {}",
+                    wallet_config_diagnostic()
+                ),
             ));
         };
 
@@ -488,6 +498,8 @@ Top up the API wallet and retry."
             .iter()
             .find(|p| p.address == position_pubkey)
             .ok_or_else(|| ApiError::not_found("Position not found"))?;
+        let pre_fees =
+            uncollected_fees_info_for_position(self.state.provider.clone(), position).await;
 
         if self.dry_run {
             info!("Dry-run mode: would collect fees");
@@ -499,7 +511,10 @@ Top up the API wallet and retry."
 
         let Some(executor) = &self.executor else {
             return Ok(OperationResult::failure(
-                "Fee collection requires executor and wallet configuration",
+                format!(
+                    "Fee collection requires executor and wallet configuration. {}",
+                    wallet_config_diagnostic()
+                ),
             ));
         };
 
@@ -508,8 +523,52 @@ Top up the API wallet and retry."
             .execute_collect_fees_only(&position_pubkey, &position.pool, cost_session_id)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
+        drop(guard);
 
-        Ok(OperationResult::success())
+        let post_position = self
+            .state
+            .monitor
+            .get_positions()
+            .await
+            .into_iter()
+            .find(|p| p.address == position_pubkey);
+        let post_fees = match post_position.as_ref() {
+            Some(p) => uncollected_fees_info_for_position(self.state.provider.clone(), p).await,
+            None => None,
+        };
+
+        let message = if let (Some(pre), Some(post)) = (pre_fees.as_ref(), post_fees.as_ref()) {
+            let collected_a = (pre.amount_a - post.amount_a)
+                .max(rust_decimal::Decimal::ZERO)
+                .round_dp(3);
+            let collected_b = (pre.amount_b - post.amount_b)
+                .max(rust_decimal::Decimal::ZERO)
+                .round_dp(3);
+            format!(
+                "Fees collected from position: {address}. {}: {}, {}: {}",
+                pre.token_a_label, collected_a, pre.token_b_label, collected_b
+            )
+        } else {
+            format!(
+                "Fees collected from position: {address} (amounts unavailable: pre/post fee snapshot RPC failed)"
+            )
+        };
+
+        Ok(OperationResult::success_with_data(serde_json::json!({
+            "message": message,
+            "pre_uncollected_fees": pre_fees.as_ref().map(|f| serde_json::json!({
+                "token_a_label": f.token_a_label,
+                "token_b_label": f.token_b_label,
+                "amount_a": f.amount_a.to_string(),
+                "amount_b": f.amount_b.to_string(),
+            })),
+            "post_uncollected_fees": post_fees.as_ref().map(|f| serde_json::json!({
+                "token_a_label": f.token_a_label,
+                "token_b_label": f.token_b_label,
+                "amount_a": f.amount_a.to_string(),
+                "amount_b": f.amount_b.to_string(),
+            }))
+        })))
     }
 
     /// Rebalances a position.
@@ -768,8 +827,8 @@ Top up the API wallet and retry."
 }
 
 fn min_open_sol_lamports() -> u64 {
-    // 0 disables. Default is conservative: 0.01 SOL (covers rent + a few retries).
-    const DEFAULT: u64 = 10_000_000; // 0.01 SOL
+    // 0 disables. Default is operational buffer (rent + tx overhead), without WSOL leg notional.
+    const DEFAULT: u64 = 12_000_000; // 0.012 SOL
     env::var("CLMM_MIN_OPEN_SOL_LAMPORTS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())

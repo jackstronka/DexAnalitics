@@ -91,6 +91,23 @@ fn wsol_deposit_target_exact(needed_amount: u64) -> u64 {
     needed_amount
 }
 
+fn open_native_sol_pad_lamports() -> u64 {
+    std::env::var("CLMM_MIN_OPEN_SOL_LAMPORTS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(12_000_000)
+}
+
+fn parse_insufficient_lamports_from_log_line(line: &str) -> Option<(u64, u64)> {
+    let marker = "Transfer: insufficient lamports ";
+    let idx = line.find(marker)?;
+    let tail = &line[idx + marker.len()..];
+    let (have_s, need_part) = tail.split_once(", need ")?;
+    let have = have_s.trim().parse::<u64>().ok()?;
+    let need = need_part.trim().parse::<u64>().ok()?;
+    Some((have, need))
+}
+
 /// Associated token program ID.
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
@@ -192,6 +209,10 @@ pub struct ExecutionResult {
     pub error: Option<String>,
     /// Position PDA created by open-position flow (if applicable).
     pub created_position: Option<Pubkey>,
+    /// For collect/harvest: quoted fee owed (pool token A raw) at instruction build time.
+    pub collect_fee_owed_a_raw: Option<u64>,
+    /// For collect/harvest: quoted fee owed (pool token B raw) at instruction build time.
+    pub collect_fee_owed_b_raw: Option<u64>,
 }
 
 impl ExecutionResult {
@@ -204,6 +225,8 @@ impl ExecutionResult {
             slot: Some(slot),
             error: None,
             created_position: None,
+            collect_fee_owed_a_raw: None,
+            collect_fee_owed_b_raw: None,
         }
     }
 
@@ -216,6 +239,8 @@ impl ExecutionResult {
             slot: None,
             error: Some(error),
             created_position: None,
+            collect_fee_owed_a_raw: None,
+            collect_fee_owed_b_raw: None,
         }
     }
 }
@@ -274,32 +299,11 @@ impl WhirlpoolExecutor {
             Ok(())
         };
 
-        let check_wsol = |need: u64, leg: &'static str| async move {
+        let check_wsol = |need: u64, _leg: &'static str| async move {
             if need == 0 {
-                return Ok(());
+                return Ok::<(), anyhow::Error>(());
             }
-            let target = wsol_deposit_target_with_buffer(need);
-            let ata = get_associated_token_address(&owner, &wsol);
-            let current = self.read_spl_token_amount_opt(&ata).await?;
-            if current >= target {
-                return Ok(());
-            }
-            let topup = target - current;
-            let native = self
-                .provider
-                .get_balance(&owner)
-                .await
-                .context("fetch native SOL balance for WSOL preflight")?;
-            // Rent for new accounts in the same tx + signature fee — stay conservative.
-            const NATIVE_PAD_LAMPORTS: u64 = 2_500_000;
-            if native < topup.saturating_add(NATIVE_PAD_LAMPORTS) {
-                anyhow::bail!(
-                    "open preflight: not enough native SOL to wrap ~{topup} lamports into WSOL for {leg} \
-                     (target {target} lamports in wSOL ATA; have {current} wrapped; native SOL {native}). \
-                     Top up SOL on the API wallet or lower Amount. (owner {owner})"
-                );
-            }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         };
 
         if amount_a > 0 {
@@ -383,7 +387,6 @@ impl WhirlpoolExecutor {
                 );
             }
         }
-
         let opened = open_position_instructions_with_tick_bounds(
             &rpc,
             params.pool,
@@ -551,7 +554,6 @@ impl WhirlpoolExecutor {
         } else {
             0
         };
-
         if current_amount >= target_amount {
             return Ok(ixs);
         }
@@ -635,8 +637,7 @@ impl WhirlpoolExecutor {
             let current_wsol = self.read_spl_token_amount_opt(&ata).await.unwrap_or(0);
             let native = self.provider.get_balance(&owner).await.unwrap_or(0);
             // Leave headroom for fees/rent; this is intentionally conservative.
-            const NATIVE_SOL_RESERVE_LAMPORTS: u64 = 12_000_000;
-            let wrap_budget = native.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS);
+            let wrap_budget = native.saturating_sub(open_native_sol_pad_lamports());
             let max_possible_in = current_wsol.saturating_add(wrap_budget);
             if amount > max_possible_in {
                 amount = max_possible_in.max(1);
@@ -820,13 +821,15 @@ impl WhirlpoolExecutor {
             harvest_position_instructions(&rpc, parsed.position_mint, Some(payer.pubkey()))
                 .await
                 .map_err(|e| anyhow::anyhow!("orca harvest_position_instructions failed: {e}"))?;
-
-        self.send_transaction_with_signers(
+        let mut exec = self.send_transaction_with_signers(
             &harvested.instructions,
             payer,
             &harvested.additional_signers,
         )
-        .await
+        .await?;
+        exec.collect_fee_owed_a_raw = Some(harvested.fees_quote.fee_owed_a);
+        exec.collect_fee_owed_b_raw = Some(harvested.fees_quote.fee_owed_b);
+        Ok(exec)
     }
 
     /// Closes a position.
@@ -897,7 +900,6 @@ impl WhirlpoolExecutor {
                 last = Some(res);
                 continue;
             }
-
             return Ok(res);
         }
 
@@ -964,6 +966,30 @@ impl WhirlpoolExecutor {
             signers.push(kp);
         }
         transaction.sign(&signers, recent_blockhash);
+
+        if let Ok(sim) = self.provider.simulate_transaction(&transaction).await {
+            if let Some(logs) = sim.logs {
+                let parsed = logs
+                    .iter()
+                    .find_map(|line| parse_insufficient_lamports_from_log_line(line));
+                if let Some((have_lamports, need_lamports)) = parsed {
+                    let required_with_margin = need_lamports.saturating_mul(101).saturating_add(99) / 100;
+                    let payer_pubkey = payer.pubkey();
+                    let native_balance = self.provider.get_balance(&payer_pubkey).await.unwrap_or(have_lamports);
+                    if native_balance < required_with_margin {
+                        let signature = transaction.signatures.first().copied().unwrap_or_default();
+                        return Ok(ExecutionResult::failure(
+                            signature,
+                            format!(
+                                "open preflight exact-plan: insufficient native SOL. \
+                                 Runtime simulation requires {need_lamports} lamports; with 1% safety margin require {required_with_margin}. \
+                                 Current native balance {native_balance}. Top up SOL or lower Amount."
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
 
         debug!("Sending transaction...");
 

@@ -415,6 +415,25 @@ pub struct SuggestStrategyLinkResponse {
 
 /// One node (one PDA) in a rotated position stream lineage.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LineageCollectZeroDiagnostics {
+    /// Best-effort share of sampled time where tick was inside node range (0..100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub in_range_time_share_pct_est: Option<Decimal>,
+    /// Number of checkpoint samples used for in-range estimation.
+    pub in_range_samples: u32,
+    /// Best-effort number of swap events in this node's pool and time window.
+    pub swap_events_in_window_est: u32,
+    /// Best-effort position liquidity share vs max sampled liquidity in same pool window (0..100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub position_share_pct_est: Option<Decimal>,
+    /// Human-readable explanation of what this estimate means.
+    pub methodology_note: String,
+}
+
+/// One node (one PDA) in a rotated position stream lineage.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PositionStreamLineageNode {
     /// Position PDA (base58).
     pub position_address: String,
@@ -436,9 +455,15 @@ pub struct PositionStreamLineageNode {
     /// Baseline value for this PDA (earliest known valuation snapshot).
     #[schema(value_type = String)]
     pub baseline_value_usd: Decimal,
+    /// Data quality/source tag for baseline valuation (e.g. `exact`, `missing_price`, `fallback`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_valuation_quality: Option<String>,
     /// Latest known value for this PDA (latest valuation snapshot).
     #[schema(value_type = String)]
     pub current_value_usd: Decimal,
+    /// Data quality/source tag for current/end valuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_valuation_quality: Option<String>,
     /// Sum of Solana **network** tx fees (`meta.fee`) in lamports for all lifecycle rows for this PDA.
     pub tx_fee_lamports: u64,
     /// Network tx fees in USD (`tx_fee_lamports` × SOL/USD).
@@ -474,6 +499,9 @@ pub struct PositionStreamLineageNode {
     /// Notes about data quality / limitations for this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Extra diagnostics for collect rows that show zero LP fees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_zero_diagnostics: Option<LineageCollectZeroDiagnostics>,
 }
 
 /// Aggregated **network costs** and **LP fees collected** across the full rotation chain.
@@ -1212,6 +1240,28 @@ pub struct PoolStateResponse {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+// ============================================================================
+// Base EVM — Aerodrome Slipstream (read-only)
+// ============================================================================
+
+/// `slot0()` on a Slipstream / Uniswap-v3–style pool contract (`GET .../slot0`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SlipstreamSlot0Response {
+    /// Base mainnet chain id (`8453`).
+    pub chain_id: u64,
+    /// Pool contract address (`0x` + 40 hex).
+    pub pool: String,
+    /// `sqrtPriceX96` as a decimal string (fits uint160; string avoids JSON precision loss).
+    pub sqrt_price_x96: String,
+    /// Current tick.
+    pub tick: i32,
+    pub observation_index: u16,
+    pub observation_cardinality: u16,
+    pub observation_cardinality_next: u16,
+    pub fee_protocol: u8,
+    pub unlocked: bool,
+}
+
 /// Rough **network fee** estimate for an Orca swap in a pool (`meta.fee` band), from local ledger history + default.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SwapCostEstimateResponse {
@@ -1451,6 +1501,40 @@ pub struct BacktestFromClosedPositionRequest {
     pub snapshot_protocol: Option<String>,
 }
 
+/// Request for `POST /backtests/from-open-position`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFromOpenPositionRequest {
+    pub position_address: String,
+    /// Override: lower bound price (A/B). By default derived from `tick_lower` in registry open details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower: Option<f64>,
+    /// Override: upper bound price (A/B). By default derived from `tick_upper` in registry open details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper: Option<f64>,
+    /// Override: initial capital USD. By default derived from open-session token deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capital: Option<f64>,
+    /// Strategy string accepted by CLI (`static|periodic|threshold` etc.). Defaults to `static`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Optional start date (UTC) YYYY-MM-DD. If omitted, inferred from registry_open timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    /// Optional end date (UTC) `YYYY-MM-DD` (exclusive upper bound for CLI `ts < end`).
+    /// If omitted, API uses the next UTC calendar day from "now" so the current day is included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    /// Fee source accepted by CLI (default `snapshots`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_source: Option<String>,
+    /// Price path source accepted by CLI (default `snapshots`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_path_source: Option<String>,
+    /// Snapshot protocol accepted by CLI (default `orca`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_protocol: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BacktestJobStatusResponse {
     pub id: String,
@@ -1655,6 +1739,47 @@ pub struct PendingOpenRecoveryResponse {
     pub data: Option<serde_json::Value>,
 }
 
+/// One rebalance session where close was observed but corresponding open is missing.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StrandedRebalanceItem {
+    pub rebalance_session_id: String,
+    pub close_seen: bool,
+    pub open_seen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_ts_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_ts_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
+    pub rebalance_incomplete_logged: bool,
+    pub in_pending_open_queue: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intended_tick_lower: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intended_tick_upper: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub can_auto_enqueue: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Watchdog response with detected stranded rebalance sessions and optional enqueue count.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StrandedRebalancesResponse {
+    pub lifecycle_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub il_ledger_path: Option<String>,
+    pub pending_open_path: String,
+    pub rows_scanned: usize,
+    pub auto_enqueued: usize,
+    pub items: Vec<StrandedRebalanceItem>,
+}
+
 /// POST body: how many recent ledger rows to include in the Slack digest.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SlackActivitySummaryRequest {
@@ -1818,7 +1943,7 @@ pub struct ApiSignerWalletResponse {
     /// Current SOL balance as decimal string (when configured + RPC succeeded).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sol: Option<String>,
-    /// Minimum lamports for **open** / rent-heavy ops (`CLMM_MIN_OPEN_SOL_LAMPORTS`, default 0.01 SOL).
+    /// Minimum lamports for **open** / rent-heavy ops (`CLMM_MIN_OPEN_SOL_LAMPORTS`, default 0.012 SOL).
     pub min_open_lamports: u64,
     /// Minimum lamports for **swap-only** (fee + buffer; lower than open; `CLMM_MIN_SWAP_SOL_LAMPORTS`, default ~0.0015 SOL).
     pub min_swap_lamports: u64,

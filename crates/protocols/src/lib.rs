@@ -4,9 +4,15 @@
 //! - Orca Whirlpools
 //! - Raydium CLMM
 //! - Meteora DLMM (planned)
+//!
+//! EVM (Base): [`aerodrome_slipstream`] holds pinned **Aerodrome Slipstream** deployment constants
+//! (no RPC client here yet).
 
 /// Prelude module for convenient imports.
 pub mod prelude;
+
+/// Aerodrome Slipstream (Base) — pinned deployment addresses and integration notes.
+pub mod aerodrome_slipstream;
 
 /// Event fetching and parsing.
 pub mod events;

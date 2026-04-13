@@ -86,6 +86,14 @@ fn load_config_from_env() -> ServerConfig {
         script_runner_url: env::var("SCRIPT_RUNNER_URL").ok(),
         script_runner_token: env::var("SCRIPT_RUNNER_TOKEN").ok(),
         wallets_dir: env::var("CLMM_WALLETS_DIR").ok(),
+        base_rpc_url: env::var("BASE_RPC_URL").ok().and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
         enable_cors: env::var("API_CORS_ALLOW_ALL")
             .map(|v| v == "true")
             .unwrap_or(true),

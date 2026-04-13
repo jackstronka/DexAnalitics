@@ -107,7 +107,9 @@ export interface PositionStreamLineageNode {
   opened_ts_utc?: string | null
   closed_ts_utc?: string | null
   baseline_value_usd: string
+  baseline_valuation_quality?: string | null
   current_value_usd: string
+  current_valuation_quality?: string | null
   /** Sum of Solana network fees (lamports) for all txs logged for this PDA. */
   tx_fee_lamports: number
   tx_fees_usd: string
@@ -125,6 +127,13 @@ export interface PositionStreamLineageNode {
   net_pnl_usd: string
   net_pnl_pct: string
   note?: string | null
+  collect_zero_diagnostics?: {
+    in_range_time_share_pct_est?: string | null
+    in_range_samples: number
+    swap_events_in_window_est: number
+    position_share_pct_est?: string | null
+    methodology_note: string
+  } | null
 }
 
 /** Sums of per-node network costs vs LP fees across the full rotation chain. */
@@ -212,6 +221,19 @@ export interface PositionLifecycleSummaryResponse {
 }
 
 export interface BacktestFromClosedPositionRequest {
+  position_address: string
+  lower?: number
+  upper?: number
+  capital?: number
+  strategy?: string
+  start_date?: string
+  end_date?: string
+  fee_source?: string
+  price_path_source?: string
+  snapshot_protocol?: string
+}
+
+export interface BacktestFromOpenPositionRequest {
   position_address: string
   lower?: number
   upper?: number
@@ -449,6 +471,9 @@ function messageFromErrorBody(text: string, status: number): string {
   const statusLine = `HTTP ${status}`
   const trimmed = text.trim()
   if (!trimmed) {
+    if (status === 408) {
+      return `${statusLine} (empty body) — zwykle timeout warstwy HTTP API (Tower) albo proxy; endpoint /positions/:addr wymaga dłuższego limitu po stronie serwera (on-chain router) i wolnego RPC.`
+    }
     return `${statusLine} (empty body)`
   }
   try {
@@ -650,7 +675,9 @@ export function closedPositionsListQueryOptions(
     retry: 1 as const,
   }
 }
-export const getPosition = (address: string) => fetchJson<Position>(`/positions/${address}`)
+/** Matches API on-chain router timeout (`API_ONCHAIN_REQUEST_TIMEOUT_SECS`, default 120s): many RPC + prices. */
+export const getPosition = (address: string) =>
+  fetchJsonWithTimeout<Position>(`/positions/${encodeURIComponent(address)}`, 120_000)
 export const getPositionDiagnostics = (address: string) =>
   fetchJson<PositionDiagnosticsResponse>(`/positions/${encodeURIComponent(address)}/diagnostics`)
 export const suggestPositionStrategy = (address: string) =>
@@ -677,6 +704,12 @@ export const getPositionLifecycleSummary = (address: string) =>
 
 export const runBacktestFromClosedPosition = (body: BacktestFromClosedPositionRequest) =>
   fetchJsonLong<BacktestJobStatusResponse>('/backtests/from-closed-position', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const runBacktestFromOpenPosition = (body: BacktestFromOpenPositionRequest) =>
+  fetchJsonLong<BacktestJobStatusResponse>('/backtests/from-open-position', {
     method: 'POST',
     body: JSON.stringify(body),
   })
@@ -952,6 +985,33 @@ export interface PendingOpenRecoveryResponse {
   data?: Record<string, unknown> | null
 }
 
+export interface StrandedRebalanceItem {
+  rebalance_session_id: string
+  close_seen: boolean
+  open_seen: boolean
+  close_ts_utc?: string | null
+  open_ts_utc?: string | null
+  old_position?: string | null
+  new_position?: string | null
+  pool_address?: string | null
+  rebalance_incomplete_logged: boolean
+  in_pending_open_queue: boolean
+  intended_tick_lower?: number | null
+  intended_tick_upper?: number | null
+  reason?: string | null
+  can_auto_enqueue: boolean
+  note?: string | null
+}
+
+export interface StrandedRebalancesResponse {
+  lifecycle_path: string
+  il_ledger_path?: string | null
+  pending_open_path: string
+  rows_scanned: number
+  auto_enqueued: number
+  items: StrandedRebalanceItem[]
+}
+
 function qsBotActivity(limit: number, filter?: string, offset?: number): string {
   const p = new URLSearchParams()
   p.set('limit', String(limit))
@@ -974,6 +1034,14 @@ export const getBotRegistry = (limit = 200, filter?: string) =>
 
 export const getPendingOpenRecovery = () =>
   fetchJson<PendingOpenRecoveryResponse>('/bot-activity/pending-open')
+
+export const getStrandedRebalances = () =>
+  fetchJson<StrandedRebalancesResponse>('/bot-activity/stranded-rebalances')
+
+export const reconcileStrandedRebalances = () =>
+  fetchJson<StrandedRebalancesResponse>('/bot-activity/stranded-rebalances/reconcile', {
+    method: 'POST',
+  })
 
 export const postSlackActivitySummary = (limit = 40) =>
   fetchJson<SlackActivitySummaryResponse>('/bot-activity/slack-summary', {

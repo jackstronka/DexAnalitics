@@ -58,6 +58,7 @@ reqwest = { workspace = true, default-features = false, features = ["json", "rus
 urlencoding = "2.1"
 spl-token = { workspace = true }
 num-traits = { workspace = true }
+primitive-types = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.8.3"

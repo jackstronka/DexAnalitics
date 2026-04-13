@@ -1,0 +1,31 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "release/**"
+
+jobs:
+  critical_area_requires_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Gate critical areas with tests
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/critical-area-test-gate.sh
+
+  lineage_shadow_diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Run lineage shadow diff test
+        run: cargo test -p clmm-lp-api lineage_shadow_diff_matches_golden_fixture -- --nocapture

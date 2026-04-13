@@ -276,7 +276,6 @@ pub async fn quote_open_budget(
     }
 
     let in_range = pool.tick_current >= body.tick_lower && pool.tick_current < body.tick_upper;
-
     let q = quote_deposit_budget_in_range(
         body.tick_lower,
         body.tick_upper,
@@ -292,7 +291,6 @@ pub async fn quote_open_budget(
 
     let a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
     let b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
-
     Ok(Json(QuoteOpenBudgetResponse {
         token_max_a: q.token_max_a,
         token_max_b: q.token_max_b,

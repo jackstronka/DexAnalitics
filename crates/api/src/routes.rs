@@ -31,7 +31,6 @@ fn create_base_router(state: AppState) -> Router {
         // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
         .route("/positions/closed", get(handlers::list_closed_positions))
-        .route("/positions/{address}", get(handlers::get_position))
         .route("/positions/{address}/pnl", get(handlers::get_position_pnl))
         .route(
             "/positions/{address}/suggest-strategy",
@@ -115,6 +114,10 @@ fn create_base_router(state: AppState) -> Router {
             "/backtests/from-closed-position",
             post(handlers::backtest_from_closed_position),
         )
+        .route(
+            "/backtests/from-open-position",
+            post(handlers::backtest_from_open_position),
+        )
         .route("/backtests/{id}", get(handlers::get_backtest_job))
         // Bot activity (JSONL ledger / registry; Slack digest)
         .route("/bot-activity/ledger", get(handlers::get_bot_ledger))
@@ -123,6 +126,14 @@ fn create_base_router(state: AppState) -> Router {
         .route(
             "/bot-activity/pending-open",
             get(handlers::get_pending_open_recovery),
+        )
+        .route(
+            "/bot-activity/stranded-rebalances",
+            get(handlers::get_stranded_rebalances),
+        )
+        .route(
+            "/bot-activity/stranded-rebalances/reconcile",
+            post(handlers::reconcile_stranded_rebalances),
         )
         .route(
             "/bot-activity/slack-summary",
@@ -137,6 +148,11 @@ fn create_base_router(state: AppState) -> Router {
         .route("/wallets/api-signer", get(handlers::get_api_signer_wallet))
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
+        // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
+        .route(
+            "/evm/base/aerodrome-slipstream/pools/{pool}/slot0",
+            get(handlers::get_aerodrome_slipstream_pool_slot0),
+        )
         // WebSocket routes
         .route("/ws/positions", get(websocket::positions_ws))
         .route("/ws/alerts", get(websocket::alerts_ws))
@@ -147,6 +163,7 @@ fn create_base_router(state: AppState) -> Router {
 fn create_onchain_router(state: AppState) -> Router {
     Router::new()
         // Position routes (on-chain / can take long)
+        .route("/positions/{address}", get(handlers::get_position))
         .route("/positions", post(handlers::open_position))
         .route(
             "/positions/swap-before-open",

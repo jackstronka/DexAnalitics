@@ -1,0 +1,15 @@
+---
+description: Mandatory regression quality gates for bugfixes and critical paths
+alwaysApply: true
+---
+
+# AI Quality Gates (Mandatory)
+
+Before implementing bugfixes or critical-path changes:
+
+1. Read `doc/BUGS.md` and check for similar `keywords`.
+2. Read `doc/DATA_CATALOG.md` and prefer reusing existing tagged data sources before adding new snapshot/ingestion flows.
+3. For `high`/`critical` bugs, add/update at least one regression or invariant test.
+4. If touching critical areas (lineage/execution/position actions), ensure tests are updated in the same change.
+5. Run through `doc/AI_MERGE_CHECKLIST.md` before marking work done.
+6. If behavior/API changed materially, append an entry in `doc/ENGINEERING_NOTES.md` with `keywords:`.

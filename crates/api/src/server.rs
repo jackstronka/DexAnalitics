@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::time::sleep;
 use tokio::time::{Duration, timeout};
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -28,8 +29,50 @@ fn env_autostart_strategies_on_boot() -> bool {
             v.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "y" | "on"
         ),
-        Err(_) => false,
+        // Default ON: strategies explicitly marked `auto_start` should survive API restarts
+        // without requiring extra env wiring in every launch script.
+        Err(_) => true,
     }
+}
+
+fn json_boolish(v: &serde_json::Value) -> Option<bool> {
+    v.as_bool().or_else(|| {
+        v.as_str().and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "y" | "on" => Some(true),
+            "0" | "false" | "no" | "n" | "off" => Some(false),
+            _ => None,
+        })
+    })
+}
+
+fn spawn_stranded_reconcile_watchdog() {
+    let secs = crate::services::stranded_rebalance_watchdog::reconcile_interval_secs_from_env();
+    if secs == 0 {
+        return;
+    }
+    info!(
+        interval_secs = secs,
+        env = "CLMM_STRANDED_RECONCILE_INTERVAL_SECS",
+        "Stranded rebalance watchdog: periodic reconcile enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(secs)).await;
+            match crate::services::stranded_rebalance_watchdog::reconcile_stranded_periodic_tick() {
+                Ok(r) if r.auto_enqueued > 0 => {
+                    info!(
+                        auto_enqueued = r.auto_enqueued,
+                        pending_path = %r.pending_open_path,
+                        "stranded rebalance watchdog enqueued pending-open recovery items"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "stranded rebalance watchdog reconcile failed");
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 async fn maybe_autostart_strategies(state: &AppState) {
@@ -41,11 +84,13 @@ async fn maybe_autostart_strategies(state: &AppState) {
         let map = state.strategies.read().await;
         map.values()
             .filter_map(|s| {
+                // Prefer parameters.auto_start, fallback to legacy root-level config.auto_start.
                 let auto_start = s
                     .config
                     .get("parameters")
                     .and_then(|p| p.get("auto_start"))
-                    .and_then(|v| v.as_bool())
+                    .and_then(json_boolish)
+                    .or_else(|| s.config.get("auto_start").and_then(json_boolish))
                     .unwrap_or(false);
                 if auto_start {
                     Some(s.id.clone())
@@ -64,7 +109,15 @@ async fn maybe_autostart_strategies(state: &AppState) {
     info!(count = ids.len(), "Auto-starting opted-in strategies on API boot");
     let svc = crate::services::StrategyService::new(state.clone());
     for id in ids {
-        match svc.start_strategy(&id).await {
+        let first = svc.start_strategy(&id).await;
+        let res = if first.is_ok() {
+            first
+        } else {
+            // API boot race (RPC warmup / key loading) can fail first attempt.
+            sleep(Duration::from_millis(600)).await;
+            svc.start_strategy(&id).await
+        };
+        match res {
             Ok(res) => {
                 if res.success {
                     info!(strategy_id = %id, "Auto-started strategy");
@@ -181,6 +234,7 @@ impl ApiServer {
         // Best-effort: re-add open positions into monitor after restart.
         seed_monitor_from_registry(self.state.monitor.clone()).await;
         maybe_autostart_strategies(&self.state).await;
+        spawn_stranded_reconcile_watchdog();
 
         let router = self.build_router();
 
@@ -204,6 +258,7 @@ impl ApiServer {
         // Best-effort: re-add open positions into monitor after restart.
         seed_monitor_from_registry(self.state.monitor.clone()).await;
         maybe_autostart_strategies(&self.state).await;
+        spawn_stranded_reconcile_watchdog();
 
         let router = self.build_router();
 

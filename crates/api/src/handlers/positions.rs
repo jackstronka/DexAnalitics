@@ -958,7 +958,9 @@ pub async fn get_position_lifecycle_summary(
     ),
     responses(
         (status = 200, description = "Position details", body = PositionResponse),
-        (status = 404, description = "Position not found")
+        (status = 400, description = "Invalid address or not a position account"),
+        (status = 404, description = "Position account absent on-chain for this RPC cluster"),
+        (status = 502, description = "RPC/upstream error while fetching position")
     )
 )]
 pub async fn get_position(
@@ -1726,8 +1728,15 @@ pub async fn collect_fees(
         .filter(|s| !s.is_empty());
     let op = svc.collect_fees(&address, sid).await?;
     if op.success {
+        let msg = op
+            .data
+            .as_ref()
+            .and_then(|d| d.get("message"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Fees collected from position: {address}"));
         Ok(Json(MessageResponse::new(format!(
-            "Fees collected from position: {address}"
+            "{msg}"
         ))))
     } else {
         Err(ApiError::ServiceUnavailable(
@@ -2005,3 +2014,4 @@ pub async fn suggest_position_strategy(
         reason: format!("Inferred parent PDA {parent} but no strategy contains it in parameters.position_addresses."),
     }))
 }
+

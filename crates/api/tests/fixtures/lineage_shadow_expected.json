@@ -1,0 +1,20 @@
+[
+  {
+    "position_address": "old",
+    "baseline_value_usd": "2.00",
+    "current_value_usd": "1.80",
+    "note": null
+  },
+  {
+    "position_address": "new",
+    "baseline_value_usd": "1.80",
+    "current_value_usd": "1.75",
+    "note": "baseline_from_rotation_session."
+  },
+  {
+    "position_address": "next",
+    "baseline_value_usd": "1.75",
+    "current_value_usd": "1.60",
+    "note": "baseline approximated from previous node end value (rotation continuity)."
+  }
+]

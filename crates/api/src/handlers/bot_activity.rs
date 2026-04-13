@@ -3,7 +3,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     BotActivityJsonlResponse, BotRegistryJsonlResponse, SlackActivitySummaryRequest,
-    SlackActivitySummaryResponse, PendingOpenRecoveryResponse,
+    SlackActivitySummaryResponse, PendingOpenRecoveryResponse, StrandedRebalancesResponse,
 };
 use crate::state::AppState;
 use axum::{
@@ -210,6 +210,48 @@ pub async fn get_pending_open_recovery(
         file_missing: false,
         data: Some(v),
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/bot-activity/stranded-rebalances",
+    tag = "Bot activity",
+    responses(
+        (status = 200, description = "Detected rebalance sessions with close and missing open", body = StrandedRebalancesResponse)
+    )
+)]
+pub async fn get_stranded_rebalances(
+    State(_state): State<AppState>,
+) -> ApiResult<Json<StrandedRebalancesResponse>> {
+    let r = crate::services::stranded_rebalance_watchdog::get_stranded_rebalances_snapshot()
+        .map_err(|e| ApiError::internal(format!("stranded rebalances: {e}")))?;
+    Ok(Json(r))
+}
+
+#[utoipa::path(
+    post,
+    path = "/bot-activity/stranded-rebalances/reconcile",
+    tag = "Bot activity",
+    responses(
+        (status = 200, description = "Auto-enqueue eligible stranded sessions into pending-open recovery", body = StrandedRebalancesResponse)
+    )
+)]
+pub async fn reconcile_stranded_rebalances(
+    State(_state): State<AppState>,
+) -> ApiResult<Json<StrandedRebalancesResponse>> {
+    match crate::services::stranded_rebalance_watchdog::reconcile_stranded_rebalances_for_api(
+        "watchdog auto-enqueue from POST /bot-activity/stranded-rebalances/reconcile",
+    ) {
+        Ok(r) => Ok(Json(r)),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("CLMM_IL_LEDGER_PATH") {
+                Err(ApiError::bad_request(msg))
+            } else {
+                Err(ApiError::internal(msg))
+            }
+        }
+    }
 }
 
 /// Post a short plain-text digest of recent lifecycle ledger rows to Slack (`SLACK_WEBHOOK_URL`).

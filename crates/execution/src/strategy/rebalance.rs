@@ -1956,16 +1956,23 @@ impl RebalanceExecutor {
         }
         let wallet = self.require_wallet()?;
         let reader = PositionReader::new(self.provider.clone());
-        let pos_state = reader
-            .get_position(&position.to_string())
-            .await
-            .context("collect_fees: read position for fee_owed")?;
-        let fee_owed_a = pos_state.fees_owed_a;
-        let fee_owed_b = pos_state.fees_owed_b;
+        let (fee_owed_a, fee_owed_b) = match reader.get_position(&position.to_string()).await {
+            Ok(pos_state) => (Some(pos_state.fees_owed_a), Some(pos_state.fees_owed_b)),
+            Err(e) => {
+                warn!(
+                    position = %position,
+                    error = %e,
+                    "collect_fees: cannot read position fee_owed_*; continuing collect without authoritative pre-tx legs"
+                );
+                (None, None)
+            }
+        };
 
         let orca = WhirlpoolExecutor::new(self.provider.clone());
         let payer = wallet.keypair();
         let res = orca.collect_fees(position, pool, payer).await?;
+        let fee_owed_a = res.collect_fee_owed_a_raw.or(fee_owed_a);
+        let fee_owed_b = res.collect_fee_owed_b_raw.or(fee_owed_b);
         self.ensure_execution_success(
             "collect_fees",
             &res,
@@ -1973,18 +1980,20 @@ impl RebalanceExecutor {
             Some(*position),
             ledger_session_id,
             None,
-            Some(fee_owed_a),
-            Some(fee_owed_b),
+            fee_owed_a,
+            fee_owed_b,
         )
         .await?;
 
         debug!(
             position = %position,
-            fee_owed_a = fee_owed_a,
-            fee_owed_b = fee_owed_b,
-            "Collect fees succeeded (amounts = pre-tx position fee_owed_a/b)"
+            quote_fee_owed_a = ?res.collect_fee_owed_a_raw,
+            quote_fee_owed_b = ?res.collect_fee_owed_b_raw,
+            fee_owed_a = ?fee_owed_a,
+            fee_owed_b = ?fee_owed_b,
+            "Collect fees succeeded (using Orca harvest quote for both legs when available)"
         );
-        Ok((fee_owed_a, fee_owed_b))
+        Ok((fee_owed_a.unwrap_or(0), fee_owed_b.unwrap_or(0)))
     }
 
     /// Decreases liquidity on-chain (`token_min_*` = 0 — set stricter mins when wiring slippage).

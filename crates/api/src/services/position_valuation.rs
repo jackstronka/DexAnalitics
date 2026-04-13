@@ -21,8 +21,60 @@ use solana_sdk::pubkey::Pubkey;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Mint;
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
+
+fn format_error_chain(err: &(dyn Error + 'static)) -> String {
+    let mut s = err.to_string();
+    let mut cur = err.source();
+    while let Some(e) = cur {
+        s.push_str(" | ");
+        s.push_str(&e.to_string());
+        cur = e.source();
+    }
+    s
+}
+
+/// True when Solana RPC / client indicates the account is absent (not a transport error).
+fn chain_suggests_account_absent(chain: &str) -> bool {
+    chain.contains("AccountNotFound")
+        || chain.contains("could not find account")
+        || chain.contains("Account does not exist")
+        || chain.contains("Invalid param: could not find account")
+}
+
+/// Maps [`PositionReader::get_position`] (and equivalent RPC reads) to HTTP errors.
+/// **Important:** generic RPC failures must not be returned as 404 — that misleads the UI into
+/// thinking the position is gone when the node is down, rate-limited, or timing out.
+pub(crate) fn map_position_fetch_error(err: anyhow::Error) -> ApiError {
+    let chain = format_error_chain(err.as_ref());
+    let root = err.to_string();
+
+    if chain.contains("This pubkey is a Whirlpool")
+        || chain.contains("not a **position** PDA")
+    {
+        return ApiError::bad_request(
+            "This address is not an Orca Whirlpool position account (often a pool address was pasted). \
+             Use the position PDA from the OpenPosition instruction (not the whirlpool/pool account)."
+                .to_string(),
+        );
+    }
+    if chain.contains("Failed to deserialize Whirlpool position") {
+        return ApiError::bad_request(format!(
+            "On-chain account is not a valid Whirlpool position layout: {root}"
+        ));
+    }
+    if chain_suggests_account_absent(&chain) {
+        return ApiError::not_found(format!(
+            "On-chain position account not found (likely closed, wrong cluster, or not a position PDA). {root}"
+        ));
+    }
+
+    ApiError::bad_gateway(format!(
+        "Solana RPC error while fetching position (does not prove the account is missing). Check RPC_URL / retries. {root}"
+    ))
+}
 
 /// Tick range expressed as **USDC per 1 unit of the non-USDC token** when the pool has exactly one USDC leg.
 #[derive(Debug, Clone)]
@@ -468,7 +520,7 @@ pub async fn monitored_position_from_chain(
     let on_chain = position_reader
         .get_position(&position_address.to_string())
         .await
-        .map_err(|e| ApiError::not_found(format!("Position not found: {e}")))?;
+        .map_err(map_position_fetch_error)?;
 
     let pool_reader = WhirlpoolReader::new(provider.clone());
     let pool_state = pool_reader
@@ -555,28 +607,32 @@ pub async fn compute_position_usd_valuation(
         dec_b,
     );
 
-    if amount_a_raw > 0 && is_wsol_mint(&pool_state.token_mint_a) && wsol_feed_usd_looks_bogus(pa) {
+    if amount_a_raw > 0 && is_wsol_mint(&pool_state.token_mint_a) {
         if let Some(p) = implied_sol_usd {
-            tracing::info!(
-                pool = %position.pool,
-                tick = pool_state.tick_current,
-                feed_usd = pa,
-                implied_sol_usd = p,
-                "WSOL USD from feed missing or implausible; using pool tick implied USDC/SOL"
-            );
-            pa = p;
+            if wsol_feed_usd_looks_bogus(pa) || is_usdc_mint(&pool_state.token_mint_b) {
+                tracing::info!(
+                    pool = %position.pool,
+                    tick = pool_state.tick_current,
+                    feed_usd = pa,
+                    implied_sol_usd = p,
+                    "WSOL USD valuation using pool tick implied USDC/SOL"
+                );
+                pa = p;
+            }
         }
     }
-    if amount_b_raw > 0 && is_wsol_mint(&pool_state.token_mint_b) && wsol_feed_usd_looks_bogus(pb) {
+    if amount_b_raw > 0 && is_wsol_mint(&pool_state.token_mint_b) {
         if let Some(p) = implied_sol_usd {
-            tracing::info!(
-                pool = %position.pool,
-                tick = pool_state.tick_current,
-                feed_usd = pb,
-                implied_sol_usd = p,
-                "WSOL USD from feed missing or implausible; using pool tick implied USDC/SOL"
-            );
-            pb = p;
+            if wsol_feed_usd_looks_bogus(pb) || is_usdc_mint(&pool_state.token_mint_a) {
+                tracing::info!(
+                    pool = %position.pool,
+                    tick = pool_state.tick_current,
+                    feed_usd = pb,
+                    implied_sol_usd = p,
+                    "WSOL USD valuation using pool tick implied USDC/SOL"
+                );
+                pb = p;
+            }
         }
     }
 
@@ -586,7 +642,6 @@ pub async fn compute_position_usd_valuation(
     let fees_b_ui = ui_amount(on_chain_fresh.fees_owed_b, dec_b);
 
     let value_usd_f = a_ui * pa + b_ui * pb;
-
     let fees_owed_a_ui = Decimal::from_f64_retain(fees_a_ui).unwrap_or(Decimal::ZERO);
     let fees_owed_b_ui = Decimal::from_f64_retain(fees_b_ui).unwrap_or(Decimal::ZERO);
     let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
@@ -701,5 +756,35 @@ mod tick_range_usdc_tests {
             p > 50.0 && p < 150.0,
             "implied SOL USD from tick -25268 (spot ~$80): got {p}"
         );
+    }
+}
+
+#[cfg(test)]
+mod map_position_fetch_tests {
+    use super::map_position_fetch_error;
+    use crate::error::ApiError;
+
+    #[test]
+    fn account_not_found_is_404() {
+        let err = map_position_fetch_error(anyhow::Error::msg(
+            "Failed to get account: AccountNotFound",
+        ));
+        assert!(matches!(err, ApiError::NotFound(_)), "{err:?}");
+    }
+
+    #[test]
+    fn connection_refused_is_bad_gateway() {
+        let e = anyhow::Error::msg("error sending request: connection refused");
+        let err = map_position_fetch_error(e);
+        assert!(matches!(err, ApiError::BadGateway(_)), "{err:?}");
+    }
+
+    #[test]
+    fn pool_pubkey_hint_is_bad_request() {
+        let e = anyhow::Error::msg(
+            "This pubkey is a Whirlpool **pool** account (653 bytes), not a **position** PDA (216 bytes).",
+        );
+        let err = map_position_fetch_error(e);
+        assert!(matches!(err, ApiError::BadRequest(_)), "{err:?}");
     }
 }

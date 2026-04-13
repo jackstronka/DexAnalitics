@@ -10,6 +10,72 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $WebDir = Join-Path $RepoRoot "web"
+$WorkCacheRoot = Join-Path $RepoRoot ".cache"
+$NpmCacheDir = Join-Path $WorkCacheRoot "npm-cache"
+$TempDir = Join-Path $WorkCacheRoot "tmp"
+New-Item -ItemType Directory -Force -Path $NpmCacheDir | Out-Null
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+$env:NPM_CONFIG_CACHE = $NpmCacheDir
+$env:TEMP = $TempDir
+$env:TMP = $TempDir
+
+function Stop-StaleDashboardProcesses {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $RepoRootPath
+  )
+
+  $repoEscaped = [Regex]::Escape($RepoRootPath)
+  $killed = 0
+
+  # Close helper pwsh windows launched by our start scripts.
+  try {
+    $pwsh = Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" -ErrorAction SilentlyContinue
+    foreach ($p in $pwsh) {
+      $cmd = [string]$p.CommandLine
+      if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+      if (
+        $cmd -match 'Start-ClmmApi-8081\.ps1' -or
+        $cmd -match 'Start-ClmmScriptRunner\.ps1' -or
+        ($cmd -match 'cargo run -q -p clmm-lp-api --bin clmm-lp-api' -and $cmd -match $repoEscaped)
+      ) {
+        try {
+          Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+          $killed++
+        } catch {
+          # best effort
+        }
+      }
+    }
+  } catch {
+    # best effort
+  }
+
+  # Ensure stale Vite processes from this repo are gone.
+  try {
+    $node = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue
+    foreach ($p in $node) {
+      $cmd = [string]$p.CommandLine
+      if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+      if ($cmd -match 'vite' -and $cmd -match $repoEscaped) {
+        try {
+          Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+          $killed++
+        } catch {
+          # best effort
+        }
+      }
+    }
+  } catch {
+    # best effort
+  }
+
+  if ($killed -gt 0) {
+    Write-Host "[Start-Dashboard-Safe] Zamknięto stare procesy dashboardu: $killed" -ForegroundColor DarkGray
+  }
+}
+
+Stop-StaleDashboardProcesses -RepoRootPath $RepoRoot
 
 if (-not (Test-Path (Join-Path $WebDir "package.json"))) {
   throw "Missing web/package.json (run from CLMM repo root)."
@@ -104,5 +170,7 @@ if (-not $env:VITE_API_KEY -or $env:VITE_API_KEY.Trim().Length -eq 0) {
 }
 
 Write-Host "[Start-Dashboard-Safe] Starting Vite on :3000 (proxy -> $env:API_UPSTREAM)..." -ForegroundColor Cyan
+Write-Host "[Start-Dashboard-Safe] NPM cache: $env:NPM_CONFIG_CACHE" -ForegroundColor DarkGray
+Write-Host "[Start-Dashboard-Safe] TEMP/TMP: $env:TEMP" -ForegroundColor DarkGray
 npx vite
 

@@ -247,6 +247,8 @@ pub struct ApiConfig {
     pub script_runner_token: Option<String>,
     /// Directory with wallet keypair JSON files on the API host (used by `GET /wallets`).
     pub wallets_dir: Option<String>,
+    /// Base (EVM) JSON-RPC URL for read-only calls (`BASE_RPC_URL`). Optional: Slipstream endpoints return 503 if unset.
+    pub base_rpc_url: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -268,6 +270,7 @@ impl Default for ApiConfig {
             script_runner_url: None,
             script_runner_token: None,
             wallets_dir: None,
+            base_rpc_url: None,
         }
     }
 }

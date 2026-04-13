@@ -281,7 +281,7 @@ pub async fn get_api_signer_wallet(
     let min_open_lamports = std::env::var("CLMM_MIN_OPEN_SOL_LAMPORTS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(10_000_000);
+        .unwrap_or(12_000_000);
     let min_swap_lamports = std::env::var("CLMM_MIN_SWAP_SOL_LAMPORTS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -301,7 +301,7 @@ pub async fn get_api_signer_wallet(
             min_open_lamports,
             min_swap_lamports,
             note: Some(
-                "Set KEYPAIR_PATH (or SOLANA_KEYPAIR_PATH) on the API host to enable in-app swaps/open."
+                "Set one signer source on API host: KEYPAIR_PATH / SOLANA_KEYPAIR_PATH / WALLET_KEYPAIR_PATH or SOLANA_KEYPAIR / WALLET_KEYPAIR_BASE58."
                     .to_string(),
             ),
         }));

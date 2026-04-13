@@ -14,12 +14,33 @@ use solana_transaction_status_client_types::{
     EncodedConfirmedTransactionWithStatusMeta, UiTransactionEncoding,
 };
 use solana_transaction_status_client_types::{TransactionConfirmationStatus, TransactionStatus};
+use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+
+fn format_error_chain(err: &(dyn Error + 'static)) -> String {
+    let mut s = err.to_string();
+    let mut cur = err.source();
+    while let Some(e) = cur {
+        s.push_str(" | ");
+        s.push_str(&e.to_string());
+        cur = e.source();
+    }
+    s
+}
+
+/// Solana `getAccount` / JSON-RPC for a missing account — rotating RPC nodes will not fix this.
+fn is_definitive_account_not_found(err: &anyhow::Error) -> bool {
+    let chain = format_error_chain(err.as_ref());
+    chain.contains("AccountNotFound")
+        || chain.contains("could not find account")
+        || chain.contains("Account does not exist")
+        || chain.contains("Invalid param: could not find account")
+}
 
 /// Lightweight signature status snapshot returned by `get_signature_status`.
 #[derive(Debug, Clone)]
@@ -157,6 +178,14 @@ impl RpcProvider {
                     return Ok(result);
                 }
                 Err(e) => {
+                    if is_definitive_account_not_found(&e) {
+                        debug!(
+                            endpoint = endpoint,
+                            chain = %format_error_chain(e.as_ref()),
+                            "RPC error is definitive account missing; skip rotate/retries"
+                        );
+                        return Err(e);
+                    }
                     if let Some(reason) = hard_disable_reason(&e) {
                         warn!(
                             endpoint = endpoint,
@@ -169,6 +198,7 @@ impl RpcProvider {
                         endpoint = endpoint,
                         retry = retry_count,
                         error = %e,
+                        error_full = %format_error_chain(e.as_ref()),
                         "RPC request failed"
                     );
                     self.health.record_failure(&endpoint).await;
@@ -646,5 +676,11 @@ mod tests {
         let provider = RpcProvider::devnet();
         let endpoint = provider.current_endpoint().await;
         assert!(endpoint.contains("devnet"));
+    }
+
+    #[test]
+    fn account_not_found_detected_in_chain() {
+        let e = anyhow::anyhow!("outer").context("could not find account");
+        assert!(is_definitive_account_not_found(&e));
     }
 }

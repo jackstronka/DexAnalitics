@@ -1,3 +1,243 @@
+## 2026-04-13 — WSOL/USDC valuation aligns with pool tick
+
+keywords: api, valuation, wsol, usdc, position-value, price-source, open-position
+
+- **What:** In position USD valuation, WSOL price for WSOL/USDC pools now prefers the pool tick-implied SOL/USD value (same on-chain state used to derive token amounts) instead of relying on external feed-only price.
+- **Why:** Runtime evidence showed open notional was near target, but displayed value drifted down because external SOL/USD feed diverged from pool-implied price for the same moment.
+- **paths:** `crates/api/src/services/position_valuation.rs`, `doc/BUGS.md`
+
+## 2026-04-13 — Open precheck from exact runtime simulation (+1% margin)
+
+keywords: orca, open, precheck, simulation, insufficient-lamports, exact-plan, margin
+
+- **What:** Replaced blocking WSOL-native heuristic in preflight with an exact-plan precheck based on `simulate_transaction` of the final signed instruction stack. If simulation logs `Transfer: insufficient lamports X, need Y`, API now returns a deterministic precheck failure using `ceil(Y*1.01)` as required native with 1% safety margin.
+- **Why:** Align decisioning with actual Solana/Orca runtime path (including CPI side-effects) instead of simplified native-SOL heuristics that could over/under-block.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `doc/BUGS.md`
+
+## 2026-04-13 — PositionCreate: swap suggestion now includes operational SOL reserve
+
+keywords: ui, position-create, swap, sol, rent, fees, min-open-lamports
+
+- **What:** `PositionCreate` funding checks now include native SOL reserve needed for open-path rent/fees. The UI computes projected native SOL after funding a WSOL leg and compares it against API `min_open_lamports` from `/wallets/api-signer`.
+- **Update:** WSOL leg sufficiency now uses token balance only (without adding native SOL), matching backend validation that requires both wrapped SOL for position notional and native SOL for operational rent/fees.
+- **Update:** Funding validation and displayed balances now use the API signer wallet (from `/wallets/api-signer`) instead of the locally selected UI wallet, aligning frontend gating with the actual backend transaction signer for open/swap flows.
+- **Update:** Tuned default `CLMM_MIN_OPEN_SOL_LAMPORTS` to `0.012 SOL` using local historical open costs (lifecycle ledger p95/max with buffer). This threshold is now explicitly treated as operational overhead guardrail, while WSOL leg notional is validated separately.
+- **Update:** `crates/protocols` WSOL open preflight now uses the same operational pad (`CLMM_MIN_OPEN_SOL_LAMPORTS`, default `0.012 SOL`) instead of a stale fixed `2_500_000` lamports, preventing false positives where preflight passed but `SystemProgram::Transfer` failed at simulation.
+- **Why:** Prevents false-positive readiness where token A/B balances are sufficient but `Open Position` still fails on missing native SOL for operational costs.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
+## 2026-04-13 — Strategy executor: no stale fallback after refresh
+
+keywords: strategy-executor, manual-close, stale-snapshot, evaluate_position, reopen, race
+
+- **What:** `evaluate_position` no longer uses stale cached `MonitoredPosition` after refresh problems. If refresh fails, or if refresh removed the position from monitor (e.g. manual close), the executor skips this cycle.
+- **Why:** Prevents unintended close/open actions on stale snapshots right after operator-triggered manual close.
+- **paths:** `crates/execution/src/strategy/executor.rs`, `doc/BUGS.md`
+
+## 2026-04-13 — UI lineage valuation quality badges (`exact` / `fallback` / `missing`)
+
+keywords: lineage, ui, valuation_quality, position-detail, closed-position-detail, start-value, end-value
+
+- **What:** Exposed `baseline_valuation_quality` and `current_valuation_quality` in `PositionStreamLineageNode` and wired badges next to `start value` / `end value` in both active and closed position lineage tables.
+- **Why:** Operators can now distinguish trustworthy event snapshots from fallback/missing valuations without inspecting raw notes.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-13 — Lineage prefers event snapshots (`baseline_open` / `end_close`)
+
+keywords: lineage, valuation-snapshots, baseline_open, end_close, valuation_quality, start-value, end-value
+
+- **What:** During `stream-lineage` build (DB mode), API now persists per-node event snapshots from lifecycle rows for the current chain: `baseline_open` (first open) and `end_close` (last close), including token leg amounts, USD value, `price_source`, and `valuation_quality` in `raw_json`.
+- **How:** Added `persist_event_valuation_snapshots_for_positions` (live+cached mint prices) and changed snapshot selection queries to prefer `raw_json.kind = baseline_open/end_close` before generic earliest/latest rows.
+- **Why:** Makes `start value` / `end value` rely on explicit open/close event snapshots instead of drifting to generic/fallback snapshots.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-13 — Backtest from open positions (`POST /backtests/from-open-position`)
+
+keywords: backtest, open-position, position-detail, clmm-lp-cli, snapshots, strategy-validation
+
+- **What:** Added `POST /api/v1/backtests/from-open-position` mirroring the closed-position flow but anchored on `registry_open` context. API derives start date from open timestamp (or request override), end date defaults to next UTC day from now (exclusive upper bound), range from open ticks, and capital from request or lifecycle/DB fallbacks.
+- **UI:** Added `Backtest (from open position)` panel on active `PositionDetail` with one-click run, job polling (`/backtests/{id}`), and stdout/stderr display.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-13 — Lineage: stable mint-price fallback cache for start/end valuation
+
+keywords: lineage, valuation, start-value, end-value, mint-prices, cache, fallback, position-stream-lineage
+
+- **Problem:** `Logs / rebalances` per-node `start value` / `end value` could intermittently drop to `—` when short price fetches timed out; repeated refreshes for the same chain could produce different values.
+- **Fix:** Added in-process mint price cache (`last good` TTL 15 min) and merged live+cache pricing path in `position_stream_lineage`: missing live quotes now reuse recent cached quotes instead of zeroing node valuation. Backfill snapshots also use the same stable price fetch path.
+- **Guards/tests:** Added unit test `merge_live_prices_uses_recent_cache_for_missing_mint`.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-11 — API: Base RPC + Aerodrome Slipstream `slot0` read endpoint
+
+keywords: api, BASE_RPC_URL, evm, eth_call, slipstream, slot0, aerodrome, openapi
+
+- **What:** `GET /api/v1/evm/base/aerodrome-slipstream/pools/{pool}/slot0` — `eth_call` `slot0()` via `BASE_RPC_URL`; JSON `SlipstreamSlot0Response` (tick, sqrtPriceX96 string, observation fields). Service `evm_json_rpc` decodes standard v3 return layout. `503` when env unset; `502` on RPC/decode failure.
+- **Update:** Plan `doc/AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md` dopisany o **§0 — najpierw komunikacja, potem cięższe rzeczy**; Etap A/B w zakresie produktu; fazy 0–1 przeformułowane pod ten priorytet; rustdoc w `aerodrome_slipstream` handlerze.
+- **paths:** `crates/api/src/services/evm_json_rpc.rs`, `crates/api/src/handlers/aerodrome_slipstream.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/api/src/models.rs`, `crates/api/src/state.rs`, `crates/api/src/main.rs`, `crates/api/Cargo.toml`, `.env.example`
+
+## 2026-04-11 — Aerodrome Slipstream Base: live deployment plan doc
+
+keywords: aerodrome, slipstream, base, live, deployment, phases, alloy, rpc, gauges-v3, doc
+
+- **What:** Added `doc/AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md` — phased rollout (0–5), official doc links (Slipstream README/SPEC, Base docs, Uniswap v3 reference), multi-generation `PoolFactory` warning, security/ops checklist, scope fee-only unstaked; indexed from `doc/README.md`.
+- **Update:** Plan dopisany o **referencyjne pary z UI** (WETH–cbBTC, WETH–USDC, USDC–cbBTC, badge `CL100`) oraz kanoniczne adresy **WETH / USDC / cbBTC** na Base do rozwiązywania puli; przypomnienie, że procent z badge to nie „prawda fee” bez odczytu on-chain.
+- **paths:** `doc/AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`, `doc/README.md`
+
+## 2026-04-11 — Aerodrome Slipstream (Base): pinned Gauges V3 addresses in `protocols`
+
+keywords: aerodrome, slipstream, base, evm, gauges-v3, PoolFactory, NonfungiblePositionManager, Quoter, protocols
+
+- **What:** Added `crates/protocols/src/aerodrome_slipstream/` with Base mainnet chain id and **Gauges V3** contract addresses from upstream Slipstream `README.md`, plus a short read-path integration checklist in module docs (unstaked vs gauge called out).
+- **Why:** Single in-repo source of truth before adding an EVM RPC client (`alloy` / etc.); avoids ad-hoc copy-paste from explorers.
+- **Update:** Product scope clarified as **fee z handlu only** — **unstaked** LP (NPM + pool `collect`); gauge stake / AERO emissions explicitly **out of scope** for the first integration; note on unstaked fee module vs naive Uniswap-v3 fee math in module rustdoc.
+- **paths:** `crates/protocols/src/aerodrome_slipstream/mod.rs`, `crates/protocols/src/lib.rs`
+
+## 2026-04-10 — RPC: dedupe endpoints + no rotate on definitive AccountNotFound
+
+keywords: RpcProvider, RpcConfig, all_endpoints, SOLANA_RPC_URL, AccountNotFound, rotation
+
+- **Problem:** Duplicate URLs in `all_endpoints()` (e.g. primary equals a fallback) made rotation log `from` == `to`. Definitive missing-account RPC errors still rotated through every node and incremented failure counters as if nodes were bad.
+- **Fix:** `all_endpoints()` dedupes by URL string (first wins). `execute_with_retry` returns immediately on chain-matched `AccountNotFound` / “could not find account” without rotate/retry; other failures log `error_full` (full chain) for diagnosis.
+- **paths:** `crates/protocols/src/rpc/config.rs`, `crates/protocols/src/rpc/provider.rs`
+
+## 2026-04-10 — GET /positions/:addr — RPC errors vs missing account (502 vs 404)
+
+keywords: get_position, monitored_position_from_chain, RpcProvider, 502, 404, PositionDetail
+
+- **Problem:** Any `get_account` failure was mapped to HTTP 404 `Position not found: Failed to get account`, so transient RPC issues looked like a missing position; UI could not distinguish proxy/API down from on-chain absence.
+- **Fix:** `map_position_fetch_error` classifies: pool-vs-position and bad layout → 400; Solana account absent (`AccountNotFound` / “could not find account”) → 404 with clearer copy; other RPC failures → 502 `Bad gateway`. Frontend `PositionDetail` adds contextual hints; `encodeURIComponent` on the path segment.
+- **Update:** `GET /positions/{address}` lived on the **30s** base router; slow RPC + valuation exceeded Tower’s limit → **HTTP 408** empty body. Route moved to **on-chain** router (`API_ONCHAIN_REQUEST_TIMEOUT_SECS`, default **120s**). UI `getPosition` timeout raised to **120s**; empty-body **408** hint in `messageFromErrorBody`.
+- **paths:** `crates/api/src/services/position_valuation.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/routes.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-10 — watchdog for stranded rebalances + dedicated Logs section
+
+keywords: bot-activity, watchdog, rebalance_incomplete, pending-open-recovery, logs-ui, close-without-open, CLMM_STRANDED_RECONCILE_INTERVAL_SECS
+
+- **Problem:** Rebalance sessions could end with `bot_close_position` and no matching `bot_open_position`, but detection/recovery visibility in UI was fragmented and partially heuristic.
+- **Fix:** Added watchdog API endpoints: `GET /bot-activity/stranded-rebalances` (detected close-without-open sessions) and `POST /bot-activity/stranded-rebalances/reconcile` (auto-enqueue eligible sessions to pending-open queue when IL `rebalance_incomplete` provides intended ticks). Added dedicated "Urwane pozycje (watchdog)" section in `Logs` with one-click reconcile and session drill-down filter.
+- **Update:** Logic lives in `stranded_rebalance_watchdog` service; API can run periodic reconcile in background when `CLMM_STRANDED_RECONCILE_INTERVAL_SECS` > 0 (requires `CLMM_IL_LEDGER_PATH`; if unset the task is a no-op per tick).
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `crates/api/src/server.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Logs.tsx`, `.env.example`, `tools/Start-ClmmApi-8081.ps1`
+- **Update:** `Start-ClmmApi-8081.ps1` hydrates `CLMM_STRANDED_RECONCILE_INTERVAL_SECS`, `CLMM_IL_LEDGER_PATH`, `CLMM_PENDING_OPEN_RECOVERY_PATH` from `.env` (when not already set) and forwards them to the `cargo run` child like signer vars.
+
+## 2026-04-10 — position ops executor: wallet env fallback for collect/swap/close
+
+keywords: position-executor, collect_fees, wallet, KEYPAIR_PATH, SOLANA_KEYPAIR, WALLET_KEYPAIR_BASE58
+
+- **Problem:** API position ops could fail with `requires executor and wallet configuration` even when key material was present in env (non-path form).
+- **Fix:** `load_wallet_from_env()` now checks file-path vars first, then env key material fallback (`SOLANA_KEYPAIR`, `WALLET_KEYPAIR_BASE58`) for lazy executor creation.
+- **Update:** Added wallet-env diagnostics in operation errors (collect/swap/open/close) including `path_exists` hints and updated `/wallets/api-signer` guidance text for all supported signer sources. `tools/Start-ClmmApi-8081.ps1` now loads signer env vars from `.env` and forwards them explicitly to the API process.
+- **Update:** `collect_fees` execution no longer hard-fails when pre-reading position `fee_owed_*` fails; it logs warning and continues harvest tx, storing authoritative LP leg raws only when pre-read data is available.
+- **Update:** API collect success response now includes both collected legs in message (`token A/B`) and exposes pre/post uncollected snapshots in response `data` to make harvested amounts auditable from UI.
+- **Update:** Lineage node `note` now explicitly marks `collect 1x` with `A/B=0` as a valid zero-owed collect event, reducing ambiguity between “missing data” and “executed collect with zero available fees”.
+- **Update:** Added per-node `collect_zero_diagnostics` for UI panel (`why 0`): estimated in-range time share, swap events in window, and estimated position share using local fee checkpoints + lifecycle rows.
+- **Update:** Collect legs now prefer Orca harvest quote (`fees_quote.fee_owed_a/b`) captured at instruction-build time, improving both-leg fidelity vs stale pre-read-only `fee_owed_*`.
+- **paths:** `crates/api/src/services/position_executor.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/handlers/wallets.rs`, `tools/Start-ClmmApi-8081.ps1`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`, `doc/BUGS.md`
+
+## 2026-04-10 — lineage shadow-diff gate + tagged data catalog
+
+keywords: lineage, shadow-diff, golden-fixture, quality-gates, data-catalog, data-tags
+
+- **Problem:** Needed deterministic regression detection for lineage metrics and a way to avoid duplicating snapshot pipelines when equivalent data already exists.
+- **Fix:** Added golden-fixture shadow diff test (`lineage_shadow_diff_matches_golden_fixture`) with expected JSON fixture and wired it into CI quality gates. Added `doc/DATA_CATALOG.md` with tagged source metadata and integrated it into AI quality checklist/rule.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/tests/fixtures/lineage_shadow_expected.json`, `.github/workflows/quality_gates.yml`, `doc/DATA_CATALOG.md`, `doc/AI_MERGE_CHECKLIST.md`, `.cursor/rules/ai-quality-gates.mdc`
+
+## 2026-04-10 — regression quality gates: bug->test, CI policy, merge checklist
+
+keywords: quality-gates, bug-regression, ci-policy, lineage-invariants, checklist, cursor-rules
+
+- **Problem:** High/critical regressions were reappearing because fixes were not consistently coupled with tests and merge-time checks.
+- **Fix:** Added CI gate `scripts/ci/critical-area-test-gate.sh` + workflow `.github/workflows/quality_gates.yml` that fails PRs when critical areas change without tests. Added mandatory AI rule `.cursor/rules/ai-quality-gates.mdc` and operator checklist `doc/AI_MERGE_CHECKLIST.md`. Added lineage regression/invariant tests in `position_stream_lineage.rs`.
+- **paths:** `.github/workflows/quality_gates.yml`, `scripts/ci/critical-area-test-gate.sh`, `.cursor/rules/ai-quality-gates.mdc`, `doc/AI_MERGE_CHECKLIST.md`, `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-04-10 — bug memory system: `doc/BUGS.md` + always-on AI rule
+
+keywords: bugs, regression, bug-registry, cursor-rules, ai-quality, context-retention
+
+- **Problem:** Repeated regressions and context loss across sessions/models caused the same classes of bugs to recur.
+- **Fix:** Added persistent bug registry `doc/BUGS.md` with searchable `keywords` and status fields, plus mandatory always-on rule `.cursor/rules/bug-registry.mdc` requiring AI to read/update bug entries for reported issues.
+- **paths:** `doc/BUGS.md`, `.cursor/rules/bug-registry.mdc`
+
+## 2026-04-10 — API default `DRY_RUN` changed to false
+
+keywords: DRY_RUN, AppState, collect_fees, swap-before-open, manual ops
+
+- **Problem:** Manual actions (`collect`, `swap-before-open`) often returned `Would ...` because API defaulted to dry-run when `DRY_RUN` env was missing.
+- **Fix:** `AppState` now defaults `DRY_RUN=false` when env is unset. `.env.example` updated to `DRY_RUN=false` for local dashboard/manual operation expectations.
+- **paths:** `crates/api/src/state.rs`, `.env.example`
+
+## 2026-04-10 — local startup: `Start-ClmmApi-8081.ps1` defaults to `DRY_RUN=false`
+
+keywords: DRY_RUN, Start-ClmmApi-8081.ps1, swap-before-open, collect_fees, local dashboard
+
+- **Problem:** UI actions (swap/collect/open) looked “broken” while API was in dry-run, returning `Would ...` messages and no tx signature.
+- **Fix:** Local API start script now sets `DRY_RUN=false` by default (unless user explicitly pre-sets `DRY_RUN`), and prints effective `DRY_RUN` value in launcher/API window.
+- **paths:** `tools/Start-ClmmApi-8081.ps1`
+
+## 2026-04-10 — UX truthfulness: collect/swap show real backend outcome
+
+keywords: collect_fees, swap-before-open, dry-run, ui feedback, positions handler
+
+- **Problem:** UI mogło pokazać „Collect requested” albo sprawiać wrażenie „nic się nie dzieje”, mimo że backend zwrócił dry-run/no-op/info (albo brak collectable fees).
+- **Fix:** `PositionDetail` pokazuje rzeczywisty `message` z API dla collect. Backend collect robi pre-check on-chain `fees_owed_{a,b}` i gdy oba = 0 zwraca jawny komunikat „No collectable fees…”, bez wysyłania tx. `PositionCreate` pokazuje `swapStepInfo` z odpowiedzi API także gdy brak signature.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/pages/PositionCreate.tsx`, `crates/api/src/services/position_service.rs`, `crates/api/src/handlers/positions.rs`
+
+## 2026-04-10 — stream-lineage: session-first continuity (`close(old) -> open(new)`)
+
+keywords: stream-lineage, rebalance_session_id, baseline_value_usd, rotation, session-first
+
+- **Problem:** Nawet przy świeżych danych baseline/current potrafił dryfować przez mieszanie źródeł i fallbacków.
+- **Fix:** Dodana reguła session-first: z lifecycle budujemy linki `old_position -> new_position` po tym samym `rebalance_session_id` i przenosimy `end(old)` jako `start(new)` dla węzłów sąsiadujących w chainie. Fallbacky działają dopiero po tej regule.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-10 — stream-lineage baseline: cap/fallback guardrail vs overstatement
+
+keywords: stream-lineage, baseline_value_usd, amount_a_cap, amount_b_cap, rotation continuity
+
+- **Problem:** `start value` mogło być zawyżone (np. ~2x `end value`) gdy fallback brał pełne open capy albo `prev_end` dla kolejnego PDA mimo braku wiarygodnej ciągłości.
+- **Fix:** Przy fallbackach baseline dodany limit wiarygodności: cap/prev-end może podnieść baseline tylko gdy nie przekracza ~135% bieżącego `current_value_usd` dla node. Chroni to przed skokami typu „dane z dupy”.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-10 — PositionCreate swap-before-open: anti-underestimate for `amount_in`
+
+keywords: PositionCreate, swap-before-open, estimateSwapInputRawExactIn, Whirlpool price, USD prices
+
+- **Problem:** W niektórych sesjach plan SWAP wyliczał zbyt mały `amount_in` (mikroswap), więc krok „Swap” praktycznie nie pokrywał deficytu i wyglądał jak „swap nie działa”.
+- **Fix:** Plan `swap_before_open` bierze teraz **większą** z dwóch estymacji: (1) USD-price based i (2) fallback z ceny puli Whirlpool (UI B-per-A), obie z +5% buforem; nadal ograniczone do ~92% dostępnego salda nogi finansującej.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-04-10 — strategie po restarcie: autostart bardziej niezawodny
+
+keywords: strategies, autostart, CLMM_STRATEGY_AUTOSTART_ON_BOOT, server boot, auto_start
+
+- **Problem:** Po restarcie API strategie z `auto_start` bywały nieaktywne, bo autostart był globalnie OFF bez env i czytał tylko `parameters.auto_start` jako strict bool.
+- **Fix:** Domyślnie autostart ON (chyba że env explicite wyłącza), parsowanie `auto_start` jako bool-ish (`true/false`, `1/0`, `yes/no`) + fallback do legacy root `config.auto_start`; przy starcie strategii na boot dodany jeden retry z krótkim backoffem.
+- **paths:** `crates/api/src/server.rs`
+
+## 2026-04-10 — collect_fees lineage: prefer authoritative pair (`lp_collected_token_*_raw`)
+
+keywords: stream-lineage, collect_fees, lp_collected_token_a_raw, lp_collected_token_b_raw, fee_owed
+
+- **Problem:** Agregacja node LP legs łączyła źródła `max(map/meta, columns, raw)`, co mogło dawać mylący obraz dla jednej nogi przy niepełnych danych RPC.
+- **Fix:** Gdy dla wiersza collect są dostępne **obie** wartości `lp_collected_token_{a,b}_raw`, lineage traktuje je jako źródło prawdy i używa tej pary bez mieszania z meta RPC; stare wiersze bez pary nadal działają fallbackowo.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-10 — stream-lineage collect legs: `0` tylko gdy noga jest potwierdzona
+
+keywords: stream-lineage, collect_fees, SOL, WSOL, unknown-vs-zero, lp_collected_token_raw
+
+- **Problem:** Po poprzedniej zmianie UI dostawało `0` dla obu nóg nawet gdy jedna noga była nieznana (brak źródła), co wyglądało jak „wszędzie SOL=0”.
+- **Fix:** Agregacja zapisuje `0` tylko gdy istnieje jawny sygnał nogi (`lp_collected_token_{a,b}_raw` obecne, także równe 0). Gdy noga nie ma żadnego dowodu w danych, API zostawia `null` i UI pokazuje `—`.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-10 — stream-lineage: continuity fallback `prev end -> next baseline`
+
+keywords: stream-lineage, baseline_value_usd, current_value_usd, rotation continuity, PositionDetail, ClosedPositionDetail
+
+- **Problem:** Ten sam PDA mógł mieć różny `start value` między widokiem open i closed (`—` vs liczba), gdy baseline dla nowego węzła był pusty, a poprzedni zamknięty węzeł miał już sensowne `end value`.
+- **Fix:** Po istniejącym fallbacku `next baseline -> prev end` dodany odwrotny fallback `prev end -> next baseline` (gdy baseline = 0), z przeliczeniem `net_pnl_*` i notą w node.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
 ## 2026-04-10 — stream-lineage: baseline guardrail w DB (`amount_*_cap` z open)
 
 keywords: stream-lineage, baseline_open, position_stream_valuation_snapshots, amount_a_cap, amount_b_cap, WSOL, PositionDetail
