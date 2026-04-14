@@ -45,22 +45,28 @@ keywords: position-create, wallet-balances, api-signer, stale-data, react-query,
 
 ### BUG-20260413-07 — Performance „Value” vs Position history (start/end): duża rozbieżność (~2×) na otwartej pozycji
 
-status: open  
+status: partially fixed  
 severity: medium  
 reported_by: user  
 first_seen: 2026-04-13  
-fixed_in:   
+fixed_in: local  
 keywords: position-detail, performance, stream-lineage, value-usd, snapshots, valuation-drift, UI-consistency
 
 - **Symptom:** Na `/positions/<PDA>` (otwarta pozycja) karta **Performance → Value** pokazuje np. **~$3.88**, a w **Position history (rotations)** kolumny **start value** i **end value** obie np. **~$1.80** z etykietą `exact` — użytkownik widzi pozornie „dwukrotnie mniej” w tabeli niż w Performance.
+- **Symptom (2026-04-14):** Karta **Performance → Value** bywa „historyczna”/zaniżona po wejściu na detal pozycji (frontend cache), mimo że oczekiwana jest bieżąca wycena.
+- **Symptom (2026-04-14, follow-up):** Po wdrożeniu odświeżania na mount, w części sesji `Performance -> Value` nadal wygląda na zaniżone (np. ~$2.278) względem oczekiwanej bieżącej wyceny.
+- **Symptom (2026-04-14, UI semantics):** Użytkownik mieszał „live value” (single PDA) z agregatem historycznym streamu; etykieta `end value` dla open node była czytana jako „przyszła wartość”.
 - **Root cause (analiza kodu):** Ta metryka „wartość USD” jest liczona w **dwóch miejscach** (nie jest jednym cache): karta Performance vs wiersz lineage. Karta Performance bierze `value_usd` z `GET /positions/{address}`: świeże `compute_position_usd_valuation` na stanie z monitora/RPC (`handlers/positions.rs`). Tabela lineage w `GET /positions/{address}/stream-lineage` dla węzła w ścieżce DB w `node_metrics` ustawia **baseline** i **current** z tabeli `position_stream_valuation_snapshots` (pierwszy vs ostatni wiersz wg sortowania SQL), a niekoniecznie z tą samą chwilą ani tą samą logiką co bieżąca karta. Dla **świeżo otwartej** pozycji często jest **jeden** (lub kilka) snapshotów — **start i end mogą wskazywać ten sam zapis**, z wartością zapisaną wcześniej (inny moment/ceny/jedna noga w delcie) podczas gdy karta już pokazuje nowszą wycenę. Etykieta `exact` w UI pochodzi z `raw_json.valuation_quality` snapshotu lub z ścieżki lifecycle — opisuje **jakość wejścia cen**, nie gwarancję zgodności z kartą Performance.
-- **Fix:** Do wdrożenia: dla węzłów **otwartych** (`closed_ts_utc` puste) ustawiać `current_value_usd` (ew. spójnie `baseline` przy braku sensownego open snapshot) tą samą ścieżką co `get_position` / `compute_position_usd_valuation`, albo w UI wyraźnie oznaczyć tabelę jako „wartości ze snapshotów ledgera” vs „bieżąca wartość” w Performance; opcjonalnie dopisywać nowy snapshot przy każdym `get_position` i używać **najnowszego** wiersza jako `current` dla aktywnej pozycji.
-- **Guards/tests:** Test regresyjny: mock DB z jednym snapshotem o wartości X i mock on-chain valuation Y — lineage dla otwartej pozycji nie powinien pokazywać obu kolumn jako X gdy API detail zwraca Y (po fixie); albo snapshot current nadpisany live.
+- **Fix:** (2026-04-13, uproszczenie) Zamiast wielu heurystyk w `node_metrics`, **`persist_event_valuation_snapshots_for_positions`** przy zapisie **`baseline_open`** uzupełnia **tylko brakującą nogę** (delta `amount_*_ui == 0`) z **`details.amount_*_cap`** (Orca max raw); druga noga zostaje z delt. **Pełne zastąpienie obu nóg capami** usunięte — cap to maksimum, nie faktyczny depozyt; dawało zawyżenie wobec **Performance** (np. ~$6.15 vs ~$5.60). `baseline_amounts_source: "open_caps"`. **`ON CONFLICT DO UPDATE`** tylko przy `open_caps`. `node_metrics` — prosty odczyt snapshotów + istniejący guardrail z ledgera.
+- **Fix (2026-04-14):** `PositionDetail` wymusza świeży fetch `GET /positions/{address}` na mount (`staleTime: 0`, `refetchOnMount: 'always'`). API zwraca też `valuation_source` (`live_valuation` vs `fallback_monitor`) dla `value_usd`, więc UI odróżnia świeżą wycenę od fallbacku monitora.
+- **Fix (2026-04-14, UI):** `PositionDetail` rozdziela semantykę sekcji: `Live value (this position, now)` + jawny opis źródła dla single-PDA endpointu; stream dostał nagłówek „history summary across rotated PDAs”; kolumna historii `end value` zmieniona na `current/end value`.
+- **Guards/tests:** `cargo test -p clmm-lp-api position_stream_lineage`; po deploy: odśwież stream-lineage (persist) dla danej PDA — stary zły wiersz `baseline_open` może się zaktualizować tylko gdy trafi `open_caps`.
+- **Residual risk:** Otwarcie **bez** `amount_*_cap` w `details` (np. część ścieżek CLI) — wtedy tylko delty + guardrail `node_metrics`; nadal możliwy drift cen/RPC. Dodatkowo możliwy pozostaje drift live/fallback przy chwilowej niedostępności RPC/price feed.
 - **Paths:** `web/src/pages/PositionDetail.tsx` (Performance vs tabela lineage), `crates/api/src/handlers/positions.rs` (`get_position`, zapis snapshotów), `crates/api/src/services/position_stream_lineage.rs` (`node_metrics`, zapytania `position_stream_valuation_snapshots`), `crates/api/src/services/position_valuation.rs`
 
 ### BUG-20260413-05 — Stream lineage chained manual opens to unrelated rotation history
 
-status: fixed  
+status: regressed  
 severity: medium  
 reported_by: user  
 first_seen: 2026-04-13  
@@ -68,9 +74,11 @@ fixed_in: local
 keywords: position-stream-lineage, rotation, registry.jsonl, lifecycle, rebalance_session_id, false-parent, manual-open
 
 - **Symptom:** A newly opened position in the same pool as prior activity appeared in **Position history (rotations)** as continuing an old PDA chain instead of a standalone node.
+- **Symptom (2026-04-14):** Część nowych botowych rebalance (`close -> open`) nie dopina się do historii i pojawia się jako nowa pozycja startowa; jednocześnie manual opens na tym samym poolu muszą pozostać oddzielnymi historiami.
 - **Root cause:** Registry fallback linked `registry_open` → `registry_close` by time/pool/owner even when `rebalance_session_id` did not match (or was empty). Lifecycle fallback linked opens to the latest close in a short window without requiring rotation evidence; forward close→open used the first qualifying open, not the true successor; lifecycle parent inference treated loose swap rows as rotation.
 - **Root cause (runtime `debug-c45ac3.log`, H-lineage):** With DB enabled, `db_chain_from_edges_len` stayed **1** while JSONL fallback inflated `chain_len` to **3–4** — `build_linear_chain` walked from a single graph root and **omitted `entry` on forked `position_stream_edges`** (`A→B` and `A→C`), fell back to `[entry]`, then registry/lifecycle re-stitched a long pool history.
-- **Fix:** Registry parent/chain only when both rows carry the same non-empty `rebalance_session_id`. Lifecycle uses `lifecycle_rotation_parent_before_open` (session match, `close_kind=rotation`, or bot activity tied to the closed PDA); forward links require that helper to return the closed PDA; `infer_parent_position_from_lifecycle_best_effort` delegates to the same helper. DB mode uses **`build_lineage_chain_from_db_edges`** (backward from `entry`, then forward); **JSONL/registry fallback is skipped when any persisted edge touches `entry`**. **JSONL/registry fallback also requires `lifecycle_open_has_prior_close_same_session`** (latest open’s `rebalance_session_id` must match a prior close in the same pool/payer within 60m) so UI `bot_open_position` + fresh `cost_session_id` does not inherit unrelated pool history; `position_open` (CLI) still suppresses stitching.
+- **Fix:** Registry parent/chain only when both rows carry the same non-empty `rebalance_session_id`. Lifecycle uses `lifecycle_rotation_parent_before_open` (session match, `close_kind=rotation`, or bot activity tied to the closed PDA); forward links require that helper to return the closed PDA; `infer_parent_position_from_lifecycle_best_effort` delegates to the same helper. DB mode uses **`build_lineage_chain_from_db_edges`** (backward from `entry`, then forward); **JSONL/registry fallback is skipped when any persisted edge touches `entry`**. **Update 2026-04-14:** JSONL suppress now blocks only fresh manual roots; bot-open nodes remain stitchable when rotation parent is inferable even with session mismatch. Rebalance executor now stamps one generated `ledger_session_id` through collect/close/swap/open lifecycle rows to improve deterministic close->open continuity.
+- **Guards/tests (2026-04-14):** Added `jsonl_stitch_allowed_when_rotation_parent_exists_without_session_match`; existing `jsonl_stitch_suppressed_when_open_session_not_on_prior_close` and `jsonl_stitch_allowed_when_session_matches_prior_close` still pass.
 - **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`.
 - **Paths:** `crates/api/src/services/position_stream_lineage.rs`
 
@@ -91,17 +99,17 @@ keywords: open-position, target-usd, valuation, wsol, usdc, price-source, drift
 
 ### BUG-20260413-03 — Close Position fails with Whirlpool custom 6018
 
-status: open  
+status: fixed  
 severity: high  
 reported_by: user  
 first_seen: 2026-04-13  
-fixed_in:   
+fixed_in: local  
 keywords: close-position, whirlpool, custom-6018, tokenminsubceeded, slippage, min-out
 
 - **Symptom:** `Close Position failed: ... InstructionError(2, Custom(6018)) ... TokenMinSubceeded` on `whirLb...` even for manual close flow.
-- **Root cause:** Unknown yet (hypotheses in progress): min-out/slippage too tight for close instruction vs price move at execution time, retry path may not be sufficient/visible, or wrong effective slippage passed to close.
-- **Fix:** In progress (runtime instrumentation added to close path to log effective slippage, attempt count, and exact fail branch before next fix).
-- **Guards/tests:** TODO after fix: regression test for close retry on 6018 and explicit user-facing hint with effective slippage/attempts.
+- **Root cause:** Manual close API path mapped executor failures to generic `500 Internal error`, so users did not get actionable guidance for Whirlpool `6018` (`TokenMinSubceeded`) even after executor-side retry logic was added.
+- **Fix:** `PositionService::close_position` now classifies close errors (like open path): `6018`/slippage returns `400` with explicit min-out/slippage hint and suggested close-specific knobs (`--slippage-bps`, `WHIRLPOOL_CLOSE_SLIPPAGE_BPS`); wallet misconfiguration is mapped to `503` with signer setup hint.
+- **Guards/tests:** Added regression test `close_position_error_6018_maps_to_bad_request_with_hint` in `crates/api/src/services/position_service.rs`; verified with `cargo test -p clmm-lp-api position_service::tests::close_position_error_6018_maps_to_bad_request_with_hint -- --nocapture`.
 - **Paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/services/position_service.rs`
 
 ### BUG-20260413-02 — PositionCreate nie sugerował swapu na operacyjny SOL

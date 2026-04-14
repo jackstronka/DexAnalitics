@@ -18,6 +18,11 @@ tags: domain=lifecycle,lineage; source=jsonl-local; freshness=historical; qualit
 
 - Event log for open/close/collect/swap bot operations.
 - Includes `rebalance_session_id` and collected LP raw legs (`lp_collected_token_a_raw`, `lp_collected_token_b_raw`) when available.
+- **Open/close row `details` (event-time valuation):** on successful bot `open_position` / `open_full_range_position` / `close_position`, the executor best-effort merges:
+  - `event_slot` (u64) — confirmation slot when known;
+  - `event_price_a_usd`, `event_price_b_usd` — USD spot for pool **token A / B** (same mint order as the Whirlpool), from a fresh pool read + GeckoTerminal (with the same WSOL/USDC tick override heuristic as API Performance);
+  - `event_price_source` — e.g. `gecko` or `gecko+pool_tick_wsol`.
+  Missing/timeout on enrichment does not block the ledger append. API lineage `persist_event_valuation_snapshots` prefers these fields for `baseline_open` / `end_close` and tags `raw_json.price_time_kind` (`at_tx_event` vs `at_persist_fallback`).
 
 ### `position_stream_ledger_rows` (Postgres)
 

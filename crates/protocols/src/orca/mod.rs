@@ -20,5 +20,7 @@ pub mod provider;
 pub mod tick_array;
 /// Tick boundary fetcher.
 pub mod tick_reader;
+/// Event-time USD spot for pool mints (aligns with API Performance heuristics).
+pub mod event_pool_mint_usd;
 /// Orca whirlpool account structures.
 pub mod whirlpool;

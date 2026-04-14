@@ -115,6 +115,40 @@ async fn fetch_mint_prices_usd_stable(
     (live_prices, source)
 }
 
+fn json_f64_for_event_price(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(|x| {
+        x.as_f64()
+            .or_else(|| x.as_i64().map(|i| i as f64))
+            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    })
+    .filter(|p| p.is_finite() && *p > 0.0)
+}
+
+fn json_u64_for_event_slot(v: Option<&serde_json::Value>) -> Option<u64> {
+    v.and_then(|x| {
+        x.as_u64()
+            .or_else(|| x.as_i64().and_then(|i| (i >= 0).then_some(i as u64)))
+            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    })
+}
+
+/// Ledger `details` fields written on successful bot open/close (`event_*` keys — see `doc/DATA_CATALOG.md`).
+fn event_spot_from_ledger_details(
+    details: Option<&serde_json::Value>,
+) -> Option<(f64, f64, String, Option<u64>)> {
+    let d = details?.as_object()?;
+    let pa = json_f64_for_event_price(d.get("event_price_a_usd"))?;
+    let pb = json_f64_for_event_price(d.get("event_price_b_usd"))?;
+    let src = d
+        .get("event_price_source")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let slot = json_u64_for_event_slot(d.get("event_slot"));
+    Some((pa, pb, src, slot))
+}
+
 async fn persist_event_valuation_snapshots_for_positions(
     state: &AppState,
     rows: &[LifecycleRow],
@@ -193,8 +227,12 @@ async fn persist_event_valuation_snapshots_for_positions(
         kind: &str,
         quality: &str,
         deltas: Option<&serde_json::Value>,
+        // When `Some("open_caps")`, amounts/value use ledger `details` caps (Orca max deposit raw).
+        baseline_amounts_source: Option<&'static str>,
+        price_time_kind: &'static str,
+        event_slot: Option<u64>,
     ) -> Result<(), ApiError> {
-        let raw = serde_json::json!({
+        let mut raw = serde_json::json!({
             "source": price_source,
             "kind": kind,
             "valuation_quality": quality,
@@ -207,14 +245,34 @@ async fn persist_event_valuation_snapshots_for_positions(
             "amount_b_ui": amount_b_ui,
             "price_a_usd": pa_d,
             "price_b_usd": pb_d,
+            "price_time_kind": price_time_kind,
             "fee_payer_token_deltas": deltas.cloned(),
         });
+        if let Some(s) = baseline_amounts_source {
+            raw["baseline_amounts_source"] = serde_json::json!(s);
+        }
+        if let Some(s) = event_slot {
+            raw["event_slot"] = serde_json::json!(s);
+        }
         sqlx::query(
             r#"
             INSERT INTO position_stream_valuation_snapshots
               (position_pubkey, ts_utc, pool_pubkey, value_usd, amount_a_ui, amount_b_ui, fees_usd, token_mint_a, token_mint_b, price_a_usd, price_b_usd, price_source, raw_json)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            ON CONFLICT (position_pubkey, ts_utc) DO NOTHING
+            ON CONFLICT (position_pubkey, ts_utc) DO UPDATE SET
+              pool_pubkey = EXCLUDED.pool_pubkey,
+              value_usd = EXCLUDED.value_usd,
+              amount_a_ui = EXCLUDED.amount_a_ui,
+              amount_b_ui = EXCLUDED.amount_b_ui,
+              fees_usd = EXCLUDED.fees_usd,
+              token_mint_a = EXCLUDED.token_mint_a,
+              token_mint_b = EXCLUDED.token_mint_b,
+              price_a_usd = EXCLUDED.price_a_usd,
+              price_b_usd = EXCLUDED.price_b_usd,
+              price_source = EXCLUDED.price_source,
+              raw_json = EXCLUDED.raw_json
+            WHERE EXCLUDED.raw_json->>'baseline_amounts_source' = 'open_caps'
+               OR position_stream_valuation_snapshots.raw_json->>'baseline_amounts_source' = 'open_caps'
             "#,
         )
         .bind(pos)
@@ -252,26 +310,92 @@ async fn persist_event_valuation_snapshots_for_positions(
         let Some((mint_a, mint_b)) = pool_mints.get(pool).cloned() else {
             continue;
         };
-        let pa = prices.get(&mint_a).copied().unwrap_or(0.0);
-        let pb = prices.get(&mint_b).copied().unwrap_or(0.0);
-        let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
-        let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
 
-        if let Some(r) = open
-            && let (Some(ts), Some(obj)) =
-                (r.ts_utc, r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()))
-        {
-            let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
-            let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
-            let amount_a_ui = (-da).max(Decimal::ZERO);
-            let amount_b_ui = (-dbb).max(Decimal::ZERO);
+        if let Some(r) = open && let Some(ts) = r.ts_utc {
+            let parse_cap_u64 = |v: &serde_json::Value| -> Option<u64> {
+                v.as_u64()
+                    .or_else(|| v.as_i64().and_then(|x| (x > 0).then_some(x as u64)))
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            };
+
+            let (pa_eff, pb_eff, mint_feed_suffix, time_kind, ev_slot) =
+                match event_spot_from_ledger_details(r.details.as_ref()) {
+                    Some((ea, eb, src, sl)) => (ea, eb, src, "at_tx_event", sl),
+                    None => {
+                        let pa0 = prices.get(&mint_a).copied().unwrap_or(0.0);
+                        let pb0 = prices.get(&mint_b).copied().unwrap_or(0.0);
+                        (
+                            pa0,
+                            pb0,
+                            price_source.clone(),
+                            "at_persist_fallback",
+                            None,
+                        )
+                    }
+                };
+            let pa_d = Decimal::from_f64_retain(pa_eff).unwrap_or(Decimal::ZERO);
+            let pb_d = Decimal::from_f64_retain(pb_eff).unwrap_or(Decimal::ZERO);
+
+            let mut amount_a_ui = Decimal::ZERO;
+            let mut amount_b_ui = Decimal::ZERO;
+            if let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()) {
+                let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
+                let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
+                amount_a_ui = (-da).max(Decimal::ZERO);
+                amount_b_ui = (-dbb).max(Decimal::ZERO);
+            }
+
+            let mut value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
+            let mut baseline_amounts_source: Option<&'static str> = None;
+
+            if let Some(details) = r.details.as_ref().and_then(|v| v.as_object()) {
+                if let (Some(ca_v), Some(cb_v)) =
+                    (details.get("amount_a_cap"), details.get("amount_b_cap"))
+                {
+                    if let (Some(cap_a), Some(cap_b)) =
+                        (parse_cap_u64(ca_v), parse_cap_u64(cb_v))
+                    {
+                        if cap_a > 0 && cap_b > 0 {
+                            let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
+                            let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
+                            if let (Some(a_pk), Some(b_pk)) = (a_pk, b_pk) {
+                                let dec_a =
+                                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &a_pk)
+                                        .await;
+                                let dec_b =
+                                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &b_pk)
+                                        .await;
+                                if let (Some(dec_a), Some(dec_b)) = (dec_a, dec_b) {
+                                    let cap_a_ui = decimal_ui_from_raw_u64(cap_a, dec_a);
+                                    let cap_b_ui = decimal_ui_from_raw_u64(cap_b, dec_b);
+                                    // Orca caps are **max** deposit per leg — using both caps for USD
+                                    // overstates vs on-chain liquidity (Performance). Only substitute legs
+                                    // that are **missing** in fee-payer deltas (typical wrapped/native SOL).
+                                    if pa_eff > 0.0 && pb_eff > 0.0 {
+                                        if amount_a_ui.is_zero() && !cap_a_ui.is_zero() {
+                                            amount_a_ui = cap_a_ui;
+                                            baseline_amounts_source = Some("open_caps");
+                                        }
+                                        if amount_b_ui.is_zero() && !cap_b_ui.is_zero() {
+                                            amount_b_ui = cap_b_ui;
+                                            baseline_amounts_source = Some("open_caps");
+                                        }
+                                        value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if !amount_a_ui.is_zero() || !amount_b_ui.is_zero() {
-                let value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
-                let quality = if pa > 0.0 && pb > 0.0 {
+                let quality = if pa_eff > 0.0 && pb_eff > 0.0 {
                     "exact"
                 } else {
                     "missing_price"
                 };
+                let col_price_src = format!("event_open_{mint_feed_suffix}");
                 insert_snapshot(
                     db,
                     p,
@@ -284,10 +408,13 @@ async fn persist_event_valuation_snapshots_for_positions(
                     value_usd,
                     pa_d,
                     pb_d,
-                    &format!("event_open_{price_source}"),
+                    &col_price_src,
                     "baseline_open",
                     quality,
                     r.fee_payer_token_deltas.as_ref(),
+                    baseline_amounts_source,
+                    time_kind,
+                    ev_slot,
                 )
                 .await?;
             }
@@ -297,17 +424,36 @@ async fn persist_event_valuation_snapshots_for_positions(
             && let (Some(ts), Some(obj)) =
                 (r.ts_utc, r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()))
         {
+            let (pa_eff, pb_eff, mint_feed_suffix, time_kind, ev_slot) =
+                match event_spot_from_ledger_details(r.details.as_ref()) {
+                    Some((ea, eb, src, sl)) => (ea, eb, src, "at_tx_event", sl),
+                    None => {
+                        let pa0 = prices.get(&mint_a).copied().unwrap_or(0.0);
+                        let pb0 = prices.get(&mint_b).copied().unwrap_or(0.0);
+                        (
+                            pa0,
+                            pb0,
+                            price_source.clone(),
+                            "at_persist_fallback",
+                            None,
+                        )
+                    }
+                };
+            let pa_d = Decimal::from_f64_retain(pa_eff).unwrap_or(Decimal::ZERO);
+            let pb_d = Decimal::from_f64_retain(pb_eff).unwrap_or(Decimal::ZERO);
+
             let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
             let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
             let amount_a_ui = da.max(Decimal::ZERO);
             let amount_b_ui = dbb.max(Decimal::ZERO);
             if !amount_a_ui.is_zero() || !amount_b_ui.is_zero() {
                 let value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
-                let quality = if pa > 0.0 && pb > 0.0 {
+                let quality = if pa_eff > 0.0 && pb_eff > 0.0 {
                     "exact"
                 } else {
                     "missing_price"
                 };
+                let col_price_src = format!("event_close_{mint_feed_suffix}");
                 insert_snapshot(
                     db,
                     p,
@@ -320,10 +466,13 @@ async fn persist_event_valuation_snapshots_for_positions(
                     value_usd,
                     pa_d,
                     pb_d,
-                    &format!("event_close_{price_source}"),
+                    &col_price_src,
                     "end_close",
                     quality,
                     r.fee_payer_token_deltas.as_ref(),
+                    None,
+                    time_kind,
+                    ev_slot,
                 )
                 .await?;
             }
@@ -451,16 +600,10 @@ fn lifecycle_entry_open_is_manual_cli(rows: &[LifecycleRow], entry: &str) -> boo
     best.is_some_and(|(_, manual)| manual)
 }
 
-/// True when the **latest** open row for `entry` shares a non-empty `rebalance_session_id` with some
-/// **close** row in the same pool + fee payer strictly before that open (60m lookback).
-///
-/// UI/API opens attach a fresh `cost_session_id` per request; that id does **not** match prior
-/// strategy `bot_close_position` rows, so JSONL/registry rotation stitching must not inherit unrelated
-/// pool history. True strategy rotations (close → open, same session) still match here.
-fn lifecycle_open_has_prior_close_same_session(rows: &[LifecycleRow], entry: &str) -> bool {
+fn lifecycle_latest_open_row<'a>(rows: &'a [LifecycleRow], entry: &str) -> Option<&'a LifecycleRow> {
     let entry = entry.trim();
     if entry.is_empty() {
-        return false;
+        return None;
     }
     let mut open_row: Option<&LifecycleRow> = None;
     let mut best_ts: Option<DateTime<Utc>> = None;
@@ -479,7 +622,17 @@ fn lifecycle_open_has_prior_close_same_session(rows: &[LifecycleRow], entry: &st
             open_row = Some(r);
         }
     }
-    let Some(o) = open_row else {
+    open_row
+}
+
+/// True when the **latest** open row for `entry` shares a non-empty `rebalance_session_id` with some
+/// **close** row in the same pool + fee payer strictly before that open (60m lookback).
+///
+/// UI/API opens attach a fresh `cost_session_id` per request; that id does **not** match prior
+/// strategy `bot_close_position` rows, so JSONL/registry rotation stitching must not inherit unrelated
+/// pool history. True strategy rotations (close → open, same session) still match here.
+fn lifecycle_open_has_prior_close_same_session(rows: &[LifecycleRow], entry: &str) -> bool {
+    let Some(o) = lifecycle_latest_open_row(rows, entry) else {
         return false;
     };
     let Some(open_ts) = o.ts_utc else {
@@ -531,9 +684,26 @@ fn lifecycle_open_has_prior_close_same_session(rows: &[LifecycleRow], entry: &st
     false
 }
 
-/// No registry/JSONL rotation chain when CLI manual open, or when open is not session-anchored to a prior close.
+/// No registry/JSONL rotation chain for fresh manual opens.
+/// For bot opens, allow stitching when we can infer a concrete rotation parent from lifecycle
+/// evidence (session match, `close_kind=rotation`, or bot activity tied to the closed PDA).
 fn suppress_jsonl_rotation_stitch(rows: &[LifecycleRow], entry: &str) -> bool {
-    lifecycle_entry_open_is_manual_cli(rows, entry) || !lifecycle_open_has_prior_close_same_session(rows, entry)
+    if lifecycle_entry_open_is_manual_cli(rows, entry) {
+        return true;
+    }
+    let Some(open_row) = lifecycle_latest_open_row(rows, entry) else {
+        return true;
+    };
+    let event = open_row.event.as_deref();
+    if !matches!(
+        event,
+        Some("bot_open_position") | Some("bot_open_position_full_range")
+    ) {
+        return true;
+    }
+    let has_parent = lifecycle_rotation_parent_before_open(rows, open_row).is_some();
+    let has_session_anchor = lifecycle_open_has_prior_close_same_session(rows, entry);
+    !(has_parent || has_session_anchor)
 }
 
 struct LifecycleRowsCache {
@@ -1883,6 +2053,8 @@ async fn node_metrics(
     };
 
     // Baseline/current valuation per PDA from persisted snapshots.
+    // Prefer explicit `baseline_open` / `end_close` rows from `persist_event_valuation_snapshots_for_positions`
+    // (corrected with `open_caps` when fee-payer deltas understate deposit).
     let baseline = sqlx::query(
         r#"
         SELECT ts_utc, value_usd, token_mint_a, token_mint_b, raw_json
@@ -2100,7 +2272,9 @@ async fn node_metrics(
 
     // DB path guardrail: baseline snapshots derived from open deltas may miss one leg (WSOL),
     // which can massively understate "start value". Correct from open `amount_*_cap` when available.
-    if baseline_value.is_zero() || (current_value > Decimal::ZERO && baseline_value < current_value * Decimal::new(60, 2)) {
+    if baseline_value.is_zero()
+        || (current_value > Decimal::ZERO && baseline_value < current_value * Decimal::new(60, 2))
+    {
         let open_row = sqlx::query(
             r#"
             SELECT raw_json
@@ -3351,6 +3525,7 @@ pub async fn infer_parent_position_from_lifecycle_best_effort(entry: &str) -> Op
 
 #[cfg(test)]
 mod tests {
+    use super::event_spot_from_ledger_details;
     use super::*;
     use serde::Serialize;
 
@@ -3520,6 +3695,46 @@ mod tests {
         ];
         assert!(lifecycle_open_has_prior_close_same_session(&rows, "posB"));
         assert!(!suppress_jsonl_rotation_stitch(&rows, "posB"));
+    }
+
+    #[test]
+    fn jsonl_stitch_allowed_when_rotation_parent_exists_without_session_match() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::minutes(1);
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                details: Some(serde_json::json!({ "close_kind": "rotation" })),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("fresh-open-session".to_string()),
+                ..empty_lifecycle_row()
+            },
+        ];
+        assert!(
+            !lifecycle_open_has_prior_close_same_session(&rows, "posB"),
+            "session may differ, but rotation parent still exists"
+        );
+        assert!(
+            !suppress_jsonl_rotation_stitch(&rows, "posB"),
+            "bot open with inferred rotation parent should stay stitchable"
+        );
+        assert_eq!(
+            chain_from_lifecycle_best_effort_rows(&rows, "posB", 25),
+            vec!["posA".to_string(), "posB".to_string()]
+        );
     }
 
     #[test]
@@ -3714,6 +3929,27 @@ mod tests {
         let got = serde_json::to_string_pretty(&to_shadow(&nodes)).expect("serialize shadow");
         let expected = include_str!("../../tests/fixtures/lineage_shadow_expected.json").trim();
         assert_eq!(got.trim(), expected);
+    }
+
+    #[test]
+    fn event_spot_from_ledger_details_parses_prices_source_and_slot() {
+        let d = serde_json::json!({
+            "event_price_a_usd": "100.5",
+            "event_price_b_usd": 1.0,
+            "event_price_source": "gecko+pool_tick_wsol",
+            "event_slot": "12345"
+        });
+        let got = event_spot_from_ledger_details(Some(&d)).expect("parse");
+        assert!((got.0 - 100.5).abs() < 1e-9);
+        assert!((got.1 - 1.0).abs() < 1e-9);
+        assert_eq!(got.2, "gecko+pool_tick_wsol");
+        assert_eq!(got.3, Some(12345));
+    }
+
+    #[test]
+    fn event_spot_from_ledger_details_requires_both_prices() {
+        let d = serde_json::json!({ "event_price_a_usd": 1.0 });
+        assert!(event_spot_from_ledger_details(Some(&d)).is_none());
     }
 }
 

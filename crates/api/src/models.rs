@@ -208,6 +208,11 @@ pub struct PositionResponse {
     /// Current value in USD.
     #[schema(value_type = String)]
     pub value_usd: Decimal,
+    /// Source quality for `value_usd`:
+    /// - `live_valuation`: fresh on-chain valuation path succeeded
+    /// - `fallback_monitor`: fallback to monitor cache (valuation failed)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valuation_source: Option<String>,
     /// PnL details.
     pub pnl: PnLResponse,
     /// Position status.

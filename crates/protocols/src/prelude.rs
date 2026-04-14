@@ -25,6 +25,7 @@ pub use crate::events::{
 
 // Orca
 pub use crate::orca::deposit_quote::{DepositBudgetQuote, quote_deposit_budget_in_range};
+pub use crate::orca::event_pool_mint_usd::fetch_event_pool_mint_usd_prices;
 pub use crate::orca::executor::{
     DecreaseLiquidityParams, ExecutionResult, IncreaseLiquidityParams, OpenFullRangeParams,
     OpenPositionParams, WhirlpoolExecutor, derive_whirlpool_position_address,

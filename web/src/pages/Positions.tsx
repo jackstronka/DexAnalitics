@@ -1,11 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useQuery, useQueries } from '@tanstack/react-query'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
-import { getOrcaPositionsByOwner, getPositions } from '@/lib/api'
+import { getOrcaPositionsByOwner, getPoolState, getPositions, getStrategies } from '@/lib/api'
+import type { Position, Strategy } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import {
   formatUSD,
@@ -34,6 +35,58 @@ function rangeStatusLabel(inRange: boolean | undefined) {
   return '—'
 }
 
+function strategyTypeLabel(v: Strategy['strategy_type']) {
+  return v.replace(/_/g, ' ')
+}
+
+function strategyParamsSummary(s: Strategy) {
+  const p = s.parameters ?? {}
+  const bits: string[] = []
+  if (typeof p.rebalance_threshold_pct === 'number' && p.rebalance_threshold_pct > 0) {
+    bits.push(`thr ${p.rebalance_threshold_pct}%`)
+  }
+  if (typeof p.min_rebalance_interval_hours === 'number' && p.min_rebalance_interval_hours > 0) {
+    bits.push(`every ${p.min_rebalance_interval_hours}h`)
+  }
+  if (typeof p.range_width_pct === 'number' && p.range_width_pct > 0) {
+    bits.push(`width ${p.range_width_pct}%`)
+  }
+  if (typeof p.max_il_pct === 'number' && p.max_il_pct > 0) {
+    bits.push(`max IL ${p.max_il_pct}%`)
+  }
+  if (p.periodic_requires_out_of_range === true) {
+    bits.push('only OOR')
+  }
+  if (p.rebalance_on_range_exit_immediately === true) {
+    bits.push('instant on range-exit')
+  }
+  return bits.length ? bits.join(' · ') : 'no explicit toggles'
+}
+
+function parseNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string') {
+    const n = parseFloat(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function estimateNowUsdcFromPosition(p: Position): number | null {
+  const quote = (p.range_usdc_quote ?? '').toLowerCase()
+  const labelA = (p.token_a_label ?? '').toLowerCase()
+  const labelB = (p.token_b_label ?? '').toLowerCase()
+  if (quote && labelA && quote.includes(labelA) && typeof p.token_price_a_usd === 'number') {
+    return p.token_price_a_usd
+  }
+  if (quote && labelB && quote.includes(labelB) && typeof p.token_price_b_usd === 'number') {
+    return p.token_price_b_usd
+  }
+  if (labelA === 'usdc' && typeof p.token_price_b_usd === 'number') return p.token_price_b_usd
+  if (labelB === 'usdc' && typeof p.token_price_a_usd === 'number') return p.token_price_a_usd
+  return null
+}
+
 export default function Positions() {
   const navigate = useNavigate()
   const devPk = getDevWalletPubkey()
@@ -44,6 +97,11 @@ export default function Positions() {
     queryKey: ['positions'],
     queryFn: getPositions,
   })
+  const strategiesQ = useQuery({
+    queryKey: ['strategies'],
+    queryFn: getStrategies,
+    staleTime: 30_000,
+  })
 
   const chainQ = useQuery({
     queryKey: ['orca-positions-by-owner', appliedOwner],
@@ -53,6 +111,39 @@ export default function Positions() {
   })
 
   const positions = data?.positions || []
+  const monitoredPools = useMemo(
+    () => Array.from(new Set(positions.map((p) => p.pool_address).filter((v) => !!v))),
+    [positions],
+  )
+  const poolStateQueries = useQueries({
+    queries: monitoredPools.map((poolAddress) => ({
+      queryKey: ['pool-state', poolAddress],
+      queryFn: () => getPoolState(poolAddress),
+      staleTime: 30_000,
+      retry: 1,
+    })),
+  })
+  const poolSpotByAddress = useMemo(() => {
+    const m = new Map<string, number>()
+    monitoredPools.forEach((poolAddress, idx) => {
+      const n = parseNum(poolStateQueries[idx]?.data?.price)
+      if (n !== null) m.set(poolAddress, n)
+    })
+    return m
+  }, [monitoredPools, poolStateQueries])
+
+  const strategiesByPosition = useMemo(() => {
+    const map = new Map<string, Strategy[]>()
+    for (const s of strategiesQ.data?.strategies ?? []) {
+      for (const addr of s.parameters?.position_addresses ?? []) {
+        const key = addr.trim()
+        if (!key) continue
+        if (!map.has(key)) map.set(key, [])
+        map.get(key)!.push(s)
+      }
+    }
+    return map
+  }, [strategiesQ.data])
 
   return (
     <div className="space-y-6">
@@ -96,7 +187,7 @@ export default function Positions() {
                 <thead>
                   <tr className="border-b text-left text-sm text-muted-foreground">
                     <th className="pb-3 font-medium">Position</th>
-                    <th className="pb-3 font-medium">Pool</th>
+                    <th className="pb-3 font-medium">Strategy</th>
                     <th className="pb-3 font-medium">Range (in / out)</th>
                     <th className="pb-3 font-medium text-right">Value</th>
                     <th className="pb-3 font-medium text-right">PnL</th>
@@ -120,22 +211,36 @@ export default function Positions() {
                             priceA={position.token_price_a_usd}
                             priceB={position.token_price_b_usd}
                           />
-                          {position.token_a_label && position.token_b_label ? (
-                            <div className="text-[11px] text-muted-foreground font-mono">
-                              PDA {shortenAddress(position.address)}
-                            </div>
-                          ) : (
+                          {!(position.token_a_label && position.token_b_label) ? (
                             <div className="font-medium font-mono text-sm">
                               {shortenAddress(position.address)}
                             </div>
-                          )}
+                          ) : null}
                         </Link>
                       </td>
-                      <td className="py-4 text-muted-foreground">
-                        <span className="font-mono text-xs">{shortenAddress(position.pool_address)}</span>
+                      <td className="py-4 max-w-[18rem]">
+                        {(() => {
+                          const linked = strategiesByPosition.get(position.address) ?? []
+                          if (!linked.length) {
+                            return <span className="text-xs text-muted-foreground">Not linked</span>
+                          }
+                          return (
+                            <div className="space-y-1.5">
+                              {linked.map((s) => (
+                                <div key={s.id} className="text-xs leading-tight">
+                                  <div className="font-medium">
+                                    {s.name}{' '}
+                                    <span className="text-muted-foreground">({strategyTypeLabel(s.strategy_type)})</span>
+                                  </div>
+                                  <div className="text-muted-foreground">{strategyParamsSummary(s)}</div>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        })()}
                       </td>
                       <td className="py-4">
-                        <div className="space-y-0.5">
+                        <div className="space-y-1">
                           <span className={`text-sm block ${rangeCellClass(position.in_range)}`}>
                             {formatUsdcPriceRange(
                               position.range_lower_usdc ?? undefined,
@@ -149,6 +254,33 @@ export default function Positions() {
                               ) ??
                               `${position.tick_lower} → ${position.tick_upper}`}
                           </span>
+                          {(() => {
+                            const lowerUsdc = parseNum(position.range_lower_usdc)
+                            const upperUsdc = parseNum(position.range_upper_usdc)
+                            const lowerGeneric = parseNum(position.range_lower_price)
+                            const upperGeneric = parseNum(position.range_upper_price)
+                            const useUsdc = lowerUsdc !== null && upperUsdc !== null
+                            const lower = useUsdc ? lowerUsdc : lowerGeneric
+                            const upper = useUsdc ? upperUsdc : upperGeneric
+                            const now = useUsdc
+                              ? estimateNowUsdcFromPosition(position)
+                              : (poolSpotByAddress.get(position.pool_address) ?? null)
+                            if (lower === null || upper === null || now === null || upper <= lower) return null
+                            const markerPct = Math.max(0, Math.min(100, ((now - lower) / (upper - lower)) * 100))
+                            return (
+                              <div className="pt-0.5">
+                                <div className="relative h-1.5 rounded-full bg-muted">
+                                  <span
+                                    className={`absolute top-1/2 h-3 w-3 -translate-y-1/2 -translate-x-1/2 rounded-full border border-background ${
+                                      position.in_range ? 'bg-emerald-500' : 'bg-red-500'
+                                    }`}
+                                    style={{ left: `${markerPct}%` }}
+                                    aria-label="Current price inside position range"
+                                  />
+                                </div>
+                              </div>
+                            )
+                          })()}
                           <span className="text-[11px] text-muted-foreground">
                             {rangeStatusLabel(position.in_range)}
                           </span>

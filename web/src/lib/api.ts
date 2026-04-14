@@ -37,6 +37,7 @@ export interface Position {
   liquidity: string
   in_range: boolean
   value_usd: string
+  valuation_source?: 'live_valuation' | 'fallback_monitor' | string | null
   pnl: PnL
   status: 'active' | 'closed' | 'pending'
   created_at: string | null

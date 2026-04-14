@@ -349,6 +349,11 @@ pub async fn list_positions(
             .as_ref()
             .map(|v| v.value_usd)
             .unwrap_or(p.pnl.current_value_usd);
+        let valuation_source = if valuation.is_some() {
+            Some("live_valuation".to_string())
+        } else {
+            Some("fallback_monitor".to_string())
+        };
         let fees_usd = valuation
             .as_ref()
             .map(|v| v.fees_usd)
@@ -421,6 +426,7 @@ pub async fn list_positions(
             liquidity: p.on_chain.liquidity.to_string(),
             in_range: in_range_fresh,
             value_usd,
+            valuation_source,
             pnl: PnLResponse {
                 unrealized_pnl_usd: p.pnl.net_pnl_usd,
                 unrealized_pnl_pct: p.pnl.net_pnl_pct,
@@ -1036,6 +1042,11 @@ pub async fn get_position(
         .as_ref()
         .map(|v| v.value_usd)
         .unwrap_or(position.pnl.current_value_usd);
+    let valuation_source = if valuation.is_some() {
+        Some("live_valuation".to_string())
+    } else {
+        Some("fallback_monitor".to_string())
+    };
     let fees_usd = valuation
         .as_ref()
         .map(|v| v.fees_usd)
@@ -1108,6 +1119,7 @@ pub async fn get_position(
         liquidity: position.on_chain.liquidity.to_string(),
         in_range: in_range_fresh,
         value_usd,
+        valuation_source,
         pnl: PnLResponse {
             unrealized_pnl_usd: position.pnl.net_pnl_usd,
             unrealized_pnl_pct: position.pnl.net_pnl_pct,

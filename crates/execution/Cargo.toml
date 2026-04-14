@@ -32,7 +32,6 @@ chrono = { workspace = true }
 zeroize = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
-bs58 = "0.5"
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }

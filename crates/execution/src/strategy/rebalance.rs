@@ -19,6 +19,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 /// Retries for `open_position` after a successful close (`CLMM_REBALANCE_OPEN_MAX_ATTEMPTS`, 1..=20, default 5).
 fn rebalance_open_max_attempts() -> u32 {
@@ -588,6 +589,7 @@ impl RebalanceExecutor {
         tick_upper: i32,
         owner: &Pubkey,
         log_position: &Pubkey,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<u32> {
         if self.is_dry_run() {
             return Ok(0);
@@ -872,7 +874,7 @@ impl RebalanceExecutor {
                         amount_in,
                         self.config.max_slippage_bps,
                         Some(*log_position),
-                        None,
+                        ledger_session_id.clone(),
                     )
                     .await
                 {
@@ -1083,7 +1085,7 @@ impl RebalanceExecutor {
                         amount_in,
                         self.config.max_slippage_bps,
                         Some(*log_position),
-                        None,
+                        ledger_session_id.clone(),
                     )
                     .await
                 {
@@ -1203,6 +1205,7 @@ impl RebalanceExecutor {
         amount_a_before_calc: u64,
         amount_b_before_calc: u64,
         log_position: &Pubkey,
+        ledger_session_id: Option<String>,
     ) -> Result<(Pubkey, u32), String> {
         let Some(owner) = self.wallet_pubkey() else {
             return Err(
@@ -1218,6 +1221,7 @@ impl RebalanceExecutor {
                 new_tick_upper,
                 &owner,
                 log_position,
+                ledger_session_id.clone(),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -1272,7 +1276,14 @@ impl RebalanceExecutor {
             }
 
             match self
-                .open_position(pool, new_tick_lower, new_tick_upper, cap_a, cap_b)
+                .open_position(
+                    pool,
+                    new_tick_lower,
+                    new_tick_upper,
+                    cap_a,
+                    cap_b,
+                    ledger_session_id.clone(),
+                )
                 .await
             {
                 Ok(pos) => {
@@ -1360,6 +1371,7 @@ impl RebalanceExecutor {
             tx_cost_lamports: 0,
             error: None,
         };
+        let rebalance_session_id = Uuid::new_v4().to_string();
 
         if self.is_dry_run() {
             info!("Dry run mode - simulating rebalance");
@@ -1424,7 +1436,14 @@ impl RebalanceExecutor {
 
         // Step 1: Collect fees if configured
         if self.config.collect_fees_first {
-            match self.collect_fees(&params.position, &params.pool, None).await {
+            match self
+                .collect_fees(
+                    &params.position,
+                    &params.pool,
+                    Some(rebalance_session_id.clone()),
+                )
+                .await
+            {
                 Ok(fees) => {
                     result.fees_collected = Some(fees);
                     result.tx_cost_lamports += 5000; // Approximate
@@ -1601,7 +1620,12 @@ impl RebalanceExecutor {
         // Step 3: Close old position (includes decreasing all liquidity + collecting remaining fees)
         result.liquidity_removed = params.current_liquidity;
         if let Err(e) = self
-            .close_position(&params.position, &params.pool, None, Some(serde_json::json!({"close_kind":"rotation"})))
+            .close_position(
+                &params.position,
+                &params.pool,
+                Some(rebalance_session_id.clone()),
+                Some(serde_json::json!({"close_kind":"rotation"})),
+            )
             .await
         {
             error!(
@@ -1648,6 +1672,7 @@ impl RebalanceExecutor {
                 amount_a_before_calc,
                 amount_b_before_calc,
                 &params.position,
+                Some(rebalance_session_id.clone()),
             )
             .await
         {
@@ -1804,6 +1829,7 @@ impl RebalanceExecutor {
                 1,
                 1,
                 &p.closed_position_nft,
+                None,
             )
             .await
         {
@@ -2069,6 +2095,7 @@ impl RebalanceExecutor {
         tick_upper: i32,
         cap_a: u64,
         cap_b: u64,
+        ledger_session_id: Option<String>,
     ) -> anyhow::Result<Pubkey> {
         let (p, _, _) = self
             .open_position_with_caps(
@@ -2078,7 +2105,7 @@ impl RebalanceExecutor {
                 cap_a,
                 cap_b,
                 self.config.max_slippage_bps,
-                None,
+                ledger_session_id,
             )
             .await?;
         Ok(p)
@@ -2362,6 +2389,23 @@ impl RebalanceExecutor {
                 .ok()
                 .and_then(|g| g.as_ref().map(|w| w.pubkey()));
             if let Some(fee_payer) = fee_payer {
+                let ledger_for_append = if matches!(
+                    op_name,
+                    "open_position" | "open_full_range_position" | "close_position"
+                ) {
+                    Some(
+                        enrich_open_close_ledger_details(
+                            self.provider.clone(),
+                            pool,
+                            result,
+                            ledger_details.clone(),
+                        )
+                        .await,
+                    )
+                } else {
+                    ledger_details.clone()
+                };
+
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_rebalance_executor_tx_cost(
                     self.provider.as_ref(),
                     &fee_payer,
@@ -2371,7 +2415,7 @@ impl RebalanceExecutor {
                     position,
                     result.created_position,
                     ledger_session_id.clone(),
-                    ledger_details.clone(),
+                    ledger_for_append.clone(),
                     lp_collected_token_a_raw,
                     lp_collected_token_b_raw,
                 )
@@ -2410,7 +2454,7 @@ impl RebalanceExecutor {
                         &fee_payer,
                         &result.signature,
                         ledger_session_id,
-                        ledger_details.clone(),
+                        ledger_for_append.clone(),
                     )
                     .await;
                 }
@@ -2445,6 +2489,61 @@ impl RebalanceExecutor {
 
         Ok(())
     }
+}
+
+/// Merge `event_slot` + best-effort pool mint USD spot into lifecycle `details` (open/close only).
+async fn enrich_open_close_ledger_details(
+    provider: Arc<RpcProvider>,
+    pool: Option<Pubkey>,
+    result: &clmm_lp_protocols::orca::executor::ExecutionResult,
+    ledger_details: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut base = match ledger_details {
+        Some(serde_json::Value::Object(m)) => serde_json::Value::Object(m),
+        Some(other) => {
+            let mut m = serde_json::Map::new();
+            m.insert("_non_object_ledger_details".to_string(), other);
+            serde_json::Value::Object(m)
+        }
+        None => serde_json::json!({}),
+    };
+    if let Some(slot) = result.slot {
+        if let Some(obj) = base.as_object_mut() {
+            obj.insert("event_slot".to_string(), slot.into());
+        }
+    }
+    if let Some(pool_pk) = pool {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            clmm_lp_protocols::orca::event_pool_mint_usd::fetch_event_pool_mint_usd_prices(
+                provider.clone(),
+                &pool_pk,
+            ),
+        )
+        .await
+        {
+            Ok(Some(ev)) => {
+                if let Some(obj) = base.as_object_mut() {
+                    obj.insert("event_price_a_usd".to_string(), serde_json::json!(ev.price_a_usd));
+                    obj.insert("event_price_b_usd".to_string(), serde_json::json!(ev.price_b_usd));
+                    obj.insert(
+                        "event_price_source".to_string(),
+                        serde_json::json!(ev.price_source),
+                    );
+                }
+            }
+            Ok(None) => {
+                warn!(
+                    pool = %pool_pk,
+                    "event-time pool USD enrichment skipped (no prices from pool read + feed)"
+                );
+            }
+            Err(_) => {
+                warn!(pool = %pool_pk, "event-time pool USD enrichment timed out");
+            }
+        }
+    }
+    base
 }
 
 fn validate_execution_result(

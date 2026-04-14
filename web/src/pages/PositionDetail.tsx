@@ -132,6 +132,15 @@ function parseLamports(v: unknown): number | null {
   return null
 }
 
+function parseNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string') {
+    const n = parseFloat(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
 /** ~USD for tx fee in lamports, using SOL/USD from Jupiter proxy (`solUsd` per 1 SOL). */
 function lamportsToUsdDisplay(lamports: unknown, solUsd: number): string {
   if (solUsd <= 0) return '—'
@@ -227,6 +236,10 @@ export default function PositionDetail() {
     queryFn: () => getPosition(address!),
     enabled: !!address,
     retry: 1,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    refetchInterval: 15_000,
   })
 
   const { data: diag } = useQuery({
@@ -611,6 +624,13 @@ export default function PositionDetail() {
     position.range_upper_usdc ?? undefined,
     position.range_usdc_quote ?? undefined,
   )
+  const rangeLo = parseNum(position.range_lower_usdc)
+  const rangeHi = parseNum(position.range_upper_usdc)
+  const rangeNow = parseNum(position.range_usdc_quote)
+  const hasRangeBar = rangeLo !== null && rangeHi !== null && rangeNow !== null && rangeHi > rangeLo
+  const rangeMarkerPct = hasRangeBar
+    ? Math.max(0, Math.min(100, ((rangeNow - rangeLo) / (rangeHi - rangeLo)) * 100))
+    : null
 
   return (
     <div className="space-y-6">
@@ -825,13 +845,29 @@ export default function PositionDetail() {
                 </div>
                 <div className="flex justify-between gap-4">
                   <span className="text-muted-foreground shrink-0">Range</span>
-                  <span className="text-right">
+                  <span className="text-right min-w-[14rem]">
                     {rangeUsdcLine ? (
                       <>
                         <span className="block">{rangeUsdcLine}</span>
                         <span className="block text-xs text-muted-foreground mt-0.5">
                           ticks {position.tick_lower} → {position.tick_upper}
                         </span>
+                        {hasRangeBar && rangeMarkerPct !== null ? (
+                          <span className="block mt-1.5">
+                            <span className="relative block h-1.5 rounded-full bg-muted">
+                              <span
+                                className="absolute top-1/2 h-3 w-3 -translate-y-1/2 -translate-x-1/2 rounded-full border border-background bg-primary"
+                                style={{ left: `${rangeMarkerPct}%` }}
+                                aria-label="Current price in range"
+                              />
+                            </span>
+                            <span className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+                              <span>L</span>
+                              <span>NOW</span>
+                              <span>H</span>
+                            </span>
+                          </span>
+                        ) : null}
                       </>
                     ) : (
                       <span>
@@ -928,9 +964,19 @@ export default function PositionDetail() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Value</span>
+                  <span className="text-muted-foreground">Live value (this position, now)</span>
                   <span className="font-bold">{formatUsdFixed(position.value_usd, 3)}</span>
                 </div>
+                {position.valuation_source === 'fallback_monitor' ? (
+                  <p className="text-[11px] text-amber-600 leading-snug">
+                    Value source: fallback monitor cache (live on-chain valuation unavailable in this refresh).
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    Source: fresh valuation from <code className="text-[10px]">GET /positions/{'{address}'}</code> for this
+                    single PDA.
+                  </p>
+                )}
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Net PnL</span>
                   <span
@@ -963,7 +1009,9 @@ export default function PositionDetail() {
                 </div>
                 {(streamTotals || streamPerf || streamLineage) ? (
                   <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                    <div className="text-xs text-muted-foreground">Stream summary (across rotated PDAs)</div>
+                    <div className="text-xs text-muted-foreground">
+                      Stream history summary (across rotated PDAs, not single-PDA live value)
+                    </div>
                     <div className="flex justify-between text-sm">
                       <span className="text-muted-foreground">Known PDAs</span>
                       <span className="font-mono tabular-nums">{streamKnownPdas}</span>
@@ -997,7 +1045,7 @@ export default function PositionDetail() {
                     {streamTotals ? (
                       <div className="border-t border-border/60 pt-2 space-y-1">
                         <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">Baseline → current</span>
+                          <span className="text-muted-foreground">History baseline → latest chain mark</span>
                           <span className="font-mono tabular-nums">
                             {usdOrDash(streamTotals.baseline_value_usd)} → {usdOrDash(streamTotals.current_value_usd)}
                           </span>
@@ -1249,7 +1297,7 @@ export default function PositionDetail() {
                           <th className="px-2 py-1 text-left">opened</th>
                           <th className="px-2 py-1 text-left">closed / last</th>
                           <th className="px-2 py-1 text-left">start value</th>
-                          <th className="px-2 py-1 text-left">end value</th>
+                          <th className="px-2 py-1 text-left">current/end value</th>
                           <th className="px-2 py-1 text-left">principal Δ</th>
                           <th className="px-2 py-1 text-left">Sieć (tx)</th>
                           <th className="px-2 py-1 text-left">LP zebrane</th>

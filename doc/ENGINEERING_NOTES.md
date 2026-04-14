@@ -1,3 +1,51 @@
+## 2026-04-14 — PositionDetail UI: explicit live vs history value semantics
+
+keywords: web, position-detail, ui, value-usd, stream-lineage, stream-pnl, labeling, usability
+
+- **What:** In `PositionDetail`, Performance label now states `Live value (this position, now)` and always shows an explicit value source hint (live single-PDA endpoint vs fallback monitor cache). Stream block title now explicitly says it is chain history across rotated PDAs. History table column `end value` was renamed to `current/end value`.
+- **What:** `PositionDetail` range section now includes a compact visual bar (`L — NOW — H`) placing current quote inside lower/upper bounds for quick Orca-like in-range reading.
+- **What:** `Positions` (`Monitored positions (API)`) table now shows linked strategy + compact parameter summary (threshold/interval/range/IL flags) per PDA instead of pool-address column; extra PDA subline is hidden when token labels are known, reducing address noise.
+- **Update:** Strategy summary in `Monitored positions (API)` now shows only explicitly enabled/toggled parameters (positive numeric thresholds/intervals/width/IL and boolean flags set to `true`) to reduce noise from defaults.
+- **Update:** `Monitored positions (API)` range column now shows `NOW` value and a compact `L—NOW—H` marker bar so operators can see at a glance whether price is near left/right boundary (green in-range marker, red out-of-range marker).
+- **Why:** Users were mixing single-position live valuation with history-chain aggregates and reading `end value` as a future value for open nodes. Labels now communicate scope and time semantics directly.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/pages/Positions.tsx`
+
+## 2026-04-14 — Lineage continuity rebalance session propagation + manual-root safeguard
+
+keywords: api, execution, stream-lineage, manual-open, bot-rotation, rebalance-session-id, position-detail, value-usd
+
+- **What:** `suppress_jsonl_rotation_stitch` now suppresses fallback stitching only for fresh manual roots (`position_open`). For bot opens, stitching is allowed when `lifecycle_rotation_parent_before_open` can infer a concrete parent (session match, `close_kind=rotation`, or bot activity tied to closed PDA), even when open-session differs. Added regression test `jsonl_stitch_allowed_when_rotation_parent_exists_without_session_match`.
+- **What:** Rebalance executor now generates one per-run UUID `ledger_session_id` and passes it through collect/close/swap/open tx lifecycle appends. This restores deterministic close->open continuity evidence for lineage while keeping manual opens isolated.
+- **What:** `PositionDetail` position query now forces fresh fetch on mount (`staleTime: 0`, `refetchOnMount: 'always'`) so **Performance → Value** reflects current valuation instead of stale cache.
+- **What:** `GET /positions/{address}` now includes `valuation_source` for `value_usd` (`live_valuation` vs `fallback_monitor`) and `PositionDetail` shows a fallback note when live valuation is unavailable for a refresh.
+- **Why:** Previous hard session gate prevented valid bot rotation continuity; earlier looser stitching incorrectly inherited unrelated manual starts. This balances both constraints and preserves separate histories for multiple manual positions in one pool.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/models.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`, `doc/BUGS.md`
+
+## 2026-04-14 — Close Position: explicit 6018/slippage API classification
+
+keywords: api, close-position, whirlpool, 6018, tokenminsubceeded, error-classification, position-service
+
+- **What:** `PositionService::close_position` no longer converts executor failures to generic `500`. Close path now classifies known user-actionable failures: Whirlpool `6018`/slippage (`TokenMinSubceeded`) -> `400` with close-specific retry guidance (`--slippage-bps`, `WHIRLPOOL_CLOSE_SLIPPAGE_BPS`); missing signer/wallet config -> `503` with setup hint.
+- **Why:** Manual close already had retry logic in executor, but API surfaced opaque internal errors. Operators needed deterministic, actionable messages for repeated close failures.
+- **Guards/tests:** Added regression test `close_position_error_6018_maps_to_bad_request_with_hint` in `clmm-lp-api`.
+- **paths:** `crates/api/src/services/position_service.rs`, `doc/BUGS.md`
+
+## 2026-04-13 — Event-time USD for lineage open/close snapshots (ledger `details` + persist)
+
+keywords: lineage, ledger, event_price, event_slot, position_stream_lineage, persist_event_valuation_snapshots, rebalance, execution, protocols, event_pool_mint_usd, DATA_CATALOG, price_time_kind
+
+- **What:** Bot open/close appends merge **`event_slot`**, **`event_price_a_usd`**, **`event_price_b_usd`**, **`event_price_source`** into lifecycle `details` (best-effort RPC + Gecko, timeout-safe). `persist_event_valuation_snapshots_for_positions` **prefers** those fields for `baseline_open` / `end_close`; otherwise keeps mint-price fetch at persist time and sets **`raw_json.price_time_kind`** to `at_persist_fallback`. Live `get_position` valuation unchanged.
+- **Why:** Event snapshots previously used “prices at persist”, not at tx time; pool-order mint USD is now aligned with Performance heuristics via `clmm_lp_protocols::orca::event_pool_mint_usd` (shared `adjust_pool_mint_usd_with_wsol_tick` with API).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/event_pool_mint_usd.rs`, `crates/protocols/src/simple_mint_price.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_valuation.rs`, `doc/DATA_CATALOG.md`
+
+## 2026-04-13 — Stream lineage: baseline_open valuation from open caps (single path)
+
+keywords: api, position-stream-lineage, persist_event_valuation_snapshots, baseline_open, open_caps, position_stream_valuation_snapshots, BUG-20260413-07
+
+- **What:** `persist_event_valuation_snapshots_for_positions` upgrades **`baseline_open`** when a pool leg is **missing** in fee-payer deltas (`amount_*_ui == 0`) by filling **only that leg** from `details.amount_*_cap` (Orca max raw → UI); the other leg stays from deltas. **Full dual-leg cap substitution was removed** — caps are maxima, so valuing both at cap overstated start/end vs on-chain **Performance** (example: ~$6.15 vs ~$5.60). Snapshot `raw_json` may include **`baseline_amounts_source: "open_caps"`**. **`ON CONFLICT DO UPDATE`** when the **incoming** row has `open_caps` **or** the **existing** row was tagged `open_caps` (one rerun corrects an old overstated dual-cap snapshot). **`node_metrics`** stays the simple snapshot reader.
+- **Why:** Multiple reader-side ORDER BY / overlay tweaks were hard to reason about and risked regressions; wrong open notional should be corrected **once** when persisting the event snapshot.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
 ## 2026-04-13 — Stream lineage: rotation-only linking (registry + lifecycle)
 
 keywords: api, position-stream-lineage, registry.jsonl, lifecycle, rebalance_session_id, rotation, infer_parent, strategy_service, position_stream_edges

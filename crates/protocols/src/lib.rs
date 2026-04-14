@@ -28,6 +28,8 @@ pub mod parsers;
 pub mod raydium;
 /// RPC provider with health checks and fallback.
 pub mod rpc;
+/// Minimal mint→USD (GeckoTerminal) for protocol helpers.
+pub mod simple_mint_price;
 /// Solana client wrapper.
 pub mod solana_client;
 

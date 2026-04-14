@@ -476,7 +476,7 @@ Top up the API wallet and retry."
         guard
             .execute_full_close_only(&position_pubkey, &pool_pubkey, cost_session_id, ledger_details)
             .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+            .map_err(classify_close_position_error)?;
 
         Ok(OperationResult::success())
     }
@@ -924,6 +924,46 @@ Align ticks to pool tick_spacing and keep tick_lower < tick_upper. Detail: {raw}
     ApiError::bad_request(format!("Open position failed: {raw}"))
 }
 
+fn classify_close_position_error(err: anyhow::Error) -> ApiError {
+    let raw = format!("{err:#}");
+    let s = raw.to_lowercase();
+
+    if s.contains("wallet not set")
+        || s.contains("requires executor")
+        || s.contains("wallet/executor not configured")
+    {
+        return ApiError::service_unavailable(format!(
+            "Close position failed: API host cannot sign transactions (missing wallet/executor). \
+Set `KEYPAIR_PATH` (or `SOLANA_KEYPAIR_PATH`) on the server. Detail: {raw}"
+        ));
+    }
+
+    if s.contains("tokenminsubceeded")
+        || s.contains("token_min_subceeded")
+        || s.contains("slippage")
+        || s.contains("6018")
+        || s.contains("0x1782")
+    {
+        return ApiError::bad_request(format!(
+            "Close position failed: Whirlpool min-out/slippage too tight vs pool move (custom 6018 / TokenMinSubceeded). \
+Retry; if it keeps failing, raise close slippage only for this attempt (`--slippage-bps` or `WHIRLPOOL_CLOSE_SLIPPAGE_BPS`). Detail: {raw}"
+        ));
+    }
+
+    if s.contains("insufficient funds")
+        || s.contains("insufficient lamports")
+        || s.contains("insufficient balance")
+        || s.contains("insufficient token")
+    {
+        return ApiError::bad_request(format!(
+            "Close position failed: insufficient funds/tokens on signer wallet. \
+Top up the API signer wallet and retry. Detail: {raw}"
+        ));
+    }
+
+    ApiError::bad_request(format!("Close position failed: {raw}"))
+}
+
 fn parse_custom_program_error_hex_u32(s_lower: &str) -> Option<u32> {
     // e.g. "custom program error: 0x1"
     let i = s_lower.find("custom program error: 0x")?;
@@ -1153,6 +1193,20 @@ mod tests {
             .await
             .expect_err("bad pubkey");
         assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn close_position_error_6018_maps_to_bad_request_with_hint() {
+        let err = classify_close_position_error(anyhow::anyhow!(
+            "rpc: InstructionError(2, Custom(6018)) TokenMinSubceeded"
+        ));
+        match err {
+            ApiError::BadRequest(msg) => {
+                assert!(msg.contains("Close position failed: Whirlpool min-out/slippage too tight"));
+                assert!(msg.contains("WHIRLPOOL_CLOSE_SLIPPAGE_BPS"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[tokio::test]
