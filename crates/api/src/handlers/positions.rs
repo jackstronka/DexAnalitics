@@ -327,6 +327,20 @@ pub async fn list_positions(
         }
     }
 
+    // Best-effort self-heal for rotated PDAs that lost strategy link after close->open.
+    // This keeps `parameters.position_addresses` aligned so the UI Strategy column does not show
+    // false "Not linked" for active reopened positions.
+    for p in &positions {
+        let pda = p.address.to_string();
+        if let Err(e) = heal_rotated_strategy_link_best_effort(&state, &pda).await {
+            warn!(
+                position = %pda,
+                error = %e,
+                "list_positions: strategy link heal failed (continuing)"
+            );
+        }
+    }
+
     let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
 
     let mut responses: Vec<PositionResponse> = Vec::with_capacity(positions.len());

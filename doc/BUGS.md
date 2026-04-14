@@ -28,6 +28,64 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260414-03 — Stranded list had no operator dismiss control
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: stranded-rebalances, pending-open-recovery, watchdog, ui-action, dismiss-session
+
+- **Symptom:** `Closed by bot, waiting for reopen` accumulates stale/noisy entries with no way to remove them from UI. User could not prepare clean test runs and wanted removed sessions to stop influencing bot recovery flow.
+- **Symptom (follow-up):** Removed sessions returned after some time.
+- **Symptom (follow-up 2):** `dismissed_session_ids` remained empty in runtime `pending-open-recovery.json` despite UI `Remove`.
+- **Symptom (follow-up 3):** After removing one stranded row, bot could still auto-open from another queued pending item with the same `pool + intended range`, so list clearing did not fully stop reopen attempts during manual tests.
+- **Symptom (follow-up 4):** `pending-open-recovery.json` still contained reopen items while `Closed by bot, waiting for reopen` section was empty, so operator could not remove hidden queue entries from UI.
+- **Root cause:** Watchdog/API exposed only read/reconcile operations (`get`/`reconcile`), with no persistent denylist/dismiss mechanism. Pending-open queue could continue using previously queued rows.
+- **Root cause (follow-up):** Execution-side pending-open store schema lacked `dismissed_session_ids`; when bot wrote pending-open file, dismiss metadata was dropped, so sessions reappeared.
+- **Root cause (follow-up 2):** Dismiss persistence depended on one shared JSON file; if another process rewrote the file without dismiss metadata, hidden sessions resurfaced.
+- **Fix:** Added persistent session dismiss flow: `POST /bot-activity/stranded-rebalances/{session_id}/dismiss`. Dismissed session ids are stored in pending-open JSON, excluded from stranded snapshot/reconcile, and matching pending-open item for that session's old position is removed. Execution pending-open schema now preserves `dismissed_session_ids` on load/save.
+- **Fix (follow-up 2):** Added separate persisted denylist file for dismissed sessions (`data/stranded-dismissed-sessions.json`, env override `CLMM_STRANDED_DISMISSED_PATH`) and merged it into snapshot/reconcile filters.
+- **Fix (follow-up 3):** Dismiss now prunes pending-open queue by both exact `closed_position_nft` and by `pool + intended_tick_lower + intended_tick_upper` group, so operator cleanup keeps stranded/pending views coherent and blocks same-range auto-reopen leftovers.
+- **Fix (follow-up 4):** `stranded-rebalances` snapshot now includes synthetic `pending-only` rows for queued reopen items that have no visible lifecycle close row, so every reopen-capable queue item is visible/removable from UI.
+- **Guards/tests:** Added regression test `dismissed_session_is_excluded_from_stranded_list`; watchdog suite passes.
+- **Guards/tests:** Added regression test `pending_open_store_parses_and_keeps_dismissed_sessions`.
+- **Guards/tests (follow-up 3):** Added regression test `dismiss_prunes_pending_by_old_position_and_pool_range`.
+- **Guards/tests (follow-up 4):** Added regression test `pending_only_item_is_visible_in_stranded_output`.
+- **Paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/routes.rs`, `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`, `crates/execution/src/strategy/pending_open.rs`
+
+### BUG-20260414-02 — Manual close appeared in “Closed by bot, waiting for reopen”
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: stranded-rebalances, manual-close, bot-close, close-kind, close-source, ui-section
+
+- **Symptom:** Po ręcznym zamknięciu pozycji wpis potrafił pojawić się w sekcji `Closed by bot, waiting for reopen`, co sugerowało nieprawidłową klasyfikację.
+- **Root cause:** Watchdog budujący `stranded-rebalances` traktował każdy `event=bot_close_position` jako close botowy, bez sprawdzenia `details.close_kind` / `details.close_source`.
+- **Fix:** Dodano filtr: rekordy close z `details.close_kind=manual` lub `details.close_source=api` są wykluczane z listy stranded.
+- **Guards/tests:** Dodany test `manual_close_event_is_excluded_from_stranded_list`.
+- **Paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`
+
+### BUG-20260414-01 — Manual close returns opaque Whirlpool custom 3007
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: close-position, whirlpool, custom-3007, account-owned-by-wrong-program, signer-wallet, position-nft
+
+- **Symptom:** Manual close failed with `InstructionError(2, Custom(3007))` on Whirlpool ix (`whirLb...`) and API returned generic bad-request text without actionable ownership hint.
+- **Root cause:** `classify_close_position_error` handled `6018`/slippage but had no dedicated branch for Whirlpool `3007`, so operators could not distinguish account-ownership mismatch from slippage/funding issues.
+- **Fix:** Added explicit close error mapping for `custom 3007` (`custom(3007)` / `custom_code=3007`) with clear hint: verify API signer owns required position/token accounts (especially position NFT ownership).
+- **Fix (follow-up):** `close_position` path now treats `3007` as idempotent success **when registry already marks the PDA as closed** (removes stale monitor entry instead of surfacing repeated failure).
+- **Guards/tests:** Added regression test `close_position_error_3007_maps_to_bad_request_with_account_hint`.
+- **Paths:** `crates/api/src/services/position_service.rs`
+
 ### BUG-20260413-06 — Stan portfela na „nowa pozycja” bywa nieaktualny / trzeba odświeżyć
 
 status: open  
@@ -56,10 +114,13 @@ keywords: position-detail, performance, stream-lineage, value-usd, snapshots, va
 - **Symptom (2026-04-14):** Karta **Performance → Value** bywa „historyczna”/zaniżona po wejściu na detal pozycji (frontend cache), mimo że oczekiwana jest bieżąca wycena.
 - **Symptom (2026-04-14, follow-up):** Po wdrożeniu odświeżania na mount, w części sesji `Performance -> Value` nadal wygląda na zaniżone (np. ~$2.278) względem oczekiwanej bieżącej wyceny.
 - **Symptom (2026-04-14, UI semantics):** Użytkownik mieszał „live value” (single PDA) z agregatem historycznym streamu; etykieta `end value` dla open node była czytana jako „przyszła wartość”.
+- **Symptom (2026-04-14, runtime chain jump):** Dla jednego chainu (SOL/USDC) kolejne node’y pokazały sekwencję `~2.01 -> ~0.98 -> ~3.05 -> ~6.00` przy niewielkiej zmianie ceny rynkowej; użytkownik raportuje efekt „uciętej nogi” w jednym kroku i „dodanej nogi” w następnym. To wygląda jak niespójna wycena per-node (nieadekwatna do realnego market move), a nie zwykły wynik ceny.
+- **Symptom (2026-04-14, close accounting):** `end value` dla części zamknięć bywało policzone tylko z jednej nogi puli, bo `fee_payer_token_deltas` z tx meta nie zawsze zawiera obie nogi (typowo brak jednej nogi przy WSOL/ATA flow).
 - **Root cause (analiza kodu):** Ta metryka „wartość USD” jest liczona w **dwóch miejscach** (nie jest jednym cache): karta Performance vs wiersz lineage. Karta Performance bierze `value_usd` z `GET /positions/{address}`: świeże `compute_position_usd_valuation` na stanie z monitora/RPC (`handlers/positions.rs`). Tabela lineage w `GET /positions/{address}/stream-lineage` dla węzła w ścieżce DB w `node_metrics` ustawia **baseline** i **current** z tabeli `position_stream_valuation_snapshots` (pierwszy vs ostatni wiersz wg sortowania SQL), a niekoniecznie z tą samą chwilą ani tą samą logiką co bieżąca karta. Dla **świeżo otwartej** pozycji często jest **jeden** (lub kilka) snapshotów — **start i end mogą wskazywać ten sam zapis**, z wartością zapisaną wcześniej (inny moment/ceny/jedna noga w delcie) podczas gdy karta już pokazuje nowszą wycenę. Etykieta `exact` w UI pochodzi z `raw_json.valuation_quality` snapshotu lub z ścieżki lifecycle — opisuje **jakość wejścia cen**, nie gwarancję zgodności z kartą Performance.
 - **Fix:** (2026-04-13, uproszczenie) Zamiast wielu heurystyk w `node_metrics`, **`persist_event_valuation_snapshots_for_positions`** przy zapisie **`baseline_open`** uzupełnia **tylko brakującą nogę** (delta `amount_*_ui == 0`) z **`details.amount_*_cap`** (Orca max raw); druga noga zostaje z delt. **Pełne zastąpienie obu nóg capami** usunięte — cap to maksimum, nie faktyczny depozyt; dawało zawyżenie wobec **Performance** (np. ~$6.15 vs ~$5.60). `baseline_amounts_source: "open_caps"`. **`ON CONFLICT DO UPDATE`** tylko przy `open_caps`. `node_metrics` — prosty odczyt snapshotów + istniejący guardrail z ledgera.
 - **Fix (2026-04-14):** `PositionDetail` wymusza świeży fetch `GET /positions/{address}` na mount (`staleTime: 0`, `refetchOnMount: 'always'`). API zwraca też `valuation_source` (`live_valuation` vs `fallback_monitor`) dla `value_usd`, więc UI odróżnia świeżą wycenę od fallbacku monitora.
 - **Fix (2026-04-14, UI):** `PositionDetail` rozdziela semantykę sekcji: `Live value (this position, now)` + jawny opis źródła dla single-PDA endpointu; stream dostał nagłówek „history summary across rotated PDAs”; kolumna historii `end value` zmieniona na `current/end value`.
+- **Fix (2026-04-14, accounting):** Rebalance executor zapisuje deterministycznie `details.close_amount_a_raw` i `details.close_amount_b_raw` na evencie `bot_close_position` (best-effort świeży odczyt pozycji+pool tuż przed close; fallback do obliczonych amountów „before”). Lineage `node_metrics_from_lifecycle_best_effort` preferuje te pola przy liczeniu `end value`; `fee_payer_token_deltas` zostają tylko jako fallback dla starszych wierszy bez nowych pól.
 - **Guards/tests:** `cargo test -p clmm-lp-api position_stream_lineage`; po deploy: odśwież stream-lineage (persist) dla danej PDA — stary zły wiersz `baseline_open` może się zaktualizować tylko gdy trafi `open_caps`.
 - **Residual risk:** Otwarcie **bez** `amount_*_cap` w `details` (np. część ścieżek CLI) — wtedy tylko delty + guardrail `node_metrics`; nadal możliwy drift cen/RPC. Dodatkowo możliwy pozostaje drift live/fallback przy chwilowej niedostępności RPC/price feed.
 - **Paths:** `web/src/pages/PositionDetail.tsx` (Performance vs tabela lineage), `crates/api/src/handlers/positions.rs` (`get_position`, zapis snapshotów), `crates/api/src/services/position_stream_lineage.rs` (`node_metrics`, zapytania `position_stream_valuation_snapshots`), `crates/api/src/services/position_valuation.rs`

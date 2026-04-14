@@ -9,7 +9,12 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PendingOpenStore {
     /// Pending recoveries (usually 0–1 per bot process).
+    #[serde(default)]
     pub items: Vec<PendingOpenItem>,
+    /// Session ids explicitly dismissed from stranded-rebalance UI/API.
+    /// Kept here so execution-side save() does not drop operator dismiss choices.
+    #[serde(default)]
+    pub dismissed_session_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,4 +71,22 @@ pub fn max_recovery_attempts() -> u32 {
         .and_then(|s| s.parse().ok())
         .filter(|&n| (1..=10_000).contains(&n))
         .unwrap_or(100)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PendingOpenStore;
+
+    #[test]
+    fn pending_open_store_parses_and_keeps_dismissed_sessions() {
+        let raw = serde_json::json!({
+            "items": [],
+            "dismissed_session_ids": ["sid-1", "sid-2"]
+        });
+        let parsed: PendingOpenStore =
+            serde_json::from_value(raw).expect("must parse pending-open store");
+        assert_eq!(parsed.dismissed_session_ids.len(), 2);
+        assert_eq!(parsed.dismissed_session_ids[0], "sid-1");
+        assert_eq!(parsed.dismissed_session_ids[1], "sid-2");
+    }
 }

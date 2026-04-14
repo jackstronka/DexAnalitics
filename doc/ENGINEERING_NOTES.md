@@ -1,3 +1,108 @@
+## 2026-04-14 — Open Position can plan in-pool swap for operational SOL deficit
+
+keywords: web, position-create, swap-before-open, operational-sol, wsol, open-preflight, funding
+
+- **What:** `PositionCreate` now builds `swap_before_open` plan also for the case `shortOperationalSol=true` with no token A/B deficit, when pool pair contains WSOL.
+- **What:** Plan uses non-WSOL leg as input and targets WSOL amount based on computed SOL deficit (`deficitOperationalSol` + small headroom), capped to ~92% of available input balance.
+- **Why:** Operators could have enough token legs for a small position (e.g. ~3 USD) but still fail open due to native SOL rent/fee buffer; UI should propose actionable in-pool swap path, not only external links.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-04-14 — Stranded snapshot now exposes pending-only reopen queue rows
+
+keywords: api, watchdog, stranded-rebalances, pending-open-recovery, consistency, pending-only, operator-cleanup
+
+- **What:** `build_stranded_rebalances` now appends synthetic stranded rows for pending-open items that are not represented by visible lifecycle close rows.
+- **What:** Synthetic rows are marked as pending queue (`in_pending_open_queue=true`) with deterministic synthetic ids (`pending:<closed_position_nft>:<lower>:<upper>`), so existing dismiss endpoint can remove them from UI.
+- **Why:** Operators observed empty `Closed by bot, waiting for reopen` while `pending-open-recovery.json` still had active reopen items; this broke the promised stranded/pending operational consistency.
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Dismiss now prunes pending-open by pool+range group
+
+keywords: api, watchdog, stranded-rebalances, pending-open-recovery, dismiss, pool-range, manual-testing
+
+- **What:** `POST /bot-activity/stranded-rebalances/{session_id}/dismiss` now removes queued pending-open rows not only by `closed_position_nft`, but also by matching `pool + intended_tick_lower + intended_tick_upper`.
+- **What:** Added helper `prune_pending_open_items_for_dismiss(...)` and regression test `dismiss_prunes_pending_by_old_position_and_pool_range`.
+- **Why:** Operators clear the stranded list to stop further reopen attempts during manual tests; leftover queue entries for the same range must be removed together to keep stranded and pending-open state coherent.
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Manual close now records deterministic A/B raw amounts
+
+keywords: execution, api, manual-close, close-position, ledger-details, close-amount-a-raw, close-amount-b-raw, accounting
+
+- **What:** Extended full-close-only flow to compute and persist `close_amount_a_raw` + `close_amount_b_raw` before `close_position`, using the same best-effort pre-close on-chain read path as rotation closes.
+- **What:** Added helper `with_close_amounts_in_details(...)` to merge these raw amounts into existing close metadata without dropping manual tags like `close_kind=manual` / `close_source=api`.
+- **What:** Added regression test `with_close_amounts_in_details_preserves_manual_fields`.
+- **Why:** Manual closes were missing deterministic close leg amounts, so lineage/accounting had to fallback to partial tx deltas; this restores consistent end-value inputs for both bot and manual flows.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-04-14 — Stranded list dismiss action (hide + stop recovery)
+
+keywords: api, web, bot-activity, stranded-rebalances, pending-open-recovery, watchdog, dismiss, session-id
+
+- **What:** Added `POST /bot-activity/stranded-rebalances/{session_id}/dismiss`.
+- **What:** Dismiss persists in pending-open JSON (`dismissed_session_ids`), removes matching queued `closed_position_nft` item, and excludes dismissed sessions from both snapshot and auto-reconcile enqueue flow.
+- **What:** `Positions` page adds `Remove` action per row in `Closed by bot, waiting for reopen`, wired to the new API and list refresh.
+- **Why:** Operators need to clear noisy/stale stranded rows before fresh test cycles and ensure bot recovery does not reuse dismissed sessions.
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Positions.tsx`, `doc/BUGS.md`
+
+- **Update:** `execution` pending-open store now also persists `dismissed_session_ids`; this prevents bot-side save cycles from dropping dismiss metadata and resurrecting removed sessions.
+- **paths:** `crates/execution/src/strategy/pending_open.rs`
+- **Update:** Added separate dismissed-session denylist storage (`data/stranded-dismissed-sessions.json`, `CLMM_STRANDED_DISMISSED_PATH`) and merged it into stranded snapshot/reconcile so dismiss survives cross-process file rewrites.
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`
+
+## 2026-04-14 — Close manual path: idempotent handling for stale 3007
+
+keywords: api, close-position, whirlpool, custom-3007, idempotent, registry, monitor-cleanup
+
+- **What:** Manual close now treats Whirlpool `custom 3007` as success when registry already marks the position as closed; stale monitor entry is removed and response returns `already_closed_on_chain`.
+- **Why:** Operators repeatedly hit 3007 while trying to close PDAs that were already closed by bot/earlier flow; this should be idempotent, not blocking.
+- **paths:** `crates/api/src/services/position_service.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Auto-heal strategy links in `GET /positions`
+
+keywords: api, positions, strategy-link, rotation, reopen, position_addresses, heal
+
+- **What:** `list_positions` now runs `heal_rotated_strategy_link_best_effort` for active monitored/registry-open PDAs before building the response.
+- **Why:** After close->open rotation, strategy link replacement can be missed (e.g. restart/external flow), causing false `Not linked` in `Monitored positions (API)`.
+- **paths:** `crates/api/src/handlers/positions.rs`
+
+## 2026-04-14 — Stranded watchdog excludes manual closes
+
+keywords: api, bot-activity, stranded-rebalances, manual-close, close-kind, close-source
+
+- **What:** `stranded_rebalance_watchdog` now excludes `bot_close_position` rows that carry manual-close metadata (`details.close_kind=manual` or `details.close_source=api`).
+- **What:** Added regression test `manual_close_event_is_excluded_from_stranded_list`.
+- **Why:** Prevent false positives in `Closed by bot, waiting for reopen` after operator-initiated close.
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Close error classification for Whirlpool custom 3007
+
+keywords: api, close-position, whirlpool, custom-3007, error-classification, signer, position-nft
+
+- **What:** `classify_close_position_error` now detects Whirlpool `custom 3007` (`InstructionError(... Custom(3007))` / `custom_code=3007`) and returns an actionable 400 message about account ownership mismatch.
+- **What:** Added regression test `close_position_error_3007_maps_to_bad_request_with_account_hint`.
+- **Why:** Manual close surfaced opaque errors for account-ownership mismatches; operators need clear guidance distinct from slippage (`6018`) and funding failures.
+- **paths:** `crates/api/src/services/position_service.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Stranded rebalances: pool pair labels in API/UI
+
+keywords: api, web, stranded-rebalances, bot-activity, positions, token-labels, pool-pair
+
+- **What:** `StrandedRebalanceItem` now includes `token_mint_a`, `token_mint_b`, `token_a_label`, `token_b_label` (best-effort from lifecycle row `details.token_mint_{a,b}`).
+- **What:** `Positions` page (`Closed by bot, waiting for reopen`) now renders token pair from `token_a_label/token_b_label` first, and falls back to pool/address only when labels are unavailable.
+- **Why:** Operators requested pair names instead of raw pool addresses in the stranded-reopen section.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/stranded_rebalance_watchdog.rs`, `web/src/lib/api.ts`, `web/src/pages/Positions.tsx`
+
+## 2026-04-14 — Deterministic close leg amounts for lineage `end value`
+
+keywords: execution, api, stream-lineage, rebalance, close-position, accounting, wsOL, fee-payer-token-deltas
+
+- **What:** Rebalance close flow now persists deterministic raw pool-leg amounts in lifecycle close details: `close_amount_a_raw` and `close_amount_b_raw`.
+- **What:** Added `read_close_amounts_best_effort` in executor: reads fresh on-chain position + pool state immediately before close and computes raw A/B token amounts from liquidity; if read fails, falls back to already computed pre-close amounts so fields are still populated.
+- **What:** Lineage `node_metrics_from_lifecycle_best_effort` now prefers `details.close_amount_{a,b}_raw` to compute `end value` and only falls back to `fee_payer_token_deltas` for legacy rows without these fields.
+- **Why:** `fee_payer_token_deltas` from tx meta can miss one pool leg in WSOL/ATA paths, which under-valued close nodes and produced history jumps (`cut/add leg` effect).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
 ## 2026-04-14 — PositionDetail UI: explicit live vs history value semantics
 
 keywords: web, position-detail, ui, value-usd, stream-lineage, stream-pnl, labeling, usability
@@ -7,6 +112,7 @@ keywords: web, position-detail, ui, value-usd, stream-lineage, stream-pnl, label
 - **What:** `Positions` (`Monitored positions (API)`) table now shows linked strategy + compact parameter summary (threshold/interval/range/IL flags) per PDA instead of pool-address column; extra PDA subline is hidden when token labels are known, reducing address noise.
 - **Update:** Strategy summary in `Monitored positions (API)` now shows only explicitly enabled/toggled parameters (positive numeric thresholds/intervals/width/IL and boolean flags set to `true`) to reduce noise from defaults.
 - **Update:** `Monitored positions (API)` range column now shows `NOW` value and a compact `L—NOW—H` marker bar so operators can see at a glance whether price is near left/right boundary (green in-range marker, red out-of-range marker).
+- **Update:** `Positions` page adds a third section `Closed by bot, waiting for reopen`, sourced from `/bot-activity/stranded-rebalances` (`close_seen && !open_seen`) so operators can track temporarily missing positions after bot close and before successful reopen; rows disappear automatically after open is observed.
 - **Why:** Users were mixing single-position live valuation with history-chain aggregates and reading `end value` as a future value for open nodes. Labels now communicate scope and time semantics directly.
 - **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/pages/Positions.tsx`
 

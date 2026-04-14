@@ -1619,12 +1619,21 @@ impl RebalanceExecutor {
 
         // Step 3: Close old position (includes decreasing all liquidity + collecting remaining fees)
         result.liquidity_removed = params.current_liquidity;
+        let (close_amount_a_raw, close_amount_b_raw) = self
+            .read_close_amounts_best_effort(&params.position, &params.pool)
+            .await
+            .unwrap_or((amount_a_before_calc, amount_b_before_calc));
+        let close_ledger_details = with_close_amounts_in_details(
+            Some(serde_json::json!({ "close_kind":"rotation" })),
+            close_amount_a_raw,
+            close_amount_b_raw,
+        );
         if let Err(e) = self
             .close_position(
                 &params.position,
                 &params.pool,
                 Some(rebalance_session_id.clone()),
-                Some(serde_json::json!({"close_kind":"rotation"})),
+                close_ledger_details,
             )
             .await
         {
@@ -1942,7 +1951,16 @@ impl RebalanceExecutor {
         // mixing "principal vs fees" in the close outflow heuristics.
         self.collect_fees(position, pool, ledger_session_id.clone())
             .await?;
-        self.close_position(position, pool, ledger_session_id, ledger_details)
+        let (close_amount_a_raw, close_amount_b_raw) = self
+            .read_close_amounts_best_effort(position, pool)
+            .await
+            .unwrap_or((0, 0));
+        let close_details = with_close_amounts_in_details(
+            ledger_details,
+            close_amount_a_raw,
+            close_amount_b_raw,
+        );
+        self.close_position(position, pool, ledger_session_id, close_details)
             .await
     }
 
@@ -2085,6 +2103,32 @@ impl RebalanceExecutor {
         .await?;
         debug!(position = %position, "Close position submitted");
         Ok(())
+    }
+
+    /// Best-effort authoritative position leg amounts (raw) immediately before close.
+    ///
+    /// We persist these values in lifecycle close `details` so lineage `end value` can be
+    /// reconstructed even when `fee_payer_token_deltas` is missing one pool leg (e.g. WSOL path).
+    async fn read_close_amounts_best_effort(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+    ) -> anyhow::Result<(u64, u64)> {
+        let pos_reader = PositionReader::new(self.provider.clone());
+        let pool_reader = WhirlpoolReader::new(self.provider.clone());
+        let pos = pos_reader
+            .get_position(&position.to_string())
+            .await
+            .with_context(|| format!("read position state before close for {}", position))?;
+        let pool_state = pool_reader
+            .get_pool_state(&pool.to_string())
+            .await
+            .with_context(|| format!("read pool state before close for {}", pool))?;
+        Ok(pos_reader.calculate_token_amounts(
+            &pos,
+            pool_state.tick_current,
+            pool_state.sqrt_price,
+        ))
     }
 
     /// Opens a new position.
@@ -2546,6 +2590,31 @@ async fn enrich_open_close_ledger_details(
     base
 }
 
+fn with_close_amounts_in_details(
+    details: Option<serde_json::Value>,
+    close_amount_a_raw: u64,
+    close_amount_b_raw: u64,
+) -> Option<serde_json::Value> {
+    let mut obj = match details {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(other) => {
+            let mut map = serde_json::Map::new();
+            map.insert("_non_object_ledger_details".to_string(), other);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    obj.insert(
+        "close_amount_a_raw".to_string(),
+        serde_json::json!(close_amount_a_raw),
+    );
+    obj.insert(
+        "close_amount_b_raw".to_string(),
+        serde_json::json!(close_amount_b_raw),
+    );
+    Some(serde_json::Value::Object(obj))
+}
+
 fn validate_execution_result(
     op_name: &str,
     result: &clmm_lp_protocols::orca::executor::ExecutionResult,
@@ -2605,6 +2674,24 @@ mod tests {
         let res = ExecutionResult::failure(Signature::default(), "boom".to_string());
         let err = validate_execution_result("open_position", &res).expect_err("must fail");
         assert!(err.to_string().contains("open_position failed: boom"));
+    }
+
+    #[test]
+    fn with_close_amounts_in_details_preserves_manual_fields() {
+        let out = with_close_amounts_in_details(
+            Some(serde_json::json!({
+                "close_kind": "manual",
+                "close_source": "api"
+            })),
+            123,
+            456,
+        )
+        .expect("details");
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("close_kind").and_then(|v| v.as_str()), Some("manual"));
+        assert_eq!(obj.get("close_source").and_then(|v| v.as_str()), Some("api"));
+        assert_eq!(obj.get("close_amount_a_raw").and_then(|v| v.as_u64()), Some(123));
+        assert_eq!(obj.get("close_amount_b_raw").and_then(|v| v.as_u64()), Some(456));
     }
 
     #[tokio::test]

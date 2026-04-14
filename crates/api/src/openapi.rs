@@ -136,6 +136,7 @@ use utoipa::OpenApi;
         handlers::get_pending_open_recovery,
         handlers::get_stranded_rebalances,
         handlers::reconcile_stranded_rebalances,
+        handlers::dismiss_stranded_rebalance,
         handlers::post_bot_slack_summary,
         // Scripts
         handlers::list_scripts,

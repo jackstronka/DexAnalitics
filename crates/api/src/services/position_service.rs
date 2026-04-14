@@ -2,6 +2,7 @@
 
 use crate::error::ApiError;
 use crate::models::{OpenPositionRequest, RebalanceRequest, SwapBeforeOpenRequest};
+use crate::position_registry_seed::registry_position_open_map;
 use crate::state::{AlertUpdate, AppState, PositionUpdate};
 use crate::services::position_valuation::{map_position_fetch_error, uncollected_fees_info_for_position};
 use crate::services::strategy_service::append_position_address_to_strategy;
@@ -473,10 +474,36 @@ Top up the API wallet and retry."
             "close_kind": "manual",
             "close_source": "api",
         }));
-        guard
+        if let Err(e) = guard
             .execute_full_close_only(&position_pubkey, &pool_pubkey, cost_session_id, ledger_details)
             .await
-            .map_err(classify_close_position_error)?;
+        {
+            let raw = format!("{e:#}");
+            let s = raw.to_lowercase();
+            if s.contains("fetch position account") && s.contains("accountnotfound") {
+                // Idempotent close behavior: when position account is already gone on-chain,
+                // treat close as completed and clean up monitor residue.
+                self.state.monitor.remove_position(&position_pubkey).await;
+                return Ok(OperationResult::success_with_data(serde_json::json!({
+                    "already_closed_on_chain": true,
+                    "position_pda": position_pubkey.to_string(),
+                    "note": "Position account not found on-chain during close; treated as already closed and removed from monitor."
+                })));
+            }
+            if s.contains("custom(3007)") || s.contains("custom_code=3007") {
+                let reg = registry_position_open_map();
+                let known_closed = reg.get(&position_pubkey).is_some_and(|open| !open);
+                if known_closed {
+                    self.state.monitor.remove_position(&position_pubkey).await;
+                    return Ok(OperationResult::success_with_data(serde_json::json!({
+                        "already_closed_on_chain": true,
+                        "position_pda": position_pubkey.to_string(),
+                        "note": "Close returned Whirlpool custom 3007, but registry marks this PDA as closed; treated as already closed and removed from monitor."
+                    })));
+                }
+            }
+            return Err(classify_close_position_error(e));
+        }
 
         Ok(OperationResult::success())
     }
@@ -928,6 +955,17 @@ fn classify_close_position_error(err: anyhow::Error) -> ApiError {
     let raw = format!("{err:#}");
     let s = raw.to_lowercase();
 
+    if s.contains("custom(3007)")
+        || s.contains("custom_code=3007")
+        || (s.contains("instructionerror") && s.contains("3007") && s.contains("whirl"))
+    {
+        return ApiError::bad_request(format!(
+            "Close position failed: Whirlpool account ownership mismatch (custom 3007). \
+This usually means one of required token/position accounts is not owned by the expected program/owner \
+(e.g. wrong signer wallet for this position NFT). Verify API signer owns the position NFT and retry. Detail: {raw}"
+        ));
+    }
+
     if s.contains("wallet not set")
         || s.contains("requires executor")
         || s.contains("wallet/executor not configured")
@@ -1204,6 +1242,20 @@ mod tests {
             ApiError::BadRequest(msg) => {
                 assert!(msg.contains("Close position failed: Whirlpool min-out/slippage too tight"));
                 assert!(msg.contains("WHIRLPOOL_CLOSE_SLIPPAGE_BPS"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_position_error_3007_maps_to_bad_request_with_account_hint() {
+        let err = classify_close_position_error(anyhow::anyhow!(
+            "transaction error: InstructionError(2, Custom(3007)) | ix_program=2:whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc | custom_code=3007"
+        ));
+        match err {
+            ApiError::BadRequest(msg) => {
+                assert!(msg.contains("Whirlpool account ownership mismatch (custom 3007)"));
+                assert!(msg.contains("position NFT"));
             }
             other => panic!("unexpected error variant: {other:?}"),
         }

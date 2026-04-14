@@ -1760,6 +1760,14 @@ pub struct StrandedRebalanceItem {
     pub new_position: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_mint_a: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_mint_b: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_a_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_b_label: Option<String>,
     pub rebalance_incomplete_logged: bool,
     pub in_pending_open_queue: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

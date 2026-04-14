@@ -805,12 +805,50 @@ export default function PositionCreate() {
     if (fundingCheck.shortA && fundingCheck.shortB) {
       return null
     }
-    if (!fundingCheck.shortA && !fundingCheck.shortB) {
-      return null
-    }
     const px = pricesQ.data?.prices
     const capPct = 0.92
     const poolPriceRaw = Number(poolStateQ.data?.price ?? poolQ.data?.price)
+
+    // Operational SOL deficit (native rent+fee buffer) with balanced pool legs:
+    // allow single in-pool swap to WSOL before open for WSOL pairs.
+    if (!fundingCheck.shortA && !fundingCheck.shortB && fundingCheck.shortOperationalSol) {
+      const wsolIsA = tokenA.mint === WSOL_MINT
+      const wsolIsB = tokenB.mint === WSOL_MINT
+      if (!wsolIsA && !wsolIsB) {
+        return null
+      }
+      const inToken = wsolIsA ? tokenB : tokenA
+      const outToken = wsolIsA ? tokenA : tokenB
+      const rawEst = estimateSwapInputRawExactIn(
+        inToken.mint,
+        inToken.decimals,
+        outToken.mint,
+        // add small headroom above computed deficit to reduce retries
+        fundingCheck.deficitOperationalSol * 1.05,
+        px,
+      )
+      if (!rawEst || rawEst <= 0) {
+        return null
+      }
+      const haveIn = getAvailableUiAmount(inToken.mint, effectiveBalancesQ.data)
+      if (haveIn == null) {
+        return null
+      }
+      const maxRaw = Math.floor(haveIn * 10 ** inToken.decimals * capPct)
+      const amount_in = Math.min(Math.floor(rawEst), maxRaw)
+      if (amount_in <= 0) {
+        return null
+      }
+      return {
+        specified_mint: inToken.mint,
+        amount_in,
+        label: `${inToken.symbol} → ${outToken.symbol} (operational SOL, w puli Orca)`,
+      }
+    }
+
+    if (!fundingCheck.shortA && !fundingCheck.shortB) {
+      return null
+    }
 
     if (fundingCheck.shortB && !fundingCheck.shortA) {
       const rawEstUsd = estimateSwapInputRawExactIn(

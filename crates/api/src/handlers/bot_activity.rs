@@ -8,7 +8,7 @@ use crate::models::{
 use crate::state::AppState;
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
 };
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::ledger::tx_lifecycle::{il_ledger_path_from_env, ledger_read_path};
@@ -252,6 +252,33 @@ pub async fn reconcile_stranded_rebalances(
             }
         }
     }
+}
+
+#[utoipa::path(
+    post,
+    path = "/bot-activity/stranded-rebalances/{session_id}/dismiss",
+    tag = "Bot activity",
+    params(
+        ("session_id" = String, Path, description = "Rebalance session id to dismiss")
+    ),
+    responses(
+        (status = 200, description = "Session dismissed and removed from pending-open automation", body = StrandedRebalancesResponse)
+    )
+)]
+pub async fn dismiss_stranded_rebalance(
+    State(_state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<StrandedRebalancesResponse>> {
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return Err(ApiError::bad_request("session_id is required"));
+    }
+    let r =
+        crate::services::stranded_rebalance_watchdog::dismiss_stranded_rebalance_session_for_api(
+            sid,
+        )
+        .map_err(|e| ApiError::internal(format!("dismiss stranded rebalance: {e}")))?;
+    Ok(Json(r))
 }
 
 /// Post a short plain-text digest of recent lifecycle ledger rows to Slack (`SLACK_WEBHOOK_URL`).

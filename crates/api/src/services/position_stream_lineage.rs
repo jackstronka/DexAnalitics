@@ -2521,6 +2521,8 @@ async fn node_metrics_from_lifecycle_best_effort(
     let mut close_leg_deltas: Option<BTreeMap<String, Decimal>> = None;
     let mut open_amount_a_cap: Option<u64> = None;
     let mut open_amount_b_cap: Option<u64> = None;
+    let mut close_amount_a_raw: Option<u64> = None;
+    let mut close_amount_b_raw: Option<u64> = None;
 
     for r in rows {
         if r.position_pubkey.as_deref() != Some(position_pubkey) {
@@ -2577,6 +2579,17 @@ async fn node_metrics_from_lifecycle_best_effort(
                         }
                         if !m.is_empty() {
                             close_leg_deltas = Some(m);
+                        }
+                    }
+                }
+                if (close_amount_a_raw.is_none() || close_amount_b_raw.is_none()) && r.details.is_some()
+                {
+                    if let Some(d) = r.details.as_ref().and_then(|v| v.as_object()) {
+                        if close_amount_a_raw.is_none() {
+                            close_amount_a_raw = d.get("close_amount_a_raw").and_then(|v| v.as_u64());
+                        }
+                        if close_amount_b_raw.is_none() {
+                            close_amount_b_raw = d.get("close_amount_b_raw").and_then(|v| v.as_u64());
                         }
                     }
                 }
@@ -2731,12 +2744,31 @@ async fn node_metrics_from_lifecycle_best_effort(
                 })
                 .unwrap_or(Decimal::ZERO);
 
-            let end_close = close_leg_deltas.as_ref().map(|m| {
-                let da = m.get(&a).cloned().unwrap_or(Decimal::ZERO);
-                let dbb = m.get(&b).cloned().unwrap_or(Decimal::ZERO);
-                // On close, payer deltas are typically positive (returned to wallet).
-                da * pa_d + dbb * pb_d
-            });
+            let end_close = if let (Some(raw_a), Some(raw_b)) = (close_amount_a_raw, close_amount_b_raw)
+            {
+                let mint_a_pk = solana_sdk::pubkey::Pubkey::from_str(&a).ok();
+                let mint_b_pk = solana_sdk::pubkey::Pubkey::from_str(&b).ok();
+                if let (Some(ma), Some(mb)) = (mint_a_pk, mint_b_pk) {
+                    let dec_a = fetch_mint_decimals_best_effort(state.provider.as_ref(), &ma).await;
+                    let dec_b = fetch_mint_decimals_best_effort(state.provider.as_ref(), &mb).await;
+                    if let (Some(da), Some(db)) = (dec_a, dec_b) {
+                        let qa = decimal_ui_from_raw_u64(raw_a, da);
+                        let qb = decimal_ui_from_raw_u64(raw_b, db);
+                        Some(qa * pa_d + qb * pb_d)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                close_leg_deltas.as_ref().map(|m| {
+                    let da = m.get(&a).cloned().unwrap_or(Decimal::ZERO);
+                    let dbb = m.get(&b).cloned().unwrap_or(Decimal::ZERO);
+                    // Legacy fallback for old rows without deterministic close amounts.
+                    da * pa_d + dbb * pb_d
+                })
+            };
 
             (baseline.max(Decimal::ZERO), realized_usd, end_close)
         } else {

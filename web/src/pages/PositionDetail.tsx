@@ -178,15 +178,6 @@ function usdOrDash(v: string | number, digits = 3): string {
   return formatUsdFixed(n, digits)
 }
 
-function valuationQualityLabel(q?: string | null): string | null {
-  const v = (q ?? '').trim().toLowerCase()
-  if (!v) return null
-  if (v === 'exact') return 'exact'
-  if (v === 'fallback') return 'fallback'
-  if (v === 'missing_inputs') return 'missing'
-  return v
-}
-
 function rowEvent(r: LedgerRow): string {
   const e = r.event
   return typeof e === 'string' ? e : '—'
@@ -1297,7 +1288,8 @@ export default function PositionDetail() {
                           <th className="px-2 py-1 text-left">opened</th>
                           <th className="px-2 py-1 text-left">closed / last</th>
                           <th className="px-2 py-1 text-left">start value</th>
-                          <th className="px-2 py-1 text-left">current/end value</th>
+                          <th className="px-2 py-1 text-left">end value</th>
+                          <th className="px-2 py-1 text-left">current value</th>
                           <th className="px-2 py-1 text-left">principal Δ</th>
                           <th className="px-2 py-1 text-left">Sieć (tx)</th>
                           <th className="px-2 py-1 text-left">LP zebrane</th>
@@ -1330,19 +1322,12 @@ export default function PositionDetail() {
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
                               {usdOrDash(n.baseline_value_usd, 3)}
-                              {valuationQualityLabel(n.baseline_valuation_quality) ? (
-                                <span className="ml-1 rounded border border-border/60 px-1 py-0 text-[10px] text-muted-foreground">
-                                  {valuationQualityLabel(n.baseline_valuation_quality)}
-                                </span>
-                              ) : null}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {usdOrDash(n.current_value_usd, 3)}
-                              {valuationQualityLabel(n.current_valuation_quality) ? (
-                                <span className="ml-1 rounded border border-border/60 px-1 py-0 text-[10px] text-muted-foreground">
-                                  {valuationQualityLabel(n.current_valuation_quality)}
-                                </span>
-                              ) : null}
+                              {n.closed_ts_utc ? usdOrDash(n.current_value_usd, 3) : '—'}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono">
+                              {!n.closed_ts_utc ? usdOrDash(n.current_value_usd, 3) : '—'}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
                               {formatPrincipalDeltaUsdOrDash(n.baseline_value_usd, n.current_value_usd, 3)}

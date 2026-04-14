@@ -1,11 +1,18 @@
-import { useQuery, useQueries } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
-import { getOrcaPositionsByOwner, getPoolState, getPositions, getStrategies } from '@/lib/api'
+import {
+  getOrcaPositionsByOwner,
+  getPoolState,
+  getPositions,
+  getStrategies,
+  getStrandedRebalances,
+  dismissStrandedRebalance,
+} from '@/lib/api'
 import type { Position, Strategy } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import {
@@ -87,8 +94,17 @@ function estimateNowUsdcFromPosition(p: Position): number | null {
   return null
 }
 
+function normalizePendingReopenReason(v?: string | null) {
+  if (!v) return 'Waiting for reopen cycle.'
+  if (v.toLowerCase().includes('already queued for pending-open recovery')) {
+    return 'Queued for auto-reopen (waiting for next recovery cycle).'
+  }
+  return v
+}
+
 export default function Positions() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const devPk = getDevWalletPubkey()
   const [ownerInput, setOwnerInput] = useState(() => devPk ?? '')
   const [appliedOwner, setAppliedOwner] = useState(() => devPk ?? '')
@@ -108,6 +124,13 @@ export default function Positions() {
     queryFn: () => getOrcaPositionsByOwner(appliedOwner),
     enabled: appliedOwner.trim().length > 0,
     staleTime: 60_000,
+  })
+  const strandedQ = useQuery({
+    queryKey: ['stranded-rebalances'],
+    queryFn: getStrandedRebalances,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+    retry: 1,
   })
 
   const positions = data?.positions || []
@@ -131,6 +154,23 @@ export default function Positions() {
     })
     return m
   }, [monitoredPools, poolStateQueries])
+  const poolLabelByAddress = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const p of positions) {
+      if (!p.pool_address) continue
+      const a = p.token_a_label?.trim()
+      const b = p.token_b_label?.trim()
+      if (a && b) m.set(p.pool_address, `${a} / ${b}`)
+    }
+    for (const row of chainQ.data?.entries ?? []) {
+      if (!row.pool_address) continue
+      if (m.has(row.pool_address)) continue
+      const a = row.token_a_label?.trim()
+      const b = row.token_b_label?.trim()
+      if (a && b) m.set(row.pool_address, `${a} / ${b}`)
+    }
+    return m
+  }, [positions, chainQ.data])
 
   const strategiesByPosition = useMemo(() => {
     const map = new Map<string, Strategy[]>()
@@ -144,6 +184,19 @@ export default function Positions() {
     }
     return map
   }, [strategiesQ.data])
+  const pendingReopenItems = useMemo(
+    () =>
+      (strandedQ.data?.items ?? []).filter(
+        (it) => it.close_seen === true && it.open_seen === false,
+      ),
+    [strandedQ.data],
+  )
+  const dismissStrandedM = useMutation({
+    mutationFn: (sessionId: string) => dismissStrandedRebalance(sessionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stranded-rebalances'] })
+    },
+  })
 
   return (
     <div className="space-y-6">
@@ -211,11 +264,9 @@ export default function Positions() {
                             priceA={position.token_price_a_usd}
                             priceB={position.token_price_b_usd}
                           />
-                          {!(position.token_a_label && position.token_b_label) ? (
-                            <div className="font-medium font-mono text-sm">
-                              {shortenAddress(position.address)}
-                            </div>
-                          ) : null}
+                          <div className="font-medium font-mono text-sm">
+                            {shortenAddress(position.address)}
+                          </div>
                         </Link>
                       </td>
                       <td className="py-4 max-w-[18rem]">
@@ -328,6 +379,89 @@ export default function Positions() {
                           }`} />
                           {position.status}
                         </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Closed by bot, waiting for reopen</CardTitle>
+          <p className="text-sm text-muted-foreground font-normal">
+            Sesje rebalance, gdzie bot zamknął starą pozycję, ale nowa nie została jeszcze otwarta.
+            Po udanym reopen wpis znika z tej sekcji.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {strandedQ.isLoading ? (
+            <div className="text-center py-6 text-muted-foreground">Loading stranded rebalances...</div>
+          ) : strandedQ.error ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              {(strandedQ.error as Error).message}
+            </div>
+          ) : pendingReopenItems.length === 0 ? (
+            <div className="text-muted-foreground text-sm">Brak oczekujących close-&gt;open.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b text-left text-sm text-muted-foreground">
+                    <th className="pb-3 font-medium">Closed position</th>
+                    <th className="pb-3 font-medium">Pool</th>
+                    <th className="pb-3 font-medium">Closed at</th>
+                    <th className="pb-3 font-medium">Intended range</th>
+                    <th className="pb-3 font-medium">Reason</th>
+                    <th className="pb-3 font-medium">Session</th>
+                    <th className="pb-3 font-medium text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingReopenItems.map((it) => (
+                    <tr key={it.rebalance_session_id} className="border-b last:border-0">
+                      <td className="py-3 text-sm">
+                        {it.old_position ? (
+                          <Link to={`/positions/${it.old_position}`} className="font-mono hover:text-primary">
+                            {shortenAddress(it.old_position)}
+                          </Link>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="py-3 text-sm text-muted-foreground">
+                        {it.token_a_label && it.token_b_label
+                          ? `${it.token_a_label} / ${it.token_b_label}`
+                          : it.pool_address
+                            ? (poolLabelByAddress.get(it.pool_address) ?? shortenAddress(it.pool_address))
+                            : '—'}
+                      </td>
+                      <td className="py-3 text-sm text-muted-foreground">{it.close_ts_utc ?? '—'}</td>
+                      <td className="py-3 text-sm text-muted-foreground">
+                        {it.intended_tick_lower != null && it.intended_tick_upper != null
+                          ? `${it.intended_tick_lower} → ${it.intended_tick_upper}`
+                          : '—'}
+                      </td>
+                      <td className="py-3 text-sm text-muted-foreground">
+                        {normalizePendingReopenReason(it.reason ?? it.note)}
+                      </td>
+                      <td className="py-3 text-xs font-mono text-muted-foreground">
+                        {shortenAddress(it.rebalance_session_id)}
+                      </td>
+                      <td className="py-3 text-right">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          disabled={dismissStrandedM.isPending}
+                          onClick={() => dismissStrandedM.mutate(it.rebalance_session_id)}
+                        >
+                          {dismissStrandedM.isPending ? 'Removing...' : 'Remove'}
+                        </Button>
                       </td>
                     </tr>
                   ))}

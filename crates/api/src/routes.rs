@@ -136,6 +136,10 @@ fn create_base_router(state: AppState) -> Router {
             post(handlers::reconcile_stranded_rebalances),
         )
         .route(
+            "/bot-activity/stranded-rebalances/{session_id}/dismiss",
+            post(handlers::dismiss_stranded_rebalance),
+        )
+        .route(
             "/bot-activity/slack-summary",
             post(handlers::post_bot_slack_summary),
         )

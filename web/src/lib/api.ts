@@ -995,6 +995,10 @@ export interface StrandedRebalanceItem {
   old_position?: string | null
   new_position?: string | null
   pool_address?: string | null
+  token_mint_a?: string | null
+  token_mint_b?: string | null
+  token_a_label?: string | null
+  token_b_label?: string | null
   rebalance_incomplete_logged: boolean
   in_pending_open_queue: boolean
   intended_tick_lower?: number | null
@@ -1043,6 +1047,14 @@ export const reconcileStrandedRebalances = () =>
   fetchJson<StrandedRebalancesResponse>('/bot-activity/stranded-rebalances/reconcile', {
     method: 'POST',
   })
+
+export const dismissStrandedRebalance = (sessionId: string) =>
+  fetchJson<StrandedRebalancesResponse>(
+    `/bot-activity/stranded-rebalances/${encodeURIComponent(sessionId)}/dismiss`,
+    {
+      method: 'POST',
+    },
+  )
 
 export const postSlackActivitySummary = (limit = 40) =>
   fetchJson<SlackActivitySummaryResponse>('/bot-activity/slack-summary', {
