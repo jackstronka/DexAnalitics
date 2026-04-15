@@ -23,6 +23,8 @@ pub struct PendingOpenItem {
     pub intended_tick_lower: i32,
     pub intended_tick_upper: i32,
     pub closed_position_nft: String,
+    #[serde(default)]
+    pub rebalance_session_id: Option<String>,
     pub reason: RebalanceReason,
     pub optimization_run_id: Option<String>,
     pub attempts: u32,

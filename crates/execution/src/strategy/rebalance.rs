@@ -430,6 +430,7 @@ pub struct RecoverOpenParams {
     pub new_tick_upper: i32,
     pub reason: RebalanceReason,
     pub closed_position_nft: Pubkey,
+    pub rebalance_session_id: Option<String>,
     pub optimization_run_id: Option<String>,
 }
 
@@ -455,6 +456,8 @@ pub struct RebalanceResult {
     pub tx_cost_lamports: u64,
     /// Error message if failed.
     pub error: Option<String>,
+    /// Session id used to tag collect/close/swap/open lifecycle rows for this rebalance attempt.
+    pub rebalance_session_id: Option<String>,
 }
 
 /// Executor for rebalancing operations.
@@ -1392,8 +1395,10 @@ impl RebalanceExecutor {
             liquidity_added: 0,
             tx_cost_lamports: 0,
             error: None,
+            rebalance_session_id: None,
         };
         let rebalance_session_id = Uuid::new_v4().to_string();
+        result.rebalance_session_id = Some(rebalance_session_id.clone());
 
         if self.is_dry_run() {
             info!("Dry run mode - simulating rebalance");
@@ -1825,6 +1830,7 @@ impl RebalanceExecutor {
             liquidity_added: 0,
             tx_cost_lamports: 0,
             error: None,
+            rebalance_session_id: p.rebalance_session_id.clone(),
         };
 
         info!(
@@ -1860,7 +1866,7 @@ impl RebalanceExecutor {
                 1,
                 1,
                 &p.closed_position_nft,
-                None,
+                p.rebalance_session_id.clone(),
             )
             .await
         {

@@ -117,6 +117,17 @@ pub struct StrategyExecutor {
 }
 
 impl StrategyExecutor {
+    fn managed_allowlist_state_from_positions(
+        positions: Vec<Pubkey>,
+    ) -> (Option<HashSet<Pubkey>>, Option<usize>) {
+        let mut set = HashSet::new();
+        for p in positions {
+            set.insert(p);
+        }
+        let target = Some(set.len());
+        (Some(set), target)
+    }
+
     /// Creates a new strategy executor.
     pub fn new(
         provider: Arc<RpcProvider>,
@@ -174,13 +185,9 @@ impl StrategyExecutor {
     /// contains stale historical PDAs. When set, the executor will **only** act on these PDAs, and
     /// a successful reopen will replace `old` with `new` inside this set.
     pub async fn set_managed_allowlist(&self, positions: Vec<Pubkey>) {
-        let mut set = HashSet::new();
-        for p in positions {
-            set.insert(p);
-        }
-        let target = if set.is_empty() { None } else { Some(set.len()) };
+        let (allow, target) = Self::managed_allowlist_state_from_positions(positions);
         *self.managed_target_count.lock().await = target;
-        *self.managed_allowlist.write().await = if target.is_some() { Some(set) } else { None };
+        *self.managed_allowlist.write().await = allow;
     }
 
     /// Set an optional hook that runs after a successful rebalance close→open (old PDA → new PDA).
@@ -664,6 +671,7 @@ impl StrategyExecutor {
                     new_tick_upper: item.intended_tick_upper,
                     reason: item.reason.clone(),
                     closed_position_nft: closed,
+                    rebalance_session_id: item.rebalance_session_id.clone(),
                     optimization_run_id: item.optimization_run_id.clone(),
                 })
                 .await;
@@ -681,6 +689,25 @@ impl StrategyExecutor {
                             kept.push(item);
                         }
                     } else {
+                        // Keep managed set stable on recovery too (replace old->new; never grow).
+                        if let Some(ref mut allow) = self.managed_allowlist.write().await.as_mut()
+                            && allow.remove(&closed)
+                        {
+                            allow.insert(np);
+                            if let Some(target) = *self.managed_target_count.lock().await {
+                                while allow.len() > target {
+                                    if let Some(extra) = allow.iter().copied().find(|p| p != &np) {
+                                        allow.remove(&extra);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(h) = self.reopen_hook.lock().await.clone() {
+                            // Best-effort: keep strategy links in sync after pending-open recovery.
+                            h(closed, np);
+                        }
                         info!(
                             new_position = %np,
                             pool = %pool,
@@ -1006,6 +1033,7 @@ impl StrategyExecutor {
                                     intended_tick_lower: *new_tick_lower,
                                     intended_tick_upper: *new_tick_upper,
                                     closed_position_nft: position.address.to_string(),
+                                    rebalance_session_id: result.rebalance_session_id.clone(),
                                     reason: reason.clone(),
                                     optimization_run_id: self
                                         .optimization_run_id
@@ -1287,5 +1315,13 @@ mod clamp_tests {
             clamp_decimal_liquidity_to_u128(&Decimal::new(-1, 0), 100),
             None
         );
+    }
+
+    #[test]
+    fn empty_managed_allowlist_stays_restrictive() {
+        let (allow, target) = StrategyExecutor::managed_allowlist_state_from_positions(Vec::new());
+        assert_eq!(target, Some(0));
+        assert!(allow.is_some());
+        assert_eq!(allow.expect("allowlist should exist").len(), 0);
     }
 }

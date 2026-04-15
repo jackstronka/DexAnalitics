@@ -946,6 +946,14 @@ pub async fn heal_rotated_strategy_link_best_effort(
     if new_pos.is_empty() {
         return Ok(None);
     }
+    // Safety guard: heal is only for active mints currently tracked by monitor.
+    let new_pk = match Pubkey::from_str(new_pos) {
+        Ok(pk) => pk,
+        Err(_) => return Ok(None),
+    };
+    if state.monitor.get_position(&new_pk).await.is_none() {
+        return Ok(None);
+    }
 
     if !strategy_ids_holding_position_address(state, new_pos).await.is_empty() {
         return Ok(None);

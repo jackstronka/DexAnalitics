@@ -1,3 +1,59 @@
+## 2026-04-15 — Harden heal-strategy-link to active monitored mints
+
+keywords: api, strategy-link, heal-strategy-link, monitor, safety-guard
+
+- **What:** `heal_rotated_strategy_link_best_effort` now exits early unless the target PDA is currently present in monitor (`in_monitor=true` equivalent guard).
+- **Why:** Reduce operator risk from accidental/manual heal calls on stale or inactive PDAs; keep healing scoped to active runtime context.
+- **paths:** `crates/api/src/services/strategy_service.rs`
+
+## 2026-04-15 — Explicit empty strategy allowlist no longer widens to all positions
+
+keywords: execution, strategy, managed-allowlist, position_addresses, periodic, rebalance
+
+- **What:** `StrategyExecutor::set_managed_allowlist` now preserves an explicit empty set as a restrictive allowlist (`Some(empty)`, target `0`) instead of converting it to `None` (unrestricted).
+- **What:** Added regression test `empty_managed_allowlist_stays_restrictive`.
+- **Why:** Strategies with `parameters.position_addresses: []` were unintentionally evaluating all monitored positions, which reintroduced fast in-range rebalances from unrelated runners.
+- **paths:** `crates/execution/src/strategy/executor.rs`
+
+## 2026-04-15 — Baseline open valuation: recovery-only full-caps guard
+
+keywords: api, lineage, baseline_open, recovery, fee_payer_token_deltas, open_caps_recovery, valuation
+
+- **What:** `persist_event_valuation_snapshots_for_positions` now treats a bot open as `recovery-like` when it has `rebalance_session_id` and earlier `bot_swap_*` rows in the same session before open timestamp.
+- **What:** For this recovery-only case, if pool-leg deltas are not strict spend on both legs (non-negative/mixed sign), baseline valuation forces a full-cap basket (`amount_a_cap + amount_b_cap`) and tags source as `open_caps_recovery`.
+- **Why:** Prevents mixed-source baseline inflation/instability (`delta one leg + cap second leg`) seen in pending-open recovery flows, without changing standard open valuation behavior.
+- **Guards/tests:** Added helper tests `pool_legs_strict_spend_requires_both_negative` and `open_row_is_recovery_like_when_prior_session_swap_exists`; existing lineage suite passes.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-15 — Recovery now updates strategy links (old->new PDA)
+
+keywords: execution, strategy, pending-open, reopen-hook, managed-allowlist, link-continuity
+
+- **What:** `process_pending_open_recoveries` now mirrors normal rebalance post-open behavior: replaces `managed_allowlist` entry `closed -> new` (without growth) and fires `reopen_hook(old, new)` after successful recovery open.
+- **Why:** Recovery-created positions were showing as unlinked because hook-based strategy address replacement ran only in regular rebalance flow, not in pending-open recovery flow.
+- **paths:** `crates/execution/src/strategy/executor.rs`
+
+## 2026-04-15 — Recovery open keeps original rebalance session id
+
+keywords: execution, pending-open, recover-open, rebalance-session-id, lifecycle, registry, strategy
+
+- **What:** Added optional `rebalance_session_id` to pending-open recovery items and propagated it through `RecoverOpenParams` into `open_new_range_with_wallet_mix` during `recover_open_after_incomplete`.
+- **What:** `RebalanceResult` now exposes the generated session id; executor stores this id when queuing `pending-open` after `rebalance_incomplete`.
+- **Why:** Recovery-created opens were emitted without `rebalance_session_id`, which made them appear as unanchored bot opens (history split and weaker traceability across incomplete rebalance -> recovered open).
+- **paths:** `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-04-15 — UI link-status consistency: Position Detail vs Monitored Positions
+
+keywords: web, positions, position-detail, strategies, linked-status, react-query
+
+- **What:** Strategy list queries in `PositionDetail` and `Positions` now force refetch on mount to reduce stale-cache drift between pages.
+- **What (follow-up):** Strategy queries in those views are now effectively live (`staleTime: 0`, `refetchOnWindowFocus: true`, `refetchInterval: 15s`) to avoid contradictory link badges during long-running SPA sessions.
+- **What (follow-up 2):** `PositionDetail` now gates linked strategy rendering with `position-diagnostics.linked_strategies` (authoritative backend view), preventing stale config-only links from appearing in `Position Info`.
+- **What (follow-up 3):** `Positions` strategy column now uses per-position `position-diagnostics` to determine linked badges, aligning list view with `PositionDetail` and backend truth even when `getStrategies` payload is stale.
+- **What:** `Positions` strategy-link map now normalizes position keys (`trim`) consistently on both strategy-side addresses and monitored position addresses before lookup.
+- **Why:** Prevent contradictory UI state where the same PDA appears linked in Position Detail but `Not linked` in Monitored positions.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/pages/Positions.tsx`, `doc/BUGS.md`
+
 ## 2026-04-15 — Lineage snapshot fix for open/close value mismatch
 
 keywords: api, stream-lineage, valuation-snapshots, baseline_open, end_close, close_amount_a_raw, close_amount_b_raw, amount_a_cap, amount_b_cap

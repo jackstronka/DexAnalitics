@@ -363,12 +363,21 @@ async fn persist_event_valuation_snapshots_for_positions(
                     if let (Some(dec_a), Some(dec_b)) = (dec_a, dec_b) {
                         let cap_a_ui = decimal_ui_from_raw_u64(cap_a, dec_a);
                         let cap_b_ui = decimal_ui_from_raw_u64(cap_b, dec_b);
-                        let use_full_caps = open_should_use_full_caps(deltas_obj, &mint_a, &mint_b);
+                        let recovery_like = open_row_is_recovery_like(rows, r);
+                        let strict_spend =
+                            open_pool_legs_are_strict_spend(deltas_obj, &mint_a, &mint_b);
+                        let force_full_caps_recovery = recovery_like && !strict_spend;
+                        let use_full_caps = force_full_caps_recovery
+                            || open_should_use_full_caps(deltas_obj, &mint_a, &mint_b);
                         if pa_eff > 0.0 && pb_eff > 0.0 {
                             if use_full_caps && (!cap_a_ui.is_zero() || !cap_b_ui.is_zero()) {
                                 amount_a_ui = cap_a_ui;
                                 amount_b_ui = cap_b_ui;
-                                baseline_amounts_source = Some("open_caps");
+                                baseline_amounts_source = if force_full_caps_recovery {
+                                    Some("open_caps_recovery")
+                                } else {
+                                    Some("open_caps")
+                                };
                             } else {
                                 if amount_a_ui.is_zero() && !cap_a_ui.is_zero() {
                                     amount_a_ui = cap_a_ui;
@@ -1385,6 +1394,52 @@ fn open_should_use_full_caps(
         return true;
     };
     !(obj.contains_key(mint_a) && obj.contains_key(mint_b))
+}
+
+fn open_pool_legs_are_strict_spend(
+    deltas_obj: Option<&serde_json::Map<String, serde_json::Value>>,
+    mint_a: &str,
+    mint_b: &str,
+) -> bool {
+    let Some(obj) = deltas_obj else {
+        return false;
+    };
+    let Some(da) = obj.get(mint_a).and_then(dec_from_any) else {
+        return false;
+    };
+    let Some(db) = obj.get(mint_b).and_then(dec_from_any) else {
+        return false;
+    };
+    da < Decimal::ZERO && db < Decimal::ZERO
+}
+
+fn is_lifecycle_swap_event(ev: Option<&str>) -> bool {
+    ev.is_some_and(|e| e.starts_with("bot_swap_"))
+}
+
+fn open_row_is_recovery_like(rows: &[LifecycleRow], open: &LifecycleRow) -> bool {
+    if !matches!(
+        open.event.as_deref(),
+        Some("bot_open_position") | Some("bot_open_position_full_range")
+    ) {
+        return false;
+    }
+    let Some(sid) = open
+        .rebalance_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let Some(open_ts) = open.ts_utc else {
+        return false;
+    };
+    rows.iter().any(|r| {
+        is_lifecycle_swap_event(r.event.as_deref())
+            && r.rebalance_session_id.as_deref().map(str::trim) == Some(sid)
+            && r.ts_utc.is_some_and(|ts| ts <= open_ts)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -4250,6 +4305,68 @@ mod tests {
             "So11111111111111111111111111111111111111112",
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         ));
+    }
+
+    #[test]
+    fn pool_legs_strict_spend_requires_both_negative() {
+        let ok = serde_json::json!({
+            "So11111111111111111111111111111111111111112": "-0.01",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "-1.08"
+        });
+        assert!(open_pool_legs_are_strict_spend(
+            ok.as_object(),
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        ));
+
+        let mixed = serde_json::json!({
+            "So11111111111111111111111111111111111111112": "0.00028",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "-3.88"
+        });
+        assert!(!open_pool_legs_are_strict_spend(
+            mixed.as_object(),
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        ));
+    }
+
+    #[test]
+    fn open_row_is_recovery_like_when_prior_session_swap_exists() {
+        let sid = "sid-recovery".to_string();
+        let open = LifecycleRow {
+            ts_utc: parse_ts(&serde_json::json!("2026-04-15T13:02:58.800Z")),
+            event: Some("bot_open_position".to_string()),
+            pool_address: Some("pool".to_string()),
+            position_pubkey: Some("new".to_string()),
+            fee_payer_pubkey: None,
+            rebalance_session_id: Some(sid.clone()),
+            tx_fee_lamports: None,
+            fee_payer_token_deltas: None,
+            fee_payer_token_a_delta_ui: None,
+            fee_payer_token_b_delta_ui: None,
+            lp_collected_token_a_raw: None,
+            lp_collected_token_b_raw: None,
+            details: None,
+            source: Some("orca_bot".to_string()),
+        };
+        let swap = LifecycleRow {
+            ts_utc: parse_ts(&serde_json::json!("2026-04-15T13:02:32.550Z")),
+            event: Some("bot_swap_exact_in".to_string()),
+            pool_address: Some("pool".to_string()),
+            position_pubkey: Some("old".to_string()),
+            fee_payer_pubkey: None,
+            rebalance_session_id: Some(sid),
+            tx_fee_lamports: None,
+            fee_payer_token_deltas: None,
+            fee_payer_token_a_delta_ui: None,
+            fee_payer_token_b_delta_ui: None,
+            lp_collected_token_a_raw: None,
+            lp_collected_token_b_raw: None,
+            details: None,
+            source: Some("orca_bot".to_string()),
+        };
+        let rows = vec![swap, open.clone()];
+        assert!(open_row_is_recovery_like(&rows, &open));
     }
 }
 
