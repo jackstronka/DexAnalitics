@@ -1,3 +1,13 @@
+## 2026-04-15 — Lineage snapshot fix for open/close value mismatch
+
+keywords: api, stream-lineage, valuation-snapshots, baseline_open, end_close, close_amount_a_raw, close_amount_b_raw, amount_a_cap, amount_b_cap
+
+- **What:** In `persist_event_valuation_snapshots_for_positions`, `end_close` now prefers `details.close_amount_a_raw/close_amount_b_raw` even when `fee_payer_token_deltas` is missing/incomplete; deltas are fallback only.
+- **What:** `baseline_open` now uses full `amount_a_cap + amount_b_cap` basket when one pool leg is missing in deltas (instead of mixed delta+cap), reducing start-value understatement in WSOL/ATA-like rows.
+- **What:** Snapshot upsert now always allows updates for `kind=end_close` (previous `ON CONFLICT ... WHERE` gate could block correcting existing close snapshots).
+- **Why:** Resolve recurring UI mismatch where values computed directly from lifecycle file were correct but API stream-lineage still returned stale/understated start/end values.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
 ## 2026-04-15 — Clippy sweep round: `clmm-lp-api` strict green (`-D warnings`)
 
 keywords: ci, lint, clippy, clmm-lp-api, position-stream-lineage, position-service, price-fetch, models, lines_filter_map_ok

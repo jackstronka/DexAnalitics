@@ -274,7 +274,8 @@ async fn persist_event_valuation_snapshots_for_positions(
               price_b_usd = EXCLUDED.price_b_usd,
               price_source = EXCLUDED.price_source,
               raw_json = EXCLUDED.raw_json
-            WHERE EXCLUDED.raw_json->>'baseline_amounts_source' = 'open_caps'
+            WHERE EXCLUDED.raw_json->>'kind' = 'end_close'
+               OR EXCLUDED.raw_json->>'baseline_amounts_source' = 'open_caps'
                OR position_stream_valuation_snapshots.raw_json->>'baseline_amounts_source' = 'open_caps'
             "#,
         )
@@ -315,12 +316,6 @@ async fn persist_event_valuation_snapshots_for_positions(
         };
 
         if let Some(r) = open && let Some(ts) = r.ts_utc {
-            let parse_cap_u64 = |v: &serde_json::Value| -> Option<u64> {
-                v.as_u64()
-                    .or_else(|| v.as_i64().and_then(|x| (x > 0).then_some(x as u64)))
-                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-            };
-
             let (pa_eff, pb_eff, mint_feed_suffix, time_kind, ev_slot) =
                 match event_spot_from_ledger_details(r.details.as_ref()) {
                     Some((ea, eb, src, sl)) => (ea, eb, src, "at_tx_event", sl),
@@ -341,7 +336,8 @@ async fn persist_event_valuation_snapshots_for_positions(
 
             let mut amount_a_ui = Decimal::ZERO;
             let mut amount_b_ui = Decimal::ZERO;
-            if let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()) {
+            let deltas_obj = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object());
+            if let Some(obj) = deltas_obj {
                 let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
                 let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
                 amount_a_ui = (-da).max(Decimal::ZERO);
@@ -354,7 +350,8 @@ async fn persist_event_valuation_snapshots_for_positions(
             if let Some(details) = r.details.as_ref().and_then(|v| v.as_object())
                 && let (Some(ca_v), Some(cb_v)) =
                     (details.get("amount_a_cap"), details.get("amount_b_cap"))
-                && let (Some(cap_a), Some(cap_b)) = (parse_cap_u64(ca_v), parse_cap_u64(cb_v))
+                && let (Some(cap_a), Some(cap_b)) =
+                    (parse_u64_from_json(ca_v), parse_u64_from_json(cb_v))
                 && cap_a > 0
                 && cap_b > 0
             {
@@ -366,17 +363,21 @@ async fn persist_event_valuation_snapshots_for_positions(
                     if let (Some(dec_a), Some(dec_b)) = (dec_a, dec_b) {
                         let cap_a_ui = decimal_ui_from_raw_u64(cap_a, dec_a);
                         let cap_b_ui = decimal_ui_from_raw_u64(cap_b, dec_b);
-                        // Orca caps are **max** deposit per leg — using both caps for USD
-                        // overstates vs on-chain liquidity (Performance). Only substitute legs
-                        // that are **missing** in fee-payer deltas (typical wrapped/native SOL).
+                        let use_full_caps = open_should_use_full_caps(deltas_obj, &mint_a, &mint_b);
                         if pa_eff > 0.0 && pb_eff > 0.0 {
-                            if amount_a_ui.is_zero() && !cap_a_ui.is_zero() {
+                            if use_full_caps && (!cap_a_ui.is_zero() || !cap_b_ui.is_zero()) {
                                 amount_a_ui = cap_a_ui;
-                                baseline_amounts_source = Some("open_caps");
-                            }
-                            if amount_b_ui.is_zero() && !cap_b_ui.is_zero() {
                                 amount_b_ui = cap_b_ui;
                                 baseline_amounts_source = Some("open_caps");
+                            } else {
+                                if amount_a_ui.is_zero() && !cap_a_ui.is_zero() {
+                                    amount_a_ui = cap_a_ui;
+                                    baseline_amounts_source = Some("open_caps");
+                                }
+                                if amount_b_ui.is_zero() && !cap_b_ui.is_zero() {
+                                    amount_b_ui = cap_b_ui;
+                                    baseline_amounts_source = Some("open_caps");
+                                }
                             }
                             value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
                         }
@@ -415,10 +416,7 @@ async fn persist_event_valuation_snapshots_for_positions(
             }
         }
 
-        if let Some(r) = close
-            && let (Some(ts), Some(obj)) =
-                (r.ts_utc, r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()))
-        {
+        if let Some(r) = close && let Some(ts) = r.ts_utc {
             let (pa_eff, pb_eff, mint_feed_suffix, time_kind, ev_slot) =
                 match event_spot_from_ledger_details(r.details.as_ref()) {
                     Some((ea, eb, src, sl)) => (ea, eb, src, "at_tx_event", sl),
@@ -437,10 +435,34 @@ async fn persist_event_valuation_snapshots_for_positions(
             let pa_d = Decimal::from_f64_retain(pa_eff).unwrap_or(Decimal::ZERO);
             let pb_d = Decimal::from_f64_retain(pb_eff).unwrap_or(Decimal::ZERO);
 
-            let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
-            let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
-            let amount_a_ui = da.max(Decimal::ZERO);
-            let amount_b_ui = dbb.max(Decimal::ZERO);
+            let mut amount_a_ui = Decimal::ZERO;
+            let mut amount_b_ui = Decimal::ZERO;
+            if let Some(details) = r.details.as_ref().and_then(|v| v.as_object())
+                && let (Some(raw_a), Some(raw_b)) = (
+                    details.get("close_amount_a_raw").and_then(parse_u64_from_json),
+                    details.get("close_amount_b_raw").and_then(parse_u64_from_json),
+                )
+            {
+                let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
+                let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
+                if let (Some(a_pk), Some(b_pk)) = (a_pk, b_pk) {
+                    let dec_a = fetch_mint_decimals_best_effort(state.provider.as_ref(), &a_pk).await;
+                    let dec_b = fetch_mint_decimals_best_effort(state.provider.as_ref(), &b_pk).await;
+                    if let (Some(dec_a), Some(dec_b)) = (dec_a, dec_b) {
+                        amount_a_ui = decimal_ui_from_raw_u64(raw_a, dec_a);
+                        amount_b_ui = decimal_ui_from_raw_u64(raw_b, dec_b);
+                    }
+                }
+            }
+            if amount_a_ui.is_zero()
+                && amount_b_ui.is_zero()
+                && let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object())
+            {
+                let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
+                let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
+                amount_a_ui = da.max(Decimal::ZERO);
+                amount_b_ui = dbb.max(Decimal::ZERO);
+            }
             if !amount_a_ui.is_zero() || !amount_b_ui.is_zero() {
                 let value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
                 let quality = if pa_eff > 0.0 && pb_eff > 0.0 {
@@ -1346,6 +1368,23 @@ fn dec_from_any(v: &serde_json::Value) -> Option<Decimal> {
         Value::Number(n) => n.as_f64().and_then(Decimal::from_f64_retain),
         _ => None,
     }
+}
+
+fn parse_u64_from_json(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_i64().and_then(|x| (x > 0).then_some(x as u64)))
+        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+}
+
+fn open_should_use_full_caps(
+    deltas_obj: Option<&serde_json::Map<String, serde_json::Value>>,
+    mint_a: &str,
+    mint_b: &str,
+) -> bool {
+    let Some(obj) = deltas_obj else {
+        return true;
+    };
+    !(obj.contains_key(mint_a) && obj.contains_key(mint_b))
 }
 
 #[derive(Debug, Clone)]
@@ -4183,6 +4222,34 @@ mod tests {
         assert_eq!(closed_ts_for_snapshot_kind(Some("baseline_open"), Some(now)), None);
         assert_eq!(closed_ts_for_snapshot_kind(Some("current_mark"), Some(now)), None);
         assert_eq!(closed_ts_for_snapshot_kind(None, Some(now)), None);
+    }
+
+    #[test]
+    fn open_caps_full_when_one_pool_leg_missing_in_deltas() {
+        let deltas = serde_json::json!({
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "-1.08",
+            "SomeNftMint111111111111111111111111111111111": "1"
+        });
+        let obj = deltas.as_object();
+        assert!(open_should_use_full_caps(
+            obj,
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        ));
+    }
+
+    #[test]
+    fn open_caps_not_forced_when_both_pool_legs_present_in_deltas() {
+        let deltas = serde_json::json!({
+            "So11111111111111111111111111111111111111112": "-0.01",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "-1.08"
+        });
+        let obj = deltas.as_object();
+        assert!(!open_should_use_full_caps(
+            obj,
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        ));
     }
 }
 
