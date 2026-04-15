@@ -48,16 +48,16 @@ fn resolve_position_arg(
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(p) = path.parent() {
-        if !p.as_os_str().is_empty() {
-            std::fs::create_dir_all(p)
-                .with_context(|| format!("create directory {}", p.display()))?;
-        }
+    if let Some(p) = path.parent()
+        && !p.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(p).with_context(|| format!("create directory {}", p.display()))?;
     }
     Ok(())
 }
 
 /// Run Orca LP bot: poll on-chain position, evaluate strategy, optionally sign txs.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_orca_bot(
     position: Option<String>,
     open_build_response_json: Option<PathBuf>,
@@ -153,12 +153,12 @@ pub async fn run_orca_bot(
         executor.set_pending_open_recovery_path(Some(path)).await;
     }
 
-    if let Ok(url) = std::env::var("CLMM_ALERT_WEBHOOK_URL") {
-        if !url.is_empty() {
-            let mut m = MultiNotifier::new();
-            m.add(WebhookNotifier::new(url));
-            executor.set_alert_notifier(Some(Arc::new(m))).await;
-        }
+    if let Ok(url) = std::env::var("CLMM_ALERT_WEBHOOK_URL")
+        && !url.is_empty()
+    {
+        let mut m = MultiNotifier::new();
+        m.add(WebhookNotifier::new(url));
+        executor.set_alert_notifier(Some(Arc::new(m))).await;
     }
 
     if let Some(ref p) = il_ledger_path {
@@ -213,6 +213,7 @@ fn ensure_ticks_on_spacing(lower: i32, upper: i32, spacing: u16) -> Result<()> {
 }
 
 /// Open new Orca position and immediately start bot loop on the created position.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_orca_bot_open_and_run(
     pool: String,
     keypair: Option<PathBuf>,

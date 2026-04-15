@@ -72,7 +72,7 @@ pub async fn eth_call(
 
 fn decode_hex_bytes(hex: &str) -> Result<Vec<u8>, String> {
     let s = hex.strip_prefix("0x").unwrap_or(hex);
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("odd-length hex".into());
     }
     (0..s.len())

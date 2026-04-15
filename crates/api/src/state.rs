@@ -304,8 +304,8 @@ pub(crate) fn try_persist_strategies_best_effort(strategies: &HashMap<String, St
             id: s.id.clone(),
             name: s.name.clone(),
             config: s.config.clone(),
-            created_at: s.created_at.clone(),
-            updated_at: s.updated_at.clone(),
+            created_at: s.created_at,
+            updated_at: s.updated_at,
         })
         .collect();
 

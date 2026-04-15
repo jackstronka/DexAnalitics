@@ -309,8 +309,8 @@ impl RpcProvider {
 
         self.execute_with_retry(|client| {
             let cfg = GetConfirmedSignaturesForAddress2Config {
-                before: before.clone(),
-                until: until.clone(),
+                before,
+                until,
                 limit,
                 commitment,
             };
@@ -332,7 +332,6 @@ impl RpcProvider {
     ) -> Result<EncodedConfirmedTransactionWithStatusMeta> {
         let sig = *signature;
         self.execute_with_retry(|client| {
-            let config = config.clone();
             async move {
                 client
                     .get_transaction_with_config(&sig, config)
@@ -470,7 +469,7 @@ impl RpcProvider {
                                     let mut joined = logs.join(" | ");
                                     if joined.len() > 2500 {
                                         joined.truncate(2500);
-                                        joined.push_str("…");
+                                        joined.push_str("...");
                                     }
                                     err_s.push_str(&format!(" | logs={joined}"));
                                 }

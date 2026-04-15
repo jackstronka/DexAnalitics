@@ -38,10 +38,10 @@ fn auth_state_from_env() -> AuthState {
     if let Ok(s) = std::env::var("API_JWT_SECRET") {
         cfg.jwt_secret = s;
     }
-    if let Ok(v) = std::env::var("API_JWT_EXPIRY_SECS") {
-        if let Ok(secs) = v.parse::<u64>() {
-            cfg.token_expiry_secs = secs;
-        }
+    if let Ok(v) = std::env::var("API_JWT_EXPIRY_SECS")
+        && let Ok(secs) = v.parse::<u64>()
+    {
+        cfg.token_expiry_secs = secs;
     }
     cfg.require_auth = false;
     AuthState::new(cfg)

@@ -212,13 +212,13 @@ pub async fn create_strategy(
     });
     if let Some(ref p) = request.pool_address {
         let t = p.trim();
-        if !t.is_empty() {
-            if let Some(obj) = config.as_object_mut() {
-                obj.insert(
-                    "pool_address".to_string(),
-                    serde_json::Value::String(t.to_string()),
-                );
-            }
+        if !t.is_empty()
+            && let Some(obj) = config.as_object_mut()
+        {
+            obj.insert(
+                "pool_address".to_string(),
+                serde_json::Value::String(t.to_string()),
+            );
         }
     }
 
@@ -322,10 +322,10 @@ pub async fn update_strategy(
             }
             Some(_) => { /* clear legacy pool — do not copy old */ }
             None => {
-                if let Some(p) = old_pool_addr {
-                    if let Some(obj) = config.as_object_mut() {
-                        obj.insert("pool_address".to_string(), p);
-                    }
+                if let Some(p) = old_pool_addr
+                    && let Some(obj) = config.as_object_mut()
+                {
+                    obj.insert("pool_address".to_string(), p);
                 }
             }
         }

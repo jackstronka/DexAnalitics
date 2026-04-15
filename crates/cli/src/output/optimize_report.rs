@@ -543,7 +543,7 @@ pub fn print_candidate_sets(
         let fmt_seconds = |secs: u64| -> String {
             if secs < 3600 {
                 format!("{}m", secs / 60)
-            } else if secs % 3600 == 0 {
+            } else if secs.is_multiple_of(3600) {
                 format!("{}h", secs / 3600)
             } else {
                 format!("{:.1}h", (secs as f64) / 3600.0)

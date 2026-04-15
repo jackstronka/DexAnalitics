@@ -142,11 +142,12 @@ enum FeeSwapDecodeStatusArg {
 }
 
 type OptimizeGridRow = (f64, f64, f64, String, TrackerSummary, Decimal);
+type SnapshotVaultPoint = (i64, u64, u64, Option<String>, Option<String>);
 
 /// After primary `score`, break ties so rankings are not an arbitrary permutation (common when
 /// `objective fees` and many strategies share the same range with **zero rebalances** → identical fees).
 fn sort_backtest_optimize_grid(
-    results: &mut Vec<OptimizeGridRow>,
+    results: &mut [OptimizeGridRow],
     objective: BacktestObjectiveArg,
 ) {
     use std::cmp::Ordering;
@@ -1610,11 +1611,9 @@ async fn main() -> Result<()> {
             // update per-step `lp_share` using a TVL proxy from on-chain vault balances.
             // This keeps candle/swaps fee logic intact, but makes `share(t)` more realistic.
             if lp_share_override.is_none()
-                && snapshot_protocol.is_some()
-                && snapshot_pool_address.is_some()
+                && let (Some(proto), Some(pool_addr)) =
+                    (snapshot_protocol, snapshot_pool_address.clone())
             {
-                let proto = snapshot_protocol.unwrap();
-                let pool_addr = snapshot_pool_address.clone().unwrap();
                 let base_dir =
                     std::path::Path::new("data")
                         .join("pool-snapshots")
@@ -1626,8 +1625,7 @@ async fn main() -> Result<()> {
                 let snap_path = base_dir.join(&pool_addr).join("snapshots.jsonl");
                 if snap_path.exists() {
                     let txt = std::fs::read_to_string(&snap_path)?;
-                    let mut snaps: Vec<(i64, u64, u64, Option<String>, Option<String>)> =
-                        Vec::new();
+                    let mut snaps: Vec<SnapshotVaultPoint> = Vec::new();
                     for line in txt.lines().filter(|l| !l.trim().is_empty()) {
                         let v: serde_json::Value = match serde_json::from_str(line) {
                             Ok(v) => v,
@@ -1653,7 +1651,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     snaps.sort_by_key(|(t, _, _, _, _)| *t);
-                    if snaps.len() >= 1 {
+                    if !snaps.is_empty() {
                         let pow10 = |d: u32| -> Decimal {
                             let mut v = Decimal::ONE;
                             for _ in 0..d {
@@ -1773,10 +1771,10 @@ async fn main() -> Result<()> {
                 let pool = snapshot_pool_address
                     .as_ref()
                     .or(whirlpool_address.as_ref());
-                if proto.is_none() || pool.is_none() || step_data.is_empty() {
-                    None
-                } else {
-                    let pdir = match proto.unwrap() {
+                if let (Some(proto), Some(pool)) = (proto, pool)
+                    && !step_data.is_empty()
+                {
+                    let pdir = match proto {
                         SnapshotProtocolArg::Orca => "orca",
                         SnapshotProtocolArg::Raydium => "raydium",
                         SnapshotProtocolArg::Meteora => "meteora",
@@ -1784,15 +1782,12 @@ async fn main() -> Result<()> {
                     let path = std::path::Path::new("data")
                         .join("swaps")
                         .join(pdir)
-                        .join(pool.unwrap())
+                        .join(pool)
                         .join("swaps.jsonl");
                     if !path.exists() {
                         None
                     } else {
-                        let txt = match std::fs::read_to_string(&path) {
-                            Ok(t) => t,
-                            Err(_) => String::new(),
-                        };
+                        let txt = std::fs::read_to_string(&path).unwrap_or_default();
                         if txt.is_empty() {
                             None
                         } else {
@@ -1830,6 +1825,8 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                } else {
+                    None
                 }
             };
 
@@ -2001,15 +1998,15 @@ async fn main() -> Result<()> {
                                 // Backfill missing decimals from RPC once (for protocols where snapshot doesn't include them).
                                 let mut unresolved: Vec<String> = Vec::new();
                                 for p in &pts {
-                                    if let Some(m) = &p.mint_a {
-                                        if !decimals_by_mint.contains_key(m) {
-                                            unresolved.push(m.clone());
-                                        }
+                                    if let Some(m) = &p.mint_a
+                                        && !decimals_by_mint.contains_key(m)
+                                    {
+                                        unresolved.push(m.clone());
                                     }
-                                    if let Some(m) = &p.mint_b {
-                                        if !decimals_by_mint.contains_key(m) {
-                                            unresolved.push(m.clone());
-                                        }
+                                    if let Some(m) = &p.mint_b
+                                        && !decimals_by_mint.contains_key(m)
+                                    {
+                                        unresolved.push(m.clone());
                                     }
                                 }
                                 unresolved.sort();
@@ -2111,25 +2108,23 @@ async fn main() -> Result<()> {
                                     };
 
                                     let mut usd = Decimal::ZERO;
-                                    if let Some(mint) = p1.mint_a.as_deref() {
-                                        if let (Some(dec), Some(px)) =
+                                    if let Some(mint) = p1.mint_a.as_deref()
+                                        && let (Some(dec), Some(px)) =
                                             (decimals_by_mint.get(mint), usd_for_mint(mint, step))
-                                        {
-                                            let amt = Decimal::from_u128(dv_a)
-                                                .unwrap_or(Decimal::ZERO)
-                                                / pow10(*dec);
-                                            usd += amt * px;
-                                        }
+                                    {
+                                        let amt = Decimal::from_u128(dv_a)
+                                            .unwrap_or(Decimal::ZERO)
+                                            / pow10(*dec);
+                                        usd += amt * px;
                                     }
-                                    if let Some(mint) = p1.mint_b.as_deref() {
-                                        if let (Some(dec), Some(px)) =
+                                    if let Some(mint) = p1.mint_b.as_deref()
+                                        && let (Some(dec), Some(px)) =
                                             (decimals_by_mint.get(mint), usd_for_mint(mint, step))
-                                        {
-                                            let amt = Decimal::from_u128(dv_b)
-                                                .unwrap_or(Decimal::ZERO)
-                                                / pow10(*dec);
-                                            usd += amt * px;
-                                        }
+                                    {
+                                        let amt = Decimal::from_u128(dv_b)
+                                            .unwrap_or(Decimal::ZERO)
+                                            / pow10(*dec);
+                                        usd += amt * px;
                                     }
 
                                     if usd > Decimal::ZERO {
@@ -2260,8 +2255,10 @@ async fn main() -> Result<()> {
                 let pool = snapshot_pool_address
                     .as_ref()
                     .or(whirlpool_address.as_ref());
-                if proto.is_some() && pool.is_some() && !step_data.is_empty() {
-                    let pdir = match proto.unwrap() {
+                if let (Some(proto), Some(pool)) = (proto, pool)
+                    && !step_data.is_empty()
+                {
+                    let pdir = match proto {
                         SnapshotProtocolArg::Orca => "orca",
                         SnapshotProtocolArg::Raydium => "raydium",
                         SnapshotProtocolArg::Meteora => "meteora",
@@ -2269,7 +2266,7 @@ async fn main() -> Result<()> {
                     let path = std::path::Path::new("data")
                         .join("swaps")
                         .join(pdir)
-                        .join(pool.unwrap())
+                        .join(pool)
                         .join("decoded_swaps.jsonl");
                     if path.exists() {
                         let txt = std::fs::read_to_string(&path).unwrap_or_default();
@@ -2350,12 +2347,13 @@ async fn main() -> Result<()> {
 
             // P1.2: if no decoded Dune swaps are available, use local raw swap tx timing
             // to distribute total pool fees across steps (swaps-timing proxy).
-            if swap_index.as_ref().map(|m| m.is_empty()).unwrap_or(true) {
-                if let Some(local_map) = local_decoded_swap_index.as_ref() {
-                    // If decoded swaps only cover a few step buckets, hybridize:
-                    // - use decoded swaps on buckets where we have them,
-                    // - fill missing buckets with raw tx-count timing proxy.
-                    if let Some(counts) = raw_swap_counts_by_step.as_ref() {
+            if swap_index.as_ref().map(|m| m.is_empty()).unwrap_or(true)
+                && let Some(local_map) = local_decoded_swap_index.as_ref()
+            {
+                // If decoded swaps only cover a few step buckets, hybridize:
+                // - use decoded swaps on buckets where we have them,
+                // - fill missing buckets with raw tx-count timing proxy.
+                if let Some(counts) = raw_swap_counts_by_step.as_ref() {
                         let total_count: u64 = counts.values().copied().sum();
                         if total_count > 0 {
                             let total_pool_fees: Decimal =
@@ -2375,7 +2373,7 @@ async fn main() -> Result<()> {
                                 }
                                 // Overwrite buckets we have decoded values for.
                                 for (idx, v) in local_map {
-                                    map.insert(*idx, v.clone());
+                                    map.insert(*idx, *v);
                                 }
                                 if !map.is_empty() {
                                     println!(
@@ -2393,41 +2391,41 @@ async fn main() -> Result<()> {
                         } else {
                             swap_index = Some(local_map.clone());
                         }
-                    } else {
-                        println!(
-                            "đź§Ş Using local decoded swaps from data/swaps ({} steps).",
-                            local_map.len()
-                        );
-                        swap_index = Some(local_map.clone());
-                    }
+                }
+                else {
+                    println!(
+                        "đź§Ş Using local decoded swaps from data/swaps ({} steps).",
+                        local_map.len()
+                    );
+                    swap_index = Some(local_map.clone());
                 }
             }
-            if swap_index.as_ref().map(|m| m.is_empty()).unwrap_or(true) {
-                if let Some(counts) = raw_swap_counts_by_step.as_ref() {
-                    let total_count: u64 = counts.values().copied().sum();
-                    if total_count > 0 {
-                        let total_pool_fees: Decimal =
-                            step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
-                        if total_pool_fees > Decimal::ZERO {
-                            let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
-                            let denom = Decimal::from(total_count);
-                            for (idx, c) in counts {
-                                if *c == 0 {
-                                    continue;
-                                }
-                                let w = Decimal::from(*c) / denom;
-                                let v = total_pool_fees * w;
-                                if v > Decimal::ZERO {
-                                    map.insert(*idx, v);
-                                }
+            if swap_index.as_ref().map(|m| m.is_empty()).unwrap_or(true)
+                && let Some(counts) = raw_swap_counts_by_step.as_ref()
+            {
+                let total_count: u64 = counts.values().copied().sum();
+                if total_count > 0 {
+                    let total_pool_fees: Decimal =
+                        step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
+                    if total_pool_fees > Decimal::ZERO {
+                        let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                        let denom = Decimal::from(total_count);
+                        for (idx, c) in counts {
+                            if *c == 0 {
+                                continue;
                             }
-                            if !map.is_empty() {
-                                println!(
-                                    "đź§Ş Using local raw swaps timing proxy from data/swaps ({} steps).",
-                                    map.len()
-                                );
-                                swap_index = Some(map);
+                            let w = Decimal::from(*c) / denom;
+                            let v = total_pool_fees * w;
+                            if v > Decimal::ZERO {
+                                map.insert(*idx, v);
                             }
+                        }
+                        if !map.is_empty() {
+                            println!(
+                                "đź§Ş Using local raw swaps timing proxy from data/swaps ({} steps).",
+                                map.len()
+                            );
+                            swap_index = Some(map);
                         }
                     }
                 }
@@ -2435,8 +2433,9 @@ async fn main() -> Result<()> {
 
             // Guardrail: snapshot-fee model is experimental. If implied pool fees are
             // unrealistically high vs candle-based pool fee baseline, disable it and fallback.
-            if !snapshots_only {
-                if let Some(idx_map) = snapshot_fee_index.as_ref() {
+            if !snapshots_only
+                && let Some(idx_map) = snapshot_fee_index.as_ref()
+            {
                     let snapshot_pool_fees: Decimal = idx_map.values().cloned().sum();
                     let candle_pool_fees: Decimal =
                         step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
@@ -2459,7 +2458,6 @@ async fn main() -> Result<()> {
                             snapshot_fee_index = None;
                         }
                     }
-                }
             }
 
             println!(
@@ -3554,14 +3552,14 @@ async fn main() -> Result<()> {
                                     token_b_decimals,
                                     fee_rate,
                                     require_decode_ok,
-                                ) {
-                                    if !m.is_empty() {
-                                        println!(
-                                            "🧪 backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
-                                            pdir,
-                                            m.len()
-                                        );
-                                    }
+                                )
+                                    && !m.is_empty()
+                                {
+                                    println!(
+                                        "🧪 backtest-optimize: local pool fees from data/swaps/{} ({} step buckets).",
+                                        pdir,
+                                        m.len()
+                                    );
                                 }
                             } else if dune_swaps.is_none() {
                                 println!(
@@ -3855,12 +3853,12 @@ async fn main() -> Result<()> {
                     "   ℹ️  Objective `fees`: many strategies **tie** on the same `total_fees` for a fixed range when they **do not rebalance** (identical path). Ranking uses tie-breakers: **better vs HODL**, then **fewer rebalances / lower rebalance cost**, then strategy name. Identical Score+Fees rows are economically redundant picks among strategies that behaved the same."
                 );
             }
-            if let Some(h) = hours.as_ref() {
-                if *h < 72 {
-                    println!(
-                        "   ℹ️  Short horizon ({h}h): `periodic_48h` / `periodic_72h` cannot fire; they match static if nothing else triggers. Many identical rows usually mean **0 rebalances** (price in range, no time/IL triggers)."
-                    );
-                }
+            if let Some(h) = hours.as_ref()
+                && *h < 72
+            {
+                println!(
+                    "   ℹ️  Short horizon ({h}h): `periodic_48h` / `periodic_72h` cannot fire; they match static if nothing else triggers. Many identical rows usually mean **0 rebalances** (price in range, no time/IL triggers)."
+                );
             }
             if fee_check_expected_100 > Decimal::ZERO {
                 let ratio_pct = best.4.total_fees / fee_check_expected_100 * Decimal::from(100);
@@ -4440,7 +4438,7 @@ async fn main() -> Result<()> {
         Commands::OrcaPoolFee { pool_address } => {
             let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
             let reader = clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc);
-            let state = reader.get_pool_state(&pool_address).await?;
+            let state = reader.get_pool_state(pool_address).await?;
 
             let base_fee = state.fee_rate();
             let proto = Decimal::from(state.protocol_fee_rate_bps) / Decimal::from(10_000);
@@ -4647,18 +4645,18 @@ async fn main() -> Result<()> {
                     let chars = line.chars().collect::<Vec<_>>();
                     let mut i = 0usize;
                     while i < chars.len() {
-                        if chars[i] == '`' {
-                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
-                                let addr: String = chars[i + 1..j].iter().collect();
-                                if is_solana_pubkey(&addr) && !orca_pool_addrs.contains(&addr) {
-                                    orca_pool_addrs.push(addr.clone());
-                                    if limit.map(|l| orca_pool_addrs.len() >= l).unwrap_or(false) {
-                                        done = true;
-                                    }
+                        if chars[i] == '`'
+                            && let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`')
+                        {
+                            let addr: String = chars[i + 1..j].iter().collect();
+                            if is_solana_pubkey(&addr) && !orca_pool_addrs.contains(&addr) {
+                                orca_pool_addrs.push(addr.clone());
+                                if limit.map(|l| orca_pool_addrs.len() >= l).unwrap_or(false) {
+                                    done = true;
                                 }
-                                i = j + 1;
-                                continue;
                             }
+                            i = j + 1;
+                            continue;
                         }
                         i += 1;
                     }
@@ -4684,21 +4682,21 @@ async fn main() -> Result<()> {
                     let chars = line.chars().collect::<Vec<_>>();
                     let mut i = 0usize;
                     while i < chars.len() {
-                        if chars[i] == '`' {
-                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
-                                let addr: String = chars[i + 1..j].iter().collect();
-                                if is_solana_pubkey(&addr) && !meteora_pool_addrs.contains(&addr) {
-                                    meteora_pool_addrs.push(addr.clone());
-                                    if limit
-                                        .map(|l| meteora_pool_addrs.len() >= l)
-                                        .unwrap_or(false)
-                                    {
-                                        done = true;
-                                    }
+                        if chars[i] == '`'
+                            && let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`')
+                        {
+                            let addr: String = chars[i + 1..j].iter().collect();
+                            if is_solana_pubkey(&addr) && !meteora_pool_addrs.contains(&addr) {
+                                meteora_pool_addrs.push(addr.clone());
+                                if limit
+                                    .map(|l| meteora_pool_addrs.len() >= l)
+                                    .unwrap_or(false)
+                                {
+                                    done = true;
                                 }
-                                i = j + 1;
-                                continue;
                             }
+                            i = j + 1;
+                            continue;
                         }
                         i += 1;
                     }
@@ -4724,21 +4722,21 @@ async fn main() -> Result<()> {
                     let chars = line.chars().collect::<Vec<_>>();
                     let mut i = 0usize;
                     while i < chars.len() {
-                        if chars[i] == '`' {
-                            if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
-                                let addr: String = chars[i + 1..j].iter().collect();
-                                if is_solana_pubkey(&addr) && !raydium_pool_addrs.contains(&addr) {
-                                    raydium_pool_addrs.push(addr.clone());
-                                    if limit
-                                        .map(|l| raydium_pool_addrs.len() >= l)
-                                        .unwrap_or(false)
-                                    {
-                                        done = true;
-                                    }
+                        if chars[i] == '`'
+                            && let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`')
+                        {
+                            let addr: String = chars[i + 1..j].iter().collect();
+                            if is_solana_pubkey(&addr) && !raydium_pool_addrs.contains(&addr) {
+                                raydium_pool_addrs.push(addr.clone());
+                                if limit
+                                    .map(|l| raydium_pool_addrs.len() >= l)
+                                    .unwrap_or(false)
+                                {
+                                    done = true;
                                 }
-                                i = j + 1;
-                                continue;
                             }
+                            i = j + 1;
+                            continue;
                         }
                         i += 1;
                     }
@@ -4796,7 +4794,7 @@ async fn main() -> Result<()> {
                         .await?;
 
                     let vault_amount_a = accounts
-                        .get(0)
+                        .first()
                         .and_then(|a| a.as_ref())
                         .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
                         .map(|a| a.amount)
@@ -4944,7 +4942,7 @@ async fn main() -> Result<()> {
                             match rpc.get_multiple_accounts(&[va, vb]).await {
                                 Ok(accounts) => {
                                     let a = accounts
-                                        .get(0)
+                                        .first()
                                         .and_then(|a| a.as_ref())
                                         .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
                                         .map(|a| a.amount);
@@ -5090,7 +5088,7 @@ async fn main() -> Result<()> {
                             .ok();
                         if let Some(accounts) = accounts {
                             let a = accounts
-                                .get(0)
+                                .first()
                                 .and_then(|a| a.as_ref())
                                 .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
                                 .map(|a| a.amount);
@@ -5437,11 +5435,11 @@ async fn main() -> Result<()> {
             let mut cycles: u64 = 0;
             let mut consecutive_failures: u64 = 0;
             loop {
-                if let Some(m) = *max_cycles {
-                    if cycles >= m {
-                        println!("✅ ops-ingest-loop: reached max_cycles={}", m);
-                        break;
-                    }
+                if let Some(m) = *max_cycles
+                    && cycles >= m
+                {
+                    println!("✅ ops-ingest-loop: reached max_cycles={}", m);
+                    break;
                 }
                 cycles += 1;
                 println!("🧭 ops-ingest-loop: cycle {} start", cycles);

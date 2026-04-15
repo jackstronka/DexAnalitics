@@ -91,7 +91,7 @@ pub struct DepositBudgetQuote {
 /// Returns caps targeting up to `target_usd` when the pool price sits **inside** the position range.
 ///
 /// Requires positive finite USD prices for **both** tokens (caller should pin stables to ~1).
-#[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn quote_deposit_budget_in_range(
     tick_lower: i32,
     tick_upper: i32,

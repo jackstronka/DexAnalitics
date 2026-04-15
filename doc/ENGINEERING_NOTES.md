@@ -1,3 +1,52 @@
+## 2026-04-15 — Clippy sweep round: `clmm-lp-api` strict green (`-D warnings`)
+
+keywords: ci, lint, clippy, clmm-lp-api, position-stream-lineage, position-service, price-fetch, models, lines_filter_map_ok
+
+- **What:** Completed the API strict-lint pass by clearing remaining warnings across lineage and service codepaths (collapsible-if chains, `map_while(Result::ok)`, `get_first`, derivable defaults, and small borrow/style cleanups). Added a targeted allow only for `ApplyOptimizeResultRequest` large enum variant and for an intentionally wide internal lineage snapshot helper.
+- **Why:** Unblock CI lint gates and keep critical API/lineage paths warning-free without changing product behavior.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/services/position_executor.rs`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_valuation.rs`, `crates/api/src/services/price_fetch.rs`, `crates/api/src/position_registry_seed.rs`, `crates/api/src/services/lifecycle_ledger_aggregates.rs`, `crates/api/src/services/evm_json_rpc.rs`, `crates/api/src/models.rs`
+
+## 2026-04-15 — Clippy sweep round: `clmm-lp-api` handlers/tests + strategy service cleanup
+
+keywords: ci, lint, clippy, clmm-lp-api, handlers, strategy-service, tests, field_reassign_with_default, collapsible_if
+
+- **What:** Reduced strict clippy debt in API by collapsing nested conditionals across position/script/tx/wallet handlers, replacing `clone` on `Copy` timestamps, and applying `Default` struct-update initialization in Orca/devnet/coverage tests. Also cleaned strategy-service decision config initialization and several nested JSON mutation guards.
+- **Why:** Keep iterating toward `-D warnings` in `clmm-lp-api` with low-risk mechanical refactors while preserving runtime behavior.
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/scripts.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/handlers/tx.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/handlers/orca_tests.rs`, `crates/api/src/handlers/devnet_e2e_tests.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `crates/api/src/state.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/services/stranded_rebalance_watchdog.rs`
+
+## 2026-04-15 — Clippy sweep round: `clmm-lp-cli` `main.rs` to strict green
+
+keywords: ci, lint, clippy, clmm-lp-cli, main, collapsible_if, get_first, clone_on_copy, ptr-safety
+
+- **What:** Cleaned remaining strict clippy warnings in CLI entrypoint by replacing unwrap-gated branches with explicit `if let` guards, collapsing nested `if` chains, switching `.get(0)` to `.first()`, removing a `clone()` on `Copy` values, and reducing comparator/API helper signatures to lint-preferred forms.
+- **Why:** Bring the highest-warning hotspot (`crates/cli/src/main.rs`) to `-D warnings` compliance with minimal behavioral risk and no product logic changes.
+- **paths:** `crates/cli/src/main.rs`
+
+## 2026-04-15 — Clippy sweep round: API/CLI incremental cleanup (positions + swap_sync path)
+
+keywords: ci, lint, clippy, clmm-lp-api, clmm-lp-cli, positions, swap_sync, collapsible_if, too_many_arguments
+
+- **What:** Continued strict `-D warnings` cleanup with targeted fixes in API handlers (`positions`, `devnet_e2e_tests`, `bot_activity`, `phantom_auth`) and CLI modules (`swap_sync`, `orca_bot`, `orca_position`, snapshot helpers). Included safe if-collapses, map/borrow simplifications, and limited `#[allow(clippy::too_many_arguments)]` on orchestration entrypoints.
+- **Why:** Reduce noisy lint debt in critical operational paths while preserving runtime behavior and existing external call contracts.
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/devnet_e2e_tests.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/handlers/phantom_auth.rs`, `crates/cli/src/swap_sync.rs`, `crates/cli/src/commands/orca_bot.rs`, `crates/cli/src/commands/orca_position.rs`, `crates/cli/src/commands/position_lifecycle_ledger.rs`, `crates/cli/src/commands/snapshot_price_path.rs`, `crates/cli/src/local_swap_fees.rs`, `crates/cli/src/bin/snapshot_readiness.rs`, `crates/cli/src/bin/enrich_lifecycle_ledger.rs`, `crates/cli/src/engine/pricing.rs`, `crates/cli/src/commands/studio.rs`
+
+## 2026-04-15 — Clippy sweep: `clmm-lp-protocols` + `clmm-lp-execution` strict-warnings pass
+
+keywords: ci, lint, clippy, clmm-lp-protocols, clmm-lp-execution, too_many_arguments, collapsible_if, manual_range_contains, clone_on_copy
+
+- **What:** Fixed strict clippy issues in protocols/execution crates (range checks, nested-if collapses, `map_while(Result::ok)`, copy/clone cleanups, and minor API/test init cleanup). For intentionally wide function signatures used as orchestration boundaries, added targeted `#[allow(clippy::too_many_arguments)]`.
+- **Why:** Keep `-D warnings` maintainable for critical path crates while avoiding risky refactors of existing call contracts.
+- **paths:** `crates/protocols/src/ledger/position_registry.rs`, `crates/protocols/src/ledger/swap_cost_estimate.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/protocols/src/orca/deposit_quote.rs`, `crates/protocols/src/orca/executor.rs`, `crates/protocols/src/orca/event_pool_mint_usd.rs`, `crates/protocols/src/rpc/provider.rs`, `crates/protocols/src/simple_mint_price.rs`, `crates/protocols/src/aerodrome_slipstream/mod.rs`, `crates/execution/src/lifecycle/tracker.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/decision.rs`
+
+## 2026-04-15 — CI hardening: clippy fixes in `clmm-lp-data` + resilient Codecov upload
+
+keywords: ci, lint, clippy, clmm-lp-data, defillama, dexscreener, codecov, github-actions, coverage
+
+- **What:** Added `Default` implementations for `DefiLlamaClient` / `DexscreenerClient` and collapsed nested cache read/metadata `if` chains to satisfy strict clippy (`-D warnings`) in `clmm-lp-data`.
+- **What:** Coverage workflow now uses `codecov/codecov-action@v5`, skips upload cleanly when token is missing, and does not fail the whole coverage job when Codecov upload/commit metadata step is flaky.
+- **Why:** `Lint` workflow was blocked by clippy violations in data providers; `Code Coverage Report.` repeatedly failed only on the Codecov upload stage despite successful tarpaulin report generation.
+- **paths:** `crates/data/src/providers/defillama.rs`, `crates/data/src/providers/dexscreener.rs`, `.github/workflows/code_coverage.yml`
+
 ## 2026-04-14 — Lineage: operator open/close rules (API `open_origin`, manual close barrier)
 
 keywords: api, stream-lineage, operator_api, open_origin, position_service, RebalanceExecutor, lifecycle_close_row_is_operator_manual, suppress_jsonl_rotation_stitch

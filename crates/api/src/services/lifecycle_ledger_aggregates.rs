@@ -46,7 +46,7 @@ pub fn aggregate_bot_collect_fees_totals() -> FeesCollectedFromLedger {
     let mut any_a = false;
     let mut any_b = false;
 
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };

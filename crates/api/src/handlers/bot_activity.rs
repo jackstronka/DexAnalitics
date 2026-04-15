@@ -379,10 +379,10 @@ fn read_jsonl_tail(
         let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
             continue;
         };
-        if let Some(f) = filter {
-            if !v.to_string().contains(f) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !v.to_string().contains(f)
+        {
+            continue;
         }
         parsed.push(v);
     }

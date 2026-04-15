@@ -90,8 +90,8 @@ pub enum StratConfig {
 ///   (high volume hours get more volume; often those are volatile hours when price may be out of range).
 /// - Dune daily volume for the pool gives the **scale** so the day total matches the pool.
 /// - So: `step_vol_usd = dune_daily_vol * (candle_vol_usd / birdeye_day_total)`.
-/// When Birdeye has no volume for a day we fall back to uniform `daily_vol / 24`.
-/// Without Dune we use Birdeye candle volume as-is (realistic distribution, scale from lp_share).
+/// - When Birdeye has no volume for a day we fall back to uniform `daily_vol / 24`.
+/// - Without Dune we use Birdeye candle volume as-is (realistic distribution, scale from lp_share).
 pub fn build_step_data(
     candle_slice: &[PriceCandle],
     dune_tvl: Option<&HashMap<String, Decimal>>,
@@ -127,7 +127,7 @@ pub fn build_step_data(
         })
         .collect();
     let mut birdeye_day_total: HashMap<String, Decimal> = HashMap::new();
-    for (candle, &ref vol) in candle_slice.iter().zip(candle_vol_usd.iter()) {
+    for (candle, vol) in candle_slice.iter().zip(candle_vol_usd.iter()) {
         let date_key = chrono::DateTime::from_timestamp(candle.start_timestamp as i64, 0)
             .unwrap_or_default()
             .format("%Y-%m-%d")
@@ -260,6 +260,7 @@ fn index_swaps_by_step<'a>(
 /// If `snapshot_pool_fees_usd` is provided (and `swaps` is None), per-step **pool** fees in USD come from the map
 /// (key = step index, same convention as `snapshot_price_path` / `fee_growth` deltas). LP share is still applied
 /// via [`FeeShareModel`]. When both are absent, fees default to `step_volume_usd * fee_rate`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_single(
     step_data: &[StepData],
     entry_price: Price,
@@ -397,12 +398,12 @@ pub fn run_single(
         let price_ab = p.price_ab.value;
         let in_range_float = price_ab >= current_lower_ab && price_ab <= current_upper_ab;
         let mut in_range = in_range_float;
-        if use_tick_in_range {
-            if let Some(tick_current) = p.tick_current {
-                let tick_lower = price_to_tick(current_lower_ab.max(Decimal::ZERO));
-                let tick_upper = price_to_tick(current_upper_ab.max(Decimal::ZERO));
-                in_range = tick_current >= tick_lower && tick_current < tick_upper;
-            }
+        if use_tick_in_range
+            && let Some(tick_current) = p.tick_current
+        {
+            let tick_lower = price_to_tick(current_lower_ab.max(Decimal::ZERO));
+            let tick_upper = price_to_tick(current_upper_ab.max(Decimal::ZERO));
+            in_range = tick_current >= tick_lower && tick_current < tick_upper;
         }
         if in_range {
             in_range_steps += 1;
@@ -735,6 +736,7 @@ pub fn run_single(
 /// Run grid of (width_pct, strategy) in parallel. Returns (width_pct, lower, upper, strat_name, summary).
 /// If `swaps` is provided, fees are computed from Dune swap data per step.
 /// If `snapshot_pool_fees_usd` is provided (and swaps are not), pool fees per step follow the snapshot index.
+#[allow(clippy::too_many_arguments)]
 pub fn run_grid(
     step_data: &[StepData],
     entry_price: Price,

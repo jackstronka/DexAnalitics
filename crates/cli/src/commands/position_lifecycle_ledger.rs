@@ -236,6 +236,7 @@ async fn mint_decimals(provider: &RpcProvider, mint: &Pubkey) -> Result<u8> {
 }
 
 /// Best-effort append after successful `orca-position-open`.
+#[allow(clippy::too_many_arguments)]
 pub async fn try_append_position_open_cost_ledger(
     provider: &RpcProvider,
     pool_state: &WhirlpoolState,
@@ -272,6 +273,7 @@ pub async fn try_append_position_open_cost_ledger(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn append_open_inner(
     provider: &RpcProvider,
     pool_state: &WhirlpoolState,

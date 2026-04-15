@@ -47,7 +47,7 @@ fn env_retry_attempts(var: &str, fallback: u8) -> u8 {
     std::env::var(var)
         .ok()
         .and_then(|s| s.trim().parse::<u8>().ok())
-        .filter(|&n| n >= 1 && n <= 50)
+        .filter(|&n| (1..=50).contains(&n))
         .unwrap_or(fallback)
 }
 
@@ -967,26 +967,26 @@ impl WhirlpoolExecutor {
         }
         transaction.sign(&signers, recent_blockhash);
 
-        if let Ok(sim) = self.provider.simulate_transaction(&transaction).await {
-            if let Some(logs) = sim.logs {
-                let parsed = logs
-                    .iter()
-                    .find_map(|line| parse_insufficient_lamports_from_log_line(line));
-                if let Some((have_lamports, need_lamports)) = parsed {
-                    let required_with_margin = need_lamports.saturating_mul(101).saturating_add(99) / 100;
-                    let payer_pubkey = payer.pubkey();
-                    let native_balance = self.provider.get_balance(&payer_pubkey).await.unwrap_or(have_lamports);
-                    if native_balance < required_with_margin {
-                        let signature = transaction.signatures.first().copied().unwrap_or_default();
-                        return Ok(ExecutionResult::failure(
-                            signature,
-                            format!(
-                                "open preflight exact-plan: insufficient native SOL. \
-                                 Runtime simulation requires {need_lamports} lamports; with 1% safety margin require {required_with_margin}. \
-                                 Current native balance {native_balance}. Top up SOL or lower Amount."
-                            ),
-                        ));
-                    }
+        if let Ok(sim) = self.provider.simulate_transaction(&transaction).await
+            && let Some(logs) = sim.logs
+        {
+            let parsed = logs
+                .iter()
+                .find_map(|line| parse_insufficient_lamports_from_log_line(line));
+            if let Some((have_lamports, need_lamports)) = parsed {
+                let required_with_margin = need_lamports.saturating_mul(101).saturating_add(99) / 100;
+                let payer_pubkey = payer.pubkey();
+                let native_balance = self.provider.get_balance(&payer_pubkey).await.unwrap_or(have_lamports);
+                if native_balance < required_with_margin {
+                    let signature = transaction.signatures.first().copied().unwrap_or_default();
+                    return Ok(ExecutionResult::failure(
+                        signature,
+                        format!(
+                            "open preflight exact-plan: insufficient native SOL. \
+                             Runtime simulation requires {need_lamports} lamports; with 1% safety margin require {required_with_margin}. \
+                             Current native balance {native_balance}. Top up SOL or lower Amount."
+                        ),
+                    ));
                 }
             }
         }

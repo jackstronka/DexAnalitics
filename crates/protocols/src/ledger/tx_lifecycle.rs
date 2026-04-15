@@ -342,6 +342,7 @@ fn rebalance_event_name(operation: &str) -> &'static str {
 /// For **`open_position`** / **`open_full_range_position`**, callers may merge `details` fields such
 /// as **`open_origin: "operator_api"`** (dashboard/API open). Lineage treats that as an operator
 /// mint with **no** stitched prior rotation history (same rule as CLI `position_open`).
+#[allow(clippy::too_many_arguments)]
 pub async fn try_append_rebalance_executor_tx_cost(
     provider: &RpcProvider,
     fee_payer: &Pubkey,
@@ -375,6 +376,7 @@ pub async fn try_append_rebalance_executor_tx_cost(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn append_rebalance_inner(
     provider: &RpcProvider,
     fee_payer: &Pubkey,

@@ -99,6 +99,7 @@ pub fn distribute_pool_fees_by_tx_counts(
 }
 
 /// Decoded vault-delta fees (pool-level USD) per step from `decoded_swaps.jsonl`.
+#[allow(clippy::too_many_arguments)]
 pub fn decoded_swap_fees_usd_by_step(
     protocol_dir: &str,
     pool: &str,
@@ -188,6 +189,7 @@ pub fn decoded_swap_fees_usd_by_step(
 }
 
 /// Prefer decoded swap fees; if missing/empty, use raw-swap tx-count timing proxy.
+#[allow(clippy::too_many_arguments)]
 pub fn build_local_pool_fees_usd(
     protocol_dir: &str,
     pool: &str,

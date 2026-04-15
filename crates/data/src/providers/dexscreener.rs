@@ -110,6 +110,12 @@ pub struct DexscreenerClient {
     client: Client,
 }
 
+impl Default for DexscreenerClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DexscreenerClient {
     pub fn new() -> Self {
         Self {
@@ -143,12 +149,11 @@ impl DexscreenerClient {
         if ttl == 0 {
             return false;
         }
-        if let Ok(meta) = fs::metadata(path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(elapsed) = modified.elapsed() {
-                    return elapsed.as_secs() <= ttl;
-                }
-            }
+        if let Ok(meta) = fs::metadata(path)
+            && let Ok(modified) = meta.modified()
+            && let Ok(elapsed) = modified.elapsed()
+        {
+            return elapsed.as_secs() <= ttl;
         }
         false
     }
@@ -161,12 +166,13 @@ impl DexscreenerClient {
         let disable_cache = Self::cache_disabled();
         let path = Self::cache_path(cache_key);
 
-        if !disable_cache && path.exists() && Self::is_fresh(&path) {
-            if let Ok(bytes) = fs::read(&path) {
-                if let Ok(val) = serde_json::from_slice::<T>(&bytes) {
-                    return Ok(val);
-                }
-            }
+        if !disable_cache
+            && path.exists()
+            && Self::is_fresh(&path)
+            && let Ok(bytes) = fs::read(&path)
+            && let Ok(val) = serde_json::from_slice::<T>(&bytes)
+        {
+            return Ok(val);
         }
 
         let resp = self.client.get(url).send().await?;

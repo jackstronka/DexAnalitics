@@ -446,8 +446,10 @@ mod tests {
     }
 
     fn engine_with_mode(mode: StrategyMode) -> DecisionEngine {
-        let mut cfg = DecisionConfig::default();
-        cfg.strategy_mode = mode;
+        let cfg = DecisionConfig {
+            strategy_mode: mode,
+            ..DecisionConfig::default()
+        };
         DecisionEngine::new(cfg)
     }
 
@@ -527,10 +529,12 @@ mod tests {
 
     #[test]
     fn test_oor_recenter_waits_for_interval_by_default() {
-        let mut cfg = DecisionConfig::default();
-        cfg.strategy_mode = StrategyMode::OorRecenter;
-        cfg.min_rebalance_interval_hours = 1;
-        cfg.rebalance_on_range_exit_immediately = false;
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::OorRecenter,
+            min_rebalance_interval_hours: 1,
+            rebalance_on_range_exit_immediately: false,
+            ..DecisionConfig::default()
+        };
         let engine = DecisionEngine::new(cfg);
 
         let mut context = create_test_context(false, Decimal::ZERO);

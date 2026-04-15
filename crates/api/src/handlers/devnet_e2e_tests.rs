@@ -49,8 +49,10 @@ async fn devnet_pool_state_smoke() {
 #[tokio::test]
 #[ignore = "requires live Orca API + network"]
 async fn devnet_orca_list_pools_smoke() {
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some("https://api.orca.so/v2/solana".to_string());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some("https://api.orca.so/v2/solana".to_string()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_list_pools(State(state), Query(OrcaListPoolsQuery::default())).await;
     assert!(res.is_ok(), "orca list pools failed");
@@ -62,8 +64,10 @@ async fn devnet_orca_list_pools_smoke() {
 #[tokio::test]
 #[ignore = "requires live Orca API + network"]
 async fn devnet_orca_list_tokens_smoke() {
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some("https://api.orca.so/v2/solana".to_string());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some("https://api.orca.so/v2/solana".to_string()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_list_tokens(State(state), Query(OrcaListTokensQuery::default())).await;
     assert!(res.is_ok(), "orca list tokens failed");
@@ -75,8 +79,10 @@ async fn devnet_orca_list_tokens_smoke() {
 #[tokio::test]
 #[ignore = "requires live Orca API + network"]
 async fn devnet_orca_protocol_smoke() {
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some("https://api.orca.so/v2/solana".to_string());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some("https://api.orca.so/v2/solana".to_string()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_get_protocol(State(state)).await;
     assert!(res.is_ok(), "orca protocol failed");
@@ -283,7 +289,7 @@ async fn devnet_strategy_driven_rebalance_smoke() {
         .expect("add_position");
 
     // 3) Start StrategyExecutor with auto_execute and strategy mode that always rebalances.
-    let mut exec = StrategyExecutor::new(
+    let exec = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
         state.tx_manager.clone(),
@@ -298,9 +304,11 @@ async fn devnet_strategy_driven_rebalance_smoke() {
     );
     exec.set_wallet(wallet.clone());
 
-    let mut cfg = DecisionConfig::default();
-    cfg.strategy_mode = StrategyMode::Periodic;
-    cfg.periodic_interval_hours = 0; // always eligible
+    let cfg = DecisionConfig {
+        strategy_mode: StrategyMode::Periodic,
+        periodic_interval_hours: 0, // always eligible
+        ..DecisionConfig::default()
+    };
     exec.set_decision_config(cfg);
 
     let lifecycle = exec.lifecycle().clone();
@@ -928,7 +936,7 @@ async fn devnet_bot_actions_smoke() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(128);
 
-    let mut exec = StrategyExecutor::new(
+    let exec = StrategyExecutor::new(
         state.provider.clone(),
         state.monitor.clone(),
         state.tx_manager.clone(),
@@ -1043,7 +1051,7 @@ async fn devnet_submit_unsigned_tx_is_rejected() {
     let err = tx_submit_signed(
         State(state),
         Json(crate::models::SubmitSignedTxRequest {
-            signed_tx_base64: signed_tx_base64,
+            signed_tx_base64,
         }),
     )
     .await

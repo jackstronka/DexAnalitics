@@ -71,8 +71,7 @@ fn resolve_repo_root(state: &AppState) -> PathBuf {
     let explicit = state
         .config
         .repo_root
-        .as_ref()
-        .map(std::string::String::clone)
+        .clone()
         .or_else(|| std::env::var("CLMM_REPO_ROOT").ok())
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from);
@@ -80,15 +79,15 @@ fn resolve_repo_root(state: &AppState) -> PathBuf {
         return path.clone();
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(root) = find_repo_root(&cwd) {
-            tracing::info!(
-                cwd = %cwd.display(),
-                repo_root = %root.display(),
-                "scripts: resolved repo root (walk from cwd)"
-            );
-            return root;
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(root) = find_repo_root(&cwd)
+    {
+        tracing::info!(
+            cwd = %cwd.display(),
+            repo_root = %root.display(),
+            "scripts: resolved repo root (walk from cwd)"
+        );
+        return root;
     }
 
     if let Ok(exe) = std::env::current_exe() {
@@ -373,8 +372,7 @@ pub async fn run_script(
         }
     });
     let base = derived
-        .as_ref()
-        .map(|s| s.as_str())
+        .as_deref()
         .or_else(|| {
             state
                 .config

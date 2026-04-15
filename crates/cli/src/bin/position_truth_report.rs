@@ -23,7 +23,7 @@ struct Args {
 #[derive(Debug, serde::Deserialize)]
 struct PositionFeeCheckpointRow {
     #[serde(default)]
-    schema_version: Option<u32>,
+    _schema_version: Option<u32>,
     ts_utc: String,
     position: String,
     pool: String,
@@ -54,10 +54,11 @@ fn main_inner() -> anyhow::Result<()> {
     let txt = std::fs::read_to_string(&ledger_path)?;
     let mut rows: Vec<PositionFeeCheckpointRow> = Vec::new();
     for line in txt.lines().filter(|l| !l.trim().is_empty()) {
-        if let Ok(r) = serde_json::from_str::<PositionFeeCheckpointRow>(line) {
-            if r.pool == args.pool_address && r.position == args.position_address {
-                rows.push(r);
-            }
+        if let Ok(r) = serde_json::from_str::<PositionFeeCheckpointRow>(line)
+            && r.pool == args.pool_address
+            && r.position == args.position_address
+        {
+            rows.push(r);
         }
     }
 

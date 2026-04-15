@@ -279,7 +279,11 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     }
     let mint_set: BTreeSet<String> = pool_mints.iter().cloned().collect();
     let (px, price_src) = fetch_mint_prices_usd(&mint_set).await;
-    let pa = pool_mints.get(0).and_then(|m| px.get(m)).copied().unwrap_or(0.0);
+    let pa = pool_mints
+        .first()
+        .and_then(|m| px.get(m))
+        .copied()
+        .unwrap_or(0.0);
     let pb = pool_mints.get(1).and_then(|m| px.get(m)).copied().unwrap_or(0.0);
     let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
     let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);

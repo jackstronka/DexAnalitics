@@ -35,7 +35,7 @@ fn is_wsol_mint(mint: &Pubkey) -> bool {
 }
 
 fn wsol_feed_usd_looks_bogus(p: f64) -> bool {
-    !p.is_finite() || p <= 0.0 || p < WSOL_USD_SANITY_MIN || p > WSOL_USD_SANITY_MAX
+    !p.is_finite() || p <= 0.0 || !(WSOL_USD_SANITY_MIN..=WSOL_USD_SANITY_MAX).contains(&p)
 }
 
 /// Raw Whirlpool tick → UI ratio token B per 1 token A (human decimals).
@@ -91,6 +91,7 @@ fn wsol_usd_from_usdc_pair_tick(
 /// When `position_amounts_raw` is `Some((a,b))`, only adjusts the WSOL leg if that leg's raw token
 /// balance is **> 0** (live position card). When `None`, adjusts whenever the WSOL mint heuristic
 /// matches (event-time snapshot right after open/close).
+#[allow(clippy::too_many_arguments)]
 pub fn adjust_pool_mint_usd_with_wsol_tick(
     tick: i32,
     mint_a: &Pubkey,
@@ -109,17 +110,19 @@ pub fn adjust_pool_mint_usd_with_wsol_tick(
         None => (true, true),
     };
     let mut changed = false;
-    if a_ok && is_wsol_mint(mint_a) {
-        if wsol_feed_usd_looks_bogus(*pa) || is_usdc_mint(mint_b) {
-            *pa = implied_sol;
-            changed = true;
-        }
+    if a_ok
+        && is_wsol_mint(mint_a)
+        && (wsol_feed_usd_looks_bogus(*pa) || is_usdc_mint(mint_b))
+    {
+        *pa = implied_sol;
+        changed = true;
     }
-    if b_ok && is_wsol_mint(mint_b) {
-        if wsol_feed_usd_looks_bogus(*pb) || is_usdc_mint(mint_a) {
-            *pb = implied_sol;
-            changed = true;
-        }
+    if b_ok
+        && is_wsol_mint(mint_b)
+        && (wsol_feed_usd_looks_bogus(*pb) || is_usdc_mint(mint_a))
+    {
+        *pb = implied_sol;
+        changed = true;
     }
     changed
 }
@@ -163,15 +166,15 @@ pub async fn fetch_event_pool_mint_usd_prices(
     let mut pa = *px.get(&ma.to_string()).unwrap_or(&0.0);
     let mut pb = *px.get(&mb.to_string()).unwrap_or(&0.0);
 
-    if let Some(p) = stablecoin_usd_if_applicable(&ma.to_string()) {
-        if !pa.is_finite() || pa <= 0.0 {
-            pa = p;
-        }
+    if let Some(p) = stablecoin_usd_if_applicable(&ma.to_string())
+        && (!pa.is_finite() || pa <= 0.0)
+    {
+        pa = p;
     }
-    if let Some(p) = stablecoin_usd_if_applicable(&mb.to_string()) {
-        if !pb.is_finite() || pb <= 0.0 {
-            pb = p;
-        }
+    if let Some(p) = stablecoin_usd_if_applicable(&mb.to_string())
+        && (!pb.is_finite() || pb <= 0.0)
+    {
+        pb = p;
     }
 
     let mut source = "gecko".to_string();

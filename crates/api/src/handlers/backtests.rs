@@ -104,7 +104,15 @@ fn resolve_clmm_lp_cli_path(repo_root: Option<&str>) -> Result<PathBuf, String> 
     )
 }
 
-fn registry_lookup(position_pubkey: &str) -> Option<(Option<String>, Option<String>, String, Option<String>, Option<Value>)> {
+type RegistryLookup = (
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<Value>,
+);
+
+fn registry_lookup(position_pubkey: &str) -> Option<RegistryLookup> {
     let p = registry_path();
     let f = std::fs::File::open(p).ok()?;
     let r = BufReader::new(f);
@@ -115,7 +123,7 @@ fn registry_lookup(position_pubkey: &str) -> Option<(Option<String>, Option<Stri
     let mut sid: Option<String> = None;
     let mut details: Option<Value> = None;
 
-    for line in r.lines().filter_map(Result::ok) {
+    for line in r.lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -438,25 +446,22 @@ pub async fn backtest_from_closed_position(
     } else {
         let mut cap = 0.0_f64;
         let ledger = clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path();
-        if ledger.exists() {
-            if let Ok(txt) = std::fs::read_to_string(&ledger) {
-                if let Some(ref sid) = open_sid {
-                    let sid = sid.trim();
-                    if !sid.is_empty() {
-                        cap = capital_from_ledger_session(&txt, sid, &mint_a, &mint_b, pa, pb);
-                    }
+        if ledger.exists() && let Ok(txt) = std::fs::read_to_string(&ledger) {
+            if let Some(ref sid) = open_sid {
+                let sid = sid.trim();
+                if !sid.is_empty() {
+                    cap = capital_from_ledger_session(&txt, sid, &mint_a, &mint_b, pa, pb);
                 }
-                if cap <= 0.0 {
-                    cap = capital_from_ledger_first_open(&txt, position, &mint_a, &mint_b, pa, pb);
-                }
+            }
+            if cap <= 0.0 {
+                cap = capital_from_ledger_first_open(&txt, position, &mint_a, &mint_b, pa, pb);
             }
         }
-        if cap <= 0.0 {
-            if let Some(ref db) = state.db {
-                if let Some(c) = capital_from_db_first_snapshot_usd(db, position).await {
-                    cap = c;
-                }
-            }
+        if cap <= 0.0
+            && let Some(ref db) = state.db
+            && let Some(c) = capital_from_db_first_snapshot_usd(db, position).await
+        {
+            cap = c;
         }
         cap
     };

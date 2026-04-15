@@ -378,12 +378,12 @@ fn validate_build_request(req: &BuildUnsignedTxRequest, op: TxOp) -> Result<(), 
             if amount_a == 0 || amount_b == 0 {
                 return Err(ApiError::bad_request("amount_a and amount_b must be > 0"));
             }
-            if let Some(slippage) = req.slippage_bps {
-                if slippage > MAX_SLIPPAGE_BPS {
-                    return Err(ApiError::Validation(format!(
-                        "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
-                    )));
-                }
+            if let Some(slippage) = req.slippage_bps
+                && slippage > MAX_SLIPPAGE_BPS
+            {
+                return Err(ApiError::Validation(format!(
+                    "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
+                )));
             }
         }
         TxOp::Decrease => {
@@ -395,12 +395,12 @@ fn validate_build_request(req: &BuildUnsignedTxRequest, op: TxOp) -> Result<(), 
             if liq == 0 {
                 return Err(ApiError::bad_request("liquidity_amount must be > 0"));
             }
-            if let Some(slippage) = req.slippage_bps {
-                if slippage > MAX_SLIPPAGE_BPS {
-                    return Err(ApiError::Validation(format!(
-                        "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
-                    )));
-                }
+            if let Some(slippage) = req.slippage_bps
+                && slippage > MAX_SLIPPAGE_BPS
+            {
+                return Err(ApiError::Validation(format!(
+                    "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
+                )));
             }
         }
         TxOp::Collect => {
@@ -410,12 +410,12 @@ fn validate_build_request(req: &BuildUnsignedTxRequest, op: TxOp) -> Result<(), 
         TxOp::Close => {
             require_pubkey_field("pool_address", &req.pool_address)?;
             require_pubkey_field("position_address", &req.position_address)?;
-            if let Some(slippage) = req.slippage_bps {
-                if slippage > MAX_SLIPPAGE_BPS {
-                    return Err(ApiError::Validation(format!(
-                        "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
-                    )));
-                }
+            if let Some(slippage) = req.slippage_bps
+                && slippage > MAX_SLIPPAGE_BPS
+            {
+                return Err(ApiError::Validation(format!(
+                    "slippage_bps too high (max {MAX_SLIPPAGE_BPS})"
+                )));
             }
         }
     }

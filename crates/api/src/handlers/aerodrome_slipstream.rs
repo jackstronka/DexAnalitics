@@ -44,7 +44,7 @@ pub async fn get_aerodrome_slipstream_pool_slot0(
         .await
         .map_err(ApiError::bad_gateway)?;
 
-    let d = decode_slot0_return(&raw).map_err(|e| ApiError::bad_gateway(e))?;
+    let d = decode_slot0_return(&raw).map_err(ApiError::bad_gateway)?;
 
     Ok(Json(SlipstreamSlot0Response {
         chain_id: BASE_MAINNET_CHAIN_ID,

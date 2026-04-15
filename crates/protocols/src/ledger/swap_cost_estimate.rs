@@ -25,7 +25,7 @@ fn median_from_path(path: &Path, pool_address: Option<&str>) -> (Option<u64>, us
     };
     let reader = BufReader::new(file);
     let mut fees = Vec::new();
-    for line in reader.lines().filter_map(std::result::Result::ok) {
+    for line in reader.lines().map_while(std::result::Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };

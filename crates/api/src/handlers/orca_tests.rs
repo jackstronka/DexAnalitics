@@ -30,8 +30,10 @@ async fn orca_list_pools_proxies_rest() {
         }));
     });
 
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_list_pools(State(state), Query(OrcaListPoolsQuery::default()))
         .await
@@ -63,8 +65,10 @@ async fn orca_search_pools_proxies_rest() {
         }));
     });
 
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_search_pools(
         State(state),
@@ -102,8 +106,10 @@ async fn orca_get_pool_proxies_rest() {
         }));
     });
 
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_get_pool(State(state), axum::extract::Path("POOLX".to_string()))
         .await
@@ -122,8 +128,10 @@ async fn orca_lock_proxies_rest() {
         ]));
     });
 
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_get_lock_info(State(state), axum::extract::Path("POOLX".to_string()))
         .await
@@ -151,8 +159,10 @@ async fn orca_list_tokens_proxies_rest() {
             "meta": { "next": null, "previous": null }
         }));
     });
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_list_tokens(State(state), Query(OrcaListTokensQuery::default()))
         .await
@@ -175,8 +185,10 @@ async fn orca_search_tokens_proxies_rest() {
             "meta": { "next": null, "previous": null }
         }));
     });
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_search_tokens(
         State(state),
@@ -206,8 +218,10 @@ async fn orca_get_token_proxies_rest() {
             "meta": { "next": null, "previous": null }
         }));
     });
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_get_token(State(state), axum::extract::Path("MINTX".to_string()))
         .await
@@ -230,8 +244,10 @@ async fn orca_get_protocol_proxies_rest() {
             "meta": { "next": null, "previous": null }
         }));
     });
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let res = orca_get_protocol(State(state)).await.unwrap().0;
     assert!(res.tvl_usdc.is_some());

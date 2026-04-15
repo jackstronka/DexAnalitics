@@ -325,6 +325,7 @@ impl LifecycleTracker {
 
     /// Close succeeded but open failed — funds are typically in wallet ATAs; row is written when
     /// [`Self::set_il_ledger_path`] is set (same file as successful `event: "rebalance"`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_rebalance_incomplete(
         &self,
         old_position: Pubkey,

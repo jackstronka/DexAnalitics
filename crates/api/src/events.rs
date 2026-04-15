@@ -115,6 +115,12 @@ impl InProcessEventBus {
     }
 }
 
+impl Default for InProcessEventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl EventBus for InProcessEventBus {
     async fn publish(&self, event: EventEnvelope) -> anyhow::Result<()> {

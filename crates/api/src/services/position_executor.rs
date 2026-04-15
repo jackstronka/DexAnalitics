@@ -130,10 +130,9 @@ pub async fn resolve_executor_for_position_ops(
         .iter()
         .find(|(k, _)| k.as_str() == API_POSITION_OPS_EXECUTOR_ID)
         .map(|(_, v)| v)
+        && executor_can_sign_on_chain(e).await
     {
-        if executor_can_sign_on_chain(e).await {
-            return Some(e.clone());
-        }
+        return Some(e.clone());
     }
     for (sid, e) in snapshot
         .iter()
@@ -166,10 +165,9 @@ pub async fn resolve_executor_for_position_ops(
         .iter()
         .find(|(k, _)| k.as_str() == API_POSITION_OPS_EXECUTOR_ID)
         .map(|(_, v)| v)
+        && executor_can_sign_on_chain(e).await
     {
-        if executor_can_sign_on_chain(e).await {
-            return Some(e.clone());
-        }
+        return Some(e.clone());
     }
     for (sid, e) in snapshot2
         .iter()

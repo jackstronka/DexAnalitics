@@ -213,6 +213,7 @@ async fn persist_event_valuation_snapshots_for_positions(
     }
     let (prices, price_source) = fetch_mint_prices_usd_stable(&requested_mints).await;
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_snapshot(
         db: &Database,
         pos: &str,
@@ -350,42 +351,34 @@ async fn persist_event_valuation_snapshots_for_positions(
             let mut value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
             let mut baseline_amounts_source: Option<&'static str> = None;
 
-            if let Some(details) = r.details.as_ref().and_then(|v| v.as_object()) {
-                if let (Some(ca_v), Some(cb_v)) =
+            if let Some(details) = r.details.as_ref().and_then(|v| v.as_object())
+                && let (Some(ca_v), Some(cb_v)) =
                     (details.get("amount_a_cap"), details.get("amount_b_cap"))
-                {
-                    if let (Some(cap_a), Some(cap_b)) =
-                        (parse_cap_u64(ca_v), parse_cap_u64(cb_v))
-                    {
-                        if cap_a > 0 && cap_b > 0 {
-                            let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
-                            let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
-                            if let (Some(a_pk), Some(b_pk)) = (a_pk, b_pk) {
-                                let dec_a =
-                                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &a_pk)
-                                        .await;
-                                let dec_b =
-                                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &b_pk)
-                                        .await;
-                                if let (Some(dec_a), Some(dec_b)) = (dec_a, dec_b) {
-                                    let cap_a_ui = decimal_ui_from_raw_u64(cap_a, dec_a);
-                                    let cap_b_ui = decimal_ui_from_raw_u64(cap_b, dec_b);
-                                    // Orca caps are **max** deposit per leg — using both caps for USD
-                                    // overstates vs on-chain liquidity (Performance). Only substitute legs
-                                    // that are **missing** in fee-payer deltas (typical wrapped/native SOL).
-                                    if pa_eff > 0.0 && pb_eff > 0.0 {
-                                        if amount_a_ui.is_zero() && !cap_a_ui.is_zero() {
-                                            amount_a_ui = cap_a_ui;
-                                            baseline_amounts_source = Some("open_caps");
-                                        }
-                                        if amount_b_ui.is_zero() && !cap_b_ui.is_zero() {
-                                            amount_b_ui = cap_b_ui;
-                                            baseline_amounts_source = Some("open_caps");
-                                        }
-                                        value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
-                                    }
-                                }
+                && let (Some(cap_a), Some(cap_b)) = (parse_cap_u64(ca_v), parse_cap_u64(cb_v))
+                && cap_a > 0
+                && cap_b > 0
+            {
+                let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
+                let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
+                if let (Some(a_pk), Some(b_pk)) = (a_pk, b_pk) {
+                    let dec_a = fetch_mint_decimals_best_effort(state.provider.as_ref(), &a_pk).await;
+                    let dec_b = fetch_mint_decimals_best_effort(state.provider.as_ref(), &b_pk).await;
+                    if let (Some(dec_a), Some(dec_b)) = (dec_a, dec_b) {
+                        let cap_a_ui = decimal_ui_from_raw_u64(cap_a, dec_a);
+                        let cap_b_ui = decimal_ui_from_raw_u64(cap_b, dec_b);
+                        // Orca caps are **max** deposit per leg — using both caps for USD
+                        // overstates vs on-chain liquidity (Performance). Only substitute legs
+                        // that are **missing** in fee-payer deltas (typical wrapped/native SOL).
+                        if pa_eff > 0.0 && pb_eff > 0.0 {
+                            if amount_a_ui.is_zero() && !cap_a_ui.is_zero() {
+                                amount_a_ui = cap_a_ui;
+                                baseline_amounts_source = Some("open_caps");
                             }
+                            if amount_b_ui.is_zero() && !cap_b_ui.is_zero() {
+                                amount_b_ui = cap_b_ui;
+                                baseline_amounts_source = Some("open_caps");
+                            }
+                            value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
                         }
                     }
                 }
@@ -490,10 +483,10 @@ async fn pool_token_mints_cached(state: &AppState, pool: &str) -> Option<(String
         return None;
     }
     let cache = POOL_TOKEN_MINTS_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-    if let Ok(g) = cache.read() {
-        if let Some(p) = g.get(pool) {
-            return Some(p.clone());
-        }
+    if let Ok(g) = cache.read()
+        && let Some(p) = g.get(pool)
+    {
+        return Some(p.clone());
     }
     let reader = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone());
     for attempt in 0u32..3 {
@@ -750,7 +743,7 @@ static LIFECYCLE_ROWS_CACHE: OnceLock<RwLock<LifecycleRowsCache>> = OnceLock::ne
 
 fn parse_lifecycle_rows_from_reader<R: BufRead>(reader: R) -> Vec<LifecycleRow> {
     let mut out = Vec::new();
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -839,10 +832,11 @@ async fn lifecycle_rows_cached_best_effort() -> Arc<Vec<LifecycleRow>> {
     });
 
     // Fast path: cache hit.
-    if let Ok(g) = lock.read() {
-        if g.mtime == mtime && !g.rows.is_empty() {
-            return g.rows.clone();
-        }
+    if let Ok(g) = lock.read()
+        && g.mtime == mtime
+        && !g.rows.is_empty()
+    {
+        return g.rows.clone();
     }
 
     // Slow path: rebuild off-thread to avoid blocking the async runtime.
@@ -887,7 +881,7 @@ static FEE_CHECKPOINT_ROWS_CACHE: OnceLock<RwLock<FeeCheckpointRowsCache>> = Onc
 
 fn parse_fee_checkpoint_rows_from_reader<R: BufRead>(reader: R) -> Vec<FeeCheckpointRow> {
     let mut out = Vec::new();
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -959,10 +953,11 @@ async fn fee_checkpoint_rows_cached_best_effort() -> Arc<Vec<FeeCheckpointRow>> 
             rows: Arc::new(Vec::new()),
         })
     });
-    if let Ok(g) = lock.read() {
-        if g.mtime == mtime && !g.rows.is_empty() {
-            return g.rows.clone();
-        }
+    if let Ok(g) = lock.read()
+        && g.mtime == mtime
+        && !g.rows.is_empty()
+    {
+        return g.rows.clone();
     }
     let rebuilt: Vec<FeeCheckpointRow> = tokio::task::spawn_blocking(move || {
         let file = fs::File::open(&path).ok();
@@ -1155,10 +1150,10 @@ fn lifecycle_rotation_parent_before_open<'a>(
         // within the lookback window would otherwise become a false "parent" and defeat
         // `suppress_jsonl_rotation_stitch` / lineage isolation.
         if let (Some(osid), Some(csid)) = (open_rebalance_session_id, r.rebalance_session_id.as_deref())
+            && !osid.is_empty()
+            && osid == csid
         {
-            if !osid.is_empty() && osid == csid {
-                has_rotation_signal = true;
-            }
+            has_rotation_signal = true;
         }
         if !has_rotation_signal {
             for rr in rows.iter() {
@@ -1173,17 +1168,17 @@ fn lifecycle_rotation_parent_before_open<'a>(
                     continue;
                 }
                 let ev = rr.event.as_deref().unwrap_or("");
-                if ev.starts_with("bot_swap_") || ev.starts_with("bot_swap") {
-                    if rr.position_pubkey.as_deref() == Some(parent_pda) {
-                        has_rotation_signal = true;
-                        break;
-                    }
+                if (ev.starts_with("bot_swap_") || ev.starts_with("bot_swap"))
+                    && rr.position_pubkey.as_deref() == Some(parent_pda)
+                {
+                    has_rotation_signal = true;
+                    break;
                 }
-                if ev == "bot_reopen_preflight_failed" {
-                    if rr.position_pubkey.as_deref() == Some(parent_pda) {
-                        has_rotation_signal = true;
-                        break;
-                    }
+                if ev == "bot_reopen_preflight_failed"
+                    && rr.position_pubkey.as_deref() == Some(parent_pda)
+                {
+                    has_rotation_signal = true;
+                    break;
                 }
                 if matches!(ev, "bot_collect_fees" | "bot_decrease_liquidity")
                     && rr.position_pubkey.as_deref() == Some(parent_pda)
@@ -1243,7 +1238,7 @@ fn chain_from_lifecycle_best_effort_rows(
     }
 
     // Anchor: prefer OPEN row (lets us go backwards); otherwise fall back to CLOSE.
-    let mut anchor: Option<(usize, &LifecycleRow)> = find_open_row(&rows, entry);
+    let mut anchor: Option<(usize, &LifecycleRow)> = find_open_row(rows, entry);
     if anchor.is_none() {
         // newest close row for entry
         let mut last: Option<(usize, &LifecycleRow)> = None;
@@ -1266,7 +1261,7 @@ fn chain_from_lifecycle_best_effort_rows(
     let mut backward: Vec<String> = Vec::new();
     let mut cur_pos = entry.to_string();
     for _ in 0..max_hops {
-        let Some((_oi, o)) = find_open_row(&rows, &cur_pos) else { break };
+        let Some((_oi, o)) = find_open_row(rows, &cur_pos) else { break };
         let Some(parent) = lifecycle_rotation_parent_before_open(rows, o) else {
             break;
         };
@@ -1288,7 +1283,7 @@ fn chain_from_lifecycle_best_effort_rows(
     let mut cur_idx = anchor_idx;
     for _ in 0..max_hops {
         let cur = chain.last().expect("non-empty").clone();
-        let Some((close_i, c)) = find_close_row_from(&rows, &cur, cur_idx) else { break };
+        let Some((close_i, c)) = find_close_row_from(rows, &cur, cur_idx) else { break };
         if lifecycle_close_row_is_operator_manual(c) {
             break;
         }
@@ -1365,7 +1360,7 @@ struct RegistryRow {
 
 fn parse_registry_rows_from_reader<R: BufRead>(reader: R) -> Vec<RegistryRow> {
     let mut out = Vec::new();
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -1469,12 +1464,12 @@ fn infer_parent_position_from_registry_rows(rows: &[RegistryRow], entry: &str) -
         }
         if let (Some(osid), Some(csid)) =
             (o.rebalance_session_id.as_deref(), r.rebalance_session_id.as_deref())
+            && !osid.is_empty()
+            && !csid.is_empty()
+            && osid == csid
+            && best.as_ref().is_none_or(|(_, bts)| ts > *bts)
         {
-            if !osid.is_empty() && !csid.is_empty() && osid == csid {
-                if best.as_ref().is_none_or(|(_, bts)| ts > *bts) {
-                    best = Some((r, ts));
-                }
-            }
+            best = Some((r, ts));
         }
     }
     let (c, _) = best?;
@@ -1569,12 +1564,12 @@ fn chain_from_registry_best_effort_rows(rows: &[RegistryRow], entry: &str, max_h
             }
             if let (Some(osid), Some(csid)) =
                 (o.rebalance_session_id.as_deref(), r.rebalance_session_id.as_deref())
+                && !osid.is_empty()
+                && !csid.is_empty()
+                && osid == csid
+                && best.as_ref().is_none_or(|(_, bts)| ts > *bts)
             {
-                if !osid.is_empty() && !csid.is_empty() && osid == csid {
-                    if best.as_ref().is_none_or(|(_, bts)| ts > *bts) {
-                        best = Some((r, ts));
-                    }
-                }
+                best = Some((r, ts));
             }
         }
         let Some((c, _)) = best else { break };
@@ -1614,12 +1609,12 @@ fn chain_from_registry_best_effort_rows(rows: &[RegistryRow], entry: &str, max_h
             }
             if let (Some(csid), Some(osid)) =
                 (c.rebalance_session_id.as_deref(), r.rebalance_session_id.as_deref())
+                && !csid.is_empty()
+                && !osid.is_empty()
+                && csid == osid
+                && next.as_ref().is_none_or(|(_, nts)| ts < *nts)
             {
-                if !csid.is_empty() && !osid.is_empty() && csid == osid {
-                    if next.as_ref().is_none_or(|(_, nts)| ts < *nts) {
-                        next = Some((r, ts));
-                    }
-                }
+                next = Some((r, ts));
             }
         }
         let Some((o, _)) = next else { break };
@@ -1703,39 +1698,39 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
         let mut raw_b_ui: Option<Decimal> = None;
 
         // Authoritative both legs: position `fee_owed_a/b` read by bot immediately before harvest.
-        if let Some(raw) = r.lp_collected_token_a_raw {
-            if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str()) {
-                let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
-                    d
-                } else if let Some(d) =
-                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
-                {
-                    mint_decimals.insert(ma.clone(), d);
-                    d
-                } else {
-                    9u8
-                };
-                let ui = decimal_ui_from_raw_u64(raw, dec);
-                raw_a_ui = Some(ui);
-                merged_a = merged_a.max(ui);
-            }
+        if let Some(raw) = r.lp_collected_token_a_raw
+            && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
+        {
+            let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
+                d
+            } else if let Some(d) =
+                fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+            {
+                mint_decimals.insert(ma.clone(), d);
+                d
+            } else {
+                9u8
+            };
+            let ui = decimal_ui_from_raw_u64(raw, dec);
+            raw_a_ui = Some(ui);
+            merged_a = merged_a.max(ui);
         }
-        if let Some(raw) = r.lp_collected_token_b_raw {
-            if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str()) {
-                let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
-                    d
-                } else if let Some(d) =
-                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
-                {
-                    mint_decimals.insert(mb.clone(), d);
-                    d
-                } else {
-                    9u8
-                };
-                let ui = decimal_ui_from_raw_u64(raw, dec);
-                raw_b_ui = Some(ui);
-                merged_b = merged_b.max(ui);
-            }
+        if let Some(raw) = r.lp_collected_token_b_raw
+            && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
+        {
+            let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
+                d
+            } else if let Some(d) =
+                fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+            {
+                mint_decimals.insert(mb.clone(), d);
+                d
+            } else {
+                9u8
+            };
+            let ui = decimal_ui_from_raw_u64(raw, dec);
+            raw_b_ui = Some(ui);
+            merged_b = merged_b.max(ui);
         }
 
         // Prefer authoritative pair from position fee_owed_{a,b} whenever both legs are available.
@@ -1850,39 +1845,39 @@ async fn lp_fees_collected_usd_from_ledger_db(
         let mut raw_a_ui: Option<Decimal> = None;
         let mut raw_b_ui: Option<Decimal> = None;
 
-        if let Some(raw) = lp_raw_a.filter(|x| *x > 0).map(|x| x as u64) {
-            if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str()) {
-                let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
-                    d
-                } else if let Some(d) =
-                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
-                {
-                    mint_decimals.insert(ma.clone(), d);
-                    d
-                } else {
-                    9u8
-                };
-                let ui = decimal_ui_from_raw_u64(raw, dec);
-                raw_a_ui = Some(ui);
-                merged_a = merged_a.max(ui);
-            }
+        if let Some(raw) = lp_raw_a.filter(|x| *x > 0).map(|x| x as u64)
+            && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
+        {
+            let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
+                d
+            } else if let Some(d) =
+                fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+            {
+                mint_decimals.insert(ma.clone(), d);
+                d
+            } else {
+                9u8
+            };
+            let ui = decimal_ui_from_raw_u64(raw, dec);
+            raw_a_ui = Some(ui);
+            merged_a = merged_a.max(ui);
         }
-        if let Some(raw) = lp_raw_b.filter(|x| *x > 0).map(|x| x as u64) {
-            if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str()) {
-                let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
-                    d
-                } else if let Some(d) =
-                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
-                {
-                    mint_decimals.insert(mb.clone(), d);
-                    d
-                } else {
-                    9u8
-                };
-                let ui = decimal_ui_from_raw_u64(raw, dec);
-                raw_b_ui = Some(ui);
-                merged_b = merged_b.max(ui);
-            }
+        if let Some(raw) = lp_raw_b.filter(|x| *x > 0).map(|x| x as u64)
+            && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
+        {
+            let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
+                d
+            } else if let Some(d) =
+                fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+            {
+                mint_decimals.insert(mb.clone(), d);
+                d
+            } else {
+                9u8
+            };
+            let ui = decimal_ui_from_raw_u64(raw, dec);
+            raw_b_ui = Some(ui);
+            merged_b = merged_b.max(ui);
         }
 
         // Prefer authoritative pair from position fee_owed_{a,b} whenever both legs are available.
@@ -2143,18 +2138,20 @@ async fn node_metrics(
     }
     if baseline.is_none() && current.is_none() {
         let pk = solana_sdk::pubkey::Pubkey::from_str(position_pubkey).ok();
-        if let Some(pk) = pk {
-            if let Ok(Ok(pos)) = timeout(
+        if let Some(pk) = pk
+            && let Ok(Ok(pos)) = timeout(
                 Duration::from_secs(2),
                 monitored_position_from_chain(state.provider.clone(), &pk),
             )
             .await
-            {
-                let prices =
-                    fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
-                if let Ok(v) = compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
-                {
-                    let raw = serde_json::json!({
+            && let Ok(v) = compute_position_usd_valuation(
+                state.provider.clone(),
+                &pos,
+                &fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await,
+            )
+            .await
+        {
+            let raw = serde_json::json!({
                         "position": pos.address.to_string(),
                         "pool": pos.pool.to_string(),
                         "value_usd": v.value_usd,
@@ -2167,7 +2164,7 @@ async fn node_metrics(
                         "price_b_usd": v.price_b_usd,
                         "source": "stream_lineage_self_seed"
                     });
-                    let _ = sqlx::query(
+            let _ = sqlx::query(
                         r#"
                         INSERT INTO position_stream_valuation_snapshots
                           (position_pubkey, ts_utc, pool_pubkey, value_usd, amount_a_ui, amount_b_ui, fees_usd, token_mint_a, token_mint_b, price_a_usd, price_b_usd, price_source, raw_json)
@@ -2188,9 +2185,7 @@ async fn node_metrics(
                     .bind("free_prices")
                     .bind(raw)
                     .execute(db.pool())
-                    .await;
-                }
-            }
+            .await;
         }
 
         baseline = sqlx::query(
@@ -2596,58 +2591,54 @@ async fn node_metrics_from_lifecycle_best_effort(
                 if opened_ts.is_none() {
                     opened_ts = r.ts_utc;
                 }
-                if open_leg_deltas.is_none() {
-                    if let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object())
-                    {
-                        let mut m: BTreeMap<String, Decimal> = BTreeMap::new();
-                        for (mint, dv) in obj {
-                            if let Some(d) = dec_from_any(dv) {
-                                m.insert(mint.clone(), d);
-                            }
+                if open_leg_deltas.is_none()
+                    && let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object())
+                {
+                    let mut m: BTreeMap<String, Decimal> = BTreeMap::new();
+                    for (mint, dv) in obj {
+                        if let Some(d) = dec_from_any(dv) {
+                            m.insert(mint.clone(), d);
                         }
-                        if !m.is_empty() {
-                            open_leg_deltas = Some(m);
-                        }
+                    }
+                    if !m.is_empty() {
+                        open_leg_deltas = Some(m);
                     }
                 }
                 if (open_amount_a_cap.is_none() || open_amount_b_cap.is_none())
                     && r.details.is_some()
+                    && let Some(d) = r.details.as_ref().and_then(|v| v.as_object())
                 {
-                    if let Some(d) = r.details.as_ref().and_then(|v| v.as_object()) {
-                        if open_amount_a_cap.is_none() {
-                            open_amount_a_cap = d.get("amount_a_cap").and_then(|v| v.as_u64());
-                        }
-                        if open_amount_b_cap.is_none() {
-                            open_amount_b_cap = d.get("amount_b_cap").and_then(|v| v.as_u64());
-                        }
+                    if open_amount_a_cap.is_none() {
+                        open_amount_a_cap = d.get("amount_a_cap").and_then(|v| v.as_u64());
+                    }
+                    if open_amount_b_cap.is_none() {
+                        open_amount_b_cap = d.get("amount_b_cap").and_then(|v| v.as_u64());
                     }
                 }
             }
             Some("bot_close_position") | Some("position_close") => {
                 closed_ts = r.ts_utc.or(closed_ts);
-                if close_leg_deltas.is_none() {
-                    if let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object())
-                    {
-                        let mut m: BTreeMap<String, Decimal> = BTreeMap::new();
-                        for (mint, dv) in obj {
-                            if let Some(d) = dec_from_any(dv) {
-                                m.insert(mint.clone(), d);
-                            }
+                if close_leg_deltas.is_none()
+                    && let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object())
+                {
+                    let mut m: BTreeMap<String, Decimal> = BTreeMap::new();
+                    for (mint, dv) in obj {
+                        if let Some(d) = dec_from_any(dv) {
+                            m.insert(mint.clone(), d);
                         }
-                        if !m.is_empty() {
-                            close_leg_deltas = Some(m);
-                        }
+                    }
+                    if !m.is_empty() {
+                        close_leg_deltas = Some(m);
                     }
                 }
                 if (close_amount_a_raw.is_none() || close_amount_b_raw.is_none()) && r.details.is_some()
+                    && let Some(d) = r.details.as_ref().and_then(|v| v.as_object())
                 {
-                    if let Some(d) = r.details.as_ref().and_then(|v| v.as_object()) {
-                        if close_amount_a_raw.is_none() {
-                            close_amount_a_raw = d.get("close_amount_a_raw").and_then(|v| v.as_u64());
-                        }
-                        if close_amount_b_raw.is_none() {
-                            close_amount_b_raw = d.get("close_amount_b_raw").and_then(|v| v.as_u64());
-                        }
+                    if close_amount_a_raw.is_none() {
+                        close_amount_a_raw = d.get("close_amount_a_raw").and_then(|v| v.as_u64());
+                    }
+                    if close_amount_b_raw.is_none() {
+                        close_amount_b_raw = d.get("close_amount_b_raw").and_then(|v| v.as_u64());
                     }
                 }
             }
@@ -2657,20 +2648,21 @@ async fn node_metrics_from_lifecycle_best_effort(
         // Parse token deltas (string decimals) for realized cashflow — exclude open/close principal.
         let is_principal = is_lifecycle_open_event(r.event.as_deref())
             || is_lifecycle_close_event(r.event.as_deref());
-        if !is_principal {
-            if let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()) {
-                for (mint, dv) in obj {
-                    if let Some(d) = dec_from_any(dv) {
-                        *mint_deltas.entry(mint.clone()).or_insert(Decimal::ZERO) += d;
-                    }
+        if !is_principal
+            && let Some(obj) = r.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object())
+        {
+            for (mint, dv) in obj {
+                if let Some(d) = dec_from_any(dv) {
+                    *mint_deltas.entry(mint.clone()).or_insert(Decimal::ZERO) += d;
                 }
             }
         }
 
         // Pull leg mints from details if present.
-        if mint_a.is_none() || mint_b.is_none() {
-            if let Some(details) = r.details.as_ref().and_then(|v| v.as_object()) {
-                let da = details
+        if (mint_a.is_none() || mint_b.is_none())
+            && let Some(details) = r.details.as_ref().and_then(|v| v.as_object())
+        {
+            let da = details
                     .get("token_mint_a")
                     .and_then(|v| v.as_str())
                     .map(str::trim)
@@ -2682,12 +2674,11 @@ async fn node_metrics_from_lifecycle_best_effort(
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
-                if mint_a.is_none() {
-                    mint_a = da;
-                }
-                if mint_b.is_none() {
-                    mint_b = db;
-                }
+            if mint_a.is_none() {
+                mint_a = da;
+            }
+            if mint_b.is_none() {
+                mint_b = db;
             }
         }
     }
@@ -2855,32 +2846,31 @@ async fn node_metrics_from_lifecycle_best_effort(
     };
 
     // For closed positions we can't fetch on-chain value. Use the close leg as "end value" when available.
-    if current_value_usd.is_zero() {
-        if let Some(end) = end_value_usd_from_close {
-            current_value_usd = end;
-        }
+    if current_value_usd.is_zero()
+        && let Some(end) = end_value_usd_from_close
+    {
+        current_value_usd = end;
     }
 
     // DB-disabled mode: active positions have no close leg yet. Still show a meaningful "end value"
     // using a best-effort on-chain valuation with a tight timeout to avoid UI stalls.
-    if db_disabled && current_value_usd.is_zero() && closed_ts.is_none() {
-        if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(position_pubkey) {
-            if let Ok(Ok(pos)) = timeout(
-                Duration::from_secs(2),
-                monitored_position_from_chain(state.provider.clone(), &pk),
-            )
-            .await
-            {
-                let prices =
-                    fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
-                if let Ok(v) =
-                    compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
-                {
-                    if v.value_usd > Decimal::ZERO {
-                        current_value_usd = v.value_usd;
-                    }
-                }
-            }
+    if db_disabled
+        && current_value_usd.is_zero()
+        && closed_ts.is_none()
+        && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(position_pubkey)
+        && let Ok(Ok(pos)) = timeout(
+            Duration::from_secs(2),
+            monitored_position_from_chain(state.provider.clone(), &pk),
+        )
+        .await
+    {
+        let prices =
+            fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
+        if let Ok(v) =
+            compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
+            && v.value_usd > Decimal::ZERO
+        {
+            current_value_usd = v.value_usd;
         }
     }
 
@@ -2892,8 +2882,10 @@ async fn node_metrics_from_lifecycle_best_effort(
         mint_b.clone(),
         open_amount_a_cap,
         open_amount_b_cap,
-    ) {
-        if current_value_usd > Decimal::ZERO && baseline_value_usd > Decimal::ZERO {
+    )
+        && current_value_usd > Decimal::ZERO
+        && baseline_value_usd > Decimal::ZERO
+    {
             // heuristic: baseline less than 60% of current is suspicious for short windows
             let suspicious = baseline_value_usd < current_value_usd * Decimal::new(60, 2);
             if suspicious {
@@ -2930,7 +2922,6 @@ async fn node_metrics_from_lifecycle_best_effort(
                     }
                 }
             }
-        }
     }
 
     let net_pnl_usd = current_value_usd + realized_cashflow_usd - baseline_value_usd - tx_fees_usd;
@@ -3475,11 +3466,12 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
         }
 
         // Baseline snapshot at open ts.
-        if let Some(open) = open_by_pos.get(pos) {
-            if let (Some(ts), Some(obj)) = (
+        if let Some(open) = open_by_pos.get(pos)
+            && let (Some(ts), Some(obj)) = (
                 open.ts_utc,
                 open.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()),
-            ) {
+            )
+        {
                 let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
                 let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
                 // For opens, deltas are typically negative (spent). Convert to positive basket.
@@ -3530,15 +3522,15 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
                         inserted += res.rows_affected() as u32;
                     }
                 }
-            }
         }
 
         // End snapshot at close ts.
-        if let Some(close) = close_by_pos.get(pos) {
-            if let (Some(ts), Some(obj)) = (
+        if let Some(close) = close_by_pos.get(pos)
+            && let (Some(ts), Some(obj)) = (
                 close.ts_utc,
                 close.fee_payer_token_deltas.as_ref().and_then(|v| v.as_object()),
-            ) {
+            )
+        {
                 let da = obj.get(&mint_a).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
                 let dbb = obj.get(&mint_b).and_then(dec_from_any).unwrap_or(Decimal::ZERO);
                 // For closes, deltas are typically positive (received). Keep positive.
@@ -3589,7 +3581,6 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
                         inserted += res.rows_affected() as u32;
                     }
                 }
-            }
         }
     }
 

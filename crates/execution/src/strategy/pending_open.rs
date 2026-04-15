@@ -39,10 +39,10 @@ pub fn load(path: &Path) -> anyhow::Result<PendingOpenStore> {
 }
 
 pub fn save(path: &Path, store: &PendingOpenStore) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir).ok();
-        }
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir).ok();
     }
     std::fs::write(
         path,

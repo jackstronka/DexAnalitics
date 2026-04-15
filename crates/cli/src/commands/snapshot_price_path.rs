@@ -88,7 +88,7 @@ fn json_u128(x: Option<&Value>) -> Option<u128> {
 }
 
 fn scale_decimal_pow10(d: Decimal, exp: i32) -> Decimal {
-    let e = exp.unsigned_abs() as u32;
+    let e = exp.unsigned_abs();
     if e > 18 {
         return d;
     }
@@ -303,6 +303,7 @@ fn fee_delta_tokens_raydium(p0: &RaydiumSnapRow, p1: &RaydiumSnapRow) -> (u128, 
 }
 
 /// Build [`StepDataPoint`] grid + optional per-step fee map from Raydium JSONL only.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_from_raydium_snapshots(
     pool_address: &str,
     snapshot_jsonl_override: Option<&Path>,
@@ -582,6 +583,7 @@ fn pool_bpa_meteora(
 }
 
 /// Build [`StepDataPoint`] grid + optional per-step fee map from Meteora JSONL only.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_from_meteora_snapshots(
     pool_address: &str,
     snapshot_jsonl_override: Option<&Path>,
@@ -891,6 +893,7 @@ fn fee_delta_tokens(p0: &OrcaSnapRow, p1: &OrcaSnapRow) -> (u128, u128) {
 ///
 /// `snapshot_jsonl_override`: when set (e.g. `snapshot-backtest-prep` output), read this file
 /// instead of `data/pool-snapshots/orca/<pool>/snapshots.jsonl[.repaired]`.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_from_orca_snapshots(
     pool_address: &str,
     snapshot_jsonl_override: Option<&Path>,

@@ -229,10 +229,10 @@ async fn maybe_ingest_ledgers(state: &AppState, skip: bool) {
     let min_interval = Duration::from_secs(10);
     {
         let g = state.ledger_ingest_last_at.read().await;
-        if let Some(t) = *g {
-            if t.elapsed() < min_interval {
-                return;
-            }
+        if let Some(t) = *g
+            && t.elapsed() < min_interval
+        {
+            return;
         }
     }
     {

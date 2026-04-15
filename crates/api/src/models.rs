@@ -1057,6 +1057,7 @@ pub struct AgentApplyEnvelope {
 /// Body for `POST /strategies/{id}/apply-optimize-result`: raw optimize JSON or agent envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum ApplyOptimizeResultRequest {
     /// Structured agent decision (try this variant first in JSON; see `AgentDecision`).
     Agent(AgentApplyEnvelope),
@@ -1888,16 +1889,10 @@ pub struct ScriptsListResponse {
 }
 
 /// `POST /scripts/{id}/run` — forwarded to localhost runner when configured.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct RunScriptRequest {
     #[serde(default)]
     pub triggered_by: Option<String>,
-}
-
-impl Default for RunScriptRequest {
-    fn default() -> Self {
-        Self { triggered_by: None }
-    }
 }
 
 // ============================================================================

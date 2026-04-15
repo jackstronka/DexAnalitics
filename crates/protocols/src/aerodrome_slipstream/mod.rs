@@ -73,10 +73,7 @@ mod tests {
         assert_eq!(b[0], b'0');
         assert_eq!(b[1], b'x');
         for &ch in &b[2..] {
-            assert!(
-                matches!(ch, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'),
-                "non-hex: {s}"
-            );
+            assert!(ch.is_ascii_hexdigit(), "non-hex: {s}");
         }
     }
 

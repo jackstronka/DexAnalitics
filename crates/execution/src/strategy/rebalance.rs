@@ -280,7 +280,7 @@ fn widen_ticks_around_current(
     let spacing = tick_spacing as i32;
     let width = (tick_upper - tick_lower).abs().max(spacing.max(1));
     // Expand width by ~2^step, clamped to avoid overflow.
-    let shift = (step.min(10)) as u32;
+    let shift = step.min(10);
     let factor = 1i32.checked_shl(shift).unwrap_or(1024);
     let new_width = width.saturating_mul(factor).max(spacing.max(1));
     let half = new_width / 2;
@@ -637,7 +637,7 @@ impl RebalanceExecutor {
                 let base = swap_mix_spend_cap_pct();
                 if round > 0 {
                     // After the first swap, push harder so we rarely need a third tx fee.
-                    base.max(0.998).min(0.9995)
+                    base.clamp(0.998, 0.9995)
                 } else {
                     base
                 }
@@ -1217,6 +1217,7 @@ impl RebalanceExecutor {
     }
 
     /// Swap-mix alignment + `open_position` retries (shared by full rebalance and incomplete recovery).
+    #[allow(clippy::too_many_arguments)]
     async fn open_new_range_with_wallet_mix(
         &self,
         pool: &Pubkey,
@@ -2259,6 +2260,7 @@ impl RebalanceExecutor {
     ///
     /// In dry-run mode returns the derived Whirlpool position PDA without requiring wallet.
     /// Returns `(position_pda, effective_tick_lower, effective_tick_upper)`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_open_position(
         &self,
         pool: &Pubkey,
@@ -2372,6 +2374,7 @@ impl RebalanceExecutor {
         Ok((new_position, tl, tu))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn open_position_with_caps(
         &self,
         pool: &Pubkey,
@@ -2447,6 +2450,7 @@ impl RebalanceExecutor {
         Ok(liquidity)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn ensure_execution_success(
         &self,
         op_name: &str,
@@ -2499,27 +2503,27 @@ impl RebalanceExecutor {
                 )
                 .await;
 
-                if op_name == "close_position" {
-                    if let (Some(pool_pk), Some(pos_pk)) = (pool, position) {
-                        let close_kind = ledger_details
-                            .as_ref()
-                            .and_then(|d| d.get("close_kind"))
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(|s| if s == "manual" { "manual" } else { "strategy" });
-                        clmm_lp_protocols::ledger::position_registry::try_append_registry_close(
-                            self.provider.as_ref(),
-                            "orca_bot",
-                            &pos_pk,
-                            &pool_pk,
-                            &fee_payer,
-                            &result.signature,
-                            ledger_session_id.clone(),
-                            close_kind,
-                        )
-                        .await;
-                    }
+                if op_name == "close_position"
+                    && let (Some(pool_pk), Some(pos_pk)) = (pool, position)
+                {
+                    let close_kind = ledger_details
+                        .as_ref()
+                        .and_then(|d| d.get("close_kind"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| if s == "manual" { "manual" } else { "strategy" });
+                    clmm_lp_protocols::ledger::position_registry::try_append_registry_close(
+                        self.provider.as_ref(),
+                        "orca_bot",
+                        &pos_pk,
+                        &pool_pk,
+                        &fee_payer,
+                        &result.signature,
+                        ledger_session_id.clone(),
+                        close_kind,
+                    )
+                    .await;
                 }
                 if matches!(op_name, "open_position" | "open_full_range_position")
                     && let (Some(pool_pk), Some(created)) = (pool, result.created_position)
@@ -2585,10 +2589,10 @@ async fn enrich_open_close_ledger_details(
         }
         None => serde_json::json!({}),
     };
-    if let Some(slot) = result.slot {
-        if let Some(obj) = base.as_object_mut() {
-            obj.insert("event_slot".to_string(), slot.into());
-        }
+    if let Some(slot) = result.slot
+        && let Some(obj) = base.as_object_mut()
+    {
+        obj.insert("event_slot".to_string(), slot.into());
     }
     if let Some(pool_pk) = pool {
         match tokio::time::timeout(

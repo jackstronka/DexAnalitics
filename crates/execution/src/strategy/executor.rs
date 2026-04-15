@@ -70,6 +70,8 @@ impl Default for ExecutorConfig {
     }
 }
 
+type ReopenHook = Arc<dyn Fn(Pubkey, Pubkey) + Send + Sync>;
+
 /// Strategy executor for automated position management.
 pub struct StrategyExecutor {
     /// Position monitor.
@@ -107,7 +109,7 @@ pub struct StrategyExecutor {
     alert_notifier: Mutex<Option<Arc<MultiNotifier>>>,
     /// Optional callback fired after a successful close+open cycle (old PDA → new PDA).
     /// Used by the API layer to keep `strategies.json` position links in sync without manual steps.
-    reopen_hook: Mutex<Option<Arc<dyn Fn(solana_sdk::pubkey::Pubkey, solana_sdk::pubkey::Pubkey) + Send + Sync>>>,
+    reopen_hook: Mutex<Option<ReopenHook>>,
     /// Guardrail: when set, executor evaluates **only** these positions (prevents growth from stale monitor entries).
     managed_allowlist: Arc<RwLock<Option<HashSet<Pubkey>>>>,
     /// Guardrail: desired number of positions in `managed_allowlist` (fixed at strategy start).
@@ -184,7 +186,7 @@ impl StrategyExecutor {
     /// Set an optional hook that runs after a successful rebalance close→open (old PDA → new PDA).
     pub async fn set_reopen_hook(
         &self,
-        hook: Option<Arc<dyn Fn(Pubkey, Pubkey) + Send + Sync>>,
+        hook: Option<ReopenHook>,
     ) {
         *self.reopen_hook.lock().await = hook;
     }
@@ -383,33 +385,31 @@ impl StrategyExecutor {
         pool: &solana_sdk::pubkey::Pubkey,
         liquidity_amount: u128,
     ) -> anyhow::Result<()> {
-        if self.config.fee_mode == PositionTruthMode::PositionTruth {
-            if let Some(cp) = self
+        if self.config.fee_mode == PositionTruthMode::PositionTruth
+            && let Some(cp) = self
                 .capture_position_fee_checkpoint(
                     position,
                     "decrease_liquidity_pre",
                     CheckpointSource::Onchain,
                 )
                 .await
-            {
-                self.lifecycle.record_fee_checkpoint(cp).await;
-            }
+        {
+            self.lifecycle.record_fee_checkpoint(cp).await;
         }
         self.rebalance_executor
             .execute_partial_decrease(position, pool, liquidity_amount)
             .await?;
 
-        if self.config.fee_mode == PositionTruthMode::PositionTruth {
-            if let Some(cp) = self
+        if self.config.fee_mode == PositionTruthMode::PositionTruth
+            && let Some(cp) = self
                 .capture_position_fee_checkpoint(
                     position,
                     "decrease_liquidity_post",
                     CheckpointSource::Onchain,
                 )
                 .await
-            {
-                self.lifecycle.record_fee_checkpoint(cp).await;
-            }
+        {
+            self.lifecycle.record_fee_checkpoint(cp).await;
         }
         Ok(())
     }
@@ -446,6 +446,7 @@ impl StrategyExecutor {
     ///
     /// `ledger_open_details`: merged into lifecycle `details` on success (e.g. API passes
     /// `open_origin: "operator_api"` for lineage). Strategy callers should pass `None`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_open_position(
         &self,
         pool: &solana_sdk::pubkey::Pubkey,
@@ -522,28 +523,26 @@ impl StrategyExecutor {
         pool: &solana_sdk::pubkey::Pubkey,
         ledger_session_id: Option<String>,
     ) -> anyhow::Result<()> {
-        if self.config.fee_mode == PositionTruthMode::PositionTruth {
-            if let Some(cp) = self
+        if self.config.fee_mode == PositionTruthMode::PositionTruth
+            && let Some(cp) = self
                 .capture_position_fee_checkpoint(position, "collect_pre", CheckpointSource::Onchain)
                 .await
-            {
-                self.lifecycle.record_fee_checkpoint(cp).await;
-            }
+        {
+            self.lifecycle.record_fee_checkpoint(cp).await;
         }
         self.rebalance_executor
             .execute_collect_fees_only(position, pool, ledger_session_id)
             .await?;
-        if self.config.fee_mode == PositionTruthMode::PositionTruth {
-            if let Some(cp) = self
+        if self.config.fee_mode == PositionTruthMode::PositionTruth
+            && let Some(cp) = self
                 .capture_position_fee_checkpoint(
                     position,
                     "collect_post",
                     CheckpointSource::Onchain,
                 )
                 .await
-            {
-                self.lifecycle.record_fee_checkpoint(cp).await;
-            }
+        {
+            self.lifecycle.record_fee_checkpoint(cp).await;
         }
         Ok(())
     }
@@ -556,13 +555,12 @@ impl StrategyExecutor {
         ledger_session_id: Option<String>,
         ledger_details: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
-        if self.config.fee_mode == PositionTruthMode::PositionTruth {
-            if let Some(cp) = self
+        if self.config.fee_mode == PositionTruthMode::PositionTruth
+            && let Some(cp) = self
                 .capture_position_fee_checkpoint(position, "close_pre", CheckpointSource::Onchain)
                 .await
-            {
-                self.lifecycle.record_fee_checkpoint(cp).await;
-            }
+        {
+            self.lifecycle.record_fee_checkpoint(cp).await;
         }
         self.rebalance_executor
             .execute_full_close_only(position, pool, ledger_session_id, ledger_details)
@@ -721,10 +719,10 @@ impl StrategyExecutor {
 
         let allow = self.managed_allowlist.read().await.clone();
         for position in positions {
-            if let Some(ref allow) = allow {
-                if !allow.contains(&position.address) {
-                    continue;
-                }
+            if let Some(ref allow) = allow
+                && !allow.contains(&position.address)
+            {
+                continue;
             }
             if self
                 .skip_evaluation_for
@@ -738,17 +736,16 @@ impl StrategyExecutor {
                 );
                 continue;
             }
-            if self.config.fee_mode == PositionTruthMode::PositionTruth {
-                if let Some(cp) = self
+            if self.config.fee_mode == PositionTruthMode::PositionTruth
+                && let Some(cp) = self
                     .capture_position_fee_checkpoint(
                         &position.address,
                         "poll",
                         CheckpointSource::Onchain,
                     )
                     .await
-                {
-                    self.lifecycle.record_fee_checkpoint(cp).await;
-                }
+            {
+                self.lifecycle.record_fee_checkpoint(cp).await;
             }
             if let Err(e) = self.evaluate_position(&position).await {
                 warn!(
@@ -1217,7 +1214,7 @@ impl StrategyExecutor {
             }
             Decision::DecreaseLiquidity { amount } => {
                 let Some(to_remove) =
-                    clamp_decimal_liquidity_to_u128(&amount, position.on_chain.liquidity)
+                    clamp_decimal_liquidity_to_u128(amount, position.on_chain.liquidity)
                 else {
                     warn!(
                         amount = %amount,

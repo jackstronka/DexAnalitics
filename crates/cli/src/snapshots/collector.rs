@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+#[allow(dead_code)]
 pub async fn orca_snapshot(pool_address: &str) -> Result<()> {
     use chrono::Utc;
     use rust_decimal::Decimal;
@@ -48,7 +49,7 @@ pub async fn orca_snapshot(pool_address: &str) -> Result<()> {
     let vb = Pubkey::from_str(&state.token_vault_b.to_string())?;
     let accounts = rpc.get_multiple_accounts(&[va, vb]).await?;
     let vault_amount_a = accounts
-        .get(0)
+        .first()
         .and_then(|a| a.as_ref())
         .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
         .map(|a| a.amount)
@@ -115,6 +116,7 @@ pub async fn orca_snapshot(pool_address: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
     use chrono::Utc;
     use rust_decimal::prelude::ToPrimitive;
@@ -167,19 +169,18 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
 
             let mut i = 0usize;
             while i < chars.len() {
-                if chars[i] == '`' {
-                    // find next backtick
-                    if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
-                        let addr: String = chars[i + 1..j].iter().collect();
-                        if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
-                            pool_addrs.push(addr);
-                            if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
-                                done = true;
-                            }
+                if chars[i] == '`'
+                    && let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`')
+                {
+                    let addr: String = chars[i + 1..j].iter().collect();
+                    if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
+                        pool_addrs.push(addr);
+                        if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
+                            done = true;
                         }
-                        i = j + 1;
-                        continue;
                     }
+                    i = j + 1;
+                    continue;
                 }
                 i += 1;
             }
@@ -234,7 +235,7 @@ pub async fn orca_snapshot_curated(limit: Option<usize>) -> Result<()> {
         let accounts = rpc.get_multiple_accounts(&[va, vb]).await?;
 
         let vault_amount_a = accounts
-            .get(0)
+            .first()
             .and_then(|a| a.as_ref())
             .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
             .map(|a| a.amount)
@@ -348,18 +349,18 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
             let chars = line.chars().collect::<Vec<_>>();
             let mut i = 0usize;
             while i < chars.len() {
-                if chars[i] == '`' {
-                    if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
-                        let addr: String = chars[i + 1..j].iter().collect();
-                        if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
-                            pool_addrs.push(addr.clone());
-                            if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
-                                done = true;
-                            }
+                if chars[i] == '`'
+                    && let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`')
+                {
+                    let addr: String = chars[i + 1..j].iter().collect();
+                    if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
+                        pool_addrs.push(addr.clone());
+                        if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
+                            done = true;
                         }
-                        i = j + 1;
-                        continue;
                     }
+                    i = j + 1;
+                    continue;
                 }
                 i += 1;
             }
@@ -457,7 +458,7 @@ pub async fn raydium_snapshot_curated(limit: Option<usize>) -> Result<()> {
                 match rpc.get_multiple_accounts(&[va, vb]).await {
                     Ok(accounts) => {
                         let a = accounts
-                            .get(0)
+                            .first()
                             .and_then(|a| a.as_ref())
                             .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
                             .map(|a| a.amount);
@@ -605,18 +606,18 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
             let chars = line.chars().collect::<Vec<_>>();
             let mut i = 0usize;
             while i < chars.len() {
-                if chars[i] == '`' {
-                    if let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`') {
-                        let addr: String = chars[i + 1..j].iter().collect();
-                        if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
-                            pool_addrs.push(addr.clone());
-                            if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
-                                done = true;
-                            }
+                if chars[i] == '`'
+                    && let Some(j) = (i + 1..chars.len()).find(|&k| chars[k] == '`')
+                {
+                    let addr: String = chars[i + 1..j].iter().collect();
+                    if is_solana_pubkey(&addr) && !pool_addrs.contains(&addr) {
+                        pool_addrs.push(addr.clone());
+                        if limit.map(|l| pool_addrs.len() >= l).unwrap_or(false) {
+                            done = true;
                         }
-                        i = j + 1;
-                        continue;
                     }
+                    i = j + 1;
+                    continue;
                 }
                 i += 1;
             }
@@ -701,7 +702,7 @@ pub async fn meteora_snapshot_curated(limit: Option<usize>) -> Result<()> {
 
                 let unpack_a = accounts_bulk.as_ref().and_then(|accounts| {
                     accounts
-                        .get(0)
+                        .first()
                         .and_then(|a| a.as_ref())
                         .and_then(|a| decode_any_token_account(&a.data))
                 });

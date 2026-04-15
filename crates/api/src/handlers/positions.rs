@@ -125,7 +125,7 @@ pub async fn get_position_experiment_config(
     let mut open_details: Option<serde_json::Value> = None;
     let mut open_sid: Option<String> = None;
 
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -195,10 +195,10 @@ pub async fn get_position_experiment_config(
                     continue;
                 };
                 for (mint, dv) in obj {
-                    if let Some(s) = dv.as_str() {
-                        if let Ok(d) = rust_decimal::Decimal::from_str(s.trim()) {
-                            *mint_deltas.entry(mint.clone()).or_insert(rust_decimal::Decimal::ZERO) += d;
-                        }
+                    if let Some(s) = dv.as_str()
+                        && let Ok(d) = rust_decimal::Decimal::from_str(s.trim())
+                    {
+                        *mint_deltas.entry(mint.clone()).or_insert(rust_decimal::Decimal::ZERO) += d;
                     }
                 }
             }
@@ -496,7 +496,7 @@ pub async fn list_closed_positions(
     let reader = BufReader::new(file);
 
     let mut by_pos: HashMap<String, RowState> = HashMap::new();
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -766,10 +766,11 @@ pub async fn get_position_lifecycle_summary(
             collect_events = collect_events.saturating_add(1);
         }
 
-        if let Some(deltas) = v.get("fee_payer_token_deltas").cloned() {
-            if let Some(obj) = deltas.as_object() {
-                // If this is a collect-fees tx, derive per-leg collected amounts by mint.
-                if is_collect {
+        if let Some(deltas) = v.get("fee_payer_token_deltas").cloned()
+            && let Some(obj) = deltas.as_object()
+        {
+            // If this is a collect-fees tx, derive per-leg collected amounts by mint.
+            if is_collect {
                     let pool_addr = v
                         .get("pool_address")
                         .and_then(|x| x.as_str())
@@ -794,44 +795,37 @@ pub async fn get_position_lifecycle_summary(
                             }
                         };
 
-                        if !mint_a.is_empty() {
-                            if let Some(dv) = obj.get(&mint_a) {
-                                if let Some(s) = dv.as_str() {
-                                    if let Ok(d) = Decimal::from_str(s.trim()) {
-                                        if d > Decimal::ZERO {
-                                            collected_a_ui += d;
-                                            any_collected_a = true;
-                                            mints_for_pricing.insert(mint_a.clone());
-                                        }
-                                    }
-                                }
-                            }
+                        if !mint_a.is_empty()
+                            && let Some(dv) = obj.get(&mint_a)
+                            && let Some(s) = dv.as_str()
+                            && let Ok(d) = Decimal::from_str(s.trim())
+                            && d > Decimal::ZERO
+                        {
+                            collected_a_ui += d;
+                            any_collected_a = true;
+                            mints_for_pricing.insert(mint_a.clone());
                         }
-                        if !mint_b.is_empty() {
-                            if let Some(dv) = obj.get(&mint_b) {
-                                if let Some(s) = dv.as_str() {
-                                    if let Ok(d) = Decimal::from_str(s.trim()) {
-                                        if d > Decimal::ZERO {
-                                            collected_b_ui += d;
-                                            any_collected_b = true;
-                                            mints_for_pricing.insert(mint_b.clone());
-                                        }
-                                    }
-                                }
-                            }
+                        if !mint_b.is_empty()
+                            && let Some(dv) = obj.get(&mint_b)
+                            && let Some(s) = dv.as_str()
+                            && let Ok(d) = Decimal::from_str(s.trim())
+                            && d > Decimal::ZERO
+                        {
+                            collected_b_ui += d;
+                            any_collected_b = true;
+                            mints_for_pricing.insert(mint_b.clone());
                         }
                     }
                 }
-                for (mint, dv) in obj {
-                    if let Some(s) = dv.as_str() {
-                        if let Ok(d) = Decimal::from_str(s.trim()) {
-                            let e = mint_deltas_sum.entry(mint.clone()).or_insert(Decimal::ZERO);
-                            *e += d;
-                        }
+            for (mint, dv) in obj {
+                if let Some(s) = dv.as_str()
+                    && let Ok(d) = Decimal::from_str(s.trim())
+                {
+                    let e = mint_deltas_sum.entry(mint.clone()).or_insert(Decimal::ZERO);
+                    *e += d;
                     }
                 }
             }
-        }
 
         let ev = PositionLifecycleEvent {
             ts_utc: v.get("ts_utc").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
@@ -859,10 +853,12 @@ pub async fn get_position_lifecycle_summary(
             if let Some(f) = e.tx_fee_lamports {
                 sum_fee = sum_fee.saturating_add(f);
             }
-            if let Some(ref ev) = e.event {
-                if ev.contains("rebalance") || ev.contains("open_position") || ev.contains("close_position") {
-                    rebalance_related = rebalance_related.saturating_add(1);
-                }
+            if let Some(ref ev) = e.event
+                && (ev.contains("rebalance")
+                    || ev.contains("open_position")
+                    || ev.contains("close_position"))
+            {
+                rebalance_related = rebalance_related.saturating_add(1);
             }
         }
         session_summaries.push(PositionLifecycleSessionSummary {
@@ -1401,10 +1397,10 @@ pub async fn swap_before_open(
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
-    if !state.dry_run {
-        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
-            svc.set_executor(exec);
-        }
+    if !state.dry_run
+        && let Some(exec) = resolve_executor_for_position_ops(&state).await
+    {
+        svc.set_executor(exec);
     }
 
     let op = svc.swap_before_open_exact_in(&request).await?;
@@ -1476,10 +1472,10 @@ pub async fn open_position(
     svc.set_dry_run(state.dry_run);
 
     // Non-dry-run: strategy executor or lazy KEYPAIR_PATH executor (swap/open work without a running strategy).
-    if !state.dry_run {
-        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
-            svc.set_executor(exec);
-        }
+    if !state.dry_run
+        && let Some(exec) = resolve_executor_for_position_ops(&state).await
+    {
+        svc.set_executor(exec);
     }
 
     let cost_session_id = request
@@ -1497,28 +1493,27 @@ pub async fn open_position(
 
         // New positions exist on-chain but `GET /positions/:addr` reads the in-memory monitor first.
         // Without this, the dashboard shows "Position not found" until API restart + registry seed.
-        if !state.dry_run {
-            if let Some(pda) = position_pda_opt {
-                if let Err(e) = state.monitor.add_position(pda).await {
-                    warn!(
-                        error = %e,
-                        position = %pda,
-                        "open_position: monitor.add_position failed (detail may 404 until retry)"
-                    );
-                }
-            }
+        if !state.dry_run
+            && let Some(pda) = position_pda_opt
+            && let Err(e) = state.monitor.add_position(pda).await
+        {
+            warn!(
+                error = %e,
+                position = %pda,
+                "open_position: monitor.add_position failed (detail may 404 until retry)"
+            );
         }
 
         // Legacy: response with only `message` and no PDA (avoid swallowing idempotent replay which has both).
-        if let Some(m) = data.and_then(|d| d.get("message")).and_then(|v| v.as_str()) {
-            if position_pda_opt.is_none() {
-                return Ok(Json(PositionOpenResponse {
-                    message: m.to_string(),
-                    position_pda: None,
-                    swap_signature: None,
-                    cost_session_id,
-                }));
-            }
+        if let Some(m) = data.and_then(|d| d.get("message")).and_then(|v| v.as_str())
+            && position_pda_opt.is_none()
+        {
+            return Ok(Json(PositionOpenResponse {
+                message: m.to_string(),
+                position_pda: None,
+                swap_signature: None,
+                cost_session_id,
+            }));
         }
         if let Some(pda) = position_pda_opt {
             let swap_signature = data
@@ -1773,9 +1768,7 @@ pub async fn collect_fees(
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| format!("Fees collected from position: {address}"));
-        Ok(Json(MessageResponse::new(format!(
-            "{msg}"
-        ))))
+        Ok(Json(MessageResponse::new(msg.to_string())))
     } else {
         Err(ApiError::ServiceUnavailable(
             op.error
@@ -1806,10 +1799,10 @@ pub async fn decrease_liquidity(
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
-    if !state.dry_run {
-        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
-            svc.set_executor(exec);
-        }
+    if !state.dry_run
+        && let Some(exec) = resolve_executor_for_position_ops(&state).await
+    {
+        svc.set_executor(exec);
     }
 
     let liquidity_amount: u128 = request.liquidity_amount.trim().parse().map_err(|_| {
@@ -1860,10 +1853,10 @@ pub async fn rebalance_position(
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
-    if !state.dry_run {
-        if let Some(exec) = resolve_executor_for_position_ops(&state).await {
-            svc.set_executor(exec);
-        }
+    if !state.dry_run
+        && let Some(exec) = resolve_executor_for_position_ops(&state).await
+    {
+        svc.set_executor(exec);
     }
 
     let op = svc.rebalance_position(&address, &request).await?;

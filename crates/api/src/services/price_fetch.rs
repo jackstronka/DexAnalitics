@@ -144,10 +144,10 @@ async fn fetch_geckoterminal_prices(mints: &[String]) -> BTreeMap<String, f64> {
             }
         };
         for (mint, s) in wire.data.attributes.token_prices {
-            if let Ok(p) = s.parse::<f64>() {
-                if p.is_finite() && p > 0.0 {
-                    out.insert(mint, p);
-                }
+            if let Ok(p) = s.parse::<f64>()
+                && p.is_finite() && p > 0.0
+            {
+                out.insert(mint, p);
             }
         }
     }
@@ -189,10 +189,10 @@ async fn fetch_jupiter_v2_prices(ids: &str) -> BTreeMap<String, f64> {
     };
     let mut out = BTreeMap::new();
     for (mint, row) in wire.data {
-        if let Ok(p) = row.price.parse::<f64>() {
-            if p.is_finite() && p > 0.0 {
-                out.insert(mint, p);
-            }
+        if let Ok(p) = row.price.parse::<f64>()
+            && p.is_finite() && p > 0.0
+        {
+            out.insert(mint, p);
         }
     }
     out
@@ -320,11 +320,11 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
     //
     // We observed `GeckoTerminal simple token_price` sometimes returning stale/wrong values for WSOL,
     // which then propagates to the dashboard as a misleading "Jupiter" USD estimate.
-    if mints.iter().any(|m| m == WSOL_MINT) {
-        if let Some(p) = fetch_coingecko_solana_usd().await {
-            prices.insert(WSOL_MINT.to_string(), p);
-            tags.push("coingecko_solana");
-        }
+    if mints.iter().any(|m| m == WSOL_MINT)
+        && let Some(p) = fetch_coingecko_solana_usd().await
+    {
+        prices.insert(WSOL_MINT.to_string(), p);
+        tags.push("coingecko_solana");
     }
 
     let mut pending: Vec<String> = mints

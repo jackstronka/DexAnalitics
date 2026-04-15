@@ -57,6 +57,12 @@ pub struct DefiLlamaClient {
     client: Client,
 }
 
+impl Default for DefiLlamaClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefiLlamaClient {
     pub fn new() -> Self {
         Self {
@@ -105,12 +111,12 @@ impl DefiLlamaClient {
         let cache_name = format!("chart_{}.json", pool_id);
         let path = Self::cache_path(&cache_name);
         let disable_cache = Self::cache_disabled();
-        if !disable_cache && path.exists() {
-            if let Ok(bytes) = fs::read(&path) {
-                if let Ok(points) = serde_json::from_slice::<Vec<DefiLlamaChartPoint>>(&bytes) {
-                    return Ok(points);
-                }
-            }
+        if !disable_cache
+            && path.exists()
+            && let Ok(bytes) = fs::read(&path)
+            && let Ok(points) = serde_json::from_slice::<Vec<DefiLlamaChartPoint>>(&bytes)
+        {
+            return Ok(points);
         }
 
         let url = format!("https://yields.llama.fi/chart/{}", pool_id);
@@ -167,12 +173,12 @@ impl DefiLlamaClient {
         let path = Self::cache_path(&cache_name);
         let disable_cache = Self::cache_disabled();
 
-        if !disable_cache && path.exists() {
-            if let Ok(bytes) = fs::read(&path) {
-                if let Ok(points) = serde_json::from_slice::<Vec<DailyTvlPoint>>(&bytes) {
-                    return Ok(points);
-                }
-            }
+        if !disable_cache
+            && path.exists()
+            && let Ok(bytes) = fs::read(&path)
+            && let Ok(points) = serde_json::from_slice::<Vec<DailyTvlPoint>>(&bytes)
+        {
+            return Ok(points);
         }
 
         let chart = self.fetch_pool_chart(pool_id).await?;

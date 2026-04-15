@@ -33,10 +33,11 @@ pub(crate) fn min_rebalance_interval_hours_from_json(value: &serde_json::Value) 
     if let Some(u) = value.as_u64() {
         return Some(u);
     }
-    if let Some(f) = value.as_f64() {
-        if f.is_finite() && f >= 0.0 {
-            return Some(f.floor() as u64);
-        }
+    if let Some(f) = value.as_f64()
+        && f.is_finite()
+        && f >= 0.0
+    {
+        return Some(f.floor() as u64);
     }
     value
         .as_str()
@@ -318,14 +319,16 @@ impl StrategyService {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(StrategyType::StaticRange);
 
-        let mut decision_config = DecisionConfig::default();
-        decision_config.strategy_mode = match strategy_type {
-            StrategyType::StaticRange => StrategyMode::StaticRange,
-            StrategyType::Periodic => StrategyMode::Periodic,
-            StrategyType::Threshold => StrategyMode::Threshold,
-            StrategyType::OorRecenter => StrategyMode::OorRecenter,
-            StrategyType::IlLimit => StrategyMode::IlLimit,
-            StrategyType::RetouchShift => StrategyMode::RetouchShift,
+        let mut decision_config = DecisionConfig {
+            strategy_mode: match strategy_type {
+                StrategyType::StaticRange => StrategyMode::StaticRange,
+                StrategyType::Periodic => StrategyMode::Periodic,
+                StrategyType::Threshold => StrategyMode::Threshold,
+                StrategyType::OorRecenter => StrategyMode::OorRecenter,
+                StrategyType::IlLimit => StrategyMode::IlLimit,
+                StrategyType::RetouchShift => StrategyMode::RetouchShift,
+            },
+            ..DecisionConfig::default()
         };
 
         if let Some(params) = strategy.config.get("parameters") {
@@ -381,12 +384,11 @@ impl StrategyService {
 
         let executor = Arc::new(RwLock::new(executor));
 
-        if let Some(ref rp) = result_path_buf {
-            if optimize_on_start || std::path::Path::new(rp).exists() {
-                if let Err(e) = apply_optimize_result_json(rp, executor.as_ref()).await {
-                    warn!(error = %e, "Could not apply optimize JSON; using static config");
-                }
-            }
+        if let Some(ref rp) = result_path_buf
+            && (optimize_on_start || std::path::Path::new(rp).exists())
+            && let Err(e) = apply_optimize_result_json(rp, executor.as_ref()).await
+        {
+            warn!(error = %e, "Could not apply optimize JSON; using static config");
         }
 
         if let Some(p) = il_ledger_path.as_deref() {
@@ -398,11 +400,9 @@ impl StrategyService {
 
         let busy = {
             let mut m = self.state.optimization_busy.write().await;
-            let e = m
-                .entry(strategy_id.to_string())
+            m.entry(strategy_id.to_string())
                 .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-                .clone();
-            e
+                .clone()
         };
 
         // Store executor
@@ -695,14 +695,14 @@ pub async fn remove_position_address_from_all_strategies(
         }
         let params_obj = params_val.as_object_mut().unwrap();
         for key in ["position_addresses", "executor_disabled_position_addresses"] {
-            if let Some(arr_val) = params_obj.get_mut(key) {
-                if let Some(arr) = arr_val.as_array_mut() {
-                    let before = arr.len();
-                    arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(pos));
-                    if arr.len() != before {
-                        changed = true;
-                        strategy.updated_at = chrono::Utc::now();
-                    }
+            if let Some(arr_val) = params_obj.get_mut(key)
+                && let Some(arr) = arr_val.as_array_mut()
+            {
+                let before = arr.len();
+                arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(pos));
+                if arr.len() != before {
+                    changed = true;
+                    strategy.updated_at = chrono::Utc::now();
                 }
             }
         }
@@ -792,19 +792,18 @@ pub async fn replace_position_address_in_strategy(
     // Keep per-position automation skip list in sync only when old PDA was replaced.
     if replaced_old
         && let Some(arr_val) = params_obj.get_mut("executor_disabled_position_addresses")
+        && let Some(arr) = arr_val.as_array_mut()
     {
-        if let Some(arr) = arr_val.as_array_mut() {
-            for v in arr.iter_mut() {
-                if v.as_str().map(|s| s.trim()) == Some(old_pos) {
-                    *v = serde_json::json!(new_pos);
-                    changed = true;
-                }
-            }
-            let before_d = arr.len();
-            arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(old_pos));
-            if arr.len() != before_d {
+        for v in arr.iter_mut() {
+            if v.as_str().map(|s| s.trim()) == Some(old_pos) {
+                *v = serde_json::json!(new_pos);
                 changed = true;
             }
+        }
+        let before_d = arr.len();
+        arr.retain(|v| v.as_str().map(|s| s.trim()) != Some(old_pos));
+        if arr.len() != before_d {
+            changed = true;
         }
     }
 
@@ -875,10 +874,10 @@ pub async fn try_heal_stale_strategy_links_for_strategy(
                 continue;
             };
             n += 1;
-            if let Ok(pk) = Pubkey::from_str(addr.trim()) {
-                if !open_set.contains(&pk) {
-                    any_stale = true;
-                }
+            if let Ok(pk) = Pubkey::from_str(addr.trim())
+                && !open_set.contains(&pk)
+            {
+                any_stale = true;
             }
         }
         if n == 0 {

@@ -20,7 +20,7 @@ pub fn price_ab_human_to_raw(
     if exp == 0 {
         return price_ab_human;
     }
-    let scale = Decimal::from(pow10_u64(exp.unsigned_abs() as u32));
+    let scale = Decimal::from(pow10_u64(exp.unsigned_abs()));
     if exp > 0 {
         price_ab_human * scale
     } else {

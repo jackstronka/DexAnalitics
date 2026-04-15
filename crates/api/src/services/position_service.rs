@@ -317,16 +317,15 @@ impl PositionService {
             .as_ref()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            && let Some(existing) = find_registry_open_position_by_session_id(&sid)
         {
-            if let Some(existing) = find_registry_open_position_by_session_id(&sid) {
-                return Ok(OperationResult::success_with_data(serde_json::json!({
-                    "message": "Position already opened for this request (idempotent replay)",
-                    "position_pda": existing.position_pubkey,
-                    "open_signature": existing.signature,
-                    "opened_ts_utc": existing.ts_utc,
-                    "cost_session_id": sid,
-                })));
-            }
+            return Ok(OperationResult::success_with_data(serde_json::json!({
+                "message": "Position already opened for this request (idempotent replay)",
+                "position_pda": existing.position_pubkey,
+                "open_signature": existing.signature,
+                "opened_ts_utc": existing.ts_utc,
+                "cost_session_id": sid,
+            })));
         }
 
         let Some(executor) = &self.executor else {
@@ -872,14 +871,14 @@ fn classify_open_position_error(err: anyhow::Error) -> ApiError {
 
     // "custom program error: 0x1" is too opaque for operators.
     // When the failing program is SPL Token, decode the custom code to a named TokenError.
-    if s.contains("custom program error: 0x") && s.contains("tokenkeg") {
-        if let Some(code) = parse_custom_program_error_hex_u32(&s) {
-            if let Some(name) = decode_spl_token_custom_error_name(code) {
-                return ApiError::bad_request(format!(
-                    "Open position failed: SPL Token program error {name} (custom 0x{code:x}). Detail: {raw}"
-                ));
-            }
-        }
+    if s.contains("custom program error: 0x")
+        && s.contains("tokenkeg")
+        && let Some(code) = parse_custom_program_error_hex_u32(&s)
+        && let Some(name) = decode_spl_token_custom_error_name(code)
+    {
+        return ApiError::bad_request(format!(
+            "Open position failed: SPL Token program error {name} (custom 0x{code:x}). Detail: {raw}"
+        ));
     }
 
     // If it's still a custom program error, at least identify **which program** failed at which ix index.
@@ -1098,7 +1097,7 @@ fn find_registry_open_position_by_session_id(session_id: &str) -> Option<Registr
 
     // Scan from the end would be ideal, but keep it simple and safe:
     // the registry is append-only and typically small; this is only used on `Open Position`.
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };

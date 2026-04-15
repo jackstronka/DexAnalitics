@@ -163,18 +163,27 @@ fn main_inner() -> anyhow::Result<()> {
         #[allow(dead_code)]
         #[serde(default)]
         schema_version: Option<u32>,
+        #[allow(dead_code)]
         ts_utc: String,
         position: String,
         pool: String,
         event_type: String,
+        #[allow(dead_code)]
         tick_lower: i32,
+        #[allow(dead_code)]
         tick_upper: i32,
+        #[allow(dead_code)]
         liquidity: String,
+        #[allow(dead_code)]
         fees_owed_a: u64,
+        #[allow(dead_code)]
         fees_owed_b: u64,
+        #[allow(dead_code)]
         collected_a: u64,
+        #[allow(dead_code)]
         collected_b: u64,
         #[serde(default)]
+        #[allow(dead_code)]
         source: Option<String>,
     }
 
@@ -198,11 +207,11 @@ fn main_inner() -> anyhow::Result<()> {
             let mut positions_for_pool: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
             for line in txt.lines().filter(|l| !l.trim().is_empty()) {
-                if let Ok(r) = serde_json::from_str::<PositionFeeCheckpointRow>(line) {
-                    if r.pool == args.pool_address {
-                        positions_for_pool.insert(r.position.clone());
-                        all_rows_for_pool.push(r);
-                    }
+                if let Ok(r) = serde_json::from_str::<PositionFeeCheckpointRow>(line)
+                    && r.pool == args.pool_address
+                {
+                    positions_for_pool.insert(r.position.clone());
+                    all_rows_for_pool.push(r);
                 }
             }
 

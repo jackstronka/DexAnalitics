@@ -230,29 +230,29 @@ pub async fn get_wallet_balances(
 
     let mut tokens = Vec::new();
     // If token RPC is slow/unavailable, we still return SOL (tokens empty).
-    if let Ok((_u, v)) = tok_v {
-        if let Some(arr) = v["result"]["value"].as_array() {
-            for entry in arr {
-                let mint = entry["account"]["data"]["parsed"]["info"]["mint"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                if mint.is_empty() {
-                    continue;
-                }
-                // Prefer uiAmountString; fallback to uiAmount.
-                let ui_amount =
-                    entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
-                                .as_f64()
-                                .map(|x| x.to_string())
-                        })
-                        .unwrap_or_else(|| "0".to_string());
-                tokens.push(WalletTokenBalance { mint, ui_amount });
+    if let Ok((_u, v)) = tok_v
+        && let Some(arr) = v["result"]["value"].as_array()
+    {
+        for entry in arr {
+            let mint = entry["account"]["data"]["parsed"]["info"]["mint"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if mint.is_empty() {
+                continue;
             }
+            // Prefer uiAmountString; fallback to uiAmount.
+            let ui_amount =
+                entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
+                            .as_f64()
+                            .map(|x| x.to_string())
+                    })
+                    .unwrap_or_else(|| "0".to_string());
+            tokens.push(WalletTokenBalance { mint, ui_amount });
         }
     }
     tokens.sort_by(|a, b| a.mint.cmp(&b.mint));

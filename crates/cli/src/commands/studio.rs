@@ -67,7 +67,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
         }
         out.push(ch);
     }
-    out.push_str("…");
+    out.push('…');
     out
 }
 

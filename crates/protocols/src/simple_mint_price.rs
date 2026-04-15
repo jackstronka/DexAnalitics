@@ -74,10 +74,11 @@ pub async fn fetch_gecko_solana_mint_prices_usd(mints: &[String]) -> BTreeMap<St
     };
     let mut out = BTreeMap::new();
     for (mint, s) in wire.data.attributes.token_prices {
-        if let Ok(p) = s.parse::<f64>() {
-            if p.is_finite() && p > 0.0 {
-                out.insert(mint, p);
-            }
+        if let Ok(p) = s.parse::<f64>()
+            && p.is_finite()
+            && p > 0.0
+        {
+            out.insert(mint, p);
         }
     }
     out

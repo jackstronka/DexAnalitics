@@ -7,7 +7,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -39,7 +39,7 @@ struct Args {
     only_signed_rows: bool,
 }
 
-fn default_output_path(input: &PathBuf) -> PathBuf {
+fn default_output_path(input: &Path) -> PathBuf {
     let s = input.to_string_lossy().to_string();
     if s.ends_with(".jsonl") {
         PathBuf::from(format!("{}.enriched.jsonl", s.trim_end_matches(".jsonl")))
@@ -76,10 +76,10 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         total += 1;
-        if let Some(limit) = args.limit {
-            if total > limit {
-                break;
-            }
+        if let Some(limit) = args.limit
+            && total > limit
+        {
+            break;
         }
 
         let mut v: serde_json::Value = match serde_json::from_str(t) {

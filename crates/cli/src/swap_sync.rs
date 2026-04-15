@@ -365,10 +365,8 @@ fn largest_mint_deltas(meta: &serde_json::Value) -> Vec<(String, i128)> {
             .and_then(|x| {
                 if let Some(s) = x.as_str() {
                     s.parse::<u128>().ok()
-                } else if let Some(n) = x.as_u64() {
-                    Some(n as u128)
                 } else {
-                    None
+                    x.as_u64().map(|n| n as u128)
                 }
             })
             .or_else(|| {
@@ -393,19 +391,19 @@ fn largest_mint_deltas(meta: &serde_json::Value) -> Vec<(String, i128)> {
 
     let mut pre_by_key: BTreeMap<(u64, String), u128> = BTreeMap::new();
     for b in pre_arr {
-        let Some(mint) = parse_mint(&b) else { continue };
-        let Some(idx) = parse_idx(&b) else { continue };
-        let Some(amt) = parse_amt(&b) else { continue };
+        let Some(mint) = parse_mint(b) else { continue };
+        let Some(idx) = parse_idx(b) else { continue };
+        let Some(amt) = parse_amt(b) else { continue };
         pre_by_key.insert((idx, mint.to_string()), amt);
     }
 
     let mut post_by_key: BTreeMap<(u64, String), u128> = BTreeMap::new();
     for b in post_arr {
-        let Some(post_mint) = parse_mint(&b) else {
+        let Some(post_mint) = parse_mint(b) else {
             continue;
         };
-        let Some(idx) = parse_idx(&b) else { continue };
-        let Some(post_amt) = parse_amt(&b) else {
+        let Some(idx) = parse_idx(b) else { continue };
+        let Some(post_amt) = parse_amt(b) else {
             continue;
         };
         post_by_key.insert((idx, post_mint.to_string()), post_amt);
@@ -497,10 +495,8 @@ fn parse_amount_from_transfer_info(info: &serde_json::Value) -> Option<u128> {
         .and_then(|x| {
             if let Some(s) = x.as_str() {
                 s.parse::<u128>().ok()
-            } else if let Some(n) = x.as_u64() {
-                Some(n as u128)
             } else {
-                None
+                x.as_u64().map(|n| n as u128)
             }
         })
         .or_else(|| {
@@ -509,10 +505,8 @@ fn parse_amount_from_transfer_info(info: &serde_json::Value) -> Option<u128> {
                 .and_then(|x| {
                     if let Some(s) = x.as_str() {
                         s.parse::<u128>().ok()
-                    } else if let Some(n) = x.as_u64() {
-                        Some(n as u128)
                     } else {
-                        None
+                        x.as_u64().map(|n| n as u128)
                     }
                 })
         })
@@ -580,10 +574,10 @@ fn account_index_of(account_keys: &[serde_json::Value], key: &str) -> Option<u64
             Some(s.to_string())
         } else if let Some(s) = v.get("pubkey").and_then(|x| x.as_str()) {
             Some(s.to_string())
-        } else if let Some(s) = v.get("pubKey").and_then(|x| x.as_str()) {
-            Some(s.to_string())
         } else {
-            None
+            v.get("pubKey")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
         }?;
         if pubkey.to_ascii_lowercase() == target {
             Some(i as u64)
@@ -615,7 +609,7 @@ fn static_account_keys_from_message(message: &serde_json::Value) -> Vec<serde_js
     else {
         return Vec::new();
     };
-    arr.iter().cloned().collect()
+    arr.to_vec()
 }
 
 /// Full key list for balance `accountIndex` resolution: static + writable loaded + readonly loaded.
@@ -1211,6 +1205,7 @@ async fn decode_one_signature(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn decode_one_signature_with_retry(
     rpc: &RpcProvider,
     protocol: Proto,
@@ -1293,7 +1288,7 @@ async fn sync_one_pool(
                     break;
                 }
                 Err(e) => {
-                    last_err = Some(e.into());
+                    last_err = Some(e);
                     if attempt < PAGE_RETRIES {
                         sleep(Duration::from_millis(
                             PAGE_BACKOFF_MS * (attempt as u64 + 1),
@@ -1550,7 +1545,7 @@ pub async fn enrich_curated_all(
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .map(|n| n.clamp(1, 32))
-        .unwrap_or_else(|| decode_concurrency.max(1).min(32));
+        .unwrap_or_else(|| decode_concurrency.clamp(1, 32));
     let decode_jitter_ms = std::env::var("CLMM_ENRICH_DECODE_JITTER_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -1632,10 +1627,11 @@ Set SOLANA_RPC_URL to a mainnet RPC or unset it to use https://api.mainnet-beta.
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;
                 };
-                if let Some(bt) = v.get("block_time").and_then(|x| x.as_i64()) {
-                    if bt > 0 && bt < min_block_time {
-                        continue;
-                    }
+                if let Some(bt) = v.get("block_time").and_then(|x| x.as_i64())
+                    && bt > 0
+                    && bt < min_block_time
+                {
+                    continue;
                 }
                 let Some(sig) = v.get("signature").and_then(|x| x.as_str()) else {
                     continue;
@@ -1718,7 +1714,7 @@ Set SOLANA_RPC_URL to a mainnet RPC or unset it to use https://api.mainnet-beta.
                         }
                     }
                 }
-                if processed % 10 == 0 {
+                if processed.is_multiple_of(10) {
                     println!(
                         "… progress {} {}: decoded_ok={} skipped={}",
                         proto.dir(),

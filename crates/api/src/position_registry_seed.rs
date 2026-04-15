@@ -40,7 +40,7 @@ fn replay_registry_open_positions() -> Vec<Pubkey> {
     let reader = BufReader::new(file);
 
     let mut last: HashMap<String, RegistryEvent> = HashMap::new();
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -91,7 +91,7 @@ fn replay_registry_open_map() -> HashMap<Pubkey, bool> {
     let reader = BufReader::new(file);
 
     let mut last: HashMap<String, String> = HashMap::new(); // pos_str -> event
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };

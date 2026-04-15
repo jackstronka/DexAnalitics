@@ -108,6 +108,7 @@ fn execution_ok(res: &ExecutionResult) -> Result<()> {
 }
 
 /// Open a new Whirlpool position (open + increase with max token caps).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_position_open(
     pool_addr: String,
     keypair: Option<std::path::PathBuf>,
@@ -299,6 +300,7 @@ pub async fn run_position_open(
 }
 
 /// Open a new position, wait N seconds, then close it (devnet convenience).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_position_open_and_close(
     pool_addr: String,
     keypair: Option<std::path::PathBuf>,

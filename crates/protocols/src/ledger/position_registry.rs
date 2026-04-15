@@ -71,6 +71,7 @@ struct RegistryRow<'a> {
     accounting_note: &'static str,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     event: &'static str,
     source: &'static str,
@@ -101,6 +102,7 @@ fn row(
 }
 
 /// Best-effort: record that a position is **open** (after successful on-chain open).
+#[allow(clippy::too_many_arguments)]
 pub async fn try_append_registry_open(
     provider: &RpcProvider,
     source: &'static str,
@@ -127,6 +129,7 @@ pub async fn try_append_registry_open(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn append_open_inner(
     provider: &RpcProvider,
     source: &'static str,
@@ -154,6 +157,7 @@ async fn append_open_inner(
 }
 
 /// Best-effort: record that a position is **closed** (collectors should drop position-scoped work).
+#[allow(clippy::too_many_arguments)]
 pub async fn try_append_registry_close(
     provider: &RpcProvider,
     source: &'static str,
@@ -180,6 +184,7 @@ pub async fn try_append_registry_close(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn append_close_inner(
     provider: &RpcProvider,
     source: &'static str,

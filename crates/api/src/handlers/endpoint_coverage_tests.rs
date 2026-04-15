@@ -547,8 +547,10 @@ async fn all_orca_proxy_endpoints_are_reachable() {
             serde_json::json!({"data":{"tvlUsdc":"1.0"},"meta":{"next":null,"previous":null}}),
         );
     });
-    let mut cfg = ApiConfig::default();
-    cfg.orca_public_api_base_url = Some(server.base_url());
+    let cfg = ApiConfig {
+        orca_public_api_base_url: Some(server.base_url()),
+        ..ApiConfig::default()
+    };
     let state = AppState::new(RpcConfig::default(), cfg, None);
     let router = test_router(state);
     assert_eq!(
