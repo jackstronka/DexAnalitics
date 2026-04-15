@@ -8,6 +8,7 @@ import ApiDataHint from '@/components/ApiDataHint'
 import {
   getOrcaPositionsByOwner,
   getPoolState,
+  getPositionDiagnostics,
   getPositions,
   getStrategies,
   getStrandedRebalances,
@@ -116,7 +117,10 @@ export default function Positions() {
   const strategiesQ = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
-    staleTime: 30_000,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    refetchInterval: 15_000,
   })
 
   const chainQ = useQuery({
@@ -146,6 +150,30 @@ export default function Positions() {
       retry: 1,
     })),
   })
+  const positionDiagnosticsQueries = useQueries({
+    queries: positions.map((position) => ({
+      queryKey: ['position-diagnostics', position.address],
+      queryFn: () => getPositionDiagnostics(position.address),
+      staleTime: 0,
+      refetchOnMount: 'always' as const,
+      refetchOnWindowFocus: true,
+      refetchInterval: 15_000,
+      retry: 0,
+    })),
+  })
+  const linkedStrategyIdsByPosition = useMemo(() => {
+    const map = new Map<string, Set<string>>()
+    positions.forEach((position, idx) => {
+      const linked = positionDiagnosticsQueries[idx]?.data?.linked_strategies ?? []
+      const ids = new Set(
+        linked
+          .map((s) => (typeof s?.strategy_id === 'string' ? s.strategy_id.trim() : ''))
+          .filter((x) => x.length > 0),
+      )
+      map.set(position.address.trim(), ids)
+    })
+    return map
+  }, [positions, positionDiagnosticsQueries])
   const poolSpotByAddress = useMemo(() => {
     const m = new Map<string, number>()
     monitoredPools.forEach((poolAddress, idx) => {
@@ -176,7 +204,7 @@ export default function Positions() {
     const map = new Map<string, Strategy[]>()
     for (const s of strategiesQ.data?.strategies ?? []) {
       for (const addr of s.parameters?.position_addresses ?? []) {
-        const key = addr.trim()
+        const key = String(addr).trim()
         if (!key) continue
         if (!map.has(key)) map.set(key, [])
         map.get(key)!.push(s)
@@ -249,7 +277,7 @@ export default function Positions() {
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.map((position) => (
+                  {positions.map((position, idx) => (
                     <tr key={position.address} className="border-b last:border-0">
                       <td className="py-4 max-w-[14rem]">
                         <Link
@@ -271,13 +299,23 @@ export default function Positions() {
                       </td>
                       <td className="py-4 max-w-[18rem]">
                         {(() => {
-                          const linked = strategiesByPosition.get(position.address) ?? []
-                          if (!linked.length) {
+                          const linked = strategiesByPosition.get(position.address.trim()) ?? []
+                          const linkedIds = linkedStrategyIdsByPosition.get(position.address.trim())
+                          const backendLinked = linkedIds
+                            ? linked.filter((s) => linkedIds.has(s.id.trim()))
+                            : linked
+                          const diagnosticsPending =
+                            positionDiagnosticsQueries[idx]?.isLoading ||
+                            positionDiagnosticsQueries[idx]?.isFetching
+                          if (diagnosticsPending) {
+                            return <span className="text-xs text-muted-foreground">Checking…</span>
+                          }
+                          if (!backendLinked.length) {
                             return <span className="text-xs text-muted-foreground">Not linked</span>
                           }
                           return (
                             <div className="space-y-1.5">
-                              {linked.map((s) => (
+                              {backendLinked.map((s) => (
                                 <div key={s.id} className="text-xs leading-tight">
                                   <div className="font-medium">
                                     {s.name}{' '}

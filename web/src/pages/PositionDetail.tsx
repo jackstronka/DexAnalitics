@@ -355,6 +355,10 @@ export default function PositionDetail() {
   const { data: strategiesData } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    refetchInterval: 15_000,
   })
 
   const { data: solPriceMap } = useQuery({
@@ -400,13 +404,20 @@ export default function PositionDetail() {
     }
     const needle = address.trim()
     const list = strategiesData?.strategies ?? []
-    return list.filter((s) =>
+    const linkedFromConfig = list.filter((s) =>
       (s.parameters.position_addresses ?? []).some((a) => {
         const x = typeof a === 'string' ? a.trim() : String(a).trim()
         return x.length > 0 && x === needle
       }),
     )
-  }, [address, strategiesData?.strategies])
+    // Backend diagnostics is the authoritative source for link status.
+    // Prefer it to avoid UI drift when strategy config cache is stale.
+    if (diag) {
+      const ids = new Set((diag.linked_strategies ?? []).map((s) => s.strategy_id.trim()))
+      return linkedFromConfig.filter((s) => ids.has(s.id.trim()))
+    }
+    return linkedFromConfig
+  }, [address, strategiesData?.strategies, diag])
 
   const allStrategies = strategiesData?.strategies ?? []
   const [strategyPick, setStrategyPick] = useState<string>('')
