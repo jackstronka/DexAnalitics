@@ -106,7 +106,7 @@ export const TOOLTIPS = {
   autoExecute:
     'Gdy włączone i dry-run wyłączone, wymaga portfela API (KEYPAIR_PATH) — realne tx.',
   autoStart:
-    'Jeśli włączone, API może automatycznie uruchomić tę strategię po restarcie (wymaga też globalnie `CLMM_STRATEGY_AUTOSTART_ON_BOOT=1`).',
+    'Jeśli włączone, API uruchomi tę strategię po starcie procesu. Globalny autostart jest domyślnie włączony (gdy zmienna `CLMM_STRATEGY_AUTOSTART_ON_BOOT` nie jest ustawiona). Ustaw ją na `0` / `false`, żeby wyłączyć autostart wszystkich strategii na bootcie.',
 } as const
 
 export function FieldLabel({
@@ -163,7 +163,11 @@ export function buildParameters(
     p.rebalance_threshold_pct = Number(state.rebalanceThresholdPct)
   }
   if (e.minInterval && state.minRebalanceIntervalHours !== '') {
-    p.min_rebalance_interval_hours = Number(state.minRebalanceIntervalHours)
+    const n = Number(state.minRebalanceIntervalHours)
+    if (Number.isFinite(n)) {
+      // Backend: 0 means "no hourly gate" → rebalance every eval tick (~5m default). Treat as 1h minimum.
+      p.min_rebalance_interval_hours = Math.max(1, Math.floor(n))
+    }
   }
 
   // Optional execution semantics toggles.

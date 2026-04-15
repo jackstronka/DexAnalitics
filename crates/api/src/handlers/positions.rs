@@ -327,20 +327,6 @@ pub async fn list_positions(
         }
     }
 
-    // Best-effort self-heal for rotated PDAs that lost strategy link after close->open.
-    // This keeps `parameters.position_addresses` aligned so the UI Strategy column does not show
-    // false "Not linked" for active reopened positions.
-    for p in &positions {
-        let pda = p.address.to_string();
-        if let Err(e) = heal_rotated_strategy_link_best_effort(&state, &pda).await {
-            warn!(
-                position = %pda,
-                error = %e,
-                "list_positions: strategy link heal failed (continuing)"
-            );
-        }
-    }
-
     let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
 
     let mut responses: Vec<PositionResponse> = Vec::with_capacity(positions.len());
@@ -1260,24 +1246,7 @@ pub async fn get_position_diagnostics(
     let monitor_in_range = monitored.as_ref().map(|p| p.in_range);
 
     let address_trim = address.trim();
-    let mut linked =
-        linked_strategies_for_position_diagnostics(&state, &pubkey, address_trim).await;
-    if linked.is_empty() {
-        match heal_rotated_strategy_link_best_effort(&state, address_trim).await {
-            Ok(Some(_)) => {
-                linked =
-                    linked_strategies_for_position_diagnostics(&state, &pubkey, address_trim).await;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    position = %address_trim,
-                    "heal_rotated_strategy_link_best_effort failed (diagnostics still returned)"
-                );
-            }
-        }
-    }
+    let linked = linked_strategies_for_position_diagnostics(&state, &pubkey, address_trim).await;
 
     Ok(Json(PositionDiagnosticsResponse {
         address,
@@ -1285,6 +1254,37 @@ pub async fn get_position_diagnostics(
         monitor_in_range,
         linked_strategies: linked,
     }))
+}
+
+/// Explicit, opt-in repair for strategy link after a close->open rotation.
+#[utoipa::path(
+    post,
+    path = "/positions/{address}/heal-strategy-link",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA (base58)")
+    ),
+    responses(
+        (status = 200, description = "Heal result", body = MessageResponse),
+        (status = 400, description = "Invalid address")
+    )
+)]
+pub async fn heal_position_strategy_link(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> ApiResult<Json<MessageResponse>> {
+    let pda = address.trim();
+    Pubkey::from_str(pda).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    match heal_rotated_strategy_link_best_effort(&state, pda).await {
+        Ok(Some(sids)) if !sids.is_empty() => Ok(Json(MessageResponse::new(format!(
+            "Strategy link healed for {pda}. Updated strategies: {}",
+            sids.join(", ")
+        )))),
+        Ok(_) => Ok(Json(MessageResponse::new(format!(
+            "No strategy-link heal needed for {pda}."
+        )))),
+        Err(e) => Err(ApiError::internal(format!("heal strategy link failed: {e}"))),
+    }
 }
 
 /// Get "stream" performance aggregates for a position PDA (across rotated PDAs).
@@ -1624,12 +1624,15 @@ pub async fn close_position(
 
     info!(position = %address, dry_run = state.dry_run, "Closing position");
 
-    // Verify position exists
+    // Match `GET /positions/:address`: allow close when the PDA is on-chain even if the in-memory
+    // monitor has not finished `add_position` yet (race after opening the detail page) or after
+    // restart before registry seed.
     let positions = state.monitor.get_positions().await;
-    let position = positions
-        .iter()
-        .find(|p| p.address == pubkey)
-        .ok_or_else(|| ApiError::not_found("Position not found"))?;
+    let position_snapshot = if let Some(p) = positions.iter().find(|p| p.address == pubkey) {
+        p.clone()
+    } else {
+        monitored_position_from_chain(state.provider.clone(), &pubkey).await?
+    };
 
     if state.dry_run {
         info!("Dry-run mode: would close position");
@@ -1641,7 +1644,7 @@ pub async fn close_position(
                 position_address: address.clone(),
                 timestamp: chrono::Utc::now(),
                 data: serde_json::json!({
-                    "liquidity": position.on_chain.liquidity.to_string(),
+                    "liquidity": position_snapshot.on_chain.liquidity.to_string(),
                     "dry_run": true
                 }),
             })
@@ -1649,7 +1652,7 @@ pub async fn close_position(
 
         return Ok(Json(MessageResponse::new(format!(
             "[DRY-RUN] Would close position {} with liquidity {}",
-            address, position.on_chain.liquidity
+            address, position_snapshot.on_chain.liquidity
         ))));
     }
 
@@ -1666,6 +1669,15 @@ pub async fn close_position(
         .filter(|s| !s.is_empty());
     let op = svc.close_position(&address, sid).await?;
     if op.success {
+        // Manual close is an explicit end-of-history decision by operator.
+        // Detach this PDA from all strategies so it cannot be managed/reopened via stale links.
+        if let Err(e) = remove_position_address_from_all_strategies(&state, &address).await {
+            warn!(
+                position = %address,
+                error = %e,
+                "close_position: strategy unlink failed after manual close (continuing)"
+            );
+        }
         // Remove immediately so UI doesn't keep showing stale monitored entry.
         state.monitor.remove_position(&pubkey).await;
         state

@@ -76,6 +76,7 @@ use utoipa::OpenApi;
         handlers::list_closed_positions,
         handlers::get_position,
         handlers::link_position_strategy,
+        handlers::heal_position_strategy_link,
         handlers::open_position,
         handlers::swap_before_open,
         handlers::close_position,

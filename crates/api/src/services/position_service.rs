@@ -398,6 +398,7 @@ Top up the API wallet and retry."
                 request.slippage_tolerance_bps,
                 request.full_range,
                 ledger_session.clone(),
+                Some(serde_json::json!({ "open_origin": "operator_api" })),
             )
             .await
             .map_err(classify_open_position_error)?;

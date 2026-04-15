@@ -214,6 +214,27 @@ function rowCollectDetails(r: LedgerRow): string {
   return `A raw: ${aStr}, B raw: ${bStr}`
 }
 
+function friendlyActionErrorMessage(actionLabel: string, raw: string): string {
+  const msg = raw.trim()
+  const lower = msg.toLowerCase()
+  const isSlippage =
+    lower.includes('tokenminsubceeded') ||
+    lower.includes('token_min_subceeded') ||
+    lower.includes('6018') ||
+    lower.includes('0x1782') ||
+    lower.includes('min-out') ||
+    lower.includes('slippage')
+  if (!isSlippage) {
+    return `${actionLabel} failed: ${msg}`
+  }
+  return [
+    `Nie udało się wykonać akcji (${actionLabel}): zbyt ciasny slippage/min-out.`,
+    'Rynek przesunął się między budową instrukcji a wysłaniem transakcji.',
+    'Spróbuj ponownie; jeśli błąd wraca, zwiększ tymczasowo slippage na API (np. WHIRLPOOL_CLOSE_SLIPPAGE_BPS dla close).',
+    `Szczegóły: ${msg}`,
+  ].join(' ')
+}
+
 export default function PositionDetail() {
   const { address } = useParams<{ address: string }>()
   const queryClient = useQueryClient()
@@ -451,15 +472,15 @@ export default function PositionDetail() {
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
-      // If it was a real close (not dry-run), go back to list.
+      // Real close (not dry-run): brief pause so the success banner is readable, then list.
       if (!(data?.message ?? '').toLowerCase().includes('dry-run')) {
-        navigate('/positions')
+        window.setTimeout(() => navigate('/positions'), 2000)
       }
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setActionInfo(null)
-      setActionError(`Close Position failed: ${msg}`)
+      setActionError(friendlyActionErrorMessage('Close Position', msg))
     },
   })
 
@@ -476,7 +497,7 @@ export default function PositionDetail() {
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setActionInfo(null)
-      setActionError(`Collect Fees failed: ${msg}`)
+      setActionError(friendlyActionErrorMessage('Collect Fees', msg))
     },
   })
 
@@ -504,7 +525,7 @@ export default function PositionDetail() {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg === 'Cancelled') return
       setActionInfo(null)
-      setActionError(`Rebalance failed: ${msg}`)
+      setActionError(friendlyActionErrorMessage('Rebalance', msg))
     },
   })
 

@@ -182,6 +182,10 @@ fn create_onchain_router(state: AppState) -> Router {
             "/positions/{address}/strategy",
             post(handlers::link_position_strategy),
         )
+        .route(
+            "/positions/{address}/heal-strategy-link",
+            post(handlers::heal_position_strategy_link),
+        )
         .route("/positions/{address}", delete(handlers::close_position))
         .route("/positions/{address}/collect", post(handlers::collect_fees))
         .route(

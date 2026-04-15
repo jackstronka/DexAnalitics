@@ -10,6 +10,10 @@ use crate::services::optimization_runner::{
     apply_optimize_result_parsed, end_optimize_busy, try_begin_optimize_busy,
 };
 use crate::services::position_executor::load_wallet_from_env;
+use crate::services::strategy_service::{
+    clamp_min_rebalance_interval_hours, min_rebalance_interval_hours_from_json,
+    wire_executor_allowlist_and_reopen_hook,
+};
 use crate::state::{AlertUpdate, AppState, StrategyState};
 use axum::{
     Json,
@@ -326,17 +330,23 @@ pub async fn update_strategy(
             }
         }
 
-        if let Some(addrs) = old_position_addrs {
-            if let Some(params) = config.get_mut("parameters").and_then(|p| p.as_object_mut()) {
-                params.insert("position_addresses".to_string(), addrs);
-            }
+        let request_has_position_addrs = request.parameters.position_addresses.is_some();
+        let request_has_executor_disabled = request
+            .parameters
+            .executor_disabled_position_addresses
+            .is_some();
+        if !request_has_position_addrs
+            && let Some(addrs) = old_position_addrs
+            && let Some(params) = config.get_mut("parameters").and_then(|p| p.as_object_mut())
+        {
+            params.insert("position_addresses".to_string(), addrs);
         }
-        if let Some(disabled) = old_executor_disabled {
-            if let Some(params) = config.get_mut("parameters").and_then(|p| p.as_object_mut()) {
-                if !params.contains_key("executor_disabled_position_addresses") {
-                    params.insert("executor_disabled_position_addresses".to_string(), disabled);
-                }
-            }
+        if !request_has_executor_disabled
+            && let Some(disabled) = old_executor_disabled
+            && let Some(params) = config.get_mut("parameters").and_then(|p| p.as_object_mut())
+            && !params.contains_key("executor_disabled_position_addresses")
+        {
+            params.insert("executor_disabled_position_addresses".to_string(), disabled);
         }
 
         strategy.name = request.name.clone();
@@ -612,6 +622,23 @@ async fn start_strategy_executor_core(
     id: &str,
     strategy_config: serde_json::Value,
 ) -> ApiResult<Option<String>> {
+    if let Err(e) =
+        crate::services::strategy_service::try_heal_stale_strategy_links_for_strategy(state, id).await
+    {
+        warn!(
+            strategy_id = %id,
+            error = %e,
+            "try_heal_stale_strategy_links_for_strategy before executor start"
+        );
+    }
+    let strategy_config = state
+        .strategies
+        .read()
+        .await
+        .get(id)
+        .map(|s| s.config.clone())
+        .unwrap_or(strategy_config);
+
     let dry_run = strategy_config
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -678,6 +705,14 @@ async fn start_strategy_executor_core(
         executor_config,
     );
 
+    wire_executor_allowlist_and_reopen_hook(
+        &executor,
+        state,
+        id,
+        strategy_config.get("parameters"),
+    )
+    .await;
+
     executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
         "data/position-fee-checkpoints.jsonl",
     )));
@@ -742,9 +777,11 @@ async fn start_strategy_executor_core(
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
         }
 
-        if let Some(min_hours) = params.get("min_rebalance_interval_hours")
-            && let Some(val) = min_hours.as_u64()
+        if let Some(min_hours) = params
+            .get("min_rebalance_interval_hours")
+            .and_then(min_rebalance_interval_hours_from_json)
         {
+            let val = clamp_min_rebalance_interval_hours(min_hours);
             decision_config.min_rebalance_interval_hours = val;
             // Align Periodic interval with the same knob used in the UI ("1h", "4h", ...).
             // For non-periodic modes this value is still used as the minimum rebalance interval gate.

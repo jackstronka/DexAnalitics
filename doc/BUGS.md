@@ -28,6 +28,85 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260414-08 — New position detail showed full prior rotation “history” (merged stream component)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: stream-lineage, position_stream_edges, suppress_jsonl_rotation_stitch, compute_position_stream_lineage, fresh-open, BFS
+
+- **Symptom:** After closing an old NFT and opening a new one, Position detail’s lineage/history table listed many unrelated prior PDAs (same pool) as if they belonged to the new mint.
+- **Root cause:** JSONL/registry fallback respected `suppress_jsonl_rotation_stitch` (manual / unanchored opens), but the **DB path** always queried edges using the full undirected BFS component from `compute_position_stream_performance`, which can merge unrelated PDAs when the edge graph is noisy.
+- **Root cause (follow-up):** `lifecycle_rotation_parent_before_open` treated **`close_kind=rotation` alone** on an older `bot_close_position` as rotation evidence. API opens are logged as **`bot_open_position`** with a **new** `rebalance_session_id` (`cost_session_id`); a recent unrelated rotation close in the same pool/payer window became a false “parent”, so `suppress_jsonl_rotation_stitch` stayed false and the long chain reappeared even after the DB isolation fix.
+- **Fix:** When `suppress_jsonl_rotation_stitch` is true, DB lineage uses an **entry-only** stream member list for the edge query + `build_lineage_chain_from_db_edges`, and stream PnL totals use the same restriction via `compute_position_stream_pnl_for_stream_members`. **Parent inference** no longer uses `close_kind=rotation` without a **session id match** (close vs open) or **bot-tied** rows on the closed PDA in the pre-open window.
+- **Fix (follow-up 2):** **Operator** semantics in lifecycle JSONL: `position_open` / `source:cli` / `details.open_origin=operator_api` ⇒ **always** suppress prior history; API open writes `open_origin`; **manual** closes (`position_close`, `close_kind=manual`, `close_source=api`) do not act as rotation parents and stop **forward** JSONL chain walks (commit `4836a2c` was the earlier “no false history” baseline).
+- **Guards/tests:** `db_edges_entry_only_positions_ignore_external_rotation_neighbor`, `rotation_parent_ignores_ambient_close_kind_rotation_without_session_or_bot_tie`; `cargo test -p clmm-lp-api services::position_stream_lineage::tests`.
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_pnl.rs`
+
+### BUG-20260414-07 — Manual “Close position” reported success but sent no on-chain close (dry-run strategy executor)
+
+status: fixed  
+severity: critical  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: close-position, resolve_executor_for_position_ops, dry_run, StrategyExecutor, position ops
+
+- **Symptom:** Operator clicked Close multiple times; UI/API returned success (“position closed”) but the Whirlpool position remained open on-chain.
+- **Root cause:** `resolve_executor_for_position_ops` returned the **first** strategy executor in the map. If that strategy was `dry_run=true`, `RebalanceExecutor::execute_full_close_only` **no-oped** (returns `Ok(())` without submitting txs), while `PositionService` still returned `OperationResult::success()`.
+- **Fix:** Resolve only executors with `!is_dry_run()` **and** `wallet_pubkey().is_some()`; prefer `__api_position_ops__`, then any qualifying strategy runner, then create the lazy ops executor from env keypair. Added `StrategyExecutor::is_dry_run()`.
+- **Guards/tests:** `cargo build -p clmm-lp-api`.
+- **Paths:** `crates/api/src/services/position_executor.rs`, `crates/execution/src/strategy/executor.rs`
+
+### BUG-20260414-06 — `min_rebalance_interval_hours: 0` caused a close+open every eval tick (~5m) while in-range
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: periodic, min_rebalance_interval_hours, eval_interval_secs, rebalance-loop, strategy-parameters
+
+- **Symptom:** Multiple rebalances within ~25 minutes (e.g. 5×) while the position stayed in range; cadence matched **`eval_interval_secs`** (default 300s), not “every N hours”.
+- **Root cause:** `DecisionConfig` ties Periodic to `hours_since_rebalance >= periodic_interval_hours`. When **`min_rebalance_interval_hours` / periodic interval is `0`**, `hours_since >= 0` is always true → **Rebalance on every executor tick**. UI could send `0` via numeric field; persisted JSON could also contain `0`.
+- **Fix:** Clamp `0` → `1` when building executor decision config from strategy parameters (API); parse integer/float/string for the same field. Web form sends `max(1, floor(n))`. Log a warning when clamping.
+- **Guards/tests:** `min_rebalance_interval_parses_json_number_and_string`, `zero_min_rebalance_interval_clamps_to_one`.
+- **Paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/lib/strategyFormShared.tsx`
+
+### BUG-20260414-05 — Strategy UI stuck on first linked PDA after bot rotations; HTTP start / autostart used divergent executor wiring
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: strategies, reopen-hook, position_addresses, start-strategy, autostart, StrategyService, state.executors, periodic-rebalance
+
+- **Symptom:** Bot closed and reopened positions (new NFT PDAs) while price stayed in range; dashboard strategy still showed the **original** `parameters.position_addresses` entry (e.g. first mint), not the active position.
+- **Root cause (hook):** `start_strategy_executor_core` (used by `POST /strategies/{id}/start`, `ensure_executor_after_link`, and `PUT /strategies/{id}` restart) did **not** register `set_reopen_hook` or `set_managed_allowlist`, so close→open cycles did not call `replace_position_address_in_strategy`.
+- **Root cause (map):** `StrategyService::start_strategy` (API boot autostart) stored executors in a **private** `HashMap` separate from `AppState.executors`, so stop/sync/heal paths that read `state.executors` could not see autostarted runners (and behavior diverged from HTTP-started strategies).
+- **Fix:** Introduced shared `wire_executor_allowlist_and_reopen_hook`; `start_strategy_executor_core` calls it. `StrategyService` now uses `state.executors` only (removed duplicate map).
+- **Guards/tests:** `cargo build -p clmm-lp-api`; existing `managed_allowlist_*` tests still pass.
+- **Paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`
+
+### BUG-20260414-04 — Clearing `position_addresses` via strategy update did not stick; empty list widened executor scope
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-14  
+fixed_in: local  
+keywords: strategies, put-strategies, position_addresses, linked-positions, update_strategy, managed-allowlist, executor
+
+- **Symptom:** After editing `data/strategies.json` or calling `PUT /strategies/{id}` with `position_addresses: []`, the dashboard still showed long **Linked positions** lists; operators could not reset strategy links for a clean test cycle.
+- **Root cause (persistence):** `update_strategy` always re-inserted the previous `position_addresses` JSON into the new config, so an explicit clear in the request body was overwritten.
+- **Root cause (semantics):** When `position_addresses` was an empty array, `start_strategy` / `sync_managed_allowlist_from_registry_for_strategy` treated “no configured PDAs” as “use all registry-open PDAs”, which could make a “cleared” strategy still drive automation across unrelated positions after autostart.
+- **Fix:** `update_strategy` only restores legacy `position_addresses` / `executor_disabled_position_addresses` when the request omits those fields (`None`); if the client sends them (including `[]`), the request wins. Centralized allowlist helper: explicit `[]` ⇒ empty managed set; missing or non-array field keeps legacy “registry-open” fallback.
+- **Guards/tests:** Unit tests `missing_position_addresses_field_uses_registry_open`, `explicit_empty_position_addresses_yields_empty_allowlist`.
+- **Paths:** `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/strategy_service.rs`
+
 ### BUG-20260414-03 — Stranded list had no operator dismiss control
 
 status: fixed  
@@ -42,6 +121,7 @@ keywords: stranded-rebalances, pending-open-recovery, watchdog, ui-action, dismi
 - **Symptom (follow-up 2):** `dismissed_session_ids` remained empty in runtime `pending-open-recovery.json` despite UI `Remove`.
 - **Symptom (follow-up 3):** After removing one stranded row, bot could still auto-open from another queued pending item with the same `pool + intended range`, so list clearing did not fully stop reopen attempts during manual tests.
 - **Symptom (follow-up 4):** `pending-open-recovery.json` still contained reopen items while `Closed by bot, waiting for reopen` section was empty, so operator could not remove hidden queue entries from UI.
+- **Symptom (follow-up 5):** Even after removing visible `pending:*` rows, entries could reappear from another queued/derived item in the same `pool + intended range` group (different old position/session id), so operator cleanup still felt non-deterministic.
 - **Root cause:** Watchdog/API exposed only read/reconcile operations (`get`/`reconcile`), with no persistent denylist/dismiss mechanism. Pending-open queue could continue using previously queued rows.
 - **Root cause (follow-up):** Execution-side pending-open store schema lacked `dismissed_session_ids`; when bot wrote pending-open file, dismiss metadata was dropped, so sessions reappeared.
 - **Root cause (follow-up 2):** Dismiss persistence depended on one shared JSON file; if another process rewrote the file without dismiss metadata, hidden sessions resurfaced.
@@ -49,10 +129,12 @@ keywords: stranded-rebalances, pending-open-recovery, watchdog, ui-action, dismi
 - **Fix (follow-up 2):** Added separate persisted denylist file for dismissed sessions (`data/stranded-dismissed-sessions.json`, env override `CLMM_STRANDED_DISMISSED_PATH`) and merged it into snapshot/reconcile filters.
 - **Fix (follow-up 3):** Dismiss now prunes pending-open queue by both exact `closed_position_nft` and by `pool + intended_tick_lower + intended_tick_upper` group, so operator cleanup keeps stranded/pending views coherent and blocks same-range auto-reopen leftovers.
 - **Fix (follow-up 4):** `stranded-rebalances` snapshot now includes synthetic `pending-only` rows for queued reopen items that have no visible lifecycle close row, so every reopen-capable queue item is visible/removable from UI.
+- **Fix (follow-up 5):** Dismiss now stores an additional denylist marker per `pool + intended range` (`pending-group:<pool>:<lower>:<upper>`). Snapshot/hide and reconcile/auto-enqueue both honor this group marker, preventing reappearance from sibling sessions/items in the same reopen group.
 - **Guards/tests:** Added regression test `dismissed_session_is_excluded_from_stranded_list`; watchdog suite passes.
 - **Guards/tests:** Added regression test `pending_open_store_parses_and_keeps_dismissed_sessions`.
 - **Guards/tests (follow-up 3):** Added regression test `dismiss_prunes_pending_by_old_position_and_pool_range`.
 - **Guards/tests (follow-up 4):** Added regression test `pending_only_item_is_visible_in_stranded_output`.
+- **Guards/tests (follow-up 5):** Added regression test `dismissed_pending_group_hides_all_matching_pending_rows`.
 - **Paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `crates/api/src/handlers/bot_activity.rs`, `crates/api/src/routes.rs`, `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`, `crates/execution/src/strategy/pending_open.rs`
 
 ### BUG-20260414-02 — Manual close appeared in “Closed by bot, waiting for reopen”
@@ -114,12 +196,14 @@ keywords: position-detail, performance, stream-lineage, value-usd, snapshots, va
 - **Symptom (2026-04-14):** Karta **Performance → Value** bywa „historyczna”/zaniżona po wejściu na detal pozycji (frontend cache), mimo że oczekiwana jest bieżąca wycena.
 - **Symptom (2026-04-14, follow-up):** Po wdrożeniu odświeżania na mount, w części sesji `Performance -> Value` nadal wygląda na zaniżone (np. ~$2.278) względem oczekiwanej bieżącej wyceny.
 - **Symptom (2026-04-14, UI semantics):** Użytkownik mieszał „live value” (single PDA) z agregatem historycznym streamu; etykieta `end value` dla open node była czytana jako „przyszła wartość”.
+- **Symptom (2026-04-14, follow-up):** Świeżo otwarta pozycja mogła mieć `opened == closed/last` i widoczne `end value` już na starcie, mimo braku close.
 - **Symptom (2026-04-14, runtime chain jump):** Dla jednego chainu (SOL/USDC) kolejne node’y pokazały sekwencję `~2.01 -> ~0.98 -> ~3.05 -> ~6.00` przy niewielkiej zmianie ceny rynkowej; użytkownik raportuje efekt „uciętej nogi” w jednym kroku i „dodanej nogi” w następnym. To wygląda jak niespójna wycena per-node (nieadekwatna do realnego market move), a nie zwykły wynik ceny.
 - **Symptom (2026-04-14, close accounting):** `end value` dla części zamknięć bywało policzone tylko z jednej nogi puli, bo `fee_payer_token_deltas` z tx meta nie zawsze zawiera obie nogi (typowo brak jednej nogi przy WSOL/ATA flow).
 - **Root cause (analiza kodu):** Ta metryka „wartość USD” jest liczona w **dwóch miejscach** (nie jest jednym cache): karta Performance vs wiersz lineage. Karta Performance bierze `value_usd` z `GET /positions/{address}`: świeże `compute_position_usd_valuation` na stanie z monitora/RPC (`handlers/positions.rs`). Tabela lineage w `GET /positions/{address}/stream-lineage` dla węzła w ścieżce DB w `node_metrics` ustawia **baseline** i **current** z tabeli `position_stream_valuation_snapshots` (pierwszy vs ostatni wiersz wg sortowania SQL), a niekoniecznie z tą samą chwilą ani tą samą logiką co bieżąca karta. Dla **świeżo otwartej** pozycji często jest **jeden** (lub kilka) snapshotów — **start i end mogą wskazywać ten sam zapis**, z wartością zapisaną wcześniej (inny moment/ceny/jedna noga w delcie) podczas gdy karta już pokazuje nowszą wycenę. Etykieta `exact` w UI pochodzi z `raw_json.valuation_quality` snapshotu lub z ścieżki lifecycle — opisuje **jakość wejścia cen**, nie gwarancję zgodności z kartą Performance.
 - **Fix:** (2026-04-13, uproszczenie) Zamiast wielu heurystyk w `node_metrics`, **`persist_event_valuation_snapshots_for_positions`** przy zapisie **`baseline_open`** uzupełnia **tylko brakującą nogę** (delta `amount_*_ui == 0`) z **`details.amount_*_cap`** (Orca max raw); druga noga zostaje z delt. **Pełne zastąpienie obu nóg capami** usunięte — cap to maksimum, nie faktyczny depozyt; dawało zawyżenie wobec **Performance** (np. ~$6.15 vs ~$5.60). `baseline_amounts_source: "open_caps"`. **`ON CONFLICT DO UPDATE`** tylko przy `open_caps`. `node_metrics` — prosty odczyt snapshotów + istniejący guardrail z ledgera.
 - **Fix (2026-04-14):** `PositionDetail` wymusza świeży fetch `GET /positions/{address}` na mount (`staleTime: 0`, `refetchOnMount: 'always'`). API zwraca też `valuation_source` (`live_valuation` vs `fallback_monitor`) dla `value_usd`, więc UI odróżnia świeżą wycenę od fallbacku monitora.
 - **Fix (2026-04-14, UI):** `PositionDetail` rozdziela semantykę sekcji: `Live value (this position, now)` + jawny opis źródła dla single-PDA endpointu; stream dostał nagłówek „history summary across rotated PDAs”; kolumna historii `end value` zmieniona na `current/end value`.
+- **Fix (2026-04-14, follow-up):** W DB-path lineage `closed_ts_utc` jest ustawiane tylko dla snapshotów `raw_json.kind=end_close`; zwykły latest/current snapshot dla aktywnej pozycji nie oznacza zamknięcia, więc UI nie pokazuje `end value` dla świeżego open.
 - **Fix (2026-04-14, accounting):** Rebalance executor zapisuje deterministycznie `details.close_amount_a_raw` i `details.close_amount_b_raw` na evencie `bot_close_position` (best-effort świeży odczyt pozycji+pool tuż przed close; fallback do obliczonych amountów „before”). Lineage `node_metrics_from_lifecycle_best_effort` preferuje te pola przy liczeniu `end value`; `fee_payer_token_deltas` zostają tylko jako fallback dla starszych wierszy bez nowych pól.
 - **Guards/tests:** `cargo test -p clmm-lp-api position_stream_lineage`; po deploy: odśwież stream-lineage (persist) dla danej PDA — stary zły wiersz `baseline_open` może się zaktualizować tylko gdy trafi `open_caps`.
 - **Residual risk:** Otwarcie **bez** `amount_*_cap` w `details` (np. część ścieżek CLI) — wtedy tylko delty + guardrail `node_metrics`; nadal możliwy drift cen/RPC. Dodatkowo możliwy pozostaje drift live/fallback przy chwilowej niedostępności RPC/price feed.
@@ -136,9 +220,13 @@ keywords: position-stream-lineage, rotation, registry.jsonl, lifecycle, rebalanc
 
 - **Symptom:** A newly opened position in the same pool as prior activity appeared in **Position history (rotations)** as continuing an old PDA chain instead of a standalone node.
 - **Symptom (2026-04-14):** Część nowych botowych rebalance (`close -> open`) nie dopina się do historii i pojawia się jako nowa pozycja startowa; jednocześnie manual opens na tym samym poolu muszą pozostać oddzielnymi historiami.
+- **Symptom (2026-04-14, follow-up):** `linked positions` w strategiach rosły nieoczekiwanie; samo wejście na listę pozycji potrafiło modyfikować linki strategii (auto-heal w endpointach odczytowych).
+- **Symptom (2026-04-14, follow-up 2):** Po ręcznym `Close` pozycja pozostawała w `position_addresses` strategii, mimo że manual close ma oznaczać koniec historii i brak dalszego zarządzania/reopen dla tej pozycji.
 - **Root cause:** Registry fallback linked `registry_open` → `registry_close` by time/pool/owner even when `rebalance_session_id` did not match (or was empty). Lifecycle fallback linked opens to the latest close in a short window without requiring rotation evidence; forward close→open used the first qualifying open, not the true successor; lifecycle parent inference treated loose swap rows as rotation.
 - **Root cause (runtime `debug-c45ac3.log`, H-lineage):** With DB enabled, `db_chain_from_edges_len` stayed **1** while JSONL fallback inflated `chain_len` to **3–4** — `build_linear_chain` walked from a single graph root and **omitted `entry` on forked `position_stream_edges`** (`A→B` and `A→C`), fell back to `[entry]`, then registry/lifecycle re-stitched a long pool history.
 - **Fix:** Registry parent/chain only when both rows carry the same non-empty `rebalance_session_id`. Lifecycle uses `lifecycle_rotation_parent_before_open` (session match, `close_kind=rotation`, or bot activity tied to the closed PDA); forward links require that helper to return the closed PDA; `infer_parent_position_from_lifecycle_best_effort` delegates to the same helper. DB mode uses **`build_lineage_chain_from_db_edges`** (backward from `entry`, then forward); **JSONL/registry fallback is skipped when any persisted edge touches `entry`**. **Update 2026-04-14:** JSONL suppress now blocks only fresh manual roots; bot-open nodes remain stitchable when rotation parent is inferable even with session mismatch. Rebalance executor now stamps one generated `ledger_session_id` through collect/close/swap/open lifecycle rows to improve deterministic close->open continuity.
+- **Fix (follow-up):** Removed implicit strategy-link healing from read endpoints (`GET /positions`, diagnostics). Healing is now explicit via `POST /positions/{address}/heal-strategy-link`. Also hardened `replace_position_address_in_strategy` to only add/sync `new_position` when `old_position` was actually found/replaced, preventing accidental list growth on stale parent calls.
+- **Fix (follow-up 2):** `DELETE /positions/{address}` now performs best-effort unlink from all strategies after successful manual close (`remove_position_address_from_all_strategies`), so operator close explicitly ends strategy linkage for that PDA.
 - **Guards/tests (2026-04-14):** Added `jsonl_stitch_allowed_when_rotation_parent_exists_without_session_match`; existing `jsonl_stitch_suppressed_when_open_session_not_on_prior_close` and `jsonl_stitch_allowed_when_session_matches_prior_close` still pass.
 - **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`.
 - **Paths:** `crates/api/src/services/position_stream_lineage.rs`

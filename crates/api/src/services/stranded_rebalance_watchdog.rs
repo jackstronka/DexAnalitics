@@ -427,7 +427,8 @@ fn build_stranded_rebalances(
             continue;
         }
         let synthetic_sid = synthetic_pending_session_id(old, p.intended_tick_lower, p.intended_tick_upper);
-        if dismissed_sessions.contains(&synthetic_sid) {
+        let group_sid = synthetic_pending_group_id(p.pool.trim(), p.intended_tick_lower, p.intended_tick_upper);
+        if dismissed_sessions.contains(&synthetic_sid) || dismissed_sessions.contains(&group_sid) {
             continue;
         }
         let already_visible = out.iter().any(|it| {
@@ -472,6 +473,10 @@ fn build_stranded_rebalances(
 
 fn synthetic_pending_session_id(closed_position_nft: &str, lower: i32, upper: i32) -> String {
     format!("pending:{closed_position_nft}:{lower}:{upper}")
+}
+
+fn synthetic_pending_group_id(pool: &str, lower: i32, upper: i32) -> String {
+    format!("pending-group:{pool}:{lower}:{upper}")
 }
 
 fn prune_pending_open_items_for_dismiss(
@@ -533,6 +538,23 @@ pub fn dismiss_stranded_rebalance_session_for_api(
     }
     let mut dismissed_set = load_dismissed_session_ids(&dismissed_path)?;
     dismissed_set.insert(sid.to_string());
+    if let Some(item) = dismissed_item
+        && let (Some(pool), Some(lower), Some(upper)) = (
+            item.pool_address.as_deref(),
+            item.intended_tick_lower,
+            item.intended_tick_upper,
+        )
+    {
+        let group_sid = synthetic_pending_group_id(pool.trim(), lower, upper);
+        if !pending_store
+            .dismissed_session_ids
+            .iter()
+            .any(|x| x.trim() == group_sid)
+        {
+            pending_store.dismissed_session_ids.push(group_sid.clone());
+        }
+        dismissed_set.insert(group_sid);
+    }
 
     prune_pending_open_items_for_dismiss(&mut pending_store, dismissed_item);
 
@@ -673,6 +695,10 @@ fn reconcile_stranded_with_il_path(
         if dismissed_sids.contains(&pending_sid) {
             continue;
         }
+        let group_sid = synthetic_pending_group_id(&pool, intended_tick_lower, intended_tick_upper);
+        if dismissed_sids.contains(&group_sid) {
+            continue;
+        }
         if pending_store
             .items
             .iter()
@@ -713,7 +739,8 @@ fn reconcile_stranded_with_il_path(
 mod tests {
     use super::{
         LocalPendingOpenItem, LocalPendingOpenStore, StrandedRebalanceItem, build_stranded_rebalances,
-        prune_pending_open_items_for_dismiss, synthetic_pending_session_id,
+        prune_pending_open_items_for_dismiss, synthetic_pending_group_id,
+        synthetic_pending_session_id,
     };
     use clmm_lp_execution::lifecycle::RebalanceReason;
 
@@ -938,6 +965,42 @@ mod tests {
                 created_at: "2026-04-14T14:10:00Z".to_string(),
             }],
             dismissed_session_ids: vec![sid],
+        };
+        let items = build_stranded_rebalances(&lifecycle, &il, &pending);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn dismissed_pending_group_hides_all_matching_pending_rows() {
+        let gid = synthetic_pending_group_id("pool-g", -300, 300);
+        let lifecycle = vec![];
+        let il = vec![];
+        let pending = LocalPendingOpenStore {
+            items: vec![
+                LocalPendingOpenItem {
+                    pool: "pool-g".to_string(),
+                    intended_tick_lower: -300,
+                    intended_tick_upper: 300,
+                    closed_position_nft: "old-1".to_string(),
+                    reason: RebalanceReason::Periodic,
+                    optimization_run_id: None,
+                    attempts: 0,
+                    last_error: None,
+                    created_at: "2026-04-14T14:20:00Z".to_string(),
+                },
+                LocalPendingOpenItem {
+                    pool: "pool-g".to_string(),
+                    intended_tick_lower: -300,
+                    intended_tick_upper: 300,
+                    closed_position_nft: "old-2".to_string(),
+                    reason: RebalanceReason::RangeExit,
+                    optimization_run_id: None,
+                    attempts: 0,
+                    last_error: None,
+                    created_at: "2026-04-14T14:21:00Z".to_string(),
+                },
+            ],
+            dismissed_session_ids: vec![gid],
         };
         let items = build_stranded_rebalances(&lifecycle, &il, &pending);
         assert!(items.is_empty());

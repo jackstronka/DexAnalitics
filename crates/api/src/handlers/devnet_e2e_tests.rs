@@ -945,7 +945,15 @@ async fn devnet_bot_actions_smoke() {
 
     let position = exec
         .execute_open_position(
-            &pool, tick_lower, tick_upper, amount_a, amount_b, 200, false, None,
+            &pool,
+            tick_lower,
+            tick_upper,
+            amount_a,
+            amount_b,
+            200,
+            false,
+            None,
+            None,
         )
         .await
         .expect("open_position via StrategyExecutor");

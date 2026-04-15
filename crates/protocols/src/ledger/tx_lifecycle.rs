@@ -338,6 +338,10 @@ fn rebalance_event_name(operation: &str) -> &'static str {
 /// `lp_collected_token_{a,b}_raw`: for `collect_fees` only — `fee_owed_a` / `fee_owed_b` from the
 /// Whirlpool **position** account immediately before the harvest tx (pool token A/B order). Records
 /// both LP legs even when RPC `pre/postTokenBalances` omit WSOL. For other operations, pass `None`.
+///
+/// For **`open_position`** / **`open_full_range_position`**, callers may merge `details` fields such
+/// as **`open_origin: "operator_api"`** (dashboard/API open). Lineage treats that as an operator
+/// mint with **no** stitched prior rotation history (same rule as CLI `position_open`).
 pub async fn try_append_rebalance_executor_tx_cost(
     provider: &RpcProvider,
     fee_payer: &Pubkey,

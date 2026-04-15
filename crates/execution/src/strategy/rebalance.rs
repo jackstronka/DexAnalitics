@@ -21,6 +21,27 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Shallow-merge optional operator fields (e.g. `open_origin`) into open `details` for lifecycle.
+fn merge_open_ledger_details(
+    base: serde_json::Value,
+    extra: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let Some(extra) = extra else {
+        return base;
+    };
+    let serde_json::Value::Object(mut bm) = base else {
+        return extra;
+    };
+    if let serde_json::Value::Object(em) = extra {
+        for (k, v) in em {
+            bm.insert(k, v);
+        }
+        serde_json::Value::Object(bm)
+    } else {
+        serde_json::Value::Object(bm)
+    }
+}
+
 /// Retries for `open_position` after a successful close (`CLMM_REBALANCE_OPEN_MAX_ATTEMPTS`, 1..=20, default 5).
 fn rebalance_open_max_attempts() -> u32 {
     std::env::var("CLMM_REBALANCE_OPEN_MAX_ATTEMPTS")
@@ -2150,6 +2171,7 @@ impl RebalanceExecutor {
                 cap_b,
                 self.config.max_slippage_bps,
                 ledger_session_id,
+                None,
             )
             .await?;
         Ok(p)
@@ -2247,6 +2269,8 @@ impl RebalanceExecutor {
         slippage_bps: u16,
         full_range: bool,
         ledger_session_id: Option<String>,
+        // Merged into lifecycle `details` on successful open (e.g. `open_origin` for lineage).
+        ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
         if self.is_dry_run() {
             if full_range {
@@ -2272,6 +2296,7 @@ impl RebalanceExecutor {
                     amount_b,
                     slippage_bps,
                     ledger_session_id,
+                    ledger_open_details,
                 )
                 .await;
         }
@@ -2283,6 +2308,7 @@ impl RebalanceExecutor {
             amount_b,
             slippage_bps,
             ledger_session_id,
+            ledger_open_details,
         )
         .await
     }
@@ -2294,6 +2320,7 @@ impl RebalanceExecutor {
         amount_b: u64,
         slippage_bps: u16,
         ledger_session_id: Option<String>,
+        ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
@@ -2305,12 +2332,15 @@ impl RebalanceExecutor {
             slippage_bps,
         };
         let res = orca.open_full_range_position(&params, payer).await?;
-        let details = serde_json::json!({
-            "slippage_bps": slippage_bps,
-            "amount_a_cap": amount_a,
-            "amount_b_cap": amount_b,
-            "open_kind": "full_range"
-        });
+        let details = merge_open_ledger_details(
+            serde_json::json!({
+                "slippage_bps": slippage_bps,
+                "amount_a_cap": amount_a,
+                "amount_b_cap": amount_b,
+                "open_kind": "full_range"
+            }),
+            ledger_open_details,
+        );
         self.ensure_execution_success(
             "open_full_range_position",
             &res,
@@ -2351,6 +2381,7 @@ impl RebalanceExecutor {
         amount_b: u64,
         slippage_bps: u16,
         ledger_session_id: Option<String>,
+        ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
@@ -2368,14 +2399,17 @@ impl RebalanceExecutor {
         };
 
         let res = orca.open_position(&params, payer).await?;
-        let details = serde_json::json!({
-            "tick_lower": tick_lower,
-            "tick_upper": tick_upper,
-            "slippage_bps": slippage_bps,
-            "amount_a_cap": amount_a,
-            "amount_b_cap": amount_b,
-            "open_kind": "tick_range"
-        });
+        let details = merge_open_ledger_details(
+            serde_json::json!({
+                "tick_lower": tick_lower,
+                "tick_upper": tick_upper,
+                "slippage_bps": slippage_bps,
+                "amount_a_cap": amount_a,
+                "amount_b_cap": amount_b,
+                "open_kind": "tick_range"
+            }),
+            ledger_open_details,
+        );
         self.ensure_execution_success(
             "open_position",
             &res,

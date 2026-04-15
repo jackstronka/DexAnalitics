@@ -1032,7 +1032,7 @@ pub struct StrategyParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub il_ledger_path: Option<String>,
 
-    /// If true, API will auto-start this strategy on boot when `CLMM_STRATEGY_AUTOSTART_ON_BOOT` is enabled.
+    /// If true, API will auto-start this strategy on boot unless `CLMM_STRATEGY_AUTOSTART_ON_BOOT` is set to a false-ish value (unset env ⇒ autostart allowed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_start: Option<bool>,
     /// When using `POST .../apply-optimize-result` with an agent envelope, cap `|Δ winner.width_pct|` vs `baseline_optimize_result` (same units as backtest: fraction, e.g. `0.02` = 2 percentage points).

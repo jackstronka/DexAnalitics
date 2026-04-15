@@ -1,3 +1,101 @@
+## 2026-04-14 — Lineage: operator open/close rules (API `open_origin`, manual close barrier)
+
+keywords: api, stream-lineage, operator_api, open_origin, position_service, RebalanceExecutor, lifecycle_close_row_is_operator_manual, suppress_jsonl_rotation_stitch
+
+- **What:** JSONL parser loads `source`. Operator opens: CLI `position_open` / `source:cli` / `details.open_origin=operator_api` on `bot_open_*` ⇒ lineage **never** stitches prior PDAs. API `POST /positions` open passes `open_origin=operator_api` in merged ledger `details`. Operator closes (`position_close`, or `close_kind=manual` / `close_source=api` on `bot_close_position`) are ignored as rotation parents and **stop forward** lifecycle chain walks.
+- **Why:** Product rule — ręczne otwarcie = pierwszy wiersz bez historii; ręczne zamknięcie = koniec łańcucha (w lifecycle JSONL). Aligns with intent from commit `4836a2c` (session/CLI gates) without fragile same-pool heuristics on API `bot_open_*`.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/services/position_service.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`
+
+## 2026-04-14 — Lineage: do not infer rotation parent from `close_kind=rotation` alone (API `bot_open_*`)
+
+keywords: api, stream-lineage, lifecycle_rotation_parent_before_open, close_kind, bot_open_position, cost_session_id, suppress_jsonl_rotation_stitch, BUG-20260414-08
+
+- **What:** `lifecycle_rotation_parent_before_open` no longer sets rotation evidence from **`details.close_kind=rotation` alone** on a prior close. Parentage still follows **matching `rebalance_session_id`** (close vs open) or **bot-tied** rows on the closed PDA between that close and the open (existing inner scan).
+- **Why:** Dashboard/API opens use `bot_open_position` with a fresh `cost_session_id`; an unrelated rotation close in the same pool within the 60m lookback falsely satisfied “has parent”, kept `suppress_jsonl_rotation_stitch` false, and preserved the full pre-chain in the history table.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — DB stream lineage respects `suppress_jsonl_rotation_stitch` (fresh manual / unanchored opens)
+
+keywords: api, stream-lineage, position_stream_lineage, suppress_jsonl_rotation_stitch, position_stream_edges, position_stream_pnl, BUG-20260414-08
+
+- **What:** When lifecycle says rotation stitching is suppressed, `compute_position_stream_lineage` no longer loads `position_stream_edges` using the full BFS component from `compute_position_stream_performance`. It uses the entry PDA only for the edge query and chain walk, matching the no-DB JSONL behavior; stream totals use `compute_position_stream_pnl_for_stream_members` with the same restriction.
+- **Why:** Operators opening a new mint after a long bot chain otherwise saw the entire prior history merged into the new position’s table.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_pnl.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — `DELETE /positions/:address` close without in-memory monitor race
+
+keywords: api, close-position, monitor, monitored_position_from_chain, PositionDetail
+
+- **What:** `close_position` no longer requires the PDA to already be in `PositionMonitor`; it falls back to `monitored_position_from_chain` like `GET /positions/:address`, so manual close works right after opening the detail page (before async `add_position` completes) and aligns with `PositionService::close_position`.
+- **paths:** `crates/api/src/handlers/positions.rs`, `web/src/pages/PositionDetail.tsx` (2s delay before navigate after close so success message is visible)
+
+## 2026-04-14 — Position ops executor: never use a dry-run `StrategyExecutor` for close/collect
+
+keywords: api, position_executor, resolve_executor_for_position_ops, dry_run, close-position, StrategyExecutor
+
+- **What:** `resolve_executor_for_position_ops` now skips executors with `dry_run` or without a signing wallet; prefers `__api_position_ops__`, then any live strategy runner that can sign, then lazy-creates the ops executor from env keypair. `StrategyExecutor::is_dry_run()` added.
+- **Why:** First strategy in the map could be `dry_run=true`, so `execute_full_close_only` no-oped while the API still returned HTTP success — “closed” in UI but nothing on-chain.
+- **paths:** `crates/api/src/services/position_executor.rs`, `crates/execution/src/strategy/executor.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Web copy: `CLMM_STRATEGY_AUTOSTART_ON_BOOT` (default ON when unset)
+
+keywords: web, autostart, CLMM_STRATEGY_AUTOSTART_ON_BOOT, StrategyEdit, StrategyCreate, server boot
+
+- **What:** Create/Edit strategy screens no longer state that `CLMM_STRATEGY_AUTOSTART_ON_BOOT=1` is required. API: unset env ⇒ boot autostart **allowed**; set to `0`/`false` ⇒ **disabled** globally (`env_autostart_strategies_on_boot` in `crates/api/src/server.rs`).
+- **paths:** `web/src/pages/StrategyEdit.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/lib/strategyFormShared.tsx`, `crates/api/src/models.rs`, `doc/ENGINEERING_NOTES.md` (stale bullets below corrected)
+
+## 2026-04-14 — Auto-heal stale `position_addresses` when starting strategy executor
+
+keywords: api, strategies, position_addresses, registry.jsonl, reopen-hook, heal_rotated_strategy_link, executor-start
+
+- **What:** `try_heal_stale_strategy_links_for_strategy` runs before `StrategyService::start_strategy` and `start_strategy_executor_core`. If linked mints are not `registry_open`, the API tries each open mint through existing rotation lineage repair so `parameters.position_addresses` can catch up when `reopen_hook` missed.
+- **Why:** Operators still saw the first NFT (e.g. `A4f7…`) in the dashboard after bot rotations; config is only updated by hook or explicit `POST /positions/{active}/heal-strategy-link`.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`
+
+## 2026-04-14 — Clamp `min_rebalance_interval_hours: 0` (was one rebalance per eval tick)
+
+keywords: api, strategies, periodic, min_rebalance_interval_hours, eval_interval_secs, strategyFormShared, regression
+
+- **What:** Persisted `parameters.min_rebalance_interval_hours == 0` removed the time gate (`hours_since >= 0` always), so Periodic (and other modes’ cooldown) could **close+open every `eval_interval_secs`** (~5m default). API now clamps `0` → `1` with a warning; web sends at least `1`.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/lib/strategyFormShared.tsx`, `doc/BUGS.md`
+
+## 2026-04-14 — Unified strategy executor wiring (reopen hook + allowlist; single executor map)
+
+keywords: api, strategies, StrategyService, start_strategy_executor_core, reopen-hook, managed-allowlist, autostart, state.executors
+
+- **What:** `wire_executor_allowlist_and_reopen_hook` centralizes `set_managed_allowlist` + `set_reopen_hook` (updates `parameters.position_addresses` on bot rotation). `start_strategy_executor_core` now calls it so HTTP start, link ensure, and PUT restart match autostart behavior.
+- **What:** `StrategyService` no longer keeps a separate executor map; autostart registers under `AppState.executors`.
+- **Why:** Operators saw stale linked PDAs in UI when the bot rotated positions; HTTP/PUT paths omitted the hook, and autostart used an invisible executor map.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Lineage `closed_ts` only for real close snapshots
+
+keywords: api, lineage, stream-lineage, end-value, closed-ts, ui-semantics, regression
+
+- **What:** DB-backed stream lineage no longer sets `closed_ts_utc` from any latest valuation snapshot timestamp. It now marks closed time only when `raw_json.kind == end_close`.
+- **What:** Added unit guard `closed_ts_for_snapshot_kind_only_marks_end_close`.
+- **Why:** Fresh open positions were displayed as already closed (`opened == closed/last`) and UI showed `end value` immediately, which breaks history semantics.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Strategy update respects cleared `position_addresses`; empty list does not mean “all registry opens”
+
+keywords: api, strategies, update_strategy, position_addresses, linked-positions, managed-allowlist, strategy_service, regression
+
+- **What:** `PUT /strategies/{id}` no longer overwrites request `parameters.position_addresses` / `executor_disabled_position_addresses` with the previous JSON when the client explicitly includes those fields (including empty arrays).
+- **What:** `managed_allowlist_pubkeys_for_strategy_parameters`: explicit `position_addresses: []` yields an empty executor allowlist; missing or non-array `position_addresses` keeps the legacy fallback (all registry-open pubkeys).
+- **Why:** Operators clearing linked PDAs must see empty lists in UI and must not accidentally widen automation to every registry-open position after autostart.
+- **paths:** `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/strategy_service.rs`, `doc/BUGS.md`
+
+## 2026-04-14 — Strategy link healing made explicit (read endpoints stay read-only)
+
+keywords: api, positions, strategy-link, heal, read-only, position_addresses, regression
+
+- **What:** Removed auto-heal side effects from `GET /positions` and diagnostics; read endpoints no longer mutate strategy config.
+- **What:** Added explicit endpoint `POST /positions/{address}/heal-strategy-link` to run best-effort rotation link repair on demand.
+- **What:** Hardened `replace_position_address_in_strategy` so `new_position` is appended/synced only if `old_position` was actually replaced.
+- **Why:** Prevent silent `linked positions` growth and side-effecting reads while keeping operator-triggered repair available.
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `doc/BUGS.md`
+
 ## 2026-04-14 — Open Position can plan in-pool swap for operational SOL deficit
 
 keywords: web, position-create, swap-before-open, operational-sol, wsol, open-preflight, funding
@@ -630,7 +728,7 @@ keywords: clmm-lp-execution, clmm-lp-api, ledger, lifecycle, swap, costs, ui
 keywords: web, clmm-lp-api, strategies, autostart, ui
 
 - Strategy Create/Edit forms now expose `parameters.auto_start` (opt-in autostart). The Strategies list shows an “auto-start on boot” badge when enabled.
-- Note: autostart still requires server env `CLMM_STRATEGY_AUTOSTART_ON_BOOT=1`.
+- Note (current behavior): boot autostart is allowed when env is **unset**; set `CLMM_STRATEGY_AUTOSTART_ON_BOOT=0` (or `false`) to disable globally.
 - **paths:** `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/Strategies.tsx`, `web/src/lib/strategyFormShared.tsx`, `web/src/lib/api.ts`
 
 ## 2026-04-08 — Stream performance across rotated position PDAs (DB + ledger ingest)
@@ -736,8 +834,8 @@ keywords: pending_open, recovery, clmm-pending-open, swap_exact_in, transaction 
 
 keywords: clmm-lp-api, strategy, executor, autostart, production
 
-- Added opt-in strategy autostart on API boot: when `CLMM_STRATEGY_AUTOSTART_ON_BOOT=true`, the API will automatically start strategies whose stored `parameters.auto_start=true`.
-- This keeps “running” behavior consistent after an API restart without auto-starting everything by default.
+- Added opt-in strategy autostart on API boot: strategies with `parameters.auto_start=true` are started after load unless `CLMM_STRATEGY_AUTOSTART_ON_BOOT` is set to a false-ish value (later: default became **allow** when env is unset).
+- Per-strategy opt-in avoids starting every strategy; the env knob disables the feature globally when needed.
 
 # Engineering notes (code changes)
 

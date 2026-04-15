@@ -11,7 +11,9 @@ use crate::models::{
 };
 use clmm_lp_data::repositories::Database;
 use crate::services::position_stream_performance::compute_position_stream_performance;
-use crate::services::position_stream_pnl::compute_position_stream_pnl;
+use crate::services::position_stream_pnl::{
+    compute_position_stream_pnl, compute_position_stream_pnl_for_stream_members,
+};
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
@@ -552,11 +554,23 @@ struct LifecycleRow {
     lp_collected_token_a_raw: Option<u64>,
     lp_collected_token_b_raw: Option<u64>,
     details: Option<serde_json::Value>,
+    /// `cli` / `orca_bot` / etc. from JSONL (`PositionLifecycleRecord`, rebalance executor rows).
+    source: Option<String>,
 }
 
 fn parse_ts(v: &serde_json::Value) -> Option<DateTime<Utc>> {
     let s = v.as_str()?.trim();
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
+}
+
+#[inline]
+fn closed_ts_for_snapshot_kind(kind: Option<&str>, ts: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    let kind = kind.map(str::trim).unwrap_or_default();
+    if kind.eq_ignore_ascii_case("end_close") {
+        ts
+    } else {
+        None
+    }
 }
 
 /// Bot rows use `bot_open_*` / `bot_close_*`; CLI `orca-position-open/close` uses `position_open` / `position_close`.
@@ -573,31 +587,51 @@ fn is_lifecycle_close_event(ev: Option<&str>) -> bool {
     matches!(ev, Some("bot_close_position") | Some("position_close"))
 }
 
-/// Latest open row for `entry` uses `position_open` (CLI / `orca-position-open`), not `bot_open_*`.
-/// Without a `position_stream_edges` row on this PDA, JSONL/registry rotation heuristics would
-/// still stitch same-pool bot history — operators expect a **fresh** manual position to stand alone.
-fn lifecycle_entry_open_is_manual_cli(rows: &[LifecycleRow], entry: &str) -> bool {
-    let entry = entry.trim();
-    if entry.is_empty() {
+/// True when this row is an **operator** open (CLI / dashboard): never stitch prior pool rotation
+/// history onto this mint in lineage.
+#[inline]
+fn lifecycle_open_row_is_operator_manual(r: &LifecycleRow) -> bool {
+    if !is_lifecycle_open_event(r.event.as_deref()) {
         return false;
     }
-    let mut best: Option<(DateTime<Utc>, bool)> = None;
-    for r in rows.iter() {
-        if r.position_pubkey.as_deref().map(str::trim) != Some(entry) {
-            continue;
-        }
-        if !is_lifecycle_open_event(r.event.as_deref()) {
-            continue;
-        }
-        let Some(ts) = r.ts_utc else {
-            continue;
-        };
-        let manual = r.event.as_deref() == Some("position_open");
-        if best.as_ref().is_none_or(|(bts, _)| ts >= *bts) {
-            best = Some((ts, manual));
-        }
+    if r.event.as_deref() == Some("position_open") {
+        return true;
     }
-    best.is_some_and(|(_, manual)| manual)
+    if r.source.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("cli")) {
+        return true;
+    }
+    let Some(d) = r.details.as_ref().and_then(|x| x.as_object()) else {
+        return false;
+    };
+    d.get("open_origin")
+        .and_then(|x| x.as_str())
+        .is_some_and(|s| s.trim() == "operator_api")
+}
+
+/// Latest open row for `entry` is operator-driven (see [`lifecycle_open_row_is_operator_manual`]).
+fn lifecycle_entry_open_is_operator_manual(rows: &[LifecycleRow], entry: &str) -> bool {
+    lifecycle_latest_open_row(rows, entry).is_some_and(lifecycle_open_row_is_operator_manual)
+}
+
+/// Operator closed this position (`position_close`, API `close_kind=manual`, etc.) — not a
+/// strategy rotation close to chain **through** when inferring parents or walking forward.
+#[inline]
+fn lifecycle_close_row_is_operator_manual(r: &LifecycleRow) -> bool {
+    if !is_lifecycle_close_event(r.event.as_deref()) {
+        return false;
+    }
+    if r.event.as_deref() == Some("position_close") {
+        return true;
+    }
+    let Some(d) = r.details.as_ref().and_then(|x| x.as_object()) else {
+        return false;
+    };
+    d.get("close_kind")
+        .and_then(|x| x.as_str())
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("manual"))
+        || d.get("close_source")
+            .and_then(|x| x.as_str())
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("api"))
 }
 
 fn lifecycle_latest_open_row<'a>(rows: &'a [LifecycleRow], entry: &str) -> Option<&'a LifecycleRow> {
@@ -684,11 +718,12 @@ fn lifecycle_open_has_prior_close_same_session(rows: &[LifecycleRow], entry: &st
     false
 }
 
-/// No registry/JSONL rotation chain for fresh manual opens.
-/// For bot opens, allow stitching when we can infer a concrete rotation parent from lifecycle
-/// evidence (session match, `close_kind=rotation`, or bot activity tied to the closed PDA).
+/// No registry/JSONL rotation chain for **operator** opens (CLI `position_open`, `source:cli`, or
+/// API `details.open_origin=operator_api` on `bot_open_*`).
+/// For other bot opens, allow stitching when we can infer a concrete rotation parent from lifecycle
+/// evidence (session match, or bot activity tied to the closed PDA in the pre-open window).
 fn suppress_jsonl_rotation_stitch(rows: &[LifecycleRow], entry: &str) -> bool {
-    if lifecycle_entry_open_is_manual_cli(rows, entry) {
+    if lifecycle_entry_open_is_operator_manual(rows, entry) {
         return true;
     }
     let Some(open_row) = lifecycle_latest_open_row(rows, entry) else {
@@ -766,6 +801,11 @@ fn parse_lifecycle_rows_from_reader<R: BufRead>(reader: R) -> Vec<LifecycleRow> 
             .get("lp_collected_token_b_raw")
             .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
         let details = v.get("details").cloned();
+        let source = v
+            .get("source")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         out.push(LifecycleRow {
             ts_utc,
             event,
@@ -780,6 +820,7 @@ fn parse_lifecycle_rows_from_reader<R: BufRead>(reader: R) -> Vec<LifecycleRow> 
             lp_collected_token_a_raw,
             lp_collected_token_b_raw,
             details,
+            source,
         });
     }
     out.sort_by(|a, b| a.ts_utc.cmp(&b.ts_utc));
@@ -1073,8 +1114,9 @@ fn attach_collect_zero_diagnostics(
 }
 
 /// Parent PDA for a **rotation** into `o`: only when lifecycle shows explicit rotation evidence
-/// (matching non-empty `rebalance_session_id`, executor `close_kind=rotation`, or bot activity tied
-/// to the closed parent PDA — never “any swap in pool with empty position_pubkey”).
+/// (matching non-empty `rebalance_session_id` on close vs open, or bot activity on the closed parent
+/// PDA between that close and this open — never `close_kind=rotation` alone, which would false-link
+/// unrelated later `bot_open_*` rows such as API opens with a fresh `cost_session_id`).
 fn lifecycle_rotation_parent_before_open<'a>(
     rows: &'a [LifecycleRow],
     o: &'a LifecycleRow,
@@ -1099,19 +1141,19 @@ fn lifecycle_rotation_parent_before_open<'a>(
         if !is_lifecycle_close_event(r.event.as_deref()) {
             continue;
         }
+        if lifecycle_close_row_is_operator_manual(r) {
+            continue;
+        }
         let parent_pda = r.position_pubkey.as_deref().unwrap_or("");
         if parent_pda.is_empty() {
             continue;
         }
         let mut has_rotation_signal = false;
-        if let Some(d) = r.details.as_ref().and_then(|x| x.as_object()) {
-            if d.get("close_kind")
-                .and_then(|x| x.as_str())
-                .is_some_and(|s| s.trim() == "rotation")
-            {
-                has_rotation_signal = true;
-            }
-        }
+        // Do **not** treat `close_kind=rotation` alone as proof the *current* open row continues that
+        // close. API/dashboard opens are logged as `bot_open_position` with a fresh
+        // `rebalance_session_id` (`cost_session_id`); an unrelated rotation close in the same pool
+        // within the lookback window would otherwise become a false "parent" and defeat
+        // `suppress_jsonl_rotation_stitch` / lineage isolation.
         if let (Some(osid), Some(csid)) = (open_rebalance_session_id, r.rebalance_session_id.as_deref())
         {
             if !osid.is_empty() && osid == csid {
@@ -1247,6 +1289,9 @@ fn chain_from_lifecycle_best_effort_rows(
     for _ in 0..max_hops {
         let cur = chain.last().expect("non-empty").clone();
         let Some((close_i, c)) = find_close_row_from(&rows, &cur, cur_idx) else { break };
+        if lifecycle_close_row_is_operator_manual(c) {
+            break;
+        }
         let (Some(close_ts), Some(pool), Some(payer)) = (
             c.ts_utc,
             c.pool_address.as_deref(),
@@ -2194,10 +2239,22 @@ async fn node_metrics(
         .as_ref()
         .and_then(|r| r.try_get::<Option<serde_json::Value>, _>("raw_json").ok().flatten())
         .and_then(|v| v.get("valuation_quality").and_then(|x| x.as_str()).map(|s| s.to_string()));
-    let closed_ts: Option<DateTime<Utc>> = current
+    let current_ts: Option<DateTime<Utc>> = current
         .as_ref()
         .and_then(|r| r.try_get::<Option<DateTime<Utc>>, _>("ts_utc").ok())
         .flatten();
+    let current_kind = current
+        .as_ref()
+        .and_then(|r| r.try_get::<Option<serde_json::Value>, _>("raw_json").ok().flatten())
+        .and_then(|v| {
+            v.get("kind")
+                .and_then(|x| x.as_str())
+                .map(std::string::ToString::to_string)
+        });
+    // `closed_ts_utc` represents an actual close marker (`end_close`) only.
+    // Fresh open nodes may already have a "current valuation snapshot" timestamp, which is not a close.
+    let closed_ts: Option<DateTime<Utc>> =
+        closed_ts_for_snapshot_kind(current_kind.as_deref(), current_ts);
     let current_valuation_quality: Option<String> = current
         .as_ref()
         .and_then(|r| r.try_get::<Option<serde_json::Value>, _>("raw_json").ok().flatten())
@@ -2995,11 +3052,32 @@ pub async fn compute_position_stream_lineage(
             totals,
             chain_cost_summary,
             note: Some(
-                "DB is disabled; chain reconstructed best-effort from lifecycle JSONL (rotation signals: matching rebalance_session_id, close_kind=rotation, or bot activity tied to the closed PDA; 60m window)."
+                "DB is disabled; chain reconstructed best-effort from lifecycle JSONL (rotation signals: matching rebalance_session_id, or bot activity tied to the closed PDA in the pre-open window; 60m lookback)."
                     .to_string(),
             ),
         });
     };
+
+    // When lifecycle says this mint should not inherit prior pool rotation history (manual CLI open,
+    // fresh API cost session, or unanchored bot open), the DB path must not use the full undirected
+    // BFS component from `compute_position_stream_performance` — that can merge unrelated PDAs.
+    let rows = lifecycle_rows_cached_best_effort().await;
+    let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
+    let stream_positions: Vec<String> = if stitch_suppressed {
+        vec![entry.to_string()]
+    } else {
+        perf.positions.clone()
+    };
+    if stitch_suppressed {
+        totals = compute_position_stream_pnl_for_stream_members(
+            state,
+            entry,
+            vec![entry.to_string()],
+            vec![],
+        )
+        .await
+        .ok();
+    }
 
     // Load edges among the connected component to build a linear chain.
     let mut edge_rows = sqlx::query(
@@ -3009,7 +3087,7 @@ pub async fn compute_position_stream_lineage(
         WHERE old_position = ANY($1) OR new_position = ANY($1)
         "#,
     )
-    .bind(&perf.positions)
+    .bind(&stream_positions)
     .fetch_all(db.pool())
     .await
     .map_err(|e| ApiError::internal(format!("stream lineage: edges query: {e}")))?;
@@ -3026,12 +3104,12 @@ pub async fn compute_position_stream_lineage(
         edges.push((ts, oldp, newp, sid));
     }
 
-    let pos_set: HashSet<&str> = perf.positions.iter().map(|s| s.as_str()).collect();
+    let pos_set: HashSet<&str> = stream_positions.iter().map(|s| s.as_str()).collect();
     let entry_touches_db_edge = edges.iter().any(|(_, o, n, _)| {
         (o == entry || n == entry) && pos_set.contains(o.as_str()) && pos_set.contains(n.as_str())
     });
 
-    let mut chain = build_lineage_chain_from_db_edges(&perf.positions, &edges, entry, 100);
+    let mut chain = build_lineage_chain_from_db_edges(&stream_positions, &edges, entry, 100);
 
     // IL ledger → `position_stream_edges` is optional; without ingested edges the DB graph is a
     // single PDA even when `orca_position_lifecycle.jsonl` has the full close→open chain.
@@ -3058,7 +3136,6 @@ pub async fn compute_position_stream_lineage(
         }
     }
 
-    let rows = lifecycle_rows_cached_best_effort().await;
     if state.db.is_some() {
         let _ = persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await;
     }
@@ -3097,16 +3174,19 @@ pub async fn compute_position_stream_lineage(
     .or(totals);
 
     let chain_cost_summary = rollup_lineage_chain_costs(&nodes);
+    let mut note = "Lineage chain is best-effort and assumes a mostly linear old→new rotation path (common for strategies). If edges are missing, the chain may be incomplete.".to_string();
+    if stitch_suppressed {
+        note.push_str(
+            " Cross-PDA stream stitching was suppressed for this mint (operator open: CLI `position_open` / `source:cli` / API `open_origin=operator_api`, unanchored bot open, or non-rotation lifecycle); the history table lists this position only.",
+        );
+    }
     Ok(PositionStreamLineageResponse {
         position_address: entry.to_string(),
         chain,
         nodes,
         totals,
         chain_cost_summary,
-        note: Some(
-            "Lineage chain is best-effort and assumes a mostly linear old→new rotation path (common for strategies). If edges are missing, the chain may be incomplete."
-                .to_string(),
-        ),
+        note: Some(note),
     })
 }
 
@@ -3538,20 +3618,10 @@ pub async fn infer_parent_position_from_lifecycle_best_effort(entry: &str) -> Op
         return None;
     }
     let rows = lifecycle_rows_cached_best_effort().await;
-    let mut open_row: Option<&LifecycleRow> = None;
-    for r in rows.iter() {
-        if r.position_pubkey.as_deref() != Some(entry) {
-            continue;
-        }
-        if !is_lifecycle_open_event(r.event.as_deref()) {
-            continue;
-        }
-        if r.ts_utc.is_some() && r.pool_address.is_some() && r.fee_payer_pubkey.is_some() {
-            open_row = Some(r);
-            break;
-        }
+    if lifecycle_entry_open_is_operator_manual(&rows, entry) {
+        return None;
     }
-    let o = open_row?;
+    let o = lifecycle_latest_open_row(&rows, entry)?;
     lifecycle_rotation_parent_before_open(&rows, o).map(std::string::ToString::to_string)
 }
 
@@ -3624,6 +3694,7 @@ mod tests {
             lp_collected_token_a_raw: None,
             lp_collected_token_b_raw: None,
             details: None,
+            source: None,
         }
     }
 
@@ -3665,6 +3736,19 @@ mod tests {
         );
     }
 
+    /// When `positions` is entry-only (lineage DB path after `suppress_jsonl_rotation_stitch`),
+    /// rotation edges whose other endpoint is outside the member set must not extend the chain.
+    #[test]
+    fn db_edges_entry_only_positions_ignore_external_rotation_neighbor() {
+        let t0 = Utc::now();
+        let edges = vec![(Some(t0), "OLD".to_string(), "ENTRY".to_string(), String::new())];
+        let positions = vec!["ENTRY".to_string()];
+        assert_eq!(
+            build_lineage_chain_from_db_edges(&positions, &edges, "ENTRY", 10),
+            vec!["ENTRY".to_string()]
+        );
+    }
+
     #[test]
     fn jsonl_stitch_suppressed_when_open_session_not_on_prior_close() {
         let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
@@ -3696,6 +3780,105 @@ mod tests {
             "fresh UI session must not anchor to old close"
         );
         assert!(suppress_jsonl_rotation_stitch(&rows, "posB"));
+    }
+
+    /// `close_kind=rotation` on an older close must not imply a parent for a later `bot_open_*`
+    /// with a different `rebalance_session_id` (typical API open with `cost_session_id`).
+    #[test]
+    fn rotation_parent_ignores_ambient_close_kind_rotation_without_session_or_bot_tie() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::minutes(10);
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("old-rot-sid".to_string()),
+                details: Some(serde_json::json!({"close_kind": "rotation"})),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("fresh-api-session".to_string()),
+                ..empty_lifecycle_row()
+            },
+        ];
+        let open = rows.last().expect("open row");
+        assert!(
+            lifecycle_rotation_parent_before_open(&rows, open).is_none(),
+            "ambient rotation close must not become parent without session match or bot-tied evidence"
+        );
+        assert!(suppress_jsonl_rotation_stitch(&rows, "posB"));
+    }
+
+    #[test]
+    fn operator_api_open_marks_bot_open_row_but_suppresses_lineage_stitch() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T21:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let rows = vec![LifecycleRow {
+            ts_utc: Some(t0),
+            event: Some("bot_open_position".to_string()),
+            pool_address: Some("poolP".to_string()),
+            position_pubkey: Some("posNew".to_string()),
+            fee_payer_pubkey: Some("payerX".to_string()),
+            rebalance_session_id: Some("cost-session-ui".to_string()),
+            details: Some(serde_json::json!({"open_origin": "operator_api"})),
+            source: Some("orca_bot".to_string()),
+            ..empty_lifecycle_row()
+        }];
+        assert!(suppress_jsonl_rotation_stitch(&rows, "posNew"));
+    }
+
+    #[test]
+    fn operator_manual_close_stops_forward_lifecycle_chain() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T22:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = t0 + chrono::Duration::minutes(1);
+        let t2 = t1 + chrono::Duration::minutes(15);
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(t0),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("s0".to_string()),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t1),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("s0".to_string()),
+                details: Some(serde_json::json!({"close_kind": "manual", "close_source": "api"})),
+                ..empty_lifecycle_row()
+            },
+            LifecycleRow {
+                ts_utc: Some(t2),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posB".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
+                rebalance_session_id: Some("s-bot-later".to_string()),
+                ..empty_lifecycle_row()
+            },
+        ];
+        assert_eq!(
+            chain_from_lifecycle_best_effort_rows(&rows, "posA", 25),
+            vec!["posA".to_string()]
+        );
     }
 
     #[test]
@@ -3734,6 +3917,7 @@ mod tests {
         let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let t_mid = t0 + chrono::Duration::seconds(30);
         let t1 = t0 + chrono::Duration::minutes(1);
         let rows = vec![
             LifecycleRow {
@@ -3743,6 +3927,16 @@ mod tests {
                 position_pubkey: Some("posA".to_string()),
                 fee_payer_pubkey: Some("payerX".to_string()),
                 details: Some(serde_json::json!({ "close_kind": "rotation" })),
+                ..empty_lifecycle_row()
+            },
+            // Without matching `rebalance_session_id`, parent inference now requires bot-tied evidence
+            // on the closed PDA between close and open (not `close_kind` alone).
+            LifecycleRow {
+                ts_utc: Some(t_mid),
+                event: Some("bot_decrease_liquidity".to_string()),
+                pool_address: Some("poolP".to_string()),
+                position_pubkey: Some("posA".to_string()),
+                fee_payer_pubkey: Some("payerX".to_string()),
                 ..empty_lifecycle_row()
             },
             LifecycleRow {
@@ -3856,6 +4050,7 @@ mod tests {
                 lp_collected_token_a_raw: None,
                 lp_collected_token_b_raw: None,
                 details: None,
+                source: None,
             },
             LifecycleRow {
                 ts_utc: Some(ts),
@@ -3871,6 +4066,7 @@ mod tests {
                 lp_collected_token_a_raw: None,
                 lp_collected_token_b_raw: None,
                 details: None,
+                source: None,
             },
         ];
 
@@ -3931,6 +4127,7 @@ mod tests {
                 lp_collected_token_a_raw: None,
                 lp_collected_token_b_raw: None,
                 details: None,
+                source: None,
             },
             LifecycleRow {
                 ts_utc: Some(ts),
@@ -3946,6 +4143,7 @@ mod tests {
                 lp_collected_token_a_raw: None,
                 lp_collected_token_b_raw: None,
                 details: None,
+                source: None,
             },
         ];
         let mut nodes = vec![
@@ -3982,6 +4180,18 @@ mod tests {
     fn event_spot_from_ledger_details_requires_both_prices() {
         let d = serde_json::json!({ "event_price_a_usd": 1.0 });
         assert!(event_spot_from_ledger_details(Some(&d)).is_none());
+    }
+
+    #[test]
+    fn closed_ts_for_snapshot_kind_only_marks_end_close() {
+        let now = Utc::now();
+        assert_eq!(
+            closed_ts_for_snapshot_kind(Some("end_close"), Some(now)),
+            Some(now)
+        );
+        assert_eq!(closed_ts_for_snapshot_kind(Some("baseline_open"), Some(now)), None);
+        assert_eq!(closed_ts_for_snapshot_kind(Some("current_mark"), Some(now)), None);
+        assert_eq!(closed_ts_for_snapshot_kind(None, Some(now)), None);
     }
 }
 

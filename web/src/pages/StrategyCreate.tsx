@@ -399,7 +399,7 @@ export default function StrategyCreate() {
                       tooltip={TOOLTIPS.autoStart}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Requires server env <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT=1</code>.
+                      Server: autostart is <strong>on</strong> if <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> is unset. Set it to <code className="text-[11px]">0</code> or <code className="text-[11px]">false</code> to disable boot autostart globally.
                     </p>
                   </div>
                 </div>

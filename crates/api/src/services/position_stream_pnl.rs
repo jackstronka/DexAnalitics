@@ -43,32 +43,34 @@ async fn sol_usd() -> (f64, String) {
     (px.get(WSOL_MINT).copied().unwrap_or(0.0), src)
 }
 
-pub async fn compute_position_stream_pnl(
+fn stream_pnl_db_disabled_response(position_address: &str) -> PositionStreamPnLResponse {
+    PositionStreamPnLResponse {
+        position_address: position_address.to_string(),
+        baseline_ts_utc: None,
+        current_ts_utc: None,
+        baseline_value_usd: Decimal::ZERO,
+        current_value_usd: Decimal::ZERO,
+        hodl_value_usd: Decimal::ZERO,
+        il_usd: Decimal::ZERO,
+        il_pct: Decimal::ZERO,
+        tx_fees_usd: Decimal::ZERO,
+        realized_cashflow_usd: Decimal::ZERO,
+        net_pnl_usd: Decimal::ZERO,
+        net_pnl_pct: Decimal::ZERO,
+        note: Some("DB is disabled (DATABASE_URL missing/failed); stream PnL/IL unavailable.".to_string()),
+    }
+}
+
+/// Stream PnL using an explicit member list (e.g. entry-only when lineage suppresses cross-PDA stitching).
+pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     state: &AppState,
     position_address: &str,
+    positions: Vec<String>,
+    sessions: Vec<String>,
 ) -> Result<PositionStreamPnLResponse, ApiError> {
     let Some(db) = state.db.as_ref() else {
-        return Ok(PositionStreamPnLResponse {
-            position_address: position_address.to_string(),
-            baseline_ts_utc: None,
-            current_ts_utc: None,
-            baseline_value_usd: Decimal::ZERO,
-            current_value_usd: Decimal::ZERO,
-            hodl_value_usd: Decimal::ZERO,
-            il_usd: Decimal::ZERO,
-            il_pct: Decimal::ZERO,
-            tx_fees_usd: Decimal::ZERO,
-            realized_cashflow_usd: Decimal::ZERO,
-            net_pnl_usd: Decimal::ZERO,
-            net_pnl_pct: Decimal::ZERO,
-            note: Some("DB is disabled (DATABASE_URL missing/failed); stream PnL/IL unavailable.".to_string()),
-        });
+        return Ok(stream_pnl_db_disabled_response(position_address));
     };
-
-    // Reuse stream connectivity from the existing endpoint implementation.
-    let perf = compute_position_stream_performance(state, position_address, false).await?;
-    let positions = perf.positions;
-    let sessions = perf.sessions;
 
     // Baseline = earliest valuation snapshot across the stream; current = latest.
     let mut baseline_row = sqlx::query(
@@ -328,5 +330,24 @@ pub async fn compute_position_stream_pnl(
             "Best-effort. tx fees in USD use SOL/USD ({sol_src}). realized_cashflow uses lifecycle fee_payer_token_deltas × mint USD prices ({price_src})."
         )),
     })
+}
+
+pub async fn compute_position_stream_pnl(
+    state: &AppState,
+    position_address: &str,
+) -> Result<PositionStreamPnLResponse, ApiError> {
+    if state.db.is_none() {
+        return Ok(stream_pnl_db_disabled_response(position_address));
+    }
+
+    // Reuse stream connectivity from the existing endpoint implementation.
+    let perf = compute_position_stream_performance(state, position_address, false).await?;
+    compute_position_stream_pnl_for_stream_members(
+        state,
+        position_address,
+        perf.positions,
+        perf.sessions,
+    )
+    .await
 }
 

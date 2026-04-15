@@ -12,6 +12,8 @@ use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
 use crate::position_registry_seed::registry_open_position_pubkeys;
 use rust_decimal::Decimal;
+use solana_sdk::pubkey::Pubkey;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -24,6 +26,101 @@ use tracing::{info, warn};
 fn json_f64(v: &serde_json::Value) -> Option<f64> {
     v.as_f64()
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
+/// Parse `parameters.min_rebalance_interval_hours` from JSON (integer or float).
+pub(crate) fn min_rebalance_interval_hours_from_json(value: &serde_json::Value) -> Option<u64> {
+    if let Some(u) = value.as_u64() {
+        return Some(u);
+    }
+    if let Some(f) = value.as_f64() {
+        if f.is_finite() && f >= 0.0 {
+            return Some(f.floor() as u64);
+        }
+    }
+    value
+        .as_str()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|f| f.is_finite() && *f >= 0.0)
+        .map(|f| f.floor() as u64)
+}
+
+/// `0` hours removes the time gate: Periodic treats `hours_since >=0` as always true, so the bot
+/// tends to **rebalance once per `eval_interval_secs`** (default 300s). Clamp to 1h for sane prod behavior.
+pub(crate) fn clamp_min_rebalance_interval_hours(raw: u64) -> u64 {
+    if raw == 0 {
+        warn!(
+            "min_rebalance_interval_hours was 0 in strategy parameters; clamping to 1 — \
+             zero disables the hourly gate and typically causes a close+open every eval tick"
+        );
+        1
+    } else {
+        raw
+    }
+}
+
+/// Positions the strategy executor may act on: registry-open PDAs filtered by configured links.
+///
+/// - If `parameters.position_addresses` is **missing** or not a JSON array: use all
+///   `registry_open` pubkeys (legacy strategies without an explicit link list).
+/// - If it is an **empty array**: treat as an explicit operator choice to manage **no** PDAs
+///   (cleared links), not “everything in registry”.
+/// - If non-empty: intersection(`registry_open`, configured).
+fn managed_allowlist_pubkeys_for_strategy_parameters(
+    parameters: Option<&serde_json::Value>,
+    registry_open: Vec<solana_sdk::pubkey::Pubkey>,
+) -> Vec<solana_sdk::pubkey::Pubkey> {
+    let Some(params) = parameters else {
+        return registry_open;
+    };
+    let addr_field = params.get("position_addresses");
+    let Some(arr) = addr_field.and_then(|v| v.as_array()) else {
+        return registry_open;
+    };
+    let configured: Vec<solana_sdk::pubkey::Pubkey> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| solana_sdk::pubkey::Pubkey::from_str(s.trim()).ok())
+        .collect();
+    if configured.is_empty() {
+        return Vec::new();
+    }
+    let set: std::collections::HashSet<_> = configured.into_iter().collect();
+    registry_open
+        .into_iter()
+        .filter(|p| set.contains(p))
+        .collect()
+}
+
+/// Managed allowlist + reopen hook: every executor start path must call this so bot rotations
+/// update `parameters.position_addresses` and the executor does not widen beyond linked PDAs.
+pub async fn wire_executor_allowlist_and_reopen_hook(
+    executor: &StrategyExecutor,
+    state: &AppState,
+    strategy_id: &str,
+    parameters: Option<&serde_json::Value>,
+) {
+    let managed_allow =
+        managed_allowlist_pubkeys_for_strategy_parameters(parameters, registry_open_position_pubkeys());
+    executor.set_managed_allowlist(managed_allow).await;
+
+    let st = state.clone();
+    let sid = strategy_id.to_string();
+    executor
+        .set_reopen_hook(Some(Arc::new(move |old, new| {
+            let st = st.clone();
+            let sid = sid.clone();
+            tokio::spawn(async move {
+                let _ = replace_position_address_in_strategy(
+                    &st,
+                    &sid,
+                    &old.to_string(),
+                    &new.to_string(),
+                )
+                .await;
+            });
+        })))
+        .await;
 }
 
 /// Result of a strategy operation.
@@ -55,19 +152,14 @@ impl StrategyOperationResult {
 
 /// Service for strategy operations.
 pub struct StrategyService {
-    /// Application state.
+    /// Application state (includes the shared strategy executor map).
     state: AppState,
-    /// Active strategy executors.
-    executors: Arc<RwLock<std::collections::HashMap<String, Arc<RwLock<StrategyExecutor>>>>>,
 }
 
 impl StrategyService {
     /// Creates a new strategy service.
     pub fn new(state: AppState) -> Self {
-        Self {
-            state,
-            executors: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        }
+        Self { state }
     }
 
     /// Starts a strategy.
@@ -156,6 +248,14 @@ impl StrategyService {
             }
         }
 
+        if let Err(e) = try_heal_stale_strategy_links_for_strategy(&self.state, strategy_id).await {
+            warn!(
+                strategy_id = %strategy_id,
+                error = %e,
+                "try_heal_stale_strategy_links_for_strategy failed before executor start"
+            );
+        }
+
         let mut strategies = self.state.strategies.write().await;
         let strategy = strategies
             .get_mut(strategy_id)
@@ -184,55 +284,13 @@ impl StrategyService {
             executor_config,
         );
 
-        // Guardrail: lock the executor to the “initial” managed set (do not grow positions over time).
-        // Prefer the intersection of registry-open positions with the configured position_addresses.
-        let managed_allow: Vec<solana_sdk::pubkey::Pubkey> = {
-            let open = registry_open_position_pubkeys();
-            if let Some(params) = strategy.config.get("parameters") {
-                let configured: Vec<solana_sdk::pubkey::Pubkey> = params
-                    .get("position_addresses")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str())
-                            .filter_map(|s| solana_sdk::pubkey::Pubkey::from_str(s.trim()).ok())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if !configured.is_empty() {
-                    let set: std::collections::HashSet<_> = configured.into_iter().collect();
-                    open.into_iter().filter(|p| set.contains(p)).collect()
-                } else {
-                    open
-                }
-            } else {
-                open
-            }
-        };
-        executor.set_managed_allowlist(managed_allow).await;
-
-        // Keep strategy links consistent across bot-driven close→open cycles.
-        // When the executor opens a new PDA (reopen), replace the old PDA in this strategy.
-        {
-            let st = self.state.clone();
-            let sid = strategy_id.to_string();
-            executor
-                .set_reopen_hook(Some(Arc::new(move |old, new| {
-                let st = st.clone();
-                let sid = sid.clone();
-                tokio::spawn(async move {
-                    // Best-effort; errors should not break the executor loop.
-                    let _ = replace_position_address_in_strategy(
-                        &st,
-                        &sid,
-                        &old.to_string(),
-                        &new.to_string(),
-                    )
-                    .await;
-                });
-            })))
-                .await;
-        }
+        wire_executor_allowlist_and_reopen_hook(
+            &executor,
+            &self.state,
+            strategy_id,
+            strategy.config.get("parameters"),
+        )
+        .await;
 
         // Always enable Tier3 checkpoint ledger by default (append-only JSONL).
         executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
@@ -298,8 +356,9 @@ impl StrategyService {
 
             if let Some(min_hours) = params
                 .get("min_rebalance_interval_hours")
-                .and_then(|v| v.as_u64())
+                .and_then(min_rebalance_interval_hours_from_json)
             {
+                let min_hours = clamp_min_rebalance_interval_hours(min_hours);
                 decision_config.periodic_interval_hours = min_hours;
                 decision_config.min_rebalance_interval_hours = min_hours;
             }
@@ -348,7 +407,7 @@ impl StrategyService {
 
         // Store executor
         {
-            let mut executors = self.executors.write().await;
+            let mut executors = self.state.executors.write().await;
             executors.insert(strategy_id.to_string(), executor.clone());
         }
 
@@ -357,7 +416,7 @@ impl StrategyService {
                 (Some(cmd), Some(rp)) => {
                     let argv = merge_optimize_result_json_arg(cmd.clone(), &rp.to_string_lossy());
                     let sid = strategy_id.to_string();
-                    let execs = self.executors.clone();
+                    let execs = self.state.executors.clone();
                     let busy_c = busy.clone();
                     let path = rp.clone();
                     tokio::spawn(async move {
@@ -438,7 +497,7 @@ impl StrategyService {
 
         // Stop executor
         {
-            let executors = self.executors.read().await;
+            let executors = self.state.executors.read().await;
             if let Some(executor) = executors.get(strategy_id) {
                 let executor_guard = executor.read().await;
                 executor_guard.stop();
@@ -447,7 +506,7 @@ impl StrategyService {
 
         // Remove executor
         {
-            let mut executors = self.executors.write().await;
+            let mut executors = self.state.executors.write().await;
             executors.remove(strategy_id);
         }
 
@@ -476,7 +535,7 @@ impl StrategyService {
 
     /// Gets the executor for a strategy.
     pub async fn get_executor(&self, strategy_id: &str) -> Option<Arc<RwLock<StrategyExecutor>>> {
-        let executors = self.executors.read().await;
+        let executors = self.state.executors.read().await;
         executors.get(strategy_id).cloned()
     }
 
@@ -487,7 +546,7 @@ impl StrategyService {
     ) -> Result<StrategyOperationResult, ApiError> {
         info!(strategy_id = %strategy_id, "Triggering manual evaluation");
 
-        let executors = self.executors.read().await;
+        let executors = self.state.executors.read().await;
         let _executor = executors.get(strategy_id).ok_or_else(|| {
             ApiError::not_found("Strategy executor not found - is the strategy running?")
         })?;
@@ -512,7 +571,7 @@ impl StrategyService {
         &self,
         strategy_id: &str,
     ) -> Result<serde_json::Value, ApiError> {
-        let executors = self.executors.read().await;
+        let executors = self.state.executors.read().await;
 
         if let Some(executor) = executors.get(strategy_id) {
             let executor_guard = executor.read().await;
@@ -709,14 +768,17 @@ pub async fn replace_position_address_in_strategy(
         .ok_or_else(|| ApiError::bad_request("parameters.position_addresses must be a JSON array"))?;
 
     let mut changed = false;
+    let mut replaced_old = false;
     for v in arr.iter_mut() {
         if v.as_str().map(|s| s.trim()) == Some(old_pos) {
             *v = serde_json::json!(new_pos);
             changed = true;
+            replaced_old = true;
         }
     }
-    // Ensure new is present exactly once.
-    if !arr.iter().any(|v| v.as_str().map(|s| s.trim()) == Some(new_pos)) {
+    // Ensure new is present exactly once, but only when old was actually replaced.
+    // This prevents accidental growth when called with stale/non-matching old PDA.
+    if replaced_old && !arr.iter().any(|v| v.as_str().map(|s| s.trim()) == Some(new_pos)) {
         arr.push(serde_json::json!(new_pos));
         changed = true;
     }
@@ -727,8 +789,10 @@ pub async fn replace_position_address_in_strategy(
         changed = true;
     }
 
-    // Keep per-position automation skip list in sync when a PDA rotates.
-    if let Some(arr_val) = params_obj.get_mut("executor_disabled_position_addresses") {
+    // Keep per-position automation skip list in sync only when old PDA was replaced.
+    if replaced_old
+        && let Some(arr_val) = params_obj.get_mut("executor_disabled_position_addresses")
+    {
         if let Some(arr) = arr_val.as_array_mut() {
             for v in arr.iter_mut() {
                 if v.as_str().map(|s| s.trim()) == Some(old_pos) {
@@ -785,7 +849,71 @@ async fn strategy_ids_holding_position_address(state: &AppState, pda: &str) -> V
     out
 }
 
-/// Recompute managed allowlist (registry-open ∩ configured addresses) for a **running** executor.
+/// If [`parameters.position_addresses`] references mints that are **closed** in `registry.jsonl`,
+/// try each **open** registry mint with [`heal_rotated_strategy_link_best_effort`] so rotation lineage
+/// can rewrite the link to the live NFT (covers missed `reopen_hook`).
+pub async fn try_heal_stale_strategy_links_for_strategy(
+    state: &AppState,
+    strategy_id: &str,
+) -> Result<(), ApiError> {
+    let (has_stale, linked_count) = {
+        let strategies = state.strategies.read().await;
+        let Some(s) = strategies.get(strategy_id) else {
+            return Ok(());
+        };
+        let open_set: HashSet<Pubkey> = registry_open_position_pubkeys().into_iter().collect();
+        let Some(params) = s.config.get("parameters") else {
+            return Ok(());
+        };
+        let Some(arr) = params.get("position_addresses").and_then(|v| v.as_array()) else {
+            return Ok(());
+        };
+        let mut any_stale = false;
+        let mut n = 0usize;
+        for v in arr {
+            let Some(addr) = v.as_str() else {
+                continue;
+            };
+            n += 1;
+            if let Ok(pk) = Pubkey::from_str(addr.trim()) {
+                if !open_set.contains(&pk) {
+                    any_stale = true;
+                }
+            }
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        (any_stale, n)
+    };
+
+    if !has_stale {
+        return Ok(());
+    }
+
+    for cand in registry_open_position_pubkeys() {
+        let healed = heal_rotated_strategy_link_best_effort(state, &cand.to_string()).await?;
+        if let Some(ids) = healed
+            && ids.iter().any(|x| x == strategy_id)
+        {
+            info!(
+                strategy_id = %strategy_id,
+                new_position = %cand,
+                "Healed stale strategy position_addresses from registry rotation chain (executor start)"
+            );
+            return Ok(());
+        }
+    }
+
+    warn!(
+        strategy_id = %strategy_id,
+        linked_slots = linked_count,
+        "strategy linked PDAs are not registry_open; could not infer current mint from rotation lineage — call POST /positions/{{active_mint}}/heal-strategy-link or edit parameters"
+    );
+    Ok(())
+}
+
+/// Recompute managed allowlist for a **running** executor (see [`managed_allowlist_pubkeys_for_strategy_parameters`]).
 pub async fn sync_managed_allowlist_from_registry_for_strategy(
     state: &AppState,
     strategy_id: &str,
@@ -798,27 +926,10 @@ pub async fn sync_managed_allowlist_from_registry_for_strategy(
     let Some(strategy) = strategies.get(strategy_id) else {
         return Ok(());
     };
-    let open = registry_open_position_pubkeys();
-    let managed_allow: Vec<solana_sdk::pubkey::Pubkey> = {
-        let configured: Vec<solana_sdk::pubkey::Pubkey> = strategy
-            .config
-            .get("parameters")
-            .and_then(|p| p.get("position_addresses"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .filter_map(|s| solana_sdk::pubkey::Pubkey::from_str(s.trim()).ok())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if !configured.is_empty() {
-            let set: std::collections::HashSet<_> = configured.into_iter().collect();
-            open.into_iter().filter(|p| set.contains(p)).collect()
-        } else {
-            open
-        }
-    };
+    let managed_allow = managed_allowlist_pubkeys_for_strategy_parameters(
+        strategy.config.get("parameters"),
+        registry_open_position_pubkeys(),
+    );
     drop(strategies);
     let g = exec.read().await;
     g.set_managed_allowlist(managed_allow).await;
@@ -888,4 +999,47 @@ pub async fn heal_rotated_strategy_link_best_effort(
         cur = parent;
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod managed_allowlist_tests {
+    use super::{
+        clamp_min_rebalance_interval_hours, managed_allowlist_pubkeys_for_strategy_parameters,
+        min_rebalance_interval_hours_from_json,
+    };
+    use solana_sdk::pubkey::Pubkey;
+
+    #[test]
+    fn min_rebalance_interval_parses_json_number_and_string() {
+        assert_eq!(
+            min_rebalance_interval_hours_from_json(&serde_json::json!(0)),
+            Some(0)
+        );
+        assert_eq!(
+            min_rebalance_interval_hours_from_json(&serde_json::json!("2")),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn zero_min_rebalance_interval_clamps_to_one() {
+        assert_eq!(clamp_min_rebalance_interval_hours(0), 1);
+        assert_eq!(clamp_min_rebalance_interval_hours(3), 3);
+    }
+
+    #[test]
+    fn missing_position_addresses_field_uses_registry_open() {
+        let open = vec![Pubkey::new_unique()];
+        let params = serde_json::json!({});
+        let got = managed_allowlist_pubkeys_for_strategy_parameters(Some(&params), open.clone());
+        assert_eq!(got, open);
+    }
+
+    #[test]
+    fn explicit_empty_position_addresses_yields_empty_allowlist() {
+        let open = vec![Pubkey::new_unique()];
+        let params = serde_json::json!({ "position_addresses": [] });
+        let got = managed_allowlist_pubkeys_for_strategy_parameters(Some(&params), open);
+        assert!(got.is_empty());
+    }
 }

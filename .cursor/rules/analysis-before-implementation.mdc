@@ -1,0 +1,38 @@
+---
+description: Mandatory analysis-first workflow with explicit GO before code changes
+alwaysApply: true
+---
+
+# Analysis First, Then Implement
+
+This rule is mandatory for every bugfix/refactor/request in this repository.
+
+## Hard Gate
+
+- Do **not** edit code, run migrations, change configs, or propose "done" fixes immediately.
+- Start with a **diagnostic phase only** (read/search/log analysis).
+- Implementation is allowed only after explicit user approval, e.g. `GO`, `wdrażaj`, `implementuj`, `zrób fix`.
+
+## Required Diagnostic Output Before Any Edit
+
+Provide a short pre-implementation report:
+
+1. **Root cause hypothesis** with confidence level.
+2. **Evidence** from concrete code/data paths.
+3. **Regression check** against `doc/BUGS.md` (related entries/keywords and reused guards).
+4. **Fix plan** (minimal scope, affected files, intended tests).
+
+If confidence is low or evidence is missing, explicitly say so and continue diagnosis instead of guessing.
+
+## During Implementation (after explicit GO)
+
+- Keep scope minimal; no unrelated refactors.
+- Add/update at least one regression guard (test/invariant/check) for high-impact bugs.
+- Re-run targeted verification and report results clearly.
+- If behavior changed materially, update `doc/BUGS.md` and `doc/ENGINEERING_NOTES.md` per workspace rules.
+
+## Communication Quality
+
+- Never claim certainty without evidence.
+- Never present a guess as a confirmed cause.
+- If uncertain: say "unknown yet", list what was checked, and next diagnostic step.

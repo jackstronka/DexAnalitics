@@ -326,6 +326,12 @@ impl StrategyExecutor {
         self.rebalance_executor.wallet_pubkey()
     }
 
+    /// Whether this executor is in dry-run mode (no on-chain txs from rebalance/close paths).
+    #[must_use]
+    pub fn is_dry_run(&self) -> bool {
+        self.config.dry_run
+    }
+
     /// Sets the decision engine configuration.
     pub fn set_decision_config(&self, config: DecisionConfig) {
         self.decision_engine.set_config(config);
@@ -437,6 +443,9 @@ impl StrategyExecutor {
     ///
     /// In dry-run mode this returns the derived position PDA without requiring wallet.
     /// Set `full_range` for Splash-style full-range opens (ignores `tick_lower` / `tick_upper` on-chain).
+    ///
+    /// `ledger_open_details`: merged into lifecycle `details` on success (e.g. API passes
+    /// `open_origin: "operator_api"` for lineage). Strategy callers should pass `None`.
     pub async fn execute_open_position(
         &self,
         pool: &solana_sdk::pubkey::Pubkey,
@@ -447,6 +456,7 @@ impl StrategyExecutor {
         slippage_bps: u16,
         full_range: bool,
         ledger_session_id: Option<String>,
+        ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<solana_sdk::pubkey::Pubkey> {
         let (position, eff_tl, eff_tu) = self
             .rebalance_executor
@@ -459,6 +469,7 @@ impl StrategyExecutor {
                 slippage_bps,
                 full_range,
                 ledger_session_id,
+                ledger_open_details,
             )
             .await?;
 

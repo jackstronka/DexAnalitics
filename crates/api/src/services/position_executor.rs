@@ -104,24 +104,46 @@ pub fn wallet_config_diagnostic() -> String {
     )
 }
 
-/// Prefer a **strategy** executor; otherwise a lazy executor backed by `KEYPAIR_PATH` (see [`API_POSITION_OPS_EXECUTOR_ID`]).
+async fn executor_can_sign_on_chain(exec: &Arc<RwLock<StrategyExecutor>>) -> bool {
+    let g = exec.read().await;
+    !g.is_dry_run() && g.wallet_pubkey().is_some()
+}
+
+/// Resolve a `StrategyExecutor` that can **submit real on-chain txs** for manual position ops.
+///
+/// Never returns a strategy executor that is in `dry_run` mode (those no-op `execute_*` and would
+/// still surface as HTTP success). Prefer [`API_POSITION_OPS_EXECUTOR_ID`], then any live
+/// strategy runner with a wallet, then create the lazy ops executor from env keypair.
 pub async fn resolve_executor_for_position_ops(
     state: &AppState,
 ) -> Option<Arc<RwLock<StrategyExecutor>>> {
     if state.dry_run {
         return None;
     }
-    {
+
+    let snapshot: Vec<(String, Arc<RwLock<StrategyExecutor>>)> = {
         let map = state.executors.read().await;
-        if let Some(e) = map
-            .iter()
-            .filter(|(k, _)| k.as_str() != API_POSITION_OPS_EXECUTOR_ID)
-            .map(|(_, v)| v.clone())
-            .next()
-        {
-            return Some(e);
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
+
+    if let Some(e) = snapshot
+        .iter()
+        .find(|(k, _)| k.as_str() == API_POSITION_OPS_EXECUTOR_ID)
+        .map(|(_, v)| v)
+    {
+        if executor_can_sign_on_chain(e).await {
+            return Some(e.clone());
         }
-        if let Some(e) = map.get(API_POSITION_OPS_EXECUTOR_ID) {
+    }
+    for (sid, e) in snapshot
+        .iter()
+        .filter(|(k, _)| k.as_str() != API_POSITION_OPS_EXECUTOR_ID)
+    {
+        if executor_can_sign_on_chain(e).await {
+            tracing::debug!(
+                strategy_id = %sid,
+                "resolve_executor_for_position_ops: using running strategy executor (not dry-run, wallet set)"
+            );
             return Some(e.clone());
         }
     }
@@ -135,17 +157,37 @@ pub async fn resolve_executor_for_position_ops(
         }
     };
 
-    let mut executors = state.executors.write().await;
-    if let Some(e) = executors
+    let snapshot2: Vec<(String, Arc<RwLock<StrategyExecutor>>)> = {
+        let map = state.executors.read().await;
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
+
+    if let Some(e) = snapshot2
+        .iter()
+        .find(|(k, _)| k.as_str() == API_POSITION_OPS_EXECUTOR_ID)
+        .map(|(_, v)| v)
+    {
+        if executor_can_sign_on_chain(e).await {
+            return Some(e.clone());
+        }
+    }
+    for (sid, e) in snapshot2
         .iter()
         .filter(|(k, _)| k.as_str() != API_POSITION_OPS_EXECUTOR_ID)
-        .map(|(_, v)| v.clone())
-        .next()
     {
-        return Some(e);
+        if executor_can_sign_on_chain(e).await {
+            tracing::debug!(
+                strategy_id = %sid,
+                "resolve_executor_for_position_ops: using strategy executor after wallet load (not dry-run, wallet set)"
+            );
+            return Some(e.clone());
+        }
     }
-    if let Some(e) = executors.get(API_POSITION_OPS_EXECUTOR_ID) {
-        return Some(e.clone());
+
+    let mut executors = state.executors.write().await;
+    if let Some(e) = executors.get(API_POSITION_OPS_EXECUTOR_ID).cloned() {
+        // Another task may have registered the ops executor while we loaded the wallet from env.
+        return Some(e);
     }
 
     let executor_config = ExecutorConfig {
