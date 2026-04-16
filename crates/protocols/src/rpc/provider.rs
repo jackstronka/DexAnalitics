@@ -331,13 +331,11 @@ impl RpcProvider {
         config: RpcTransactionConfig,
     ) -> Result<EncodedConfirmedTransactionWithStatusMeta> {
         let sig = *signature;
-        self.execute_with_retry(|client| {
-            async move {
-                client
-                    .get_transaction_with_config(&sig, config)
-                    .await
-                    .context("Failed to get transaction")
-            }
+        self.execute_with_retry(|client| async move {
+            client
+                .get_transaction_with_config(&sig, config)
+                .await
+                .context("Failed to get transaction")
         })
         .await
     }
@@ -555,8 +553,7 @@ impl RpcProvider {
                                     err_s.push_str(&format!(" | ix_program={ix_index}:{pid}"));
                                 }
                             }
-                            if let solana_sdk::instruction::InstructionError::Custom(code) =
-                                ix_err
+                            if let solana_sdk::instruction::InstructionError::Custom(code) = ix_err
                             {
                                 err_s.push_str(&format!(" | custom_code={code}"));
                             }

@@ -11,7 +11,7 @@ use crate::services::optimization_runner::{
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::services::strategy_service::{
-    clamp_min_rebalance_interval_hours, min_rebalance_interval_hours_from_json,
+    apply_optional_interval_to_decision_config, min_rebalance_interval_hours_from_json,
     wire_executor_allowlist_and_reopen_hook,
 };
 use crate::state::{AlertUpdate, AppState, StrategyState};
@@ -623,7 +623,8 @@ async fn start_strategy_executor_core(
     strategy_config: serde_json::Value,
 ) -> ApiResult<Option<String>> {
     if let Err(e) =
-        crate::services::strategy_service::try_heal_stale_strategy_links_for_strategy(state, id).await
+        crate::services::strategy_service::try_heal_stale_strategy_links_for_strategy(state, id)
+            .await
     {
         warn!(
             strategy_id = %id,
@@ -777,16 +778,10 @@ async fn start_strategy_executor_core(
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
         }
 
-        if let Some(min_hours) = params
+        let maybe_min_hours = params
             .get("min_rebalance_interval_hours")
-            .and_then(min_rebalance_interval_hours_from_json)
-        {
-            let val = clamp_min_rebalance_interval_hours(min_hours);
-            decision_config.min_rebalance_interval_hours = val;
-            // Align Periodic interval with the same knob used in the UI ("1h", "4h", ...).
-            // For non-periodic modes this value is still used as the minimum rebalance interval gate.
-            decision_config.periodic_interval_hours = val;
-        }
+            .and_then(min_rebalance_interval_hours_from_json);
+        apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_hours);
 
         // IL-specific knobs (only meaningful for IlLimit strategy mode).
         if decision_config.strategy_mode == clmm_lp_execution::prelude::StrategyMode::IlLimit {

@@ -3,6 +3,7 @@
 use crate::error::ApiError;
 use crate::models::OptimizeApplyPolicy;
 use crate::models::StrategyType;
+use crate::position_registry_seed::registry_open_position_pubkeys;
 use crate::services::optimization_runner::{
     apply_optimize_result_json, merge_optimize_result_json_arg, run_optimize_cycle,
     run_optimize_subprocess,
@@ -10,14 +11,13 @@ use crate::services::optimization_runner::{
 use crate::state::{AlertUpdate, AppState};
 use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
-use crate::position_registry_seed::registry_open_position_pubkeys;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::interval;
@@ -46,17 +46,41 @@ pub(crate) fn min_rebalance_interval_hours_from_json(value: &serde_json::Value) 
         .map(|f| f.floor() as u64)
 }
 
-/// `0` hours removes the time gate: Periodic treats `hours_since >=0` as always true, so the bot
-/// tends to **rebalance once per `eval_interval_secs`** (default 300s). Clamp to 1h for sane prod behavior.
-pub(crate) fn clamp_min_rebalance_interval_hours(raw: u64) -> u64 {
-    if raw == 0 {
-        warn!(
-            "min_rebalance_interval_hours was 0 in strategy parameters; clamping to 1 — \
-             zero disables the hourly gate and typically causes a close+open every eval tick"
-        );
-        1
-    } else {
-        raw
+/// Applies optional interval semantics to a decision config.
+///
+/// Rules:
+/// - `Some(n)` sets the minimum interval gate to `n` for all modes.
+/// - For `Periodic`, `Some(0)` is clamped to `1` defensively to avoid
+///   rebalance-every-eval-tick loops from direct API payloads.
+/// - `None` means "optional not set":
+///   - `Periodic`: disable timer-triggering by setting an unreachable interval.
+///   - non-`Periodic`: remove spacing gate (`min_rebalance_interval_hours=0`).
+pub(crate) fn apply_optional_interval_to_decision_config(
+    decision_config: &mut DecisionConfig,
+    maybe_min_hours: Option<u64>,
+) {
+    match maybe_min_hours {
+        Some(min_hours) => {
+            let periodic_hours = if matches!(decision_config.strategy_mode, StrategyMode::Periodic)
+                && min_hours == 0
+            {
+                warn!(
+                    "periodic strategy received min_rebalance_interval_hours=0; clamping to 1h to avoid rebalance every eval tick"
+                );
+                1
+            } else {
+                min_hours
+            };
+            decision_config.periodic_interval_hours = periodic_hours;
+            decision_config.min_rebalance_interval_hours = min_hours;
+        }
+        None => {
+            if matches!(decision_config.strategy_mode, StrategyMode::Periodic) {
+                decision_config.periodic_interval_hours = u64::MAX;
+            } else {
+                decision_config.min_rebalance_interval_hours = 0;
+            }
+        }
     }
 }
 
@@ -101,8 +125,10 @@ pub async fn wire_executor_allowlist_and_reopen_hook(
     strategy_id: &str,
     parameters: Option<&serde_json::Value>,
 ) {
-    let managed_allow =
-        managed_allowlist_pubkeys_for_strategy_parameters(parameters, registry_open_position_pubkeys());
+    let managed_allow = managed_allowlist_pubkeys_for_strategy_parameters(
+        parameters,
+        registry_open_position_pubkeys(),
+    );
     executor.set_managed_allowlist(managed_allow).await;
 
     let st = state.clone();
@@ -357,14 +383,10 @@ impl StrategyService {
                     .unwrap_or(decision_config.threshold_pct);
             }
 
-            if let Some(min_hours) = params
+            let maybe_min_hours = params
                 .get("min_rebalance_interval_hours")
-                .and_then(min_rebalance_interval_hours_from_json)
-            {
-                let min_hours = clamp_min_rebalance_interval_hours(min_hours);
-                decision_config.periodic_interval_hours = min_hours;
-                decision_config.min_rebalance_interval_hours = min_hours;
-            }
+                .and_then(min_rebalance_interval_hours_from_json);
+            apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_hours);
 
             // IL-specific knobs (only meaningful for IlLimit strategy mode).
             if let StrategyMode::IlLimit = decision_config.strategy_mode {
@@ -763,9 +785,9 @@ pub async fn replace_position_address_in_strategy(
     let arr_val = params_obj
         .entry("position_addresses".to_string())
         .or_insert_with(|| serde_json::json!([]));
-    let arr = arr_val
-        .as_array_mut()
-        .ok_or_else(|| ApiError::bad_request("parameters.position_addresses must be a JSON array"))?;
+    let arr = arr_val.as_array_mut().ok_or_else(|| {
+        ApiError::bad_request("parameters.position_addresses must be a JSON array")
+    })?;
 
     let mut changed = false;
     let mut replaced_old = false;
@@ -778,7 +800,11 @@ pub async fn replace_position_address_in_strategy(
     }
     // Ensure new is present exactly once, but only when old was actually replaced.
     // This prevents accidental growth when called with stale/non-matching old PDA.
-    if replaced_old && !arr.iter().any(|v| v.as_str().map(|s| s.trim()) == Some(new_pos)) {
+    if replaced_old
+        && !arr
+            .iter()
+            .any(|v| v.as_str().map(|s| s.trim()) == Some(new_pos))
+    {
         arr.push(serde_json::json!(new_pos));
         changed = true;
     }
@@ -838,10 +864,7 @@ async fn strategy_ids_holding_position_address(state: &AppState, pda: &str) -> V
         else {
             continue;
         };
-        if arr
-            .iter()
-            .any(|v| v.as_str().map(str::trim) == Some(pda))
-        {
+        if arr.iter().any(|v| v.as_str().map(str::trim) == Some(pda)) {
             out.push(s.id.clone());
         }
     }
@@ -955,7 +978,10 @@ pub async fn heal_rotated_strategy_link_best_effort(
         return Ok(None);
     }
 
-    if !strategy_ids_holding_position_address(state, new_pos).await.is_empty() {
+    if !strategy_ids_holding_position_address(state, new_pos)
+        .await
+        .is_empty()
+    {
         return Ok(None);
     }
 
@@ -978,7 +1004,8 @@ pub async fn heal_rotated_strategy_link_best_effort(
                 healed.push(sid.clone());
             }
             for sid in &healed {
-                if let Err(e) = sync_managed_allowlist_from_registry_for_strategy(state, sid).await {
+                if let Err(e) = sync_managed_allowlist_from_registry_for_strategy(state, sid).await
+                {
                     warn!(
                         strategy_id = %sid,
                         error = %e,
@@ -986,7 +1013,8 @@ pub async fn heal_rotated_strategy_link_best_effort(
                     );
                 }
                 if let Err(e) =
-                    crate::handlers::strategies::sync_executor_disabled_from_config(state, sid).await
+                    crate::handlers::strategies::sync_executor_disabled_from_config(state, sid)
+                        .await
                 {
                     warn!(
                         strategy_id = %sid,
@@ -1011,9 +1039,10 @@ pub async fn heal_rotated_strategy_link_best_effort(
 #[cfg(test)]
 mod managed_allowlist_tests {
     use super::{
-        clamp_min_rebalance_interval_hours, managed_allowlist_pubkeys_for_strategy_parameters,
-        min_rebalance_interval_hours_from_json,
+        apply_optional_interval_to_decision_config,
+        managed_allowlist_pubkeys_for_strategy_parameters, min_rebalance_interval_hours_from_json,
     };
+    use clmm_lp_execution::prelude::{DecisionConfig, StrategyMode};
     use solana_sdk::pubkey::Pubkey;
 
     #[test]
@@ -1029,9 +1058,46 @@ mod managed_allowlist_tests {
     }
 
     #[test]
-    fn zero_min_rebalance_interval_clamps_to_one() {
-        assert_eq!(clamp_min_rebalance_interval_hours(0), 1);
-        assert_eq!(clamp_min_rebalance_interval_hours(3), 3);
+    fn optional_interval_none_disables_periodic_timer_trigger() {
+        let mut cfg = DecisionConfig {
+            strategy_mode: StrategyMode::Periodic,
+            ..DecisionConfig::default()
+        };
+        apply_optional_interval_to_decision_config(&mut cfg, None);
+        assert_eq!(cfg.periodic_interval_hours, u64::MAX);
+        assert_eq!(
+            cfg.min_rebalance_interval_hours,
+            DecisionConfig::default().min_rebalance_interval_hours
+        );
+    }
+
+    #[test]
+    fn optional_interval_none_removes_spacing_for_non_periodic_modes() {
+        let mut cfg = DecisionConfig {
+            strategy_mode: StrategyMode::OorRecenter,
+            ..DecisionConfig::default()
+        };
+        apply_optional_interval_to_decision_config(&mut cfg, None);
+        assert_eq!(cfg.min_rebalance_interval_hours, 0);
+    }
+
+    #[test]
+    fn optional_interval_zero_is_defensively_clamped_only_for_periodic() {
+        let mut periodic_cfg = DecisionConfig {
+            strategy_mode: StrategyMode::Periodic,
+            ..DecisionConfig::default()
+        };
+        apply_optional_interval_to_decision_config(&mut periodic_cfg, Some(0));
+        assert_eq!(periodic_cfg.min_rebalance_interval_hours, 0);
+        assert_eq!(periodic_cfg.periodic_interval_hours, 1);
+
+        let mut oor_cfg = DecisionConfig {
+            strategy_mode: StrategyMode::OorRecenter,
+            ..DecisionConfig::default()
+        };
+        apply_optional_interval_to_decision_config(&mut oor_cfg, Some(0));
+        assert_eq!(oor_cfg.min_rebalance_interval_hours, 0);
+        assert_eq!(oor_cfg.periodic_interval_hours, 0);
     }
 
     #[test]

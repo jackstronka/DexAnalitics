@@ -90,6 +90,32 @@ fn swap_mix_amount_in_buffer_pct() -> f64 {
         .unwrap_or(1.03)
 }
 
+fn ui_from_raw(raw: u64, decimals: u8) -> f64 {
+    (raw as f64) / 10f64.powi(i32::from(decimals))
+}
+
+fn prev_end_value_usd_from_close_amounts(
+    amount_a_raw: u64,
+    amount_b_raw: u64,
+    decimals_a: u8,
+    decimals_b: u8,
+    price_a_usd: f64,
+    price_b_usd: f64,
+) -> f64 {
+    let a_ui = ui_from_raw(amount_a_raw, decimals_a);
+    let b_ui = ui_from_raw(amount_b_raw, decimals_b);
+    a_ui * price_a_usd + b_ui * price_b_usd
+}
+
+fn target_usd_from_prev_end_clamped(prev_end_value_usd: f64, wallet_notional_usd: f64) -> f64 {
+    // Keep a small margin for rounding / dust; matches legacy wallet-notional logic.
+    let wallet_cap = (wallet_notional_usd * 0.995).max(0.0);
+    if !(prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0) {
+        return wallet_cap;
+    }
+    prev_end_value_usd.min(wallet_cap)
+}
+
 /// Guardrail: when enabled, do not close a position unless a reopen is feasible (preflight quote).
 fn no_close_unless_reopen_feasible() -> bool {
     std::env::var("CLMM_NO_CLOSE_UNLESS_REOPEN_FEASIBLE")
@@ -585,7 +611,8 @@ impl RebalanceExecutor {
     ) -> anyhow::Result<()> {
         // Keep emergency close consistent with the normal close policy:
         // always collect fees immediately before closing.
-        self.execute_full_close_only(position, pool, None, None).await
+        self.execute_full_close_only(position, pool, None, None)
+            .await
     }
 
     /// Estimates transaction cost for rebalancing.
@@ -612,6 +639,8 @@ impl RebalanceExecutor {
         tick_lower: i32,
         tick_upper: i32,
         owner: &Pubkey,
+        amount_a_before_raw: u64,
+        amount_b_before_raw: u64,
         log_position: &Pubkey,
         ledger_session_id: Option<String>,
     ) -> anyhow::Result<u32> {
@@ -702,8 +731,8 @@ impl RebalanceExecutor {
                 dec_a,
                 dec_b,
             );
-            let a_ui = wa as f64 / 10f64.powi(i32::from(dec_a));
-            let b_ui = wb as f64 / 10f64.powi(i32::from(dec_b));
+            let a_ui = ui_from_raw(wa, dec_a);
+            let b_ui = ui_from_raw(wb, dec_b);
             let wallet_notional = a_ui * pa + b_ui * pb;
             if !wallet_notional.is_finite() || wallet_notional <= 0.0 {
                 error!(
@@ -719,7 +748,15 @@ impl RebalanceExecutor {
                 );
                 anyhow::bail!("wallet notional invalid after close");
             }
-            let target_usd = wallet_notional * 0.995;
+            let prev_end_value_usd = prev_end_value_usd_from_close_amounts(
+                amount_a_before_raw,
+                amount_b_before_raw,
+                dec_a,
+                dec_b,
+                pa,
+                pb,
+            );
+            let target_usd = target_usd_from_prev_end_clamped(prev_end_value_usd, wallet_notional);
             let q = quote_deposit_budget_in_range(
                 tick_lower,
                 tick_upper,
@@ -741,6 +778,9 @@ impl RebalanceExecutor {
                     tick_upper,
                     tick_current = pool_state.tick_current,
                     target_usd,
+                    prev_end_value_usd,
+                    wallet_notional,
+                    price_mode,
                     quote_err = %m,
                     "swap-mix: quote_deposit_budget_in_range failed"
                 );
@@ -784,14 +824,17 @@ impl RebalanceExecutor {
                 .expect("WSOL mint");
             let can_wrap_native_sol_for_wsol_leg = pool_state.token_mint_a == wsol_mint_pk
                 && deficit_b > 0
-                && native_lamports
-                    > NATIVE_SOL_RESERVE_LAMPORTS.saturating_add(MIN_SWAP);
+                && native_lamports > NATIVE_SOL_RESERVE_LAMPORTS.saturating_add(MIN_SWAP);
 
             if deficit_a > 0 && wb > MIN_SWAP {
                 // Swap B -> A to cover deficit in A (estimate using synthetic USD prices).
                 let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
                 let usd_need = (deficit_a_ui * pa).max(0.0);
-                let mut fund_b_ui = if pb > 0.0 { (usd_need / pb) * buffer_pct } else { 0.0 };
+                let mut fund_b_ui = if pb > 0.0 {
+                    (usd_need / pb) * buffer_pct
+                } else {
+                    0.0
+                };
                 if !fund_b_ui.is_finite() || fund_b_ui <= 0.0 {
                     fund_b_ui = (wb as f64 / 10f64.powi(i32::from(dec_b))) * 0.5;
                 }
@@ -800,8 +843,7 @@ impl RebalanceExecutor {
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wb)) as u64;
-                let amount_in_ui =
-                    (amount_in as f64) / 10f64.powi(i32::from(dec_b));
+                let amount_in_ui = (amount_in as f64) / 10f64.powi(i32::from(dec_b));
                 let amount_in_usd_est = amount_in_ui * pb;
                 let need_a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
                 let need_b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
@@ -971,15 +1013,14 @@ impl RebalanceExecutor {
                         0.0
                     };
                     if !fund_a_ui.is_finite() || fund_a_ui <= 0.0 {
-                        fund_a_ui = (native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS) as f64
+                        fund_a_ui = (native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS)
+                            as f64
                             / 1e9)
                             * 0.25;
                     }
-                    let raw_est_wrap =
-                        (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as u64;
-                    let wrap_amt = raw_est_wrap.min(
-                        native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS),
-                    );
+                    let raw_est_wrap = (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as u64;
+                    let wrap_amt = raw_est_wrap
+                        .min(native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS));
                     if wrap_amt >= MIN_SWAP {
                         let wallet = self.require_wallet()?;
                         let orca = WhirlpoolExecutor::new(self.provider.clone());
@@ -993,8 +1034,7 @@ impl RebalanceExecutor {
                             wa_spl = wa,
                             "swap-mix: pre-wrap native SOL into wSOL ATA (SPL wa was 0; Orca uses wSOL SPL)"
                         );
-                        orca
-                            .submit_wsol_wrap_if_needed(wrap_amt, wallet.keypair())
+                        orca.submit_wsol_wrap_if_needed(wrap_amt, wallet.keypair())
                             .await
                             .map_err(|e| anyhow::anyhow!("swap-mix wsol pre-wrap: {e}"))?;
                         continue;
@@ -1002,7 +1042,11 @@ impl RebalanceExecutor {
                 }
                 let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
                 let usd_need = (deficit_b_ui * pb).max(0.0);
-                let mut fund_a_ui = if pa > 0.0 { (usd_need / pa) * buffer_pct } else { 0.0 };
+                let mut fund_a_ui = if pa > 0.0 {
+                    (usd_need / pa) * buffer_pct
+                } else {
+                    0.0
+                };
                 if !fund_a_ui.is_finite() || fund_a_ui <= 0.0 {
                     fund_a_ui = (wa as f64 / 10f64.powi(i32::from(dec_a))) * 0.5;
                 }
@@ -1011,8 +1055,7 @@ impl RebalanceExecutor {
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wa)) as u64;
-                let amount_in_ui =
-                    (amount_in as f64) / 10f64.powi(i32::from(dec_a));
+                let amount_in_ui = (amount_in as f64) / 10f64.powi(i32::from(dec_a));
                 let amount_in_usd_est = amount_in_ui * pa;
                 let need_a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
                 let need_b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
@@ -1245,6 +1288,8 @@ impl RebalanceExecutor {
                 new_tick_lower,
                 new_tick_upper,
                 &owner,
+                amount_a_before_calc,
+                amount_b_before_calc,
                 log_position,
                 ledger_session_id.clone(),
             )
@@ -1258,12 +1303,55 @@ impl RebalanceExecutor {
         let mut last_cap_b: u64 = 0;
 
         for attempt in 1..=max_open_attempts {
-            let mut cap_a =
+            let wa =
                 spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_a)
                     .await;
-            let mut cap_b =
+            let wb =
                 spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_b)
                     .await;
+
+            let dec_a =
+                spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_a).await.unwrap_or(0);
+            let dec_b =
+                spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_b).await.unwrap_or(0);
+            let (pa, pb, _price_mode) = synthetic_prices_for_deposit_quote(
+                pool_state.price,
+                &pool_state.token_mint_a,
+                &pool_state.token_mint_b,
+                dec_a,
+                dec_b,
+            );
+            let wallet_notional = ui_from_raw(wa, dec_a) * pa + ui_from_raw(wb, dec_b) * pb;
+            let prev_end_value_usd = prev_end_value_usd_from_close_amounts(
+                amount_a_before_calc,
+                amount_b_before_calc,
+                dec_a,
+                dec_b,
+                pa,
+                pb,
+            );
+            let target_usd = target_usd_from_prev_end_clamped(prev_end_value_usd, wallet_notional);
+
+            let mut cap_a = wa;
+            let mut cap_b = wb;
+            let quote_opt = quote_deposit_budget_in_range(
+                new_tick_lower,
+                new_tick_upper,
+                pool_state.tick_current,
+                pool_state.sqrt_price,
+                dec_a,
+                dec_b,
+                pa,
+                pb,
+                target_usd,
+            )
+            .ok();
+
+            if let Some(q) = quote_opt.as_ref() {
+                cap_a = cap_a.min(q.token_max_a);
+                cap_b = cap_b.min(q.token_max_b);
+            }
+
             if cap_a == 0 && cap_b == 0 {
                 cap_a = amount_a_before_calc.max(1);
                 cap_b = amount_b_before_calc.max(1);
@@ -1308,6 +1396,42 @@ impl RebalanceExecutor {
                     cap_a,
                     cap_b,
                     ledger_session_id.clone(),
+                    Some({
+                        let mut v = serde_json::json!({
+                            "open_target_usd": target_usd,
+                            "open_prev_end_value_usd": prev_end_value_usd,
+                            "open_wallet_notional_usd": wallet_notional
+                        });
+                        if let Some(q) = quote_opt.as_ref() {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "open_quote_estimated_value_usd".to_string(),
+                                    serde_json::json!(q.estimated_value_usd),
+                                );
+                                obj.insert(
+                                    "open_quote_token_max_a".to_string(),
+                                    serde_json::json!(q.token_max_a),
+                                );
+                                obj.insert(
+                                    "open_quote_token_max_b".to_string(),
+                                    serde_json::json!(q.token_max_b),
+                                );
+                                obj.insert(
+                                    "open_quote_amount_a_raw".to_string(),
+                                    serde_json::json!(q.amount_a),
+                                );
+                                obj.insert(
+                                    "open_quote_amount_b_raw".to_string(),
+                                    serde_json::json!(q.amount_b),
+                                );
+                                obj.insert(
+                                    "open_quote_liquidity".to_string(),
+                                    serde_json::json!(q.liquidity.to_string()),
+                                );
+                            }
+                        }
+                        v
+                    }),
                 )
                 .await
             {
@@ -1521,12 +1645,18 @@ impl RebalanceExecutor {
                 }
             };
 
-            let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_a).await
+            let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_a)
+                .await
                 .unwrap_or(0);
-            let dec_b = spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_b).await
+            let dec_b = spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_b)
+                .await
                 .unwrap_or(0);
-            let wa = spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_a).await;
-            let wb = spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_b).await;
+            let wa =
+                spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_a)
+                    .await;
+            let wb =
+                spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_b)
+                    .await;
             let (pa, pb, price_mode) = synthetic_prices_for_deposit_quote(
                 pool_state.price,
                 &pool_state.token_mint_a,
@@ -1534,10 +1664,18 @@ impl RebalanceExecutor {
                 dec_a,
                 dec_b,
             );
-            let a_ui = wa as f64 / 10f64.powi(i32::from(dec_a));
-            let b_ui = wb as f64 / 10f64.powi(i32::from(dec_b));
+            let a_ui = ui_from_raw(wa, dec_a);
+            let b_ui = ui_from_raw(wb, dec_b);
             let wallet_notional = a_ui * pa + b_ui * pb;
-            let target_usd = (wallet_notional * 0.995).max(0.0);
+            let prev_end_value_usd = prev_end_value_usd_from_close_amounts(
+                amount_a_before_calc,
+                amount_b_before_calc,
+                dec_a,
+                dec_b,
+                pa,
+                pb,
+            );
+            let target_usd = target_usd_from_prev_end_clamped(prev_end_value_usd, wallet_notional);
 
             let mut ok = quote_deposit_budget_in_range(
                 planned_tick_lower,
@@ -1594,6 +1732,7 @@ impl RebalanceExecutor {
                             "wb_ui": b_ui,
                             "wallet_notional": wallet_notional,
                             "target_usd": target_usd,
+                        "prev_end_value_usd": prev_end_value_usd,
                             "pa": pa,
                             "pb": pb,
                             "price_mode": price_mode,
@@ -1629,6 +1768,7 @@ impl RebalanceExecutor {
                         "wb_ui": b_ui,
                         "wallet_notional": wallet_notional,
                         "target_usd": target_usd,
+                        "prev_end_value_usd": prev_end_value_usd,
                         "pa": pa,
                         "pb": pb,
                         "price_mode": price_mode,
@@ -1983,11 +2123,8 @@ impl RebalanceExecutor {
             .read_close_amounts_best_effort(position, pool)
             .await
             .unwrap_or((0, 0));
-        let close_details = with_close_amounts_in_details(
-            ledger_details,
-            close_amount_a_raw,
-            close_amount_b_raw,
-        );
+        let close_details =
+            with_close_amounts_in_details(ledger_details, close_amount_a_raw, close_amount_b_raw);
         self.close_position(position, pool, ledger_session_id, close_details)
             .await
     }
@@ -2152,11 +2289,13 @@ impl RebalanceExecutor {
             .get_pool_state(&pool.to_string())
             .await
             .with_context(|| format!("read pool state before close for {}", pool))?;
-        Ok(pos_reader.calculate_token_amounts(
-            &pos,
-            pool_state.tick_current,
-            pool_state.sqrt_price,
-        ))
+        Ok(
+            pos_reader.calculate_token_amounts(
+                &pos,
+                pool_state.tick_current,
+                pool_state.sqrt_price,
+            ),
+        )
     }
 
     /// Opens a new position.
@@ -2168,6 +2307,7 @@ impl RebalanceExecutor {
         cap_a: u64,
         cap_b: u64,
         ledger_session_id: Option<String>,
+        ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<Pubkey> {
         let (p, _, _) = self
             .open_position_with_caps(
@@ -2178,7 +2318,7 @@ impl RebalanceExecutor {
                 cap_b,
                 self.config.max_slippage_bps,
                 ledger_session_id,
-                None,
+                ledger_open_details,
             )
             .await?;
         Ok(p)
@@ -2213,7 +2353,9 @@ impl RebalanceExecutor {
 
         let reader = WhirlpoolReader::new(self.provider.clone());
         let pool_state = reader.get_pool_state(&pool.to_string()).await.ok();
-        let dec_in = spl_mint_decimals(self.provider.as_ref(), specified_mint).await.unwrap_or(0);
+        let dec_in = spl_mint_decimals(self.provider.as_ref(), specified_mint)
+            .await
+            .unwrap_or(0);
         let amount_in_ui = (amount_in as f64) / 10f64.powi(i32::from(dec_in));
         let (token_a_s, token_b_s, other_out) = match &pool_state {
             Some(s) => {
@@ -2258,7 +2400,7 @@ impl RebalanceExecutor {
             None,
             None,
         )
-            .await?;
+        .await?;
         Ok(Some(sig))
     }
 
@@ -2612,8 +2754,14 @@ async fn enrich_open_close_ledger_details(
         {
             Ok(Some(ev)) => {
                 if let Some(obj) = base.as_object_mut() {
-                    obj.insert("event_price_a_usd".to_string(), serde_json::json!(ev.price_a_usd));
-                    obj.insert("event_price_b_usd".to_string(), serde_json::json!(ev.price_b_usd));
+                    obj.insert(
+                        "event_price_a_usd".to_string(),
+                        serde_json::json!(ev.price_a_usd),
+                    );
+                    obj.insert(
+                        "event_price_b_usd".to_string(),
+                        serde_json::json!(ev.price_b_usd),
+                    );
                     obj.insert(
                         "event_price_source".to_string(),
                         serde_json::json!(ev.price_source),
@@ -2628,6 +2776,75 @@ async fn enrich_open_close_ledger_details(
             }
             Err(_) => {
                 warn!(pool = %pool_pk, "event-time pool USD enrichment timed out");
+            }
+        }
+    }
+
+    // Best-effort: on successful open flows, record *measured* token amounts by reading the created
+    // position + pool state on-chain and computing amounts from liquidity.
+    if let (Some(pool_pk), Some(pos_pk)) = (pool, result.created_position) {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let pool_reader = WhirlpoolReader::new(provider.clone());
+            let pos_reader = PositionReader::new(provider.clone());
+
+            // RPC can lag right after confirmation; retry a few times before giving up.
+            let mut last_err: Option<anyhow::Error> = None;
+            for attempt in 1..=8u32 {
+                let pool_state = match pool_reader.get_pool_state(&pool_pk.to_string()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            400 * u64::from(attempt),
+                        ))
+                        .await;
+                        continue;
+                    }
+                };
+                let pos = match pos_reader.get_position(&pos_pk.to_string()).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            400 * u64::from(attempt),
+                        ))
+                        .await;
+                        continue;
+                    }
+                };
+
+                let (a_raw, b_raw) = pos_reader.calculate_token_amounts(
+                    &pos,
+                    pool_state.tick_current,
+                    pool_state.sqrt_price,
+                );
+                return Ok::<(u64, u64), anyhow::Error>((a_raw, b_raw));
+            }
+            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown RPC error")))
+        })
+        .await
+        {
+            Ok(Ok((a_raw, b_raw))) => {
+                if let Some(obj) = base.as_object_mut() {
+                    obj.insert("open_amount_a_raw".to_string(), serde_json::json!(a_raw));
+                    obj.insert("open_amount_b_raw".to_string(), serde_json::json!(b_raw));
+                    obj.insert(
+                        "open_amounts_source".to_string(),
+                        serde_json::json!("onchain_after_open"),
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                if let Some(obj) = base.as_object_mut() {
+                    obj.insert("open_amounts_pending".to_string(), serde_json::json!(true));
+                }
+                warn!(error = %e, "post-open on-chain amount enrichment failed; continuing");
+            }
+            Err(_) => {
+                if let Some(obj) = base.as_object_mut() {
+                    obj.insert("open_amounts_pending".to_string(), serde_json::json!(true));
+                }
+                warn!("post-open on-chain amount enrichment timed out; continuing");
             }
         }
     }
@@ -2732,10 +2949,45 @@ mod tests {
         )
         .expect("details");
         let obj = out.as_object().expect("object");
-        assert_eq!(obj.get("close_kind").and_then(|v| v.as_str()), Some("manual"));
-        assert_eq!(obj.get("close_source").and_then(|v| v.as_str()), Some("api"));
-        assert_eq!(obj.get("close_amount_a_raw").and_then(|v| v.as_u64()), Some(123));
-        assert_eq!(obj.get("close_amount_b_raw").and_then(|v| v.as_u64()), Some(456));
+        assert_eq!(
+            obj.get("close_kind").and_then(|v| v.as_str()),
+            Some("manual")
+        );
+        assert_eq!(
+            obj.get("close_source").and_then(|v| v.as_str()),
+            Some("api")
+        );
+        assert_eq!(
+            obj.get("close_amount_a_raw").and_then(|v| v.as_u64()),
+            Some(123)
+        );
+        assert_eq!(
+            obj.get("close_amount_b_raw").and_then(|v| v.as_u64()),
+            Some(456)
+        );
+    }
+
+    #[test]
+    fn target_usd_prefers_prev_end_when_wallet_is_larger() {
+        let prev_end = 10.0;
+        let wallet = 100.0;
+        let target = target_usd_from_prev_end_clamped(prev_end, wallet);
+        assert!((target - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn target_usd_clamps_to_wallet_cap_when_wallet_is_smaller() {
+        let prev_end = 10.0;
+        let wallet = 8.0;
+        let target = target_usd_from_prev_end_clamped(prev_end, wallet);
+        assert!((target - (8.0 * 0.995)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prev_end_value_usd_from_close_amounts_uses_decimals_and_prices() {
+        // 1.5 * $2 + 3.0 * $1 = $6
+        let v = prev_end_value_usd_from_close_amounts(1_500_000, 3_000_000, 6, 6, 2.0, 1.0);
+        assert!((v - 6.0).abs() < 1e-9);
     }
 
     #[tokio::test]

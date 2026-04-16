@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 
 use crate::backtest_engine::StepData;
-use crate::backtest_engine::{parse_strategy_label, StratConfig};
+use crate::backtest_engine::{StratConfig, parse_strategy_label};
 use clmm_lp_simulation::prelude::TrackerSummary;
 
 pub fn round2(d: Decimal) -> Decimal {
@@ -479,8 +479,14 @@ pub fn print_candidate_sets(
     // Full grid audit: summarize each LastCandle variant by its best-performing width/range.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
     enum LastCandleKey {
-        Steps { candle_steps: u64, rebalance_steps: u64 },
-        Time { candle_seconds: u64, rebalance_seconds: u64 },
+        Steps {
+            candle_steps: u64,
+            rebalance_steps: u64,
+        },
+        Time {
+            candle_seconds: u64,
+            rebalance_seconds: u64,
+        },
     }
 
     let mut last_candle_best: std::collections::BTreeMap<
@@ -489,7 +495,9 @@ pub fn print_candidate_sets(
     > = std::collections::BTreeMap::new();
     for row in results.iter().cloned() {
         let name = row.3.as_str();
-        let Some(cfg) = parse_strategy_label(name) else { continue };
+        let Some(cfg) = parse_strategy_label(name) else {
+            continue;
+        };
         let key = match cfg {
             StratConfig::LastCandle {
                 candle_steps,
@@ -549,7 +557,8 @@ pub fn print_candidate_sets(
                 format!("{:.1}h", (secs as f64) / 3600.0)
             }
         };
-        let fmt_steps = |steps: u64| -> String { fmt_seconds(steps.saturating_mul(derived_step_seconds)) };
+        let fmt_steps =
+            |steps: u64| -> String { fmt_seconds(steps.saturating_mul(derived_step_seconds)) };
 
         println!();
         println!("== Last-candle grid (best per variant) ==");
@@ -579,7 +588,11 @@ pub fn print_candidate_sets(
                     rebalance_seconds,
                 } => (
                     format!("{} (t{})", fmt_seconds(candle_seconds), candle_seconds),
-                    format!("{} (r{})", fmt_seconds(rebalance_seconds), rebalance_seconds),
+                    format!(
+                        "{} (r{})",
+                        fmt_seconds(rebalance_seconds),
+                        rebalance_seconds
+                    ),
                 ),
             };
             t.add_row(row![

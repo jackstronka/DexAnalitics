@@ -390,17 +390,15 @@ pub fn run_single(
 
     for (i, p) in step_data.iter().enumerate() {
         if let Some(prev) = prev_ts {
-            secs_since_rebalance = secs_since_rebalance
-                .saturating_add(p.start_timestamp.saturating_sub(prev));
+            secs_since_rebalance =
+                secs_since_rebalance.saturating_add(p.start_timestamp.saturating_sub(prev));
         }
         prev_ts = Some(p.start_timestamp);
         steps_since_rebalance += 1;
         let price_ab = p.price_ab.value;
         let in_range_float = price_ab >= current_lower_ab && price_ab <= current_upper_ab;
         let mut in_range = in_range_float;
-        if use_tick_in_range
-            && let Some(tick_current) = p.tick_current
-        {
+        if use_tick_in_range && let Some(tick_current) = p.tick_current {
             let tick_lower = price_to_tick(current_lower_ab.max(Decimal::ZERO));
             let tick_upper = price_to_tick(current_upper_ab.max(Decimal::ZERO));
             in_range = tick_current >= tick_lower && tick_current < tick_upper;
@@ -529,8 +527,7 @@ pub fn run_single(
                 rebalance_steps, ..
             } => steps_since_rebalance >= rebalance_steps,
             StratConfig::LastCandleTime {
-                rebalance_seconds,
-                ..
+                rebalance_seconds, ..
             } => secs_since_rebalance >= rebalance_seconds,
         };
 
@@ -601,15 +598,11 @@ pub fn run_single(
                         )
                     }
                 }
-                StratConfig::LastCandleTime {
-                    candle_seconds, ..
-                } => {
+                StratConfig::LastCandleTime { candle_seconds, .. } => {
                     // Snapshot-friendly: use last fully closed wall-clock bucket `[t-candle_seconds, t)`.
-                    if let Some((start, end)) = indicators::last_closed_time_bucket_step_range(
-                        step_data,
-                        i,
-                        candle_seconds,
-                    ) {
+                    if let Some((start, end)) =
+                        indicators::last_closed_time_bucket_step_range(step_data, i, candle_seconds)
+                    {
                         let slice = &step_data[start..=end];
                         let mut lo_ab = slice[0].price_ab.value;
                         let mut hi_ab = lo_ab;

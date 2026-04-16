@@ -191,10 +191,7 @@ impl StrategyExecutor {
     }
 
     /// Set an optional hook that runs after a successful rebalance close→open (old PDA → new PDA).
-    pub async fn set_reopen_hook(
-        &self,
-        hook: Option<ReopenHook>,
-    ) {
+    pub async fn set_reopen_hook(&self, hook: Option<ReopenHook>) {
         *self.reopen_hook.lock().await = hook;
     }
 
@@ -1137,7 +1134,9 @@ impl StrategyExecutor {
                                 // Best-effort: if something went wrong and the set grew, trim it back.
                                 while allow.len() > target {
                                     // Remove an arbitrary extra (not the newly opened).
-                                    if let Some(extra) = allow.iter().copied().find(|p| p != &new_pos) {
+                                    if let Some(extra) =
+                                        allow.iter().copied().find(|p| p != &new_pos)
+                                    {
                                         allow.remove(&extra);
                                     } else {
                                         break;
@@ -1206,7 +1205,12 @@ impl StrategyExecutor {
 
                 match self
                     .rebalance_executor
-                    .execute_full_close_only(&addr, &pool_pk, None, Some(serde_json::json!({"close_kind":"strategy"})))
+                    .execute_full_close_only(
+                        &addr,
+                        &pool_pk,
+                        None,
+                        Some(serde_json::json!({"close_kind":"strategy"})),
+                    )
                     .await
                 {
                     Ok(()) => {

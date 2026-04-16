@@ -2,12 +2,13 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    ApiSignerWalletResponse, WalletBalancesResponse, WalletEntry, WalletTokenBalance,
-    WalletsListResponse,
+    ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest, ConvertSolResponse,
+    WalletBalancesResponse, WalletEntry, WalletTokenBalance, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
+use clmm_lp_protocols::orca::executor::WhirlpoolExecutor;
 use serde::Deserialize;
 use solana_sdk::{pubkey::Pubkey, signature::read_keypair_file, signer::Signer};
 use std::collections::HashSet;
@@ -330,4 +331,78 @@ pub async fn get_api_signer_wallet(
             note: Some(format!("Wallet loaded but SOL balance RPC failed: {e}")),
         })),
     }
+}
+
+/// Convert native SOL <-> WSOL in the API signer wallet (1:1, no pool swap).
+#[utoipa::path(
+    post,
+    path = "/wallets/convert-sol",
+    tag = "Wallets",
+    request_body = ConvertSolRequest,
+    responses(
+        (status = 200, description = "SOL conversion submitted", body = ConvertSolResponse),
+        (status = 400, description = "Invalid request / insufficient source balance"),
+        (status = 500, description = "RPC or execution error")
+    )
+)]
+pub async fn convert_sol(
+    State(state): State<AppState>,
+    Json(req): Json<ConvertSolRequest>,
+) -> ApiResult<Json<ConvertSolResponse>> {
+    if req.amount_raw == 0 {
+        return Err(ApiError::bad_request("amount_raw must be > 0"));
+    }
+    let signer = load_wallet_from_env()
+        .map_err(|e| ApiError::internal(format!("api-signer wallet load: {e}")))?
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "API signer wallet is not configured (set KEYPAIR_PATH / SOLANA_KEYPAIR_PATH / WALLET_KEYPAIR_PATH)",
+            )
+        })?;
+    let owner = signer.pubkey();
+    let exec = WhirlpoolExecutor::new(state.provider.clone());
+    let signature = match req.direction {
+        ConvertSolDirection::NativeToWsol => {
+            let native = state
+                .provider
+                .get_balance(&owner)
+                .await
+                .map_err(|e| ApiError::internal(format!("read native SOL balance: {e}")))?;
+            if native < req.amount_raw {
+                return Err(ApiError::bad_request(format!(
+                    "insufficient native SOL balance (have {native} raw, need {} raw)",
+                    req.amount_raw
+                )));
+            }
+            exec.submit_wsol_wrap_with_signature_if_needed(req.amount_raw, signer.keypair())
+                .await
+                .map_err(|e| ApiError::bad_request(format!("native_to_wsol failed: {e}")))?
+                .map(|s| s.to_string())
+        }
+        ConvertSolDirection::WsolToNative => {
+            let wsol = exec
+                .read_wsol_balance_raw(&owner)
+                .await
+                .map_err(|e| ApiError::internal(format!("read WSOL balance: {e}")))?;
+            if wsol < req.amount_raw {
+                return Err(ApiError::bad_request(format!(
+                    "insufficient WSOL balance (have {wsol} raw, need {} raw)",
+                    req.amount_raw
+                )));
+            }
+            let sig = exec
+                .submit_wsol_unwrap_with_signature(req.amount_raw, signer.keypair())
+                .await
+                .map_err(|e| ApiError::bad_request(format!("wsol_to_native failed: {e}")))?;
+            Some(sig.to_string())
+        }
+    };
+
+    Ok(Json(ConvertSolResponse {
+        message: "SOL conversion submitted".to_string(),
+        signature,
+        direction: req.direction,
+        amount_raw: req.amount_raw,
+        owner_pubkey: owner.to_string(),
+    }))
 }

@@ -49,9 +49,7 @@ pub(crate) fn map_position_fetch_error(err: anyhow::Error) -> ApiError {
     let chain = format_error_chain(err.as_ref());
     let root = err.to_string();
 
-    if chain.contains("This pubkey is a Whirlpool")
-        || chain.contains("not a **position** PDA")
-    {
+    if chain.contains("This pubkey is a Whirlpool") || chain.contains("not a **position** PDA") {
         return ApiError::bad_request(
             "This address is not an Orca Whirlpool position account (often a pool address was pasted). \
              Use the position PDA from the OpenPosition instruction (not the whirlpool/pool account)."
@@ -159,7 +157,11 @@ fn compute_tick_range_price(
 ) -> TickRangePrice {
     let v_lo = b_per_a_ui_decimal(tick_lower, dec_a, dec_b);
     let v_hi = b_per_a_ui_decimal(tick_upper, dec_a, dec_b);
-    let (lower, upper) = if v_lo <= v_hi { (v_lo, v_hi) } else { (v_hi, v_lo) };
+    let (lower, upper) = if v_lo <= v_hi {
+        (v_lo, v_hi)
+    } else {
+        (v_hi, v_lo)
+    };
     TickRangePrice {
         lower,
         upper,
@@ -584,9 +586,7 @@ pub async fn compute_position_usd_valuation(
         &token_b_label,
     );
 
-    if (on_chain_fresh.fees_owed_a > 0 || on_chain_fresh.fees_owed_b > 0)
-        && fees_usd.is_zero()
-    {
+    if (on_chain_fresh.fees_owed_a > 0 || on_chain_fresh.fees_owed_b > 0) && fees_usd.is_zero() {
         tracing::warn!(
             mint_a = %pool_state.token_mint_a,
             mint_b = %pool_state.token_mint_b,
@@ -661,9 +661,8 @@ mod map_position_fetch_tests {
 
     #[test]
     fn account_not_found_is_404() {
-        let err = map_position_fetch_error(anyhow::Error::msg(
-            "Failed to get account: AccountNotFound",
-        ));
+        let err =
+            map_position_fetch_error(anyhow::Error::msg("Failed to get account: AccountNotFound"));
         assert!(matches!(err, ApiError::NotFound(_)), "{err:?}");
     }
 

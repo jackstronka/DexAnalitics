@@ -6,10 +6,10 @@ use crate::events::{
     EVENT_ALERT_RAISED, EVENT_POSITION_UPDATED, EventBus, EventEnvelope, InProcessEventBus,
     publish_with_retry,
 };
+use clmm_lp_data::repositories::Database;
 use clmm_lp_execution::prelude::{
     CircuitBreaker, LifecycleTracker, PositionMonitor, StrategyExecutor, TransactionManager,
 };
-use clmm_lp_data::repositories::Database;
 use clmm_lp_protocols::prelude::{RpcConfig, RpcProvider};
 use std::collections::HashMap;
 use std::env;

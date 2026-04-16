@@ -5,13 +5,13 @@ use crate::models::{
     BacktestFromClosedPositionRequest, BacktestFromOpenPositionRequest, BacktestJobResponse,
     BacktestJobStatusResponse,
 };
+use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use clmm_lp_data::repositories::Database;
 use clmm_lp_domain::math::price_tick::tick_to_price;
 use clmm_lp_protocols::ledger::position_registry::registry_path;
-use crate::services::price_fetch::fetch_mint_prices_usd;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
@@ -68,8 +68,7 @@ fn resolve_clmm_lp_cli_path(repo_root: Option<&str>) -> Result<PathBuf, String> 
         let root = std::path::Path::new(root);
         for profile in ["debug", "release"] {
             candidates.push(
-                root
-                    .join("target")
+                root.join("target")
                     .join(profile)
                     .join(clmm_lp_cli_filename()),
             );
@@ -156,7 +155,10 @@ fn registry_lookup(position_pubkey: &str) -> Option<RegistryLookup> {
             .filter(|s| !s.is_empty())
             .or(sid);
         details = v.get("details").cloned().or(details);
-        let ts = v.get("ts_utc").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+        let ts = v
+            .get("ts_utc")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string());
         match ev {
             "registry_open" => opened_ts = ts.or(opened_ts),
             "registry_close" => closed_ts = ts.or(closed_ts),
@@ -219,7 +221,10 @@ fn capital_usd_from_mint_deltas(
     usd.to_f64().unwrap_or(0.0)
 }
 
-fn merge_fee_payer_deltas_from_object(obj: &serde_json::Map<String, Value>, into: &mut HashMap<String, Decimal>) {
+fn merge_fee_payer_deltas_from_object(
+    obj: &serde_json::Map<String, Value>,
+    into: &mut HashMap<String, Decimal>,
+) {
     for (mint, dv) in obj {
         if let Some(d) = json_to_decimal(dv) {
             *into.entry(mint.clone()).or_insert(Decimal::ZERO) += d;
@@ -293,7 +298,11 @@ fn capital_from_ledger_first_open(
         if pos != position {
             continue;
         }
-        let ev = v.get("event").and_then(|x| x.as_str()).map(str::trim).unwrap_or("");
+        let ev = v
+            .get("event")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
         let is_open = matches!(
             ev,
             "bot_open_position" | "bot_open_position_full_range" | "position_open"
@@ -342,11 +351,7 @@ async fn capital_from_db_first_snapshot_usd(db: &Database, position: &str) -> Op
     .ok()
     .flatten()?;
     let v: Decimal = row.try_get("value_usd").ok()?;
-    if v > Decimal::ZERO {
-        v.to_f64()
-    } else {
-        None
-    }
+    if v > Decimal::ZERO { v.to_f64() } else { None }
 }
 
 /// Spawn a historical backtest for a closed position (best-effort) using CLI `clmm-lp-cli backtest`.
@@ -369,9 +374,10 @@ pub async fn backtest_from_closed_position(
         return Err(ApiError::bad_request("position_address is required"));
     }
 
-    let (opened_ts, closed_ts, pool_address, open_sid, details) = registry_lookup(position).ok_or_else(|| {
-        ApiError::not_found("Position not found in registry (missing open/close rows)")
-    })?;
+    let (opened_ts, closed_ts, pool_address, open_sid, details) = registry_lookup(position)
+        .ok_or_else(|| {
+            ApiError::not_found("Position not found in registry (missing open/close rows)")
+        })?;
 
     // Resolve dates (best-effort). CLI `--end-date` is exclusive at 00:00 UTC; see `end_date_for_cli` below when inferring from registry.
     let start_date = req
@@ -446,7 +452,9 @@ pub async fn backtest_from_closed_position(
     } else {
         let mut cap = 0.0_f64;
         let ledger = clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path();
-        if ledger.exists() && let Ok(txt) = std::fs::read_to_string(&ledger) {
+        if ledger.exists()
+            && let Ok(txt) = std::fs::read_to_string(&ledger)
+        {
             if let Some(ref sid) = open_sid {
                 let sid = sid.trim();
                 if !sid.is_empty() {
@@ -495,7 +503,10 @@ pub async fn backtest_from_closed_position(
 
     let repo_root = state.config.repo_root.clone();
     let strategy = req.strategy.clone().unwrap_or_else(|| "static".to_string());
-    let fee_source = req.fee_source.clone().unwrap_or_else(|| "snapshots".to_string());
+    let fee_source = req
+        .fee_source
+        .clone()
+        .unwrap_or_else(|| "snapshots".to_string());
     let price_path_source = req
         .price_path_source
         .clone()
@@ -599,9 +610,7 @@ pub async fn backtest_from_open_position(
     }
 
     let (opened_ts, _closed_ts, pool_address, open_sid, details) = registry_lookup(position)
-        .ok_or_else(|| {
-        ApiError::not_found("Position not found in registry (missing open row)")
-    })?;
+        .ok_or_else(|| ApiError::not_found("Position not found in registry (missing open row)"))?;
 
     let start_date = req
         .start_date
@@ -661,7 +670,9 @@ pub async fn backtest_from_open_position(
     } else {
         let mut cap = 0.0_f64;
         let ledger = clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path();
-        if ledger.exists() && let Ok(txt) = std::fs::read_to_string(&ledger) {
+        if ledger.exists()
+            && let Ok(txt) = std::fs::read_to_string(&ledger)
+        {
             if let Some(ref sid) = open_sid {
                 let sid = sid.trim();
                 if !sid.is_empty() {
@@ -672,7 +683,10 @@ pub async fn backtest_from_open_position(
                 cap = capital_from_ledger_first_open(&txt, position, &mint_a, &mint_b, pa, pb);
             }
         }
-        if cap <= 0.0 && let Some(ref db) = state.db && let Some(c) = capital_from_db_first_snapshot_usd(db, position).await {
+        if cap <= 0.0
+            && let Some(ref db) = state.db
+            && let Some(c) = capital_from_db_first_snapshot_usd(db, position).await
+        {
             cap = c;
         }
         cap
@@ -706,7 +720,10 @@ pub async fn backtest_from_open_position(
 
     let repo_root = state.config.repo_root.clone();
     let strategy = req.strategy.clone().unwrap_or_else(|| "static".to_string());
-    let fee_source = req.fee_source.clone().unwrap_or_else(|| "snapshots".to_string());
+    let fee_source = req
+        .fee_source
+        .clone()
+        .unwrap_or_else(|| "snapshots".to_string());
     let price_path_source = req
         .price_path_source
         .clone()
@@ -806,7 +823,9 @@ pub async fn get_backtest_job(
     Path(id): Path<String>,
 ) -> ApiResult<Json<BacktestJobResponse>> {
     let r = JOBS.read().await;
-    let j = r.get(id.trim()).cloned().ok_or_else(|| ApiError::not_found("Job not found"))?;
+    let j = r
+        .get(id.trim())
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("Job not found"))?;
     Ok(Json(j))
 }
-

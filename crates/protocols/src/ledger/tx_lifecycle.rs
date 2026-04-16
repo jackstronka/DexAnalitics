@@ -593,8 +593,7 @@ pub async fn try_append_bot_diagnostic_row(
         rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
         rpc_url,
         details,
-        accounting_note:
-            "Diagnostic row (no tx); helps debug swap-mix / rebalance incomplete sequences.",
+        accounting_note: "Diagnostic row (no tx); helps debug swap-mix / rebalance incomplete sequences.",
     };
 
     if let Err(e) = append_jsonl_line(&rec) {

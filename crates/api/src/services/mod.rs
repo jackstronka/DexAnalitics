@@ -16,8 +16,8 @@ pub mod position_stream_pnl;
 pub mod position_valuation;
 pub mod price_fetch;
 pub mod simulation_analytics;
-pub mod strategy_service;
 pub mod stranded_rebalance_watchdog;
+pub mod strategy_service;
 
 pub use orca_read_service::OrcaReadService;
 pub use orca_tx_service::OrcaTxService;

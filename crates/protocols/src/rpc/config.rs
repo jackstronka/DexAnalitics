@@ -240,7 +240,11 @@ mod tests {
         config.fallback_urls.clear();
         let config = config.with_fallback("https://solana-rpc.publicnode.com");
         let endpoints = config.all_endpoints();
-        assert_eq!(endpoints.len(), 1, "duplicate URL should collapse: {endpoints:?}");
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "duplicate URL should collapse: {endpoints:?}"
+        );
     }
 
     #[test]

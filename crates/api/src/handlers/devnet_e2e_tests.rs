@@ -953,15 +953,7 @@ async fn devnet_bot_actions_smoke() {
 
     let position = exec
         .execute_open_position(
-            &pool,
-            tick_lower,
-            tick_upper,
-            amount_a,
-            amount_b,
-            200,
-            false,
-            None,
-            None,
+            &pool, tick_lower, tick_upper, amount_a, amount_b, 200, false, None, None,
         )
         .await
         .expect("open_position via StrategyExecutor");
@@ -1050,9 +1042,7 @@ async fn devnet_submit_unsigned_tx_is_rejected() {
 
     let err = tx_submit_signed(
         State(state),
-        Json(crate::models::SubmitSignedTxRequest {
-            signed_tx_base64,
-        }),
+        Json(crate::models::SubmitSignedTxRequest { signed_tx_base64 }),
     )
     .await
     .expect_err("unsigned transaction must be rejected");

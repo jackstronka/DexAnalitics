@@ -463,7 +463,7 @@ export default function Positions() {
                     <tr key={it.rebalance_session_id} className="border-b last:border-0">
                       <td className="py-3 text-sm">
                         {it.old_position ? (
-                          <Link to={`/positions/${it.old_position}`} className="font-mono hover:text-primary">
+                          <Link to={`/positions/closed/${it.old_position}`} className="font-mono hover:text-primary">
                             {shortenAddress(it.old_position)}
                           </Link>
                         ) : (

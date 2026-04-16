@@ -158,14 +158,7 @@ pub fn default_strategies(
                 // Snapshot mode has irregular step spacing; prefer wall-clock buckets.
                 // Candles: 15m, 30m, 45m, 1h. Rebalance: 15m, 30m, 45m, 1h, 4h, 12h.
                 const CANDLES: &[u64] = &[15 * 60, 30 * 60, 45 * 60, 60 * 60];
-                const REBALS: &[u64] = &[
-                    15 * 60,
-                    30 * 60,
-                    45 * 60,
-                    60 * 60,
-                    4 * 3600,
-                    12 * 3600,
-                ];
+                const REBALS: &[u64] = &[15 * 60, 30 * 60, 45 * 60, 60 * 60, 4 * 3600, 12 * 3600];
                 for &c in CANDLES {
                     for &r in REBALS {
                         v.push(StratConfig::LastCandleTime {

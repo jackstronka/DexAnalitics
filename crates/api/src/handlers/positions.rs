@@ -13,11 +13,11 @@ use crate::models::{
     RebalanceRequest, SuggestStrategyLinkResponse, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
     UncollectedFeesInfo,
 };
-use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_stream_lineage::{
     backfill_valuation_snapshots_from_lifecycle_current_prices, compute_position_stream_lineage,
     infer_parent_position_from_lifecycle_best_effort,
 };
+use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_stream_pnl::compute_position_stream_pnl;
 use crate::services::strategy_service::{
     append_position_address_to_strategy, heal_rotated_strategy_link_best_effort,
@@ -31,8 +31,8 @@ use axum::{
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::program_pack::Pack;
+use solana_sdk::pubkey::Pubkey;
 use spl_token::state::Mint;
 use std::str::FromStr;
 use tracing::{info, warn};
@@ -45,17 +45,17 @@ use crate::services::position_valuation::{
     range_usdc_and_in_range_for_pool_ticks, refresh_position_fees_from_chain,
     uncollected_fees_info_for_position,
 };
-use std::collections::HashSet;
+use crate::services::price_fetch::fetch_mint_prices_usd;
 use axum::extract::Query;
-use serde::Deserialize;
+use clmm_lp_domain::math::price_tick::tick_to_price;
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path;
+use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use crate::services::price_fetch::fetch_mint_prices_usd;
-use std::collections::BTreeSet;
-use clmm_lp_domain::math::price_tick::tick_to_price;
 
 fn token_short_label(mint: &str) -> String {
     match mint.trim() {
@@ -114,12 +114,15 @@ pub async fn get_position_experiment_config(
             derived_lower: None,
             derived_upper: None,
             derived_initial_capital_usd: None,
-            note: Some(format!("Registry file missing on API host: {}", path.display())),
+            note: Some(format!(
+                "Registry file missing on API host: {}",
+                path.display()
+            )),
         }));
     }
 
-    let file = File::open(&path)
-        .map_err(|e| ApiError::internal(format!("open registry file: {e}")))?;
+    let file =
+        File::open(&path).map_err(|e| ApiError::internal(format!("open registry file: {e}")))?;
     let reader = BufReader::new(file);
 
     let mut open_details: Option<serde_json::Value> = None;
@@ -186,7 +189,9 @@ pub async fn get_position_experiment_config(
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
                     continue;
                 };
-                if v.get("rebalance_session_id").and_then(|x| x.as_str()).map(str::trim)
+                if v.get("rebalance_session_id")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
                     != Some(sid)
                 {
                     continue;
@@ -198,21 +203,24 @@ pub async fn get_position_experiment_config(
                     if let Some(s) = dv.as_str()
                         && let Ok(d) = rust_decimal::Decimal::from_str(s.trim())
                     {
-                        *mint_deltas.entry(mint.clone()).or_insert(rust_decimal::Decimal::ZERO) += d;
+                        *mint_deltas
+                            .entry(mint.clone())
+                            .or_insert(rust_decimal::Decimal::ZERO) += d;
                     }
                 }
             }
 
             // Convert only pool leg mints (A and B) to USD at current free prices.
-            let pool_state = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
-                .get_pool_state(
-                    open_details
-                        .as_ref()
-                        .and_then(|d| d.get("pool_address"))
-                        .and_then(|x| x.as_str())
-                        .unwrap_or(""),
-                )
-                .await;
+            let pool_state =
+                clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
+                    .get_pool_state(
+                        open_details
+                            .as_ref()
+                            .and_then(|d| d.get("pool_address"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or(""),
+                    )
+                    .await;
             // If pool not in details (it often isn't), fall back to resolving by reading last closed list? Keep best-effort.
             let (mint_a, mint_b) = if let Ok(ps) = pool_state {
                 (ps.token_mint_a.to_string(), ps.token_mint_b.to_string())
@@ -236,12 +244,21 @@ pub async fn get_position_experiment_config(
             let (px, _src) = fetch_mint_prices_usd(&mints).await;
             let pa = px.get(&mint_a).copied().unwrap_or(0.0);
             let pb = px.get(&mint_b).copied().unwrap_or(0.0);
-            let da = mint_deltas.get(&mint_a).cloned().unwrap_or(rust_decimal::Decimal::ZERO);
-            let dbb = mint_deltas.get(&mint_b).cloned().unwrap_or(rust_decimal::Decimal::ZERO);
+            let da = mint_deltas
+                .get(&mint_a)
+                .cloned()
+                .unwrap_or(rust_decimal::Decimal::ZERO);
+            let dbb = mint_deltas
+                .get(&mint_b)
+                .cloned()
+                .unwrap_or(rust_decimal::Decimal::ZERO);
             let spend_a = (-da).max(rust_decimal::Decimal::ZERO);
             let spend_b = (-dbb).max(rust_decimal::Decimal::ZERO);
-            let usd = spend_a * rust_decimal::Decimal::from_f64_retain(pa).unwrap_or(rust_decimal::Decimal::ZERO)
-                + spend_b * rust_decimal::Decimal::from_f64_retain(pb).unwrap_or(rust_decimal::Decimal::ZERO);
+            let usd = spend_a
+                * rust_decimal::Decimal::from_f64_retain(pa).unwrap_or(rust_decimal::Decimal::ZERO)
+                + spend_b
+                    * rust_decimal::Decimal::from_f64_retain(pb)
+                        .unwrap_or(rust_decimal::Decimal::ZERO);
             usd.to_f64()
         }
     } else {
@@ -383,18 +400,24 @@ pub async fn list_positions(
             None => uncollected_fees_info_for_position(state.provider.clone(), p).await,
         };
 
-        let (token_a_label, token_b_label, token_mint_a, token_mint_b, token_price_a_usd, token_price_b_usd) =
-            match valuation.as_ref() {
-                Some(v) => (
-                    Some(v.token_a_label.clone()),
-                    Some(v.token_b_label.clone()),
-                    Some(v.token_mint_a.to_string()),
-                    Some(v.token_mint_b.to_string()),
-                    Some(v.price_a_usd),
-                    Some(v.price_b_usd),
-                ),
-                None => (None, None, None, None, None, None),
-            };
+        let (
+            token_a_label,
+            token_b_label,
+            token_mint_a,
+            token_mint_b,
+            token_price_a_usd,
+            token_price_b_usd,
+        ) = match valuation.as_ref() {
+            Some(v) => (
+                Some(v.token_a_label.clone()),
+                Some(v.token_b_label.clone()),
+                Some(v.token_mint_a.to_string()),
+                Some(v.token_mint_b.to_string()),
+                Some(v.price_a_usd),
+                Some(v.price_b_usd),
+            ),
+            None => (None, None, None, None, None, None),
+        };
         let (range_lower_price, range_upper_price, range_price_quote) = match valuation.as_ref() {
             Some(v) => (
                 Some(v.range_price.lower),
@@ -475,7 +498,10 @@ pub async fn list_closed_positions(
         return Ok(Json(ClosedPositionsResponse {
             total: 0,
             items: Vec::new(),
-            note: Some(format!("Registry file missing on API host: {}", path.display())),
+            note: Some(format!(
+                "Registry file missing on API host: {}",
+                path.display()
+            )),
         }));
     }
 
@@ -491,8 +517,8 @@ pub async fn list_closed_positions(
         last_sid: Option<String>,
     }
 
-    let file = File::open(&path)
-        .map_err(|e| ApiError::internal(format!("open registry file: {e}")))?;
+    let file =
+        File::open(&path).map_err(|e| ApiError::internal(format!("open registry file: {e}")))?;
     let reader = BufReader::new(file);
 
     let mut by_pos: HashMap<String, RowState> = HashMap::new();
@@ -528,7 +554,10 @@ pub async fn list_closed_positions(
             .unwrap_or("")
             .trim()
             .to_string();
-        let ts = v.get("ts_utc").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+        let ts = v
+            .get("ts_utc")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string());
         let sid = v
             .get("rebalance_session_id")
             .and_then(|x| x.as_str())
@@ -595,7 +624,11 @@ pub async fn list_closed_positions(
     }
 
     // Newest first if close timestamp is present; else stable string sort.
-    closed.sort_by(|a, b| b.closed_ts_utc.cmp(&a.closed_ts_utc).then_with(|| a.position_address.cmp(&b.position_address)));
+    closed.sort_by(|a, b| {
+        b.closed_ts_utc
+            .cmp(&a.closed_ts_utc)
+            .then_with(|| a.position_address.cmp(&b.position_address))
+    });
 
     // `closed` is sorted newest-first; skip `offset` from the head, then take up to `limit`.
     let total = closed.len();
@@ -612,7 +645,8 @@ pub async fn list_closed_positions(
         None
     } else {
         Some(
-            "enrich_pools=false: registry-only rows; pair labels omitted (no pool RPC).".to_string(),
+            "enrich_pools=false: registry-only rows; pair labels omitted (no pool RPC)."
+                .to_string(),
         )
     };
 
@@ -630,7 +664,10 @@ pub async fn list_closed_positions(
         let mut pool_mints: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
         for pool in unique_pools {
             let (ma, mb) = match reader.get_pool_state(&pool).await {
-                Ok(ps) => (Some(ps.token_mint_a.to_string()), Some(ps.token_mint_b.to_string())),
+                Ok(ps) => (
+                    Some(ps.token_mint_a.to_string()),
+                    Some(ps.token_mint_b.to_string()),
+                ),
                 Err(_) => (None, None),
             };
             pool_mints.insert(pool, (ma, mb));
@@ -649,11 +686,7 @@ pub async fn list_closed_positions(
         }
     }
 
-    Ok(Json(ClosedPositionsResponse {
-        total,
-        items,
-        note,
-    }))
+    Ok(Json(ClosedPositionsResponse { total, items, note }))
 }
 
 /// Get lifecycle summary for a position: group lifecycle ledger rows by session id and compute aggregates.
@@ -697,7 +730,10 @@ pub async fn get_position_lifecycle_summary(
             collected_fees_usd: None,
             realized_cashflow_usd: Decimal::ZERO,
             session_summaries: Vec::new(),
-            note: Some(format!("Lifecycle ledger file missing on API host: {}", ledger.display())),
+            note: Some(format!(
+                "Lifecycle ledger file missing on API host: {}",
+                ledger.display()
+            )),
         }));
     }
 
@@ -753,14 +789,19 @@ pub async fn get_position_lifecycle_summary(
             continue;
         }
 
-        let key = session_id.clone().unwrap_or_else(|| "_no_session".to_string());
+        let key = session_id
+            .clone()
+            .unwrap_or_else(|| "_no_session".to_string());
 
         let tx_fee_lamports = v.get("tx_fee_lamports").and_then(|x| x.as_u64());
         if let Some(f) = tx_fee_lamports {
             total_tx_fee_lamports = total_tx_fee_lamports.saturating_add(f);
         }
 
-        let event_s = v.get("event").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+        let event_s = v
+            .get("event")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string());
         let is_collect = event_s.as_deref() == Some("bot_collect_fees");
         if is_collect {
             collect_events = collect_events.saturating_add(1);
@@ -771,73 +812,94 @@ pub async fn get_position_lifecycle_summary(
         {
             // If this is a collect-fees tx, derive per-leg collected amounts by mint.
             if is_collect {
-                    let pool_addr = v
-                        .get("pool_address")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    if let Some(pool_addr) = pool_addr {
-                        let (mint_a, mint_b) = if let Some(pair) = pool_mints_by_pool.get(&pool_addr).cloned() {
+                let pool_addr = v
+                    .get("pool_address")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(pool_addr) = pool_addr {
+                    let (mint_a, mint_b) =
+                        if let Some(pair) = pool_mints_by_pool.get(&pool_addr).cloned() {
                             pair
                         } else {
                             // Best-effort: resolve pool mints on demand (free RPC).
-                            match clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
-                                .get_pool_state(&pool_addr)
-                                .await
+                            match clmm_lp_protocols::prelude::WhirlpoolReader::new(
+                                state.provider.clone(),
+                            )
+                            .get_pool_state(&pool_addr)
+                            .await
                             {
                                 Ok(ps) => {
                                     let a = ps.token_mint_a.to_string();
                                     let b = ps.token_mint_b.to_string();
-                                    pool_mints_by_pool.insert(pool_addr.clone(), (a.clone(), b.clone()));
+                                    pool_mints_by_pool
+                                        .insert(pool_addr.clone(), (a.clone(), b.clone()));
                                     (a, b)
                                 }
                                 Err(_) => (String::new(), String::new()),
                             }
                         };
 
-                        if !mint_a.is_empty()
-                            && let Some(dv) = obj.get(&mint_a)
-                            && let Some(s) = dv.as_str()
-                            && let Ok(d) = Decimal::from_str(s.trim())
-                            && d > Decimal::ZERO
-                        {
-                            collected_a_ui += d;
-                            any_collected_a = true;
-                            mints_for_pricing.insert(mint_a.clone());
-                        }
-                        if !mint_b.is_empty()
-                            && let Some(dv) = obj.get(&mint_b)
-                            && let Some(s) = dv.as_str()
-                            && let Ok(d) = Decimal::from_str(s.trim())
-                            && d > Decimal::ZERO
-                        {
-                            collected_b_ui += d;
-                            any_collected_b = true;
-                            mints_for_pricing.insert(mint_b.clone());
-                        }
+                    if !mint_a.is_empty()
+                        && let Some(dv) = obj.get(&mint_a)
+                        && let Some(s) = dv.as_str()
+                        && let Ok(d) = Decimal::from_str(s.trim())
+                        && d > Decimal::ZERO
+                    {
+                        collected_a_ui += d;
+                        any_collected_a = true;
+                        mints_for_pricing.insert(mint_a.clone());
+                    }
+                    if !mint_b.is_empty()
+                        && let Some(dv) = obj.get(&mint_b)
+                        && let Some(s) = dv.as_str()
+                        && let Ok(d) = Decimal::from_str(s.trim())
+                        && d > Decimal::ZERO
+                    {
+                        collected_b_ui += d;
+                        any_collected_b = true;
+                        mints_for_pricing.insert(mint_b.clone());
                     }
                 }
+            }
             for (mint, dv) in obj {
                 if let Some(s) = dv.as_str()
                     && let Ok(d) = Decimal::from_str(s.trim())
                 {
                     let e = mint_deltas_sum.entry(mint.clone()).or_insert(Decimal::ZERO);
                     *e += d;
-                    }
                 }
             }
+        }
 
         let ev = PositionLifecycleEvent {
-            ts_utc: v.get("ts_utc").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
-            source: v.get("source").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            ts_utc: v
+                .get("ts_utc")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string()),
+            source: v
+                .get("source")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string()),
             event: event_s,
-            operation: v.get("operation").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
-            signature: v.get("signature").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
-            pool_address: v.get("pool_address").and_then(|x| x.as_str()).map(|s| s.trim().to_string()),
+            operation: v
+                .get("operation")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string()),
+            signature: v
+                .get("signature")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string()),
+            pool_address: v
+                .get("pool_address")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string()),
             position_pubkey,
             rebalance_session_id: session_id,
             tx_fee_lamports,
-            fee_payer_net_lamports_delta: v.get("fee_payer_net_lamports_delta").and_then(|x| x.as_i64()),
+            fee_payer_net_lamports_delta: v
+                .get("fee_payer_net_lamports_delta")
+                .and_then(|x| x.as_i64()),
             fee_payer_token_deltas: v.get("fee_payer_token_deltas").cloned(),
         };
         grouped.entry(key).or_default().push(ev);
@@ -877,7 +939,8 @@ pub async fn get_position_lifecycle_summary(
     let (px, src) = fetch_mint_prices_usd(&mints).await;
     let sol_usd = px.get(WSOL_MINT).copied().unwrap_or(0.0);
     let total_tx_fee_usd = if sol_usd > 0.0 {
-        Decimal::from_f64_retain((total_tx_fee_lamports as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
+        Decimal::from_f64_retain((total_tx_fee_lamports as f64 / 1e9) * sol_usd)
+            .unwrap_or(Decimal::ZERO)
     } else {
         Decimal::ZERO
     };
@@ -885,48 +948,52 @@ pub async fn get_position_lifecycle_summary(
     // Best-effort: collected LP fees in USD (A/B legs at current mint USD prices).
     //
     // We only compute USD when all collect rows point to the same pool (so token A/B identity is stable).
-    let collected_fees_usd = if pool_mints_by_pool.len() == 1 && (any_collected_a || any_collected_b) {
-        let (_pool, (ma, mb)) = pool_mints_by_pool.iter().next().unwrap();
-        let mut mint_set = BTreeSet::new();
-        mint_set.insert(ma.clone());
-        mint_set.insert(mb.clone());
-        let (px2, _src2) = fetch_mint_prices_usd(&mint_set).await;
-        let pa = px2.get(ma).copied().unwrap_or(0.0);
-        let pb = px2.get(mb).copied().unwrap_or(0.0);
-        let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
-        let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
+    let collected_fees_usd =
+        if pool_mints_by_pool.len() == 1 && (any_collected_a || any_collected_b) {
+            let (_pool, (ma, mb)) = pool_mints_by_pool.iter().next().unwrap();
+            let mut mint_set = BTreeSet::new();
+            mint_set.insert(ma.clone());
+            mint_set.insert(mb.clone());
+            let (px2, _src2) = fetch_mint_prices_usd(&mint_set).await;
+            let pa = px2.get(ma).copied().unwrap_or(0.0);
+            let pb = px2.get(mb).copied().unwrap_or(0.0);
+            let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
+            let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
 
-        // Also expose collected fees in smallest units (raw/base units), so UI can always sanity-check
-        // amounts even when USD pricing is unavailable.
-        let decimal_ui_to_raw_u64 = |v: Decimal, decimals: u8| -> Option<u64> {
-            if v <= Decimal::ZERO {
-                return Some(0);
-            }
-            let scale = Decimal::from(10u64).checked_powu(u64::from(decimals))?;
-            (v * scale).round().to_u64()
+            // Also expose collected fees in smallest units (raw/base units), so UI can always sanity-check
+            // amounts even when USD pricing is unavailable.
+            let decimal_ui_to_raw_u64 = |v: Decimal, decimals: u8| -> Option<u64> {
+                if v <= Decimal::ZERO {
+                    return Some(0);
+                }
+                let scale = Decimal::from(10u64).checked_powu(u64::from(decimals))?;
+                (v * scale).round().to_u64()
+            };
+
+            let dec_a = fetch_mint_decimals_best_effort(&state.provider, ma).await;
+            let dec_b = fetch_mint_decimals_best_effort(&state.provider, mb).await;
+            collected_fee_token_a_raw = dec_a.and_then(|d| {
+                any_collected_a
+                    .then_some(collected_a_ui)
+                    .and_then(|x| decimal_ui_to_raw_u64(x, d))
+            });
+            collected_fee_token_b_raw = dec_b.and_then(|d| {
+                any_collected_b
+                    .then_some(collected_b_ui)
+                    .and_then(|x| decimal_ui_to_raw_u64(x, d))
+            });
+
+            Some(collected_a_ui * pa_d + collected_b_ui * pb_d)
+        } else {
+            None
         };
-
-        let dec_a = fetch_mint_decimals_best_effort(&state.provider, ma).await;
-        let dec_b = fetch_mint_decimals_best_effort(&state.provider, mb).await;
-        collected_fee_token_a_raw = dec_a.and_then(|d| {
-            any_collected_a
-                .then_some(collected_a_ui)
-                .and_then(|x| decimal_ui_to_raw_u64(x, d))
-        });
-        collected_fee_token_b_raw = dec_b.and_then(|d| {
-            any_collected_b
-                .then_some(collected_b_ui)
-                .and_then(|x| decimal_ui_to_raw_u64(x, d))
-        });
-
-        Some(collected_a_ui * pa_d + collected_b_ui * pb_d)
-    } else {
-        None
-    };
 
     // Realized cashflow USD: best-effort using stream PnL (it knows baseline mints), otherwise 0.
     let pnl = compute_position_stream_pnl(&state, pos).await.ok();
-    let realized_cashflow_usd = pnl.as_ref().map(|p| p.realized_cashflow_usd).unwrap_or(Decimal::ZERO);
+    let realized_cashflow_usd = pnl
+        .as_ref()
+        .map(|p| p.realized_cashflow_usd)
+        .unwrap_or(Decimal::ZERO);
 
     let note = Some(format!(
         "Lifecycle summary is best-effort from lifecycle JSONL. tx fees use SOL/USD ({src}). collected_fees (if present) use positive token deltas from bot_collect_fees × current mint USD. realized_cashflow is sourced from stream PnL when available."
@@ -995,7 +1062,9 @@ pub async fn get_position(
 
     let prices =
         fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&position)).await;
-    let valuation = compute_position_usd_valuation(state.provider.clone(), &position, &prices).await.ok();
+    let valuation = compute_position_usd_valuation(state.provider.clone(), &position, &prices)
+        .await
+        .ok();
     if let (Some(db), Some(v)) = (state.db.as_ref(), valuation.as_ref()) {
         // Best-effort snapshot for stream PnL/IL across rotated PDAs.
         let raw = serde_json::json!({
@@ -1072,18 +1141,24 @@ pub async fn get_position(
         None => uncollected_fees_info_for_position(state.provider.clone(), &position).await,
     };
 
-    let (token_a_label, token_b_label, token_mint_a, token_mint_b, token_price_a_usd, token_price_b_usd) =
-        match valuation.as_ref() {
-            Some(v) => (
-                Some(v.token_a_label.clone()),
-                Some(v.token_b_label.clone()),
-                Some(v.token_mint_a.to_string()),
-                Some(v.token_mint_b.to_string()),
-                Some(v.price_a_usd),
-                Some(v.price_b_usd),
-            ),
-            None => (None, None, None, None, None, None),
-        };
+    let (
+        token_a_label,
+        token_b_label,
+        token_mint_a,
+        token_mint_b,
+        token_price_a_usd,
+        token_price_b_usd,
+    ) = match valuation.as_ref() {
+        Some(v) => (
+            Some(v.token_a_label.clone()),
+            Some(v.token_b_label.clone()),
+            Some(v.token_mint_a.to_string()),
+            Some(v.token_mint_b.to_string()),
+            Some(v.price_a_usd),
+            Some(v.price_b_usd),
+        ),
+        None => (None, None, None, None, None, None),
+    };
     let (range_lower_price, range_upper_price, range_price_quote) = match valuation.as_ref() {
         Some(v) => (
             Some(v.range_price.lower),
@@ -1279,7 +1354,9 @@ pub async fn heal_position_strategy_link(
         Ok(_) => Ok(Json(MessageResponse::new(format!(
             "No strategy-link heal needed for {pda}."
         )))),
-        Err(e) => Err(ApiError::internal(format!("heal strategy link failed: {e}"))),
+        Err(e) => Err(ApiError::internal(format!(
+            "heal strategy link failed: {e}"
+        ))),
     }
 }
 
@@ -2001,10 +2078,8 @@ pub async fn suggest_position_strategy(
         let position_addresses = params
             .and_then(|p| p.get("position_addresses"))
             .and_then(|v| v.as_array());
-        position_addresses.is_some_and(|arr| {
-            arr.iter()
-                .any(|v| v.as_str().map(str::trim) == Some(pos))
-        })
+        position_addresses
+            .is_some_and(|arr| arr.iter().any(|v| v.as_str().map(str::trim) == Some(pos)))
     });
     drop(strategies);
     if already_linked {
@@ -2017,7 +2092,9 @@ pub async fn suggest_position_strategy(
     let Some(parent) = infer_parent_position_from_lifecycle_best_effort(pos).await else {
         return Ok(Json(crate::models::SuggestStrategyLinkResponse {
             strategy_id: None,
-            reason: "No parent PDA inferred from lifecycle ledger (missing open/close correlation).".to_string(),
+            reason:
+                "No parent PDA inferred from lifecycle ledger (missing open/close correlation)."
+                    .to_string(),
         }));
     };
 
@@ -2035,14 +2112,18 @@ pub async fn suggest_position_strategy(
         if has_parent {
             return Ok(Json(crate::models::SuggestStrategyLinkResponse {
                 strategy_id: Some(s.id.clone()),
-                reason: format!("Inferred parent PDA {parent} is linked to strategy {}.", s.id),
+                reason: format!(
+                    "Inferred parent PDA {parent} is linked to strategy {}.",
+                    s.id
+                ),
             }));
         }
     }
 
     Ok(Json(crate::models::SuggestStrategyLinkResponse {
         strategy_id: None,
-        reason: format!("Inferred parent PDA {parent} but no strategy contains it in parameters.position_addresses."),
+        reason: format!(
+            "Inferred parent PDA {parent} but no strategy contains it in parameters.position_addresses."
+        ),
     }))
 }
-

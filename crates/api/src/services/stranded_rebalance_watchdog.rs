@@ -426,15 +426,15 @@ fn build_stranded_rebalances(
         if old.is_empty() {
             continue;
         }
-        let synthetic_sid = synthetic_pending_session_id(old, p.intended_tick_lower, p.intended_tick_upper);
-        let group_sid = synthetic_pending_group_id(p.pool.trim(), p.intended_tick_lower, p.intended_tick_upper);
+        let synthetic_sid =
+            synthetic_pending_session_id(old, p.intended_tick_lower, p.intended_tick_upper);
+        let group_sid =
+            synthetic_pending_group_id(p.pool.trim(), p.intended_tick_lower, p.intended_tick_upper);
         if dismissed_sessions.contains(&synthetic_sid) || dismissed_sessions.contains(&group_sid) {
             continue;
         }
         let already_visible = out.iter().any(|it| {
-            it.old_position
-                .as_deref()
-                .is_some_and(|x| x.trim() == old)
+            it.old_position.as_deref().is_some_and(|x| x.trim() == old)
                 || (it.pool_address.as_deref().is_some_and(|x| x == p.pool)
                     && it.intended_tick_lower == Some(p.intended_tick_lower)
                     && it.intended_tick_upper == Some(p.intended_tick_upper))
@@ -486,8 +486,16 @@ fn prune_pending_open_items_for_dismiss(
     let Some(item) = dismissed_item else {
         return;
     };
-    let pool = item.pool_address.as_deref().map(str::trim).unwrap_or_default();
-    let old = item.old_position.as_deref().map(str::trim).unwrap_or_default();
+    let pool = item
+        .pool_address
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    let old = item
+        .old_position
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
     let lower = item.intended_tick_lower;
     let upper = item.intended_tick_upper;
 
@@ -527,7 +535,9 @@ pub fn dismiss_stranded_rebalance_session_for_api(
     let mut pending_store = load_pending_open_store(&pending_path_buf)?;
     let items_before = build_stranded_rebalances(&lifecycle_rows, &il_rows, &pending_store);
 
-    let dismissed_item = items_before.iter().find(|it| it.rebalance_session_id == sid);
+    let dismissed_item = items_before
+        .iter()
+        .find(|it| it.rebalance_session_id == sid);
 
     if !pending_store
         .dismissed_session_ids
@@ -649,8 +659,7 @@ fn reconcile_stranded_with_il_path(
 
     let (_lifecycle_missing, _total, lifecycle_rows) =
         read_jsonl_tail(lifecycle_path.as_path(), MAX_LEDGER_ROWS, 0, None)?;
-    let (_il_missing, _il_total, il_rows) =
-        read_jsonl_tail(il_path, MAX_LEDGER_ROWS, 0, None)?;
+    let (_il_missing, _il_total, il_rows) = read_jsonl_tail(il_path, MAX_LEDGER_ROWS, 0, None)?;
     let mut pending_store = load_pending_open_store(&pending_path_buf)?;
     let dismissed_set = load_dismissed_session_ids(&dismissed_path)?;
     for sid in dismissed_set {
@@ -738,25 +747,23 @@ fn reconcile_stranded_with_il_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalPendingOpenItem, LocalPendingOpenStore, StrandedRebalanceItem, build_stranded_rebalances,
-        prune_pending_open_items_for_dismiss, synthetic_pending_group_id,
-        synthetic_pending_session_id,
+        LocalPendingOpenItem, LocalPendingOpenStore, StrandedRebalanceItem,
+        build_stranded_rebalances, prune_pending_open_items_for_dismiss,
+        synthetic_pending_group_id, synthetic_pending_session_id,
     };
     use clmm_lp_execution::lifecycle::RebalanceReason;
 
     #[test]
     fn stranded_session_close_without_open_is_auto_enqueueable_with_il_hints() {
         let sid = "sess-watchdog-1";
-        let lifecycle = vec![
-            serde_json::json!({
-                "source": "orca_bot",
-                "rebalance_session_id": sid,
-                "event": "bot_close_position",
-                "ts_utc": "2026-01-01T00:00:00Z",
-                "position_pubkey": "oldNft111",
-                "pool_address": "poolPub222",
-            }),
-        ];
+        let lifecycle = vec![serde_json::json!({
+            "source": "orca_bot",
+            "rebalance_session_id": sid,
+            "event": "bot_close_position",
+            "ts_utc": "2026-01-01T00:00:00Z",
+            "position_pubkey": "oldNft111",
+            "pool_address": "poolPub222",
+        })];
         let il = vec![serde_json::json!({
             "event": "rebalance_incomplete",
             "rebalance_session_id": sid,

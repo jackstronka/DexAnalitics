@@ -91,8 +91,8 @@ keywords: periodic, min_rebalance_interval_hours, eval_interval_secs, rebalance-
 
 - **Symptom:** Multiple rebalances within ~25 minutes (e.g. 5×) while the position stayed in range; cadence matched **`eval_interval_secs`** (default 300s), not “every N hours”.
 - **Root cause:** `DecisionConfig` ties Periodic to `hours_since_rebalance >= periodic_interval_hours`. When **`min_rebalance_interval_hours` / periodic interval is `0`**, `hours_since >= 0` is always true → **Rebalance on every executor tick**. UI could send `0` via numeric field; persisted JSON could also contain `0`.
-- **Fix:** Clamp `0` → `1` when building executor decision config from strategy parameters (API); parse integer/float/string for the same field. Web form sends `max(1, floor(n))`. Log a warning when clamping.
-- **Guards/tests:** `min_rebalance_interval_parses_json_number_and_string`, `zero_min_rebalance_interval_clamps_to_one`.
+- **Fix:** Follow-up policy split: `periodic` still guards against `0` (frontend blocks `0`, backend clamps `0 -> 1` defensively if it arrives via API), while non-periodic strategies accept `0` as “no time gate”. Optional empty interval now stays optional (no implicit 1h/24h clamp in strategy parameter mapping).
+- **Guards/tests:** `min_rebalance_interval_parses_json_number_and_string`; UI validation for `periodic` rejects `0` with explicit message.
 - **Paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/lib/strategyFormShared.tsx`
 
 ### BUG-20260414-05 — Strategy UI stuck on first linked PDA after bot rotations; HTTP start / autostart used divergent executor wiring
@@ -230,6 +230,7 @@ keywords: position-detail, performance, stream-lineage, value-usd, snapshots, va
 - **Fix (2026-04-15, recovery follow-up 2):** Recovery-like open (bot open + `rebalance_session_id` + wcześniejsze `bot_swap_*` w tej samej sesji) z niespójnymi pool-leg deltami (nie oba wydatkowe) wymusza pełny koszyk caps (`open_caps_recovery`) zamiast mieszania delta+cap.
 - **Guards/tests:** `cargo test -p clmm-lp-api position_stream_lineage`; dodane: `pool_legs_strict_spend_requires_both_negative`, `open_row_is_recovery_like_when_prior_session_swap_exists`; po deploy: odśwież stream-lineage (persist) dla danej PDA — stary zły wiersz `baseline_open` może się zaktualizować tylko gdy trafi `open_caps`.
 - **Residual risk:** Otwarcie **bez** `amount_*_cap` w `details` (np. część ścieżek CLI) — wtedy tylko delty + guardrail `node_metrics`; nadal możliwy drift cen/RPC. Dodatkowo możliwy pozostaje drift live/fallback przy chwilowej niedostępności RPC/price feed.
+- **Symptom (2026-04-16, regression?):** Pozycja `52PR84ugSnNiaWbUAy1jrmf5YL7RqyzwvQmZ5u3wWEoC` pokazuje `start value ~$5.627` w historii (baseline z `amount_a_cap/amount_b_cap`), ale `Performance -> Value` pokazuje `~$0.218` (live valuation).
 - **Paths:** `web/src/pages/PositionDetail.tsx` (Performance vs tabela lineage), `crates/api/src/handlers/positions.rs` (`get_position`, zapis snapshotów), `crates/api/src/services/position_stream_lineage.rs` (`node_metrics`, zapytania `position_stream_valuation_snapshots`), `crates/api/src/services/position_valuation.rs`
 
 ### BUG-20260413-05 — Stream lineage chained manual opens to unrelated rotation history
@@ -248,6 +249,7 @@ keywords: position-stream-lineage, rotation, registry.jsonl, lifecycle, rebalanc
 - **Symptom (2026-04-15, follow-up 3):** Recovery-open po `rebalance_incomplete` mógł utworzyć nowy PDA bez `rebalance_session_id`, więc lineage pokazywał nową pozycję jako osobny start-chain (bez powiązania z zamkniętym parentem), a strategia nie miała stabilnej kotwicy sesyjnej do old->new continuity.
 - **Symptom (2026-04-15, follow-up 4):** Recovery-open tworzył nowy aktywny PDA, ale strategia pozostawała przypięta do starego `closed_position_nft` (`linked_strategies=[]` na nowej pozycji), co dawało niespójny status linku w UI.
 - **Symptom (2026-04-15, follow-up 5):** Strategia z `parameters.position_addresses: []` (zamierzone „zarządzaj niczym”) nadal podejmowała decyzje na monitorowanych pozycjach, powodując częste rebalance nawet in-range.
+- **Symptom (2026-04-16, follow-up 6):** Po `bot_open_position` dla `52PR84ug...` z `rebalance_session_id=facce...` stream-lineage potrafi zwrócić chain długości 1 zamiast kontynuacji po `4NL...` (open nastąpił wiele godzin po close; heurystyki parent inference mają okno ~60 min).
 - **Root cause:** Registry fallback linked `registry_open` → `registry_close` by time/pool/owner even when `rebalance_session_id` did not match (or was empty). Lifecycle fallback linked opens to the latest close in a short window without requiring rotation evidence; forward close→open used the first qualifying open, not the true successor; lifecycle parent inference treated loose swap rows as rotation.
 - **Root cause (runtime `debug-c45ac3.log`, H-lineage):** With DB enabled, `db_chain_from_edges_len` stayed **1** while JSONL fallback inflated `chain_len` to **3–4** — `build_linear_chain` walked from a single graph root and **omitted `entry` on forked `position_stream_edges`** (`A→B` and `A→C`), fell back to `[entry]`, then registry/lifecycle re-stitched a long pool history.
 - **Root cause (2026-04-15, follow-up 3):** `recover_open_after_incomplete` called `open_new_range_with_wallet_mix(..., ledger_session_id=None)`; pending-open queue also did not persist session id. Recovered open rows were emitted as unanchored bot opens.
@@ -348,6 +350,8 @@ fixed_in:
 keywords: rebalance, close_without_open, swap_mix, recovery, strategy
 
 - **Symptom:** Pozycja zamknięta jako `close_kind=rotation`, ale brak kolejnego `bot_open_position` dla tej sesji/łańcucha.
+- **Symptom (2026-04-16):** Dla sesji `facce436-7913-4173-b954-17f403d15a9d` (old PDA `4NLjjVqBtV4CVeFL224UzVpSW4Ds7g16rxuTvir78Qh3`) i `323c4f01-0526-484a-b9c4-ce820e4fc1e6` (old PDA `D6tnfq94B3WnAGeqVX3JUri9AhKfkfHNcNHviyTaBrcV`) recovery ma `attempts=13` i kończy się `open_position failed ... InstructionError(3, Custom(6012))` na `OpenPositionWithTokenExtensions`; wpisy pozostają w `data/pending-open-recovery.json` i w UI `Closed by bot, waiting for reopen`.
+- **Symptom (2026-04-16, follow-up):** Bot otworzył nową pozycję `52PR84ugSnNiaWbUAy1jrmf5YL7RqyzwvQmZ5u3wWEoC` z `rebalance_session_id=facce436-7913-4173-b954-17f403d15a9d`, ale w UI nadal potrafi pozostać wpis w `Closed by bot, waiting for reopen` (prawdopodobnie przez pozostawiony item w `data/pending-open-recovery.json`, który generuje synthetic pending-only row mimo że lifecycle ma `bot_open_position`).
 - **Root cause:** Rebalance flow urwał się po close + etapach swap (`bot_swap_mix_round` / `bot_swap_exact_in_attempt`) bez finalnego open; brak jawnego `rebalance_incomplete` wpisu dla tego przypadku.
 - **Fix:** Do wdrożenia: twardy marker `rebalance_incomplete` + trwały `pending-open` recovery gdy close zakończony, a open nie doszedł do skutku; UI powinno pokazywać taki status zamiast "po prostu closed".
 - **Guards/tests:** test scenariusza: close success + swap rounds + open failure/abort => wpis `rebalance_incomplete` + recovery artifact.

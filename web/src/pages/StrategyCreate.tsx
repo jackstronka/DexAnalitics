@@ -109,6 +109,15 @@ export default function StrategyCreate() {
       })
       return
     }
+    if (strategyType === 'periodic' && minRebalanceIntervalHours === 0) {
+      toast({
+        title: 'Invalid interval for Periodic',
+        description:
+          'For Periodic strategy, interval must be at least 1 hour or left empty.',
+        variant: 'destructive',
+      })
+      return
+    }
 
     const payload: CreateStrategyRequest = {
       name: name.trim(),
@@ -135,7 +144,7 @@ export default function StrategyCreate() {
 
   const minIntervalLabel = useMemo(() => {
     if (strategyType === 'periodic') {
-      return 'Rebalance interval (h)'
+      return 'Rebalance co N godzin'
     }
     return 'Min. rebalance spacing (h)'
   }, [strategyType])
@@ -322,6 +331,7 @@ export default function StrategyCreate() {
                     id="min-interval"
                     type="number"
                     step="1"
+                    min={strategyType === 'periodic' ? 1 : 0}
                     disabled={!enabled.minInterval}
                     className={cn(
                       'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
@@ -339,25 +349,27 @@ export default function StrategyCreate() {
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
                 <p className="text-sm font-medium text-foreground">Semantyka rebalance</p>
                 <div className="grid gap-3 md:grid-cols-2">
-                  <div className="flex items-start gap-2">
-                    <input
-                      id="create-rebalance-on-exit"
-                      type="checkbox"
-                      checked={rebalanceOnRangeExitImmediately}
-                      onChange={(e) => setRebalanceOnRangeExitImmediately(e.target.checked)}
-                      className="mt-0.5 rounded border-input"
-                    />
-                    <div className="flex-1">
-                      <FieldLabel
-                        htmlFor="create-rebalance-on-exit"
-                        label="Rebalance immediately on range-exit (OOR)"
-                        tooltip={TOOLTIPS.rebalanceOnRangeExitImmediately}
+                  {strategyType !== 'periodic' && (
+                    <div className="flex items-start gap-2">
+                      <input
+                        id="create-rebalance-on-exit"
+                        type="checkbox"
+                        checked={rebalanceOnRangeExitImmediately}
+                        onChange={(e) => setRebalanceOnRangeExitImmediately(e.target.checked)}
+                        className="mt-0.5 rounded border-input"
                       />
-                      <p className="text-xs text-muted-foreground">
-                        Default: on (old behavior).
-                      </p>
+                      <div className="flex-1">
+                        <FieldLabel
+                          htmlFor="create-rebalance-on-exit"
+                          label="Rebalance immediately on range-exit (OOR)"
+                          tooltip={TOOLTIPS.rebalanceOnRangeExitImmediately}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Default: on (old behavior).
+                        </p>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   <div className="flex items-start gap-2">
                     <input
@@ -371,7 +383,7 @@ export default function StrategyCreate() {
                     <div className={cn('flex-1', strategyType !== 'periodic' && 'opacity-60')}>
                       <FieldLabel
                         htmlFor="create-periodic-requires-oor"
-                        label="Periodic only when OOR"
+                        label="Wymagaj OOR w chwili wyzwolenia"
                         tooltip={TOOLTIPS.periodicRequiresOor}
                       />
                       <p className="text-xs text-muted-foreground">

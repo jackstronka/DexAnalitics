@@ -333,9 +333,10 @@ pub async fn compute_position_stream_performance(
     maybe_ingest_ledgers(state, skip_ledger_ingest).await;
 
     let max_nodes = 2000;
-    let (positions, sessions) = stream_component_positions_and_sessions(state, position_address, max_nodes)
-        .await
-        .map_err(|e| crate::error::ApiError::internal(format!("stream component: {e}")))?;
+    let (positions, sessions) =
+        stream_component_positions_and_sessions(state, position_address, max_nodes)
+            .await
+            .map_err(|e| crate::error::ApiError::internal(format!("stream component: {e}")))?;
 
     let Some(db) = state.db.as_ref() else {
         return Ok(PositionStreamPerformanceResponse {
@@ -352,7 +353,7 @@ pub async fn compute_position_stream_performance(
     };
 
     // Total tx fee in lamports: prefer session join; if there are no sessions yet, fall back to position filter.
-        let (fee_lamports, collect_events, sum_a, sum_b) = if !sessions.is_empty() {
+    let (fee_lamports, collect_events, sum_a, sum_b) = if !sessions.is_empty() {
         let fee_row = sqlx::query(
             r#"
             SELECT
@@ -372,7 +373,12 @@ pub async fn compute_position_stream_performance(
         let collect_events: i64 = fee_row.try_get("collect_events").unwrap_or(0);
         let sum_a: Option<Decimal> = fee_row.try_get("sum_a").ok();
         let sum_b: Option<Decimal> = fee_row.try_get("sum_b").ok();
-        (fee_lamports.max(0) as u64, collect_events.max(0) as u32, sum_a, sum_b)
+        (
+            fee_lamports.max(0) as u64,
+            collect_events.max(0) as u32,
+            sum_a,
+            sum_b,
+        )
     } else {
         let fee_row = sqlx::query(
             r#"
@@ -393,7 +399,12 @@ pub async fn compute_position_stream_performance(
         let collect_events: i64 = fee_row.try_get("collect_events").unwrap_or(0);
         let sum_a: Option<Decimal> = fee_row.try_get("sum_a").ok();
         let sum_b: Option<Decimal> = fee_row.try_get("sum_b").ok();
-        (fee_lamports.max(0) as u64, collect_events.max(0) as u32, sum_a, sum_b)
+        (
+            fee_lamports.max(0) as u64,
+            collect_events.max(0) as u32,
+            sum_a,
+            sum_b,
+        )
     };
 
     // Convert SOL lamports fee to USD using free mint price fetcher.
@@ -423,4 +434,3 @@ pub async fn compute_position_stream_performance(
         ),
     })
 }
-

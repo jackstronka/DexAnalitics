@@ -22,6 +22,8 @@ tags: domain=lifecycle,lineage; source=jsonl-local; freshness=historical; qualit
   - `event_slot` (u64) — confirmation slot when known;
   - `event_price_a_usd`, `event_price_b_usd` — USD spot for pool **token A / B** (same mint order as the Whirlpool), from a fresh pool read + GeckoTerminal (with the same WSOL/USDC tick override heuristic as API Performance);
   - `event_price_source` — e.g. `gecko` or `gecko+pool_tick_wsol`.
+  - `open_amount_a_raw`, `open_amount_b_raw` — **measured** token amounts for the opened position legs (raw units), derived post-open from on-chain position liquidity + pool state (best-effort; only for successful opens).
+  - `open_amounts_source` — currently `onchain_after_open` when the measurement path succeeds.
   Missing/timeout on enrichment does not block the ledger append. API lineage `persist_event_valuation_snapshots` prefers these fields for `baseline_open` / `end_close` and tags `raw_json.price_time_kind` (`at_tx_event` vs `at_persist_fallback`).
 
 ### `position_stream_ledger_rows` (Postgres)

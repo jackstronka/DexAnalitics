@@ -1,3 +1,40 @@
+## 2026-04-16 — Strategy interval semantics: optional stays optional, periodic blocks 0
+
+keywords: web, api, strategy, periodic, min_rebalance_interval_hours, oor, validation
+
+- **What:** Updated strategy form semantics for interval input: `periodic` now rejects `0` in UI (min=1 + submit validation), while non-periodic modes can still send `0` to represent “no time gate”.
+- **What:** Backend no longer applies a global `0 -> 1` clamp for all strategy modes. Mapping now treats missing interval as truly optional and mode-specific (`periodic` no timer trigger when unset; non-periodic no spacing gate when unset). Defensive clamp for `periodic=0` remains server-side to avoid eval-tick rebalance loops from direct API calls.
+- **Why:** Operators expected `optional` to mean “leave unset without hidden replacement”. Previous behavior silently converted unset/zero into hard time gates, which was confusing and inconsistent with UI wording.
+- **paths:** `web/src/lib/strategyFormShared.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `doc/BUGS.md`
+
+## 2026-04-16 — Baseline open is now a measurement (on-chain), not caps/deltas heuristics
+
+keywords: api, execution, lineage, lifecycle, valuation, baseline_open, orca, ledger, open_amount_raw
+
+- **What:** Executor now best-effort reads the newly created Orca position + pool state after a successful open and records measured token legs into lifecycle `details`: `open_amount_a_raw`, `open_amount_b_raw` (raw units), tagged `open_amounts_source=onchain_after_open`.
+- **What:** API lineage `baseline_open` now **prefers** `open_amount_*_raw` (when present + decimals known), falling back to `fee_payer_token_deltas` only when measurement is unavailable.
+- **Why:** `amount_*_cap` are max limits, and deltas can be ambiguous (esp. WSOL/native SOL). This change removes inflated/incorrect “start value” cases and makes baseline consistent with the actual opened liquidity.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-16 — Baseline open shows planned quote until measured amounts arrive
+
+keywords: api, execution, lineage, lifecycle, valuation, baseline_open, orca, ledger, open_quote, target_usd
+
+- **What:** Strategy/bot reopen now records intended open budget and deposit-quote caps into lifecycle `details` (`open_target_usd`, `open_quote_token_max_{a,b}`, `open_quote_estimated_value_usd`, etc.).
+- **What:** API lineage `baseline_open` now prefers `open_quote_token_max_{a,b}` (planned) over `fee_payer_token_deltas` when measured `open_amount_*_raw` is missing, and then upgrades automatically once measured amounts are present.
+- **Why:** UX: show a stable “value at open” immediately (planned), but converge to authoritative on-chain amounts as soon as available; avoids WSOL/SOL delta ambiguity.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-15 — Add explicit WSOL<->SOL conversion flow in Swap (Orca mode)
+
+keywords: api, web, wallets, wsol, native-sol, convert-sol, swap-ui, orca-executor
+
+- **What:** Added `POST /wallets/convert-sol` with request `{ direction, amount_raw }` and response including `signature`, wired in router/OpenAPI and frontend API client as `convertSol(...)`.
+- **What:** Extended Orca executor with `read_wsol_balance_raw`, wrap-with-signature helper, and safe-mode unwrap (`submit_wsol_unwrap_with_signature`) that currently supports full WSOL ATA unwrap (partial unwrap intentionally rejected with clear error).
+- **What:** Added `Convert WSOL <-> SOL` panel on `Swap` page (Orca provider only): direction toggle, amount input, `Max`, submit action, validation against source balance, and post-success balance refresh.
+- **Why:** Users can explicitly move funds between WSOL and native SOL for operational fees/rent without routing through market swap paths; this reduces friction when wallet has WSOL but lacks native SOL for tx execution guards.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `crates/api/src/openapi.rs`, `crates/api/src/routes.rs`, `crates/protocols/src/orca/executor.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`
+
 ## 2026-04-15 — Harden heal-strategy-link to active monitored mints
 
 keywords: api, strategy-link, heal-strategy-link, monitor, safety-guard

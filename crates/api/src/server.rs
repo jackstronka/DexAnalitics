@@ -37,11 +37,12 @@ fn env_autostart_strategies_on_boot() -> bool {
 
 fn json_boolish(v: &serde_json::Value) -> Option<bool> {
     v.as_bool().or_else(|| {
-        v.as_str().and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "y" | "on" => Some(true),
-            "0" | "false" | "no" | "n" | "off" => Some(false),
-            _ => None,
-        })
+        v.as_str()
+            .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "y" | "on" => Some(true),
+                "0" | "false" | "no" | "n" | "off" => Some(false),
+                _ => None,
+            })
     })
 }
 
@@ -92,11 +93,7 @@ async fn maybe_autostart_strategies(state: &AppState) {
                     .and_then(json_boolish)
                     .or_else(|| s.config.get("auto_start").and_then(json_boolish))
                     .unwrap_or(false);
-                if auto_start {
-                    Some(s.id.clone())
-                } else {
-                    None
-                }
+                if auto_start { Some(s.id.clone()) } else { None }
             })
             .collect()
     };
@@ -106,7 +103,10 @@ async fn maybe_autostart_strategies(state: &AppState) {
         return;
     }
 
-    info!(count = ids.len(), "Auto-starting opted-in strategies on API boot");
+    info!(
+        count = ids.len(),
+        "Auto-starting opted-in strategies on API boot"
+    );
     let svc = crate::services::StrategyService::new(state.clone());
     for id in ids {
         let first = svc.start_strategy(&id).await;

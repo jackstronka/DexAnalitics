@@ -3,10 +3,12 @@
 use crate::error::ApiError;
 use crate::models::{OpenPositionRequest, RebalanceRequest, SwapBeforeOpenRequest};
 use crate::position_registry_seed::registry_position_open_map;
-use crate::state::{AlertUpdate, AppState, PositionUpdate};
-use crate::services::position_valuation::{map_position_fetch_error, uncollected_fees_info_for_position};
-use crate::services::strategy_service::append_position_address_to_strategy;
 use crate::services::position_executor::wallet_config_diagnostic;
+use crate::services::position_valuation::{
+    map_position_fetch_error, uncollected_fees_info_for_position,
+};
+use crate::services::strategy_service::append_position_address_to_strategy;
+use crate::state::{AlertUpdate, AppState, PositionUpdate};
 use clmm_lp_execution::prelude::{RebalanceParams, RebalanceReason, StrategyExecutor};
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::orca::position_reader::PositionReader;
@@ -173,12 +175,10 @@ impl PositionService {
         }
 
         let Some(executor) = &self.executor else {
-            return Ok(OperationResult::failure(
-                format!(
-                    "Swap requires executor and wallet configuration. {}",
-                    wallet_config_diagnostic()
-                ),
-            ));
+            return Ok(OperationResult::failure(format!(
+                "Swap requires executor and wallet configuration. {}",
+                wallet_config_diagnostic()
+            )));
         };
 
         let guard = executor.read().await;
@@ -329,12 +329,10 @@ impl PositionService {
         }
 
         let Some(executor) = &self.executor else {
-            return Ok(OperationResult::failure(
-                format!(
-                    "Position opening requires executor and wallet configuration. {}",
-                    wallet_config_diagnostic()
-                ),
-            ));
+            return Ok(OperationResult::failure(format!(
+                "Position opening requires executor and wallet configuration. {}",
+                wallet_config_diagnostic()
+            )));
         };
 
         let ledger_session = request
@@ -408,8 +406,12 @@ Top up the API wallet and retry."
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
         {
-            append_position_address_to_strategy(&self.state, &strategy_id, &opened_position.to_string())
-                .await?;
+            append_position_address_to_strategy(
+                &self.state,
+                &strategy_id,
+                &opened_position.to_string(),
+            )
+            .await?;
         }
 
         let mut data = serde_json::json!({
@@ -461,12 +463,10 @@ Top up the API wallet and retry."
         }
 
         let Some(executor) = &self.executor else {
-            return Ok(OperationResult::failure(
-                format!(
-                    "Position closing requires executor and wallet configuration. {}",
-                    wallet_config_diagnostic()
-                ),
-            ));
+            return Ok(OperationResult::failure(format!(
+                "Position closing requires executor and wallet configuration. {}",
+                wallet_config_diagnostic()
+            )));
         };
 
         let guard = executor.read().await;
@@ -475,7 +475,12 @@ Top up the API wallet and retry."
             "close_source": "api",
         }));
         if let Err(e) = guard
-            .execute_full_close_only(&position_pubkey, &pool_pubkey, cost_session_id, ledger_details)
+            .execute_full_close_only(
+                &position_pubkey,
+                &pool_pubkey,
+                cost_session_id,
+                ledger_details,
+            )
             .await
         {
             let raw = format!("{e:#}");
@@ -537,12 +542,10 @@ Top up the API wallet and retry."
         }
 
         let Some(executor) = &self.executor else {
-            return Ok(OperationResult::failure(
-                format!(
-                    "Fee collection requires executor and wallet configuration. {}",
-                    wallet_config_diagnostic()
-                ),
-            ));
+            return Ok(OperationResult::failure(format!(
+                "Fee collection requires executor and wallet configuration. {}",
+                wallet_config_diagnostic()
+            )));
         };
 
         let guard = executor.read().await;
@@ -888,7 +891,9 @@ fn classify_open_position_error(err: anyhow::Error) -> ApiError {
         let ix = parse_instruction_error_index(&s);
         let program = ix.and_then(|i| parse_ix_program_id(&raw, i));
         if code.is_some() || ix.is_some() || program.is_some() {
-            let code_s = code.map(|c| format!("0x{c:x}")).unwrap_or_else(|| "?".to_string());
+            let code_s = code
+                .map(|c| format!("0x{c:x}"))
+                .unwrap_or_else(|| "?".to_string());
             let ix_s = ix.map(|i| i.to_string()).unwrap_or_else(|| "?".to_string());
             let prog_s = program.unwrap_or_else(|| "<unknown>".to_string());
             return ApiError::bad_request(format!(
@@ -1240,7 +1245,9 @@ mod tests {
         ));
         match err {
             ApiError::BadRequest(msg) => {
-                assert!(msg.contains("Close position failed: Whirlpool min-out/slippage too tight"));
+                assert!(
+                    msg.contains("Close position failed: Whirlpool min-out/slippage too tight")
+                );
                 assert!(msg.contains("WHIRLPOOL_CLOSE_SLIPPAGE_BPS"));
             }
             other => panic!("unexpected error variant: {other:?}"),

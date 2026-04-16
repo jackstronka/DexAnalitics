@@ -8,9 +8,9 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey::Pubkey;
-use std::str::FromStr;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Mint;
+use std::str::FromStr;
 
 use crate::orca::pool_reader::WhirlpoolReader;
 use crate::rpc::RpcProvider;
@@ -110,17 +110,11 @@ pub fn adjust_pool_mint_usd_with_wsol_tick(
         None => (true, true),
     };
     let mut changed = false;
-    if a_ok
-        && is_wsol_mint(mint_a)
-        && (wsol_feed_usd_looks_bogus(*pa) || is_usdc_mint(mint_b))
-    {
+    if a_ok && is_wsol_mint(mint_a) && (wsol_feed_usd_looks_bogus(*pa) || is_usdc_mint(mint_b)) {
         *pa = implied_sol;
         changed = true;
     }
-    if b_ok
-        && is_wsol_mint(mint_b)
-        && (wsol_feed_usd_looks_bogus(*pb) || is_usdc_mint(mint_a))
-    {
+    if b_ok && is_wsol_mint(mint_b) && (wsol_feed_usd_looks_bogus(*pb) || is_usdc_mint(mint_a)) {
         *pb = implied_sol;
         changed = true;
     }

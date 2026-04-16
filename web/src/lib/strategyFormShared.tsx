@@ -94,13 +94,13 @@ export const TOOLTIPS = {
   rebalanceThresholdIl:
     'Tryb limit IL: gdy |IL| przekroczy ten próg (i spełnione są reguły odstępu), rekomendowany jest rebalance.',
   minIntervalPeriodic:
-    'Co tyle godzin od ostatniego rebalance’u wykonywana jest kolejna akcja okresowa; w backendzie powiązane z interwałem periodycznym.',
+    'Tryb czasowy: rebalance okresowy może wykonać się po upływie N godzin od poprzedniego rebalance. Licznik resetuje się po każdej wykonanej akcji.',
   minIntervalOther:
     'Minimalna liczba godzin między rebalance’ami tam, gdzie silnik egzekwuje odstęp (np. przy limit IL).',
   periodicRequiresOor:
-    'Gdy włączone, periodic wykonuje rebalance tylko jeśli pozycja jest poza zakresem (OOR). Gdy wyłączone — „po staremu”: rebalance dokładnie co N godzin niezależnie od in-range.',
+    'Gdy włączone: rebalance okresowy wykona się tylko wtedy, gdy w chwili wyzwolenia (po upływie interwału) pozycja jest poza zakresem (OOR). Gdy wyłączone: rebalance okresowy wykona się po interwale niezależnie od in-range/OOR.',
   rebalanceOnRangeExitImmediately:
-    'Gdy włączone — „po staremu”: wyjście poza zakres może od razu wywołać rebalance (close+open). Gdy wyłączone — OOR jest tylko sygnałem; rebalance czeka na minimalny interwał.',
+    'Gdy włączone, wyjście poza zakres może od razu wywołać rebalance (close+open). Gdy wyłączone, OOR jest tylko sygnałem i rebalance czeka na interwał minimalny. Uwaga: to ustawienie nie dotyczy strategii Periodic.',
   dryRun:
     'Gdy włączone, executor nie wykonuje prawdziwych transakcji on-chain (tryb bezpieczny).',
   autoExecute:
@@ -164,9 +164,8 @@ export function buildParameters(
   }
   if (e.minInterval && state.minRebalanceIntervalHours !== '') {
     const n = Number(state.minRebalanceIntervalHours)
-    if (Number.isFinite(n)) {
-      // Backend: 0 means "no hourly gate" → rebalance every eval tick (~5m default). Treat as 1h minimum.
-      p.min_rebalance_interval_hours = Math.max(1, Math.floor(n))
+    if (Number.isFinite(n) && n >= 0) {
+      p.min_rebalance_interval_hours = Math.floor(n)
     }
   }
 

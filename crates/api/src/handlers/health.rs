@@ -8,8 +8,8 @@ use crate::models::{
 use crate::state::AppState;
 use axum::{Json, extract::State};
 use clmm_lp_execution::prelude::CircuitState;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::time::timeout;
 
 /// Start time for uptime calculation.

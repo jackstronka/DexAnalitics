@@ -28,12 +28,7 @@ struct JsonRpcErrorObj {
 }
 
 /// Executes `eth_call` at `block` tag (e.g. `"latest"`).
-pub async fn eth_call(
-    rpc_url: &str,
-    to: &str,
-    data: &str,
-    block: &str,
-) -> Result<Vec<u8>, String> {
+pub async fn eth_call(rpc_url: &str, to: &str, data: &str, block: &str) -> Result<Vec<u8>, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1u64,
@@ -113,8 +108,7 @@ pub fn decode_slot0_return(bytes: &[u8]) -> Result<Slot0Decoded, String> {
 
 fn word_low24_as_i32(word32: &[u8]) -> i32 {
     debug_assert_eq!(word32.len(), 32);
-    let raw24 =
-        ((word32[29] as u32) << 16) | ((word32[30] as u32) << 8) | (word32[31] as u32);
+    let raw24 = ((word32[29] as u32) << 16) | ((word32[30] as u32) << 8) | (word32[31] as u32);
     if raw24 & 0x0080_0000 != 0 {
         (raw24 | 0xFF00_0000) as i32
     } else {

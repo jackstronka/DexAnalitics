@@ -1960,6 +1960,29 @@ pub struct ApiSignerWalletResponse {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvertSolDirection {
+    NativeToWsol,
+    WsolToNative,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ConvertSolRequest {
+    pub direction: ConvertSolDirection,
+    /// Amount in lamports/raw (9 decimals).
+    pub amount_raw: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ConvertSolResponse {
+    pub message: String,
+    pub signature: Option<String>,
+    pub direction: ConvertSolDirection,
+    pub amount_raw: u64,
+    pub owner_pubkey: String,
+}
+
 // ============================================================================
 // Prices (free external sources)
 // ============================================================================

@@ -5,6 +5,8 @@ import { ArrowLeftRight, ChevronDown, Copy, ExternalLink, RefreshCcw } from 'luc
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
+  convertSol,
+  type ConvertSolDirection,
   getApiSignerWallet,
   getJupiterPricesUsd,
   getPool,
@@ -100,6 +102,10 @@ export default function Swap() {
   const [percent, setPercent] = useState<number>(0)
   const [swapSig, setSwapSig] = useState<string | null>(null)
   const [swapErr, setSwapErr] = useState<string | null>(null)
+  const [convertDirection, setConvertDirection] = useState<ConvertSolDirection>('wsol_to_native')
+  const [convertAmountUi, setConvertAmountUi] = useState<number | ''>('')
+  const [convertSig, setConvertSig] = useState<string | null>(null)
+  const [convertErr, setConvertErr] = useState<string | null>(null)
 
   const inputMetaQ = useQuery({
     queryKey: ['orca-token', inputMint],
@@ -233,6 +239,14 @@ export default function Swap() {
     refetchInterval: 15_000,
   })
 
+  const apiSignerBalancesQ = useQuery({
+    queryKey: ['wallet-balances', apiSignerQ.data?.pubkey ?? ''],
+    queryFn: () => getWalletBalances(apiSignerQ.data!.pubkey!),
+    enabled: provider === 'orca' && !!apiSignerQ.data?.pubkey,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+  })
+
   const swapMutation = useMutation({
     mutationFn: swapBeforeOpen,
     onSuccess: (data) => {
@@ -243,6 +257,20 @@ export default function Swap() {
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setSwapErr(msg)
+    },
+  })
+
+  const convertMutation = useMutation({
+    mutationFn: convertSol,
+    onSuccess: (data) => {
+      setConvertErr(null)
+      setConvertSig(data.signature ?? null)
+      queryClient.invalidateQueries({ queryKey: ['wallet-balances', apiSignerQ.data?.pubkey ?? ''] })
+      queryClient.invalidateQueries({ queryKey: ['api-signer-wallet'] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setConvertErr(msg)
     },
   })
 
@@ -271,6 +299,32 @@ export default function Swap() {
     setAmountMode('input')
     setAmountUi(Number((inputBalanceUi / 2).toFixed(8)))
   }
+
+  const apiSignerNativeUi = useMemo(
+    () => parseFloat(apiSignerBalancesQ.data?.sol ?? '0') || 0,
+    [apiSignerBalancesQ.data?.sol],
+  )
+  const apiSignerWsolUi = useMemo(() => {
+    const row = apiSignerBalancesQ.data?.tokens.find((t) => t.mint === WSOL_MINT)
+    return parseFloat(row?.ui_amount ?? '0') || 0
+  }, [apiSignerBalancesQ.data?.tokens])
+  const convertSourceBalanceUi =
+    convertDirection === 'native_to_wsol' ? apiSignerNativeUi : apiSignerWsolUi
+  const convertAmountRaw = useMemo(() => {
+    if (convertAmountUi === '' || !Number.isFinite(Number(convertAmountUi)) || Number(convertAmountUi) <= 0) {
+      return null
+    }
+    const raw = Math.round(Number(convertAmountUi) * 1e9)
+    if (!Number.isFinite(raw) || raw <= 0 || raw > Number.MAX_SAFE_INTEGER) return null
+    return raw
+  }, [convertAmountUi])
+  const canConvert =
+    provider === 'orca' &&
+    !!apiSignerQ.data?.configured &&
+    !!apiSignerQ.data?.pubkey &&
+    convertAmountRaw != null &&
+    Number(convertAmountUi) <= convertSourceBalanceUi &&
+    !convertMutation.isPending
 
   return (
     <div className="space-y-6">
@@ -409,6 +463,92 @@ export default function Swap() {
               ) : (
                 <div className="text-xs text-muted-foreground">—</div>
               )}
+            </div>
+          ) : null}
+
+          {provider === 'orca' ? (
+            <div className="rounded-lg border border-border bg-muted/10 p-3 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm font-medium">Convert WSOL &lt;-&gt; SOL</div>
+                <div className="text-xs text-muted-foreground">
+                  Konwersja techniczna 1:1 (bez swapu rynkowego).
+                </div>
+              </div>
+              <div className="grid gap-2 md:grid-cols-[auto_auto_1fr_auto] items-end">
+                <Button
+                  type="button"
+                  variant={convertDirection === 'wsol_to_native' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setConvertDirection('wsol_to_native')}
+                >
+                  WSOL -&gt; SOL
+                </Button>
+                <Button
+                  type="button"
+                  variant={convertDirection === 'native_to_wsol' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setConvertDirection('native_to_wsol')}
+                >
+                  SOL -&gt; WSOL
+                </Button>
+                <input
+                  type="number"
+                  step="0.000001"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={convertAmountUi}
+                  onChange={(e) => setConvertAmountUi(e.target.value === '' ? '' : Number(e.target.value))}
+                  placeholder="Amount (SOL)"
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setConvertAmountUi(Number(convertSourceBalanceUi.toFixed(9)))}
+                >
+                  Max
+                </Button>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Source balance:{' '}
+                <span className="font-mono tabular-nums">{formatUi(convertSourceBalanceUi, 9)}</span>{' '}
+                {convertDirection === 'wsol_to_native' ? 'WSOL' : 'SOL'}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  disabled={!canConvert}
+                  onClick={() => {
+                    setConvertErr(null)
+                    setConvertSig(null)
+                    convertMutation.mutate({
+                      direction: convertDirection,
+                      amount_raw: convertAmountRaw ?? 0,
+                    })
+                  }}
+                >
+                  {convertMutation.isPending ? 'Converting…' : 'Convert now'}
+                </Button>
+                {convertDirection === 'wsol_to_native' ? (
+                  <span className="text-[11px] text-muted-foreground">
+                    Safe mode: aktualnie WSOL-&gt;SOL wspiera pełny unwrap (użyj Max).
+                  </span>
+                ) : null}
+              </div>
+              {(convertSig || convertErr) ? (
+                <div className="rounded-lg border border-border bg-background/60 p-2 text-xs space-y-1">
+                  {convertSig ? (
+                    <div>
+                      <span className="font-medium">Convert submitted:</span>{' '}
+                      <span className="font-mono break-all">{convertSig}</span>
+                    </div>
+                  ) : null}
+                  {convertErr ? (
+                    <div className="text-destructive break-words">
+                      <span className="font-medium">Convert failed:</span> {convertErr}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ) : null}
 

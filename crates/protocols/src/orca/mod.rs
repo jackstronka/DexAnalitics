@@ -8,6 +8,8 @@
 
 /// In-range deposit sizing from a USD budget (token caps for Whirlpool).
 pub mod deposit_quote;
+/// Event-time USD spot for pool mints (aligns with API Performance heuristics).
+pub mod event_pool_mint_usd;
 /// Executor for on-chain operations.
 pub mod executor;
 /// Pool reader for on-chain state.
@@ -20,7 +22,5 @@ pub mod provider;
 pub mod tick_array;
 /// Tick boundary fetcher.
 pub mod tick_reader;
-/// Event-time USD spot for pool mints (aligns with API Performance heuristics).
-pub mod event_pool_mint_usd;
 /// Orca whirlpool account structures.
 pub mod whirlpool;

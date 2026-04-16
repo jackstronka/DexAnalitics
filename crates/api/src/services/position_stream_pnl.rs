@@ -5,10 +5,10 @@
 use crate::error::ApiError;
 use crate::models::PositionStreamPnLResponse;
 use crate::services::position_stream_performance::compute_position_stream_performance;
-use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
 };
+use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -16,7 +16,7 @@ use serde_json::Value;
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
@@ -57,7 +57,9 @@ fn stream_pnl_db_disabled_response(position_address: &str) -> PositionStreamPnLR
         realized_cashflow_usd: Decimal::ZERO,
         net_pnl_usd: Decimal::ZERO,
         net_pnl_pct: Decimal::ZERO,
-        note: Some("DB is disabled (DATABASE_URL missing/failed); stream PnL/IL unavailable.".to_string()),
+        note: Some(
+            "DB is disabled (DATABASE_URL missing/failed); stream PnL/IL unavailable.".to_string(),
+        ),
     }
 }
 
@@ -113,8 +115,12 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         )
         .await
         {
-            let prices = fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
-            if let Ok(v) = compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await {
+            let prices =
+                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
+                    .await;
+            if let Ok(v) =
+                compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
+            {
                 let raw = serde_json::json!({
                     "position": pos.address.to_string(),
                     "pool": pos.pool.to_string(),
@@ -229,7 +235,8 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     };
     let tx_fee_lamports_u = tx_fee_lamports.max(0) as u64;
     let tx_fees_usd = if sol_usd > 0.0 {
-        Decimal::from_f64_retain((tx_fee_lamports_u as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
+        Decimal::from_f64_retain((tx_fee_lamports_u as f64 / 1e9) * sol_usd)
+            .unwrap_or(Decimal::ZERO)
     } else {
         Decimal::ZERO
     };
@@ -261,7 +268,9 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     let mut mint_deltas: BTreeMap<String, Decimal> = BTreeMap::new();
     for r in rows {
         let v: Option<Value> = r.try_get("fee_payer_token_deltas").ok();
-        let Some(Value::Object(map)) = v else { continue };
+        let Some(Value::Object(map)) = v else {
+            continue;
+        };
         for (mint, dv) in map {
             if let Some(d) = decimal_from_json(&dv) {
                 *mint_deltas.entry(mint).or_insert(Decimal::ZERO) += d;
@@ -284,13 +293,23 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         .and_then(|m| px.get(m))
         .copied()
         .unwrap_or(0.0);
-    let pb = pool_mints.get(1).and_then(|m| px.get(m)).copied().unwrap_or(0.0);
+    let pb = pool_mints
+        .get(1)
+        .and_then(|m| px.get(m))
+        .copied()
+        .unwrap_or(0.0);
     let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
     let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
 
     let realized_cashflow_usd = if pool_mints.len() == 2 {
-        let da = mint_deltas.get(&pool_mints[0]).cloned().unwrap_or(Decimal::ZERO);
-        let dbb = mint_deltas.get(&pool_mints[1]).cloned().unwrap_or(Decimal::ZERO);
+        let da = mint_deltas
+            .get(&pool_mints[0])
+            .cloned()
+            .unwrap_or(Decimal::ZERO);
+        let dbb = mint_deltas
+            .get(&pool_mints[1])
+            .cloned()
+            .unwrap_or(Decimal::ZERO);
         da * pa_d + dbb * pb_d
     } else {
         Decimal::ZERO
@@ -354,4 +373,3 @@ pub async fn compute_position_stream_pnl(
     )
     .await
 }
-

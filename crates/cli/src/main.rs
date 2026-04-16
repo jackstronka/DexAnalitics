@@ -146,10 +146,7 @@ type SnapshotVaultPoint = (i64, u64, u64, Option<String>, Option<String>);
 
 /// After primary `score`, break ties so rankings are not an arbitrary permutation (common when
 /// `objective fees` and many strategies share the same range with **zero rebalances** → identical fees).
-fn sort_backtest_optimize_grid(
-    results: &mut [OptimizeGridRow],
-    objective: BacktestObjectiveArg,
-) {
+fn sort_backtest_optimize_grid(results: &mut [OptimizeGridRow], objective: BacktestObjectiveArg) {
     use std::cmp::Ordering;
     results.sort_by(|a, b| {
         let primary = b.5.partial_cmp(&a.5).unwrap_or(Ordering::Equal);
@@ -2112,8 +2109,7 @@ async fn main() -> Result<()> {
                                         && let (Some(dec), Some(px)) =
                                             (decimals_by_mint.get(mint), usd_for_mint(mint, step))
                                     {
-                                        let amt = Decimal::from_u128(dv_a)
-                                            .unwrap_or(Decimal::ZERO)
+                                        let amt = Decimal::from_u128(dv_a).unwrap_or(Decimal::ZERO)
                                             / pow10(*dec);
                                         usd += amt * px;
                                     }
@@ -2121,8 +2117,7 @@ async fn main() -> Result<()> {
                                         && let (Some(dec), Some(px)) =
                                             (decimals_by_mint.get(mint), usd_for_mint(mint, step))
                                     {
-                                        let amt = Decimal::from_u128(dv_b)
-                                            .unwrap_or(Decimal::ZERO)
+                                        let amt = Decimal::from_u128(dv_b).unwrap_or(Decimal::ZERO)
                                             / pow10(*dec);
                                         usd += amt * px;
                                     }
@@ -2354,45 +2349,44 @@ async fn main() -> Result<()> {
                 // - use decoded swaps on buckets where we have them,
                 // - fill missing buckets with raw tx-count timing proxy.
                 if let Some(counts) = raw_swap_counts_by_step.as_ref() {
-                        let total_count: u64 = counts.values().copied().sum();
-                        if total_count > 0 {
-                            let total_pool_fees: Decimal =
-                                step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
-                            if total_pool_fees > Decimal::ZERO {
-                                let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
-                                let denom = Decimal::from(total_count);
-                                for (idx, c) in counts {
-                                    if *c == 0 {
-                                        continue;
-                                    }
-                                    let w = Decimal::from(*c) / denom;
-                                    let v = total_pool_fees * w;
-                                    if v > Decimal::ZERO {
-                                        map.insert(*idx, v);
-                                    }
+                    let total_count: u64 = counts.values().copied().sum();
+                    if total_count > 0 {
+                        let total_pool_fees: Decimal =
+                            step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
+                        if total_pool_fees > Decimal::ZERO {
+                            let mut map: BTreeMap<usize, Decimal> = BTreeMap::new();
+                            let denom = Decimal::from(total_count);
+                            for (idx, c) in counts {
+                                if *c == 0 {
+                                    continue;
                                 }
-                                // Overwrite buckets we have decoded values for.
-                                for (idx, v) in local_map {
-                                    map.insert(*idx, *v);
+                                let w = Decimal::from(*c) / denom;
+                                let v = total_pool_fees * w;
+                                if v > Decimal::ZERO {
+                                    map.insert(*idx, v);
                                 }
-                                if !map.is_empty() {
-                                    println!(
-                                        "đź§Ş Using local decoded swaps + timing proxy (decoded={} merged={})",
-                                        local_map.len(),
-                                        map.len()
-                                    );
-                                    swap_index = Some(map);
-                                } else {
-                                    swap_index = Some(local_map.clone());
-                                }
+                            }
+                            // Overwrite buckets we have decoded values for.
+                            for (idx, v) in local_map {
+                                map.insert(*idx, *v);
+                            }
+                            if !map.is_empty() {
+                                println!(
+                                    "đź§Ş Using local decoded swaps + timing proxy (decoded={} merged={})",
+                                    local_map.len(),
+                                    map.len()
+                                );
+                                swap_index = Some(map);
                             } else {
                                 swap_index = Some(local_map.clone());
                             }
                         } else {
                             swap_index = Some(local_map.clone());
                         }
-                }
-                else {
+                    } else {
+                        swap_index = Some(local_map.clone());
+                    }
+                } else {
                     println!(
                         "đź§Ş Using local decoded swaps from data/swaps ({} steps).",
                         local_map.len()
@@ -2433,31 +2427,29 @@ async fn main() -> Result<()> {
 
             // Guardrail: snapshot-fee model is experimental. If implied pool fees are
             // unrealistically high vs candle-based pool fee baseline, disable it and fallback.
-            if !snapshots_only
-                && let Some(idx_map) = snapshot_fee_index.as_ref()
-            {
-                    let snapshot_pool_fees: Decimal = idx_map.values().cloned().sum();
-                    let candle_pool_fees: Decimal =
-                        step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
-                    if candle_pool_fees > Decimal::ZERO {
-                        let ratio = snapshot_pool_fees / candle_pool_fees;
-                        // Guardrail is useful for production defaults, but when comparing
-                        // snapshot-fee index vs Birdeye volume without Dune scaling,
-                        // `step_volume_usd` may be in a different unit scale.
-                        // Allow override for experiments/debug runs.
-                        let max_ratio = std::env::var("CLMM_SNAPSHOT_FEE_SANITY_MAX_RATIO")
-                            .ok()
-                            .and_then(|s| s.parse::<f64>().ok())
-                            .and_then(Decimal::from_f64)
-                            .unwrap_or_else(|| Decimal::from(10u32));
-                        if ratio > max_ratio {
-                            println!(
-                                "âš ď¸Ź Snapshot fee sanity check failed: snapshot pool fees {:.2} vs candle baseline {:.2} (ratio {:.2}x > {:.2}x). Falling back from snapshot fees.",
-                                snapshot_pool_fees, candle_pool_fees, ratio, max_ratio
-                            );
-                            snapshot_fee_index = None;
-                        }
+            if !snapshots_only && let Some(idx_map) = snapshot_fee_index.as_ref() {
+                let snapshot_pool_fees: Decimal = idx_map.values().cloned().sum();
+                let candle_pool_fees: Decimal =
+                    step_data.iter().map(|p| p.step_volume_usd * fee_rate).sum();
+                if candle_pool_fees > Decimal::ZERO {
+                    let ratio = snapshot_pool_fees / candle_pool_fees;
+                    // Guardrail is useful for production defaults, but when comparing
+                    // snapshot-fee index vs Birdeye volume without Dune scaling,
+                    // `step_volume_usd` may be in a different unit scale.
+                    // Allow override for experiments/debug runs.
+                    let max_ratio = std::env::var("CLMM_SNAPSHOT_FEE_SANITY_MAX_RATIO")
+                        .ok()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .and_then(Decimal::from_f64)
+                        .unwrap_or_else(|| Decimal::from(10u32));
+                    if ratio > max_ratio {
+                        println!(
+                            "âš ď¸Ź Snapshot fee sanity check failed: snapshot pool fees {:.2} vs candle baseline {:.2} (ratio {:.2}x > {:.2}x). Falling back from snapshot fees.",
+                            snapshot_pool_fees, candle_pool_fees, ratio, max_ratio
+                        );
+                        snapshot_fee_index = None;
                     }
+                }
             }
 
             println!(

@@ -44,9 +44,8 @@ pub async fn fetch_gecko_solana_mint_prices_usd(mints: &[String]) -> BTreeMap<St
     };
 
     let tail = mints.join(",");
-    let url = format!(
-        "https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/{tail}"
-    );
+    let url =
+        format!("https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/{tail}");
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {

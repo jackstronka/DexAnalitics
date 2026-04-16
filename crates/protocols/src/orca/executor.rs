@@ -17,18 +17,14 @@ use orca_whirlpools::{
     set_whirlpools_config_address, swap_instructions,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_program_pack::Pack;
 use solana_sdk::{
-    instruction::Instruction,
-    pubkey::Pubkey,
-    signature::Keypair,
-    signature::Signature,
-    signer::Signer,
-    transaction::Transaction,
+    instruction::Instruction, pubkey::Pubkey, signature::Keypair, signature::Signature,
+    signer::Signer, transaction::Transaction,
 };
 use solana_system_interface::instruction as system_instruction;
 use spl_associated_token_account::get_associated_token_address;
 use spl_associated_token_account::instruction::create_associated_token_account;
-use solana_program_pack::Pack;
 use spl_token::state::Account as SplTokenAccount;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -273,6 +269,12 @@ impl WhirlpoolExecutor {
         Ok(parsed.amount)
     }
 
+    pub async fn read_wsol_balance_raw(&self, owner: &Pubkey) -> Result<u64> {
+        let mint = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let ata = get_associated_token_address(owner, &mint);
+        self.read_spl_token_amount_opt(&ata).await
+    }
+
     /// Fail fast with a clear message if the **signing wallet** cannot cover raw deposit caps.
     async fn preflight_open_liquidity_balances(
         &self,
@@ -361,13 +363,8 @@ impl WhirlpoolExecutor {
         let minimal = crate::orca::whirlpool::parse_whirlpool_minimal(&pool_acct.data)
             .context("parse whirlpool mints (open preflight / WSOL wrap)")?;
 
-        self.preflight_open_liquidity_balances(
-            &minimal,
-            params.amount_a,
-            params.amount_b,
-            payer,
-        )
-        .await?;
+        self.preflight_open_liquidity_balances(&minimal, params.amount_a, params.amount_b, payer)
+            .await?;
 
         // If a pool leg is WSOL, the operator often has enough native SOL but **0 WSOL tokens**.
         // Orca SDK will use WSOL ATA for transfers; without pre-wrapping this fails with Tokenkeg `InsufficientFunds`.
@@ -449,13 +446,8 @@ impl WhirlpoolExecutor {
         let minimal = crate::orca::whirlpool::parse_whirlpool_minimal(&pool_acct.data)
             .context("parse whirlpool mints (open preflight / WSOL wrap)")?;
 
-        self.preflight_open_liquidity_balances(
-            &minimal,
-            params.amount_a,
-            params.amount_b,
-            payer,
-        )
-        .await?;
+        self.preflight_open_liquidity_balances(&minimal, params.amount_a, params.amount_b, payer)
+            .await?;
 
         let mut pre_ix: Vec<Instruction> = Vec::new();
         if params.amount_a > 0 || params.amount_b > 0 {
@@ -549,7 +541,8 @@ impl WhirlpoolExecutor {
         }
 
         let current_amount = if let Some(acct) = acct_opt {
-            let parsed = SplTokenAccount::unpack(&acct.data).context("unpack WSOL token account")?;
+            let parsed =
+                SplTokenAccount::unpack(&acct.data).context("unpack WSOL token account")?;
             parsed.amount
         } else {
             0
@@ -561,7 +554,8 @@ impl WhirlpoolExecutor {
         let topup = target_amount - current_amount;
         ixs.push(system_instruction::transfer(&payer.pubkey(), &ata, topup));
         ixs.push(
-            spl_token::instruction::sync_native(&spl_token::id(), &ata).context("build sync_native")?,
+            spl_token::instruction::sync_native(&spl_token::id(), &ata)
+                .context("build sync_native")?,
         );
         Ok(ixs)
     }
@@ -573,14 +567,25 @@ impl WhirlpoolExecutor {
         needed_wsol_lamports: u64,
         payer: &Keypair,
     ) -> Result<()> {
+        let _ = self
+            .submit_wsol_wrap_with_signature_if_needed(needed_wsol_lamports, payer)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn submit_wsol_wrap_with_signature_if_needed(
+        &self,
+        needed_wsol_lamports: u64,
+        payer: &Keypair,
+    ) -> Result<Option<Signature>> {
         if needed_wsol_lamports == 0 {
-            return Ok(());
+            return Ok(None);
         }
         let ixs = self
             .ensure_wsol_ata_funded(needed_wsol_lamports, payer, true)
             .await?;
         if ixs.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let res = self
             .send_transaction_with_signers(&ixs, payer, &[])
@@ -592,7 +597,48 @@ impl WhirlpoolExecutor {
                 .unwrap_or_else(|| "wsol wrap transaction failed".to_string());
             anyhow::bail!("wsol wrap failed: {msg}");
         }
-        Ok(())
+        Ok(Some(res.signature))
+    }
+
+    /// Convert WSOL -> native SOL by closing WSOL ATA (full amount only).
+    pub async fn submit_wsol_unwrap_with_signature(
+        &self,
+        amount_wsol_lamports: u64,
+        payer: &Keypair,
+    ) -> Result<Signature> {
+        if amount_wsol_lamports == 0 {
+            anyhow::bail!("wsol unwrap amount must be > 0");
+        }
+        let owner = payer.pubkey();
+        let mint = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let ata = get_associated_token_address(&owner, &mint);
+        let current_wsol = self.read_spl_token_amount_opt(&ata).await?;
+        if current_wsol == 0 {
+            anyhow::bail!("wsol unwrap failed: WSOL balance is 0");
+        }
+        if amount_wsol_lamports > current_wsol {
+            anyhow::bail!(
+                "wsol unwrap failed: insufficient WSOL balance (have {current_wsol} raw, need {amount_wsol_lamports} raw)"
+            );
+        }
+        if amount_wsol_lamports < current_wsol {
+            anyhow::bail!(
+                "wsol unwrap failed: partial unwrap is not supported yet in safe mode; requested {amount_wsol_lamports} raw, current WSOL {current_wsol} raw. Use Max to unwrap full balance."
+            );
+        }
+        let ix = spl_token::instruction::close_account(&spl_token::id(), &ata, &owner, &owner, &[])
+            .context("build close_account for WSOL ATA")?;
+        let res = self
+            .send_transaction_with_signers(&[ix], payer, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("wsol unwrap send: {e}"))?;
+        if !res.success {
+            let msg = res
+                .error
+                .unwrap_or_else(|| "wsol unwrap transaction failed".to_string());
+            anyhow::bail!("wsol unwrap failed: {msg}");
+        }
+        Ok(res.signature)
     }
 
     /// Single-pool Orca swap (**ExactIn**) — same pool you will add liquidity to (e.g. rebalance token mix before open).
@@ -698,7 +744,9 @@ impl WhirlpoolExecutor {
             return Ok(res);
         }
 
-        Ok(last.unwrap_or_else(|| ExecutionResult::failure(Signature::default(), "swap failed".into())))
+        Ok(last.unwrap_or_else(|| {
+            ExecutionResult::failure(Signature::default(), "swap failed".into())
+        }))
     }
 
     /// Increases liquidity in an existing position.
@@ -821,12 +869,13 @@ impl WhirlpoolExecutor {
             harvest_position_instructions(&rpc, parsed.position_mint, Some(payer.pubkey()))
                 .await
                 .map_err(|e| anyhow::anyhow!("orca harvest_position_instructions failed: {e}"))?;
-        let mut exec = self.send_transaction_with_signers(
-            &harvested.instructions,
-            payer,
-            &harvested.additional_signers,
-        )
-        .await?;
+        let mut exec = self
+            .send_transaction_with_signers(
+                &harvested.instructions,
+                payer,
+                &harvested.additional_signers,
+            )
+            .await?;
         exec.collect_fee_owed_a_raw = Some(harvested.fees_quote.fee_owed_a);
         exec.collect_fee_owed_b_raw = Some(harvested.fees_quote.fee_owed_b);
         Ok(exec)
@@ -872,17 +921,17 @@ impl WhirlpoolExecutor {
         let max_attempts: u8 = env_retry_attempts("WHIRLPOOL_CLOSE_RETRY_ATTEMPTS", 8);
         let mut last: Option<ExecutionResult> = None;
         for attempt in 1..=max_attempts {
-            let closed = close_position_instructions(
-                &rpc,
-                parsed.position_mint,
-                slip,
-                Some(payer.pubkey()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
+            let closed =
+                close_position_instructions(&rpc, parsed.position_mint, slip, Some(payer.pubkey()))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("orca close_position_instructions failed: {e}"))?;
 
             let res = self
-                .send_transaction_with_signers(&closed.instructions, payer, &closed.additional_signers)
+                .send_transaction_with_signers(
+                    &closed.instructions,
+                    payer,
+                    &closed.additional_signers,
+                )
                 .await?;
 
             if res.success {
@@ -903,7 +952,9 @@ impl WhirlpoolExecutor {
             return Ok(res);
         }
 
-        Ok(last.unwrap_or_else(|| ExecutionResult::failure(Signature::default(), "close failed".into())))
+        Ok(last.unwrap_or_else(|| {
+            ExecutionResult::failure(Signature::default(), "close failed".into())
+        }))
     }
 
     /// Simulates a transaction without broadcasting.
@@ -974,9 +1025,14 @@ impl WhirlpoolExecutor {
                 .iter()
                 .find_map(|line| parse_insufficient_lamports_from_log_line(line));
             if let Some((have_lamports, need_lamports)) = parsed {
-                let required_with_margin = need_lamports.saturating_mul(101).saturating_add(99) / 100;
+                let required_with_margin =
+                    need_lamports.saturating_mul(101).saturating_add(99) / 100;
                 let payer_pubkey = payer.pubkey();
-                let native_balance = self.provider.get_balance(&payer_pubkey).await.unwrap_or(have_lamports);
+                let native_balance = self
+                    .provider
+                    .get_balance(&payer_pubkey)
+                    .await
+                    .unwrap_or(have_lamports);
                 if native_balance < required_with_margin {
                     let signature = transaction.signatures.first().copied().unwrap_or_default();
                     return Ok(ExecutionResult::failure(

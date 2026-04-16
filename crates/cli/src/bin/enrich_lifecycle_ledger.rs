@@ -144,7 +144,8 @@ async fn main() -> anyhow::Result<()> {
         };
 
         // Fetch parsed tx JSON and recompute per-mint deltas.
-        let (_fee, _slot, _pre, _post, _delta, tx_json) = enrich_tx_costs(&rpc, &sig, &fee_payer).await;
+        let (_fee, _slot, _pre, _post, _delta, tx_json) =
+            enrich_tx_costs(&rpc, &sig, &fee_payer).await;
         if let Some(tx) = tx_json.as_ref() {
             let deltas = fee_payer_token_deltas_by_mint(tx, &fee_payer);
             if deltas.as_object().is_some_and(|m| !m.is_empty()) {
@@ -185,4 +186,3 @@ async fn main() -> anyhow::Result<()> {
     println!("  failed: {failed}");
     Ok(())
 }
-

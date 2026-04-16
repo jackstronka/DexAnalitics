@@ -952,6 +952,21 @@ export interface ApiSignerWalletResponse {
   note?: string | null
 }
 
+export type ConvertSolDirection = 'native_to_wsol' | 'wsol_to_native'
+
+export interface ConvertSolRequest {
+  direction: ConvertSolDirection
+  amount_raw: number
+}
+
+export interface ConvertSolResponse {
+  message: string
+  signature?: string | null
+  direction: ConvertSolDirection
+  amount_raw: number
+  owner_pubkey: string
+}
+
 export const getWallets = () => fetchJson<WalletsListResponse>('/wallets')
 export const getWalletBalances = (owner: string) =>
   // This call may require multiple RPC fallbacks; allow longer than the global 15s timeout.
@@ -961,6 +976,11 @@ export const getWalletBalances = (owner: string) =>
   )
 
 export const getApiSignerWallet = () => fetchJson<ApiSignerWalletResponse>('/wallets/api-signer')
+export const convertSol = (body: ConvertSolRequest) =>
+  fetchJsonLong<ConvertSolResponse>('/wallets/convert-sol', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 
 // Bot activity (JSONL ledger + registry; Slack digest)
 export interface BotActivityJsonlResponse {

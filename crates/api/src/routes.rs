@@ -150,6 +150,7 @@ fn create_base_router(state: AppState) -> Router {
         .route("/wallets", get(handlers::list_wallets))
         .route("/wallets/balances", get(handlers::get_wallet_balances))
         .route("/wallets/api-signer", get(handlers::get_api_signer_wallet))
+        .route("/wallets/convert-sol", post(handlers::convert_sol))
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
@@ -218,9 +219,8 @@ pub fn create_versioned_router(
     onchain_request_timeout_secs: u64,
 ) -> Router {
     #[allow(deprecated)]
-    let base = create_base_router(state.clone()).layer(TimeoutLayer::new(Duration::from_secs(
-        request_timeout_secs,
-    )));
+    let base = create_base_router(state.clone())
+        .layer(TimeoutLayer::new(Duration::from_secs(request_timeout_secs)));
     #[allow(deprecated)]
     let onchain = create_onchain_router(state).layer(TimeoutLayer::new(Duration::from_secs(
         onchain_request_timeout_secs,

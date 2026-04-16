@@ -2,8 +2,8 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    BotActivityJsonlResponse, BotRegistryJsonlResponse, SlackActivitySummaryRequest,
-    SlackActivitySummaryResponse, PendingOpenRecoveryResponse, StrandedRebalancesResponse,
+    BotActivityJsonlResponse, BotRegistryJsonlResponse, PendingOpenRecoveryResponse,
+    SlackActivitySummaryRequest, SlackActivitySummaryResponse, StrandedRebalancesResponse,
 };
 use crate::state::AppState;
 use axum::{
@@ -70,8 +70,9 @@ pub async fn get_bot_ledger(
     let offset = q.offset;
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, offset, filter)
-        .map_err(|e| ApiError::internal(format!("read ledger file: {e}")))?;
+    let (file_missing, total_matching, rows) =
+        read_jsonl_tail(path.as_path(), limit, offset, filter)
+            .map_err(|e| ApiError::internal(format!("read ledger file: {e}")))?;
     let path_s = path.display().to_string();
 
     Ok(Json(BotActivityJsonlResponse {
@@ -118,8 +119,9 @@ pub async fn get_bot_il_ledger(
     };
 
     let path_s = path.display().to_string();
-    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, offset, filter)
-        .map_err(|e| ApiError::internal(format!("read IL ledger file: {e}")))?;
+    let (file_missing, total_matching, rows) =
+        read_jsonl_tail(path.as_path(), limit, offset, filter)
+            .map_err(|e| ApiError::internal(format!("read IL ledger file: {e}")))?;
 
     Ok(Json(BotActivityJsonlResponse {
         path: path_s,
@@ -152,8 +154,9 @@ pub async fn get_bot_registry(
     let offset = q.offset;
     let filter = q.filter.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-    let (file_missing, total_matching, rows) = read_jsonl_tail(path.as_path(), limit, offset, filter)
-        .map_err(|e| ApiError::internal(format!("read registry file: {e}")))?;
+    let (file_missing, total_matching, rows) =
+        read_jsonl_tail(path.as_path(), limit, offset, filter)
+            .map_err(|e| ApiError::internal(format!("read registry file: {e}")))?;
     let path_s = path.display().to_string();
 
     Ok(Json(BotRegistryJsonlResponse {
