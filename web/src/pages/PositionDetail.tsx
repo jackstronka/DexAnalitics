@@ -1460,57 +1460,102 @@ export default function PositionDetail() {
                 )}
 
                 {streamLineage.totals ? (
-                  <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2">
-                    <div className="text-xs text-muted-foreground">Totals (across full chain)</div>
-                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm mt-1">
-                      <div>
-                        <span className="text-muted-foreground">baseline</span>{' '}
-                        <span className="font-mono">{formatUsdFixed(streamLineage.totals.baseline_value_usd, 3)}</span>
+                  <div className="space-y-3">
+                    <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
+                      <div className="text-xs font-medium text-foreground">Economic chain result (net PnL)</div>
+                      <p className="text-[10px] text-muted-foreground leading-snug">
+                        End NAV + ledger cashflow − baseline − SOL tx fees (USD). Not the same metric as IL vs HODL.
+                      </p>
+                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                        <div>
+                          <span className="text-muted-foreground">baseline</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.baseline_value_usd, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">current</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.current_value_usd, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">tx fees</span>{' '}
+                          <span className="font-mono text-[11px] leading-tight inline-block align-top">
+                            {streamLineage.chain_cost_summary != null ? (
+                              <>
+                                <span className="block">
+                                  {streamLineage.chain_cost_summary.tx_fee_lamports_total.toLocaleString()} λ
+                                </span>
+                                <span className="block text-muted-foreground">
+                                  {formatUsdFixed(
+                                    parseFloat(String(streamLineage.chain_cost_summary.tx_fees_usd_total)),
+                                    4,
+                                  )}
+                                </span>
+                              </>
+                            ) : (
+                              formatUsdFixed(streamLineage.totals.tx_fees_usd, 3)
+                            )}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">cashflow</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.realized_cashflow_usd, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">LP collected (sum)</span>{' '}
+                          <span className="font-mono text-[11px] leading-tight inline-block align-top">
+                            {streamLineage.chain_cost_summary != null ? (
+                              <>
+                                <span className="block">
+                                  {formatLineageFeesCollectedUsdMain(
+                                    streamLineage.chain_cost_summary.fees_collected_usd_total,
+                                    streamLineage.chain_cost_summary.collect_events_total,
+                                  )}
+                                </span>
+                                <span className="block text-muted-foreground">
+                                  {streamLineage.chain_cost_summary.collect_events_total}x collect
+                                </span>
+                              </>
+                            ) : (
+                              '—'
+                            )}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">net PnL</span>{' '}
+                          <span
+                            className={
+                              parseFloat(streamLineage.totals.net_pnl_pct) >= 0
+                                ? 'font-mono text-green-500'
+                                : 'font-mono text-red-500'
+                            }
+                          >
+                            {formatUsdFixed(streamLineage.totals.net_pnl_usd, 3)} (
+                            {formatPercentFixed(streamLineage.totals.net_pnl_pct, 3)})
+                          </span>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-muted-foreground">current</span>{' '}
-                        <span className="font-mono">{formatUsdFixed(streamLineage.totals.current_value_usd, 3)}</span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">tx fees</span>{' '}
-                        <span className="font-mono text-[11px] leading-tight inline-block align-top">
-                          {streamLineage.chain_cost_summary != null ? (
-                            <>
-                              <span className="block">
-                                {streamLineage.chain_cost_summary.tx_fee_lamports_total.toLocaleString()} λ
-                              </span>
-                              <span className="block text-muted-foreground">
-                                {formatUsdFixed(
-                                  parseFloat(String(streamLineage.chain_cost_summary.tx_fees_usd_total)),
-                                  4,
-                                )}
-                              </span>
-                            </>
-                          ) : (
-                            formatUsdFixed(streamLineage.totals.tx_fees_usd, 3)
-                          )}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">cashflow</span>{' '}
-                        <span className="font-mono">{formatUsdFixed(streamLineage.totals.realized_cashflow_usd, 3)}</span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">net PnL</span>{' '}
-                        <span
-                          className={
-                            parseFloat(streamLineage.totals.net_pnl_pct) >= 0
-                              ? 'font-mono text-green-500'
-                              : 'font-mono text-red-500'
-                          }
-                        >
-                          {formatUsdFixed(streamLineage.totals.net_pnl_usd, 3)} (
-                          {formatPercentFixed(streamLineage.totals.net_pnl_pct, 3)})
-                        </span>
+                    </div>
+                    <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
+                      <div className="text-xs font-medium text-foreground">IL vs initial basket (benchmark)</div>
+                      <p className="text-[10px] text-muted-foreground leading-snug">
+                        LP mark vs hypothetical HODL of deposit tokens at chain start, at current mint USD prices.
+                      </p>
+                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                        <div>
+                          <span className="text-muted-foreground">HODL USD</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.hodl_value_usd, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">IL USD</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.il_usd, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">IL %</span>{' '}
+                          <span className="font-mono">{formatPercentFixed(streamLineage.totals.il_pct, 3)}</span>
+                        </div>
                       </div>
                     </div>
                     {streamLineage.totals.note ? (
-                      <div className="text-[11px] text-muted-foreground leading-snug mt-2">{streamLineage.totals.note}</div>
+                      <div className="text-[11px] text-muted-foreground leading-snug">{streamLineage.totals.note}</div>
                     ) : null}
                   </div>
                 ) : null}

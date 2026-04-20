@@ -1,3 +1,138 @@
+## 2026-04-20 — Lifecycle->DB ingest hardening + tx/collect fallback for lineage node costs
+
+keywords: api, stream-lineage, lifecycle-ingest, position_stream_ledger_rows, pool_address, tx_fees, collect_fees
+
+- **What:** `ingest_lifecycle_rows_best_effort` now maps pool from `pool_pubkey` **or** `pool_address`, keeping compatibility with lifecycle JSONL variants.
+- **What:** In DB-backed `node_metrics`, if tx/collect aggregates are zero, we bridge those specific aggregates from lifecycle rows (`lifecycle_rows_cached_best_effort`) instead of waiting for the full-node empty fallback.
+- **Why:** Closed chains had authoritative lifecycle rows with non-zero `bot_collect_fees` / `tx_fee_lamports`, but `chain_cost_summary` still showed zeros due to partial DB ingest state.
+- **Guards/tests:** `cargo test -p clmm-lp-api position_stream_lineage`.
+- **paths:** `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-04-20 — Position Detail: restored chain-level LP collected aggregate in totals card
+
+keywords: web, position-detail, stream-lineage, chain-cost-summary, lp-fees, regression
+
+- **What:** Reintroduced `LP collected (sum)` in the `Economic chain result` totals block on `PositionDetail` (`Logs / rebalances`) using `chain_cost_summary.fees_collected_usd_total` and `collect_events_total`.
+- **Why:** A prior layout split (economic vs IL benchmark) unintentionally dropped the aggregate LP fees line from this screen.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/PositionDetail.tsx`, `doc/BUGS.md`
+
+## 2026-04-19 — `StreamPnLInterpretation`: separate economic net PnL vs IL/HODL benchmark in API + UI
+
+keywords: api, stream-pnl, PositionStreamPnLResponse, interpretation, ClosedPositionDetail, web
+
+- **What:** `PositionStreamPnLResponse` includes `interpretation: StreamPnLInterpretation` with Polish captions (`economic_net_pnl_caption_pl`, `il_vs_initial_hodl_caption_pl`) filled in `position_stream_pnl`; fallback lineage totals set explicit captions when IL is unavailable.
+- **What (web):** Closed position detail groups stream metrics into two bordered blocks (economic vs IL benchmark); open `PositionDetail` lineage totals use parallel English headings + numeric IL/HODL rows.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/lib/api.ts`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-19 — Stream IL anchored to lineage first→last PDA (realistic rotation history)
+
+keywords: api, stream-pnl, stream-lineage, il, hodl, position_stream_valuation_snapshots, resolve_lineage_chain_for_stream_pnl
+
+- **What:** `compute_position_stream_pnl` resolves the same ordered rotation chain as lineage (`resolve_lineage_chain_for_stream_pnl`), then reads baseline snapshot from the **first** chain PDA (prefer `baseline_open`) and current/end snapshot from the **last** PDA (prefer `end_close`), instead of global MIN/MAX `ts_utc` across the BFS component.
+- **Why:** MIN/MAX timestamps could attribute IL to the wrong open/close pair when snapshot coverage differed between PDAs; IL vs HODL should match “start position → final position” along the stitched history.
+- **What:** Self-seed RPC inserts apply separately when baseline or current snapshot rows are missing (`stream_pnl_self_seed` / `stream_pnl_self_seed_current`).
+- **Guards/tests:** `cargo build -p clmm-lp-api`; existing `pool_mints_*` unit tests unchanged.
+- **paths:** `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-04-19 — Stream PnL: fetch pool mints from snapshots so IL/HODL matches intended formula
+
+keywords: api, stream-pnl, position_stream_pnl, hodl, il, position_stream_valuation_snapshots
+
+- **What:** Baseline/latest `position_stream_valuation_snapshots` queries now include `token_mint_a`/`token_mint_b`; mint resolution prefers the earliest snapshot and falls back per leg to the latest snapshot when older rows omit mints.
+- **Why:** Previously mint columns were never selected; `hodl_value_usd` always degraded to `baseline_value_usd`, mis-labeling ΔNAV as IL vs HODL basket.
+- **Guards/tests:** `cargo test -p clmm-lp-api pool_mints_`
+- **paths:** `crates/api/src/services/position_stream_pnl.rs`, `doc/BUGS.md`
+
+## 2026-04-19 — Curated Orca: WBTC/cbBTC 0.01% (`CBBTC_WBTC`)
+
+keywords: orca, curated-pools, WBTC, cbBTC, STARTUP.md, snapshot_health_check, tools
+
+- **What:** Added mainnet Whirlpool `4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72` (mint order A=cbBTC, B=WBTC portal per `orca-pool-read`) to `tools/orca_curated_mainnet_pools.ps1` as pair id **`CBBTC_WBTC`**, documented in `STARTUP.md` so `snapshot-run-curated-all` picks up **4** Orca targets.
+- **What:** PowerShell swap/rebalance scripts accept `-Pair CBBTC_WBTC`; `orca_swap_curated.ps1` resolves `-From`/`-To` via `Resolve-OrcaCuratedMintForSymbol` with **legacy alias** WBTC/BTC→cbBTC mint **only** for `CBBTC_USDC` (global WBTC→CBBTC normalization removed so `CBBTC_WBTC` can distinguish WBTC vs cbBTC).
+- **What:** Snapshot health monitors default `ExpectOrcaTarget` **4**; web Swap + Position Create curated dropdowns include the pool; wallet USD estimate maps portal WBTC mint to CoinGecko `bitcoin`.
+- **paths:** `tools/orca_curated_mainnet_pools.ps1`, `tools/orca_swap_curated.ps1`, `STARTUP.md`, `tools/snapshot_health_check.ps1`, `web/src/pages/Swap.tsx`, `web/src/pages/PositionCreate.tsx`
+
+## 2026-04-17 — Pending-open telemetry: `stuck_reason` classification + attempts threshold alert
+
+keywords: execution, pending_open, recovery, stuck_reason, alerts, rebalance_incomplete
+
+- **What:** Extended `PendingOpenItem` with telemetry fields (`last_attempt_at`, `stuck_reason`, `stuck_since`, `last_alert_attempts`) persisted in `pending-open-recovery.json`.
+- **What:** `process_pending_open_recoveries` now classifies failures into stable reasons (`tick_out_of_range`, `quote_failed`, `rpc_timeout`, `insufficient_balance`, `unknown`) and records the reason timeline per item.
+- **What:** Added threshold alerting (`CLMM_PENDING_OPEN_ALERT_ATTEMPTS`, default `10`) that emits `Pending Open Stuck` once per item after crossing the threshold (deduplicated via `last_alert_attempts`).
+- **Guards/tests:** Added tests for telemetry defaults, reason classification, and threshold alert dedupe logic.
+- **paths:** `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `doc/BUGS.md`
+
+## 2026-04-17 — Lifecycle costs/fees regression guard: session-or-position match + schema-tolerant ledger ingest
+
+keywords: api, lifecycle-summary, stream-performance, ledger-ingest, schema-drift, collect-fees, tx-fee
+
+- **What:** Fixed lifecycle row matching in `positions/{address}/lifecycle-summary` to include rows when either `rebalance_session_id` matches stream sessions **or** `position_pubkey` matches stream positions (previously an `if/else` path dropped valid position rows that had foreign session ids).
+- **What:** Hardened lifecycle JSONL -> `position_stream_ledger_rows` ingest against DB schema drift by detecting optional columns (`fee_payer_token_deltas`, `lp_collected_token_*_raw`) via `information_schema` and selecting compatible INSERT/UPSERT variants.
+- **Why:** Operators saw `tx=0` / `collect=0` on Position Detail despite authoritative lifecycle JSONL rows being present; this came from filter false-negatives and silent ingest failures on partially migrated databases.
+- **Guards/tests:** Added regression tests for lifecycle row matching (`lifecycle_row_matches_by_position_even_when_session_unknown`, `lifecycle_row_does_not_match_unrelated_session_and_position`); `cargo test -p clmm-lp-api lifecycle_summary_tests`.
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_performance.rs`, `doc/BUGS.md`
+
+## 2026-04-17 — Live `last_candle`: native strategy mode with closed-candle band input
+
+keywords: execution, api, strategy, last_candle, decision_engine, optimize_profile, candle_seconds
+
+- **What:** Added native live strategy type `last_candle` in API (`StrategyType`) with `parameters.candle_seconds` configuration and mapping in strategy startup paths.
+- **What:** `DecisionConfig` / `StrategyMode` gained `LastCandle`; decision flow now uses candle-derived tick band (`last_candle_ticks`) when out-of-range, with existing width-based recenter as fallback.
+- **What:** `StrategyExecutor` now keeps an in-memory per-position price sample buffer and computes low/high for the last fully closed candle bucket (`candle_seconds`) to feed `DecisionContext`.
+- **What:** `optimize_profile` no longer downgrades `strategy_kind=last_candle` to `OorRecenter`; it maps to native `StrategyMode::LastCandle`.
+- **Guards/tests:** Added execution tests for `LastCandle` tick selection/fallback and optimize mapping (`cargo test -p clmm-lp-execution last_candle`).
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `crates/execution/src/strategy/decision.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/optimize_profile.rs`
+- **What (web follow-up):** Frontend supports `last_candle` in strategy forms/listing contracts (`StrategyType`) and allows configuring `candle_seconds` in Create/Edit; Strategy Detail renders the configured candle size.
+- **Guards/tests (web):** `npx tsc --noEmit` (in `web/`) passes.
+- **paths (web):** `web/src/lib/api.ts`, `web/src/lib/strategyFormShared.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/StrategyDetail.tsx`
+
+## 2026-04-17 — Pending-open recovery: adapt stale intended ticks to current pool tick
+
+keywords: execution, rebalance, pending_open, recovery, intended_tick_range, widen_ticks
+
+- **What:** `recover_open_after_incomplete` now adapts stale `intended_tick_lower/upper` before retrying open. When current pool tick is outside intended range, recovery applies the same auto-widen policy (`reopen_auto_widen_*`) used by reopen preflight and retries with widened ticks that include spot.
+- **Why:** Prevent endless pending-open loops where recovery retries the same stale out-of-range ticks (`pool tick ... not in new range`) after market drift between close and reopen.
+- **Guards/tests:** Added unit tests for unchanged in-range behavior and widen-on-stale behavior (`adapt_recover_open_ticks_*`).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+## 2026-04-17 — PowerShell hardening: safe `RepoRoot` bootstrap in `data_alerts_loop`
+
+keywords: powershell, windows, data_alerts_loop, RepoRoot, PSScriptRoot, monitoring
+
+- **What:** `tools/data_alerts_loop.ps1` no longer computes `RepoRoot` in a parameter default expression. It now resolves at runtime with ordered fallbacks: `$PSScriptRoot` -> `$MyInvocation.MyCommand.Path` -> `Get-Location`.
+- **What (follow-up):** Applied the same `RepoRoot` bootstrap hardening to `tools/snapshot_health_alert.ps1` and `tools/register_snapshot_health_scheduled_task.ps1` to avoid host-dependent path-empty failures in one-shot checks and task registration.
+- **What (follow-up 2):** `tools/snapshot_health_alert.ps1` now sends a single Slack **RECOVERY** message on NOT OK -> OK transition and persists `ok` state in `data/agent-alerts/snapshot-slack-throttle/state.json` to avoid ambiguity after incidents.
+- **Why:** Some PowerShell host contexts provided empty `$PSScriptRoot` during parameter binding, causing immediate script failure (`Join-Path` path-empty) before monitoring loop startup.
+- **paths:** `tools/data_alerts_loop.ps1`, `tools/snapshot_health_alert.ps1`, `tools/register_snapshot_health_scheduled_task.ps1`, `doc/BUGS.md`
+
+## 2026-04-16 — CI: clippy clean for rebalance orchestration + actions/checkout@v5 (Node 24)
+
+keywords: ci, lint, clippy, rebalance, execution, github-actions, checkout
+
+- **What:** `rebalance.rs`: `#[allow(clippy::too_many_arguments)]` on `ensure_swap_mix_for_rebalance_open` and `open_position`; collapsed nested `if` (let-chains) for open-quote ledger details.
+- **What:** GitHub Actions workflows use `actions/checkout@v5`; `lint.yml` sets `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` to align with runner deprecation of Node 20 for JS actions.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `.github/workflows/*.yml`
+
+## 2026-04-16 — Snapshot collector monitoring: loop heartbeats + optional Windows scheduled task
+
+keywords: snapshots, snapshot_health_check, snapshot_health_alert, heartbeat, Task Scheduler, register_snapshot_health_scheduled_task, data_alerts_loop, windows
+
+- **What:** `run-snapshot-loop.ps1` / `run-snapshot-loop-5m.ps1` now write `data/snapshot_logs/snapshot-loop-heartbeat-{10m,5m}.json` each iteration (`ts_utc`, `interval_minutes`, `pid`).
+- **What:** `snapshot_health_check.ps1` treats a **present but stale** heartbeat as NOT OK (`heartbeat_*_stale_gt_*`), so a dead/stuck loop is detected even when status JSONL ages are ambiguous. Missing heartbeat files skips the check (backward compatible until loops are restarted on the new scripts).
+- **What:** `tools/register_snapshot_health_scheduled_task.ps1` registers **CLMM-SnapshotHealthAlert** (default: run `tools/snapshot_health_alert.ps1` every **5** minutes) so operators do not need to manually run health checks; Shawl/NSSM + `tools/data_alerts_loop.ps1` remains the documented non-Scheduler option. (Placed under `tools/` because `scripts/` is gitignored in this repo.)
+- **paths:** `scripts/windows/run-snapshot-loop.ps1`, `scripts/windows/run-snapshot-loop-5m.ps1`, `tools/snapshot_health_check.ps1`, `tools/snapshot_health_alert.ps1`, `tools/data_alerts_loop.ps1`, `tools/run_snapshot_health_monitor_loop.ps1`, `tools/register_snapshot_health_scheduled_task.ps1`, `doc/OPERATIONAL_CONTINUITY.md`, `doc/BUGS.md`
+
+## 2026-04-16 — Snapshot loops now fallback to `cargo run` when release binary is missing
+
+keywords: cli, snapshots, collector, windows-scripts, run-snapshot-loop, run-snapshot-loop-5m, reliability
+
+- **What:** Updated both Windows snapshot loop scripts to auto-fallback to `cargo run -q -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-run-curated-all` when `target/<configuration>/clmm-lp-cli.exe` is absent.
+- **What (follow-up):** Added explicit cargo executable resolution for service contexts (`CARGO_HOME`, `%USERPROFILE%\\.cargo\\bin\\cargo.exe`, PATH) where `cargo` is not available as a bare command.
+- **What:** Startup log line now explicitly marks fallback mode (`mode=cargo-run-fallback`) and the missing binary path for faster ops diagnosis.
+- **Why:** Collector loops were failing repeatedly with “binary not found”, resulting in stale/missing snapshots (`rows_in_window~=0`) despite loops appearing alive.
+- **paths:** `scripts/windows/run-snapshot-loop.ps1`, `scripts/windows/run-snapshot-loop-5m.ps1`, `doc/BUGS.md`
+
 ## 2026-04-16 — Strategy interval semantics: optional stays optional, periodic blocks 0
 
 keywords: web, api, strategy, periodic, min_rebalance_interval_hours, oor, validation

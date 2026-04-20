@@ -331,6 +331,17 @@ pub struct PositionStreamPerformanceResponse {
     pub note: Option<String>,
 }
 
+/// Human-readable separation of **economic** chain PnL vs **IL benchmark** (Polish copy for dashboard).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct StreamPnLInterpretation {
+    /// What `net_pnl_*` means (cashflow-inclusive stream result).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub economic_net_pnl_caption_pl: String,
+    /// What `il_*` / `hodl_value_usd` mean vs economic PnL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub il_vs_initial_hodl_caption_pl: String,
+}
+
 /// Stream-level Net PnL / IL across rotated position PDAs (best-effort).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PositionStreamPnLResponse {
@@ -369,6 +380,9 @@ pub struct PositionStreamPnLResponse {
     /// Net PnL% vs baseline value.
     #[schema(value_type = String)]
     pub net_pnl_pct: Decimal,
+    /// Short Polish captions so UI can show economic PnL and IL benchmark side-by-side without mixing them.
+    #[serde(default)]
+    pub interpretation: StreamPnLInterpretation,
     /// Notes about data quality / limitations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -970,6 +984,8 @@ pub enum StrategyType {
     IlLimit,
     /// Shift only the exiting edge of the range towards current price.
     RetouchShift,
+    /// Recenter from the last fully closed candle band (low/high), fallback to width%.
+    LastCandle,
 }
 
 /// Strategy parameters.
@@ -996,6 +1012,9 @@ pub struct StrategyParameters {
     /// Minimum rebalance interval in hours.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rebalance_interval_hours: Option<u64>,
+    /// Candle size for `last_candle` in seconds (e.g. 900 = 15m, 3600 = 1h).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candle_seconds: Option<u64>,
 
     /// If true, `Periodic` strategy triggers only when the position is out of range.
     /// Default (when omitted) is `true`.

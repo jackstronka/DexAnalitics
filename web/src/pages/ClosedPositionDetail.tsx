@@ -333,36 +333,68 @@ export default function ClosedPositionDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Wynik ekonomiczny (łańcuch)</CardTitle>
+          <CardTitle>Stream — dwie definicje (nie mylić)</CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
-            Wartości start/koniec i cashflow z agregacji stream — osobno od tabeli „koszty sieci vs LP” powyżej.
+            Wynik ekonomiczny vs benchmark IL/HODL — osobno od karty „koszty sieci vs LP fee” powyżej.
           </p>
         </CardHeader>
-        <CardContent className="text-sm text-muted-foreground space-y-2">
+        <CardContent className="text-sm text-muted-foreground space-y-4">
           {totals ? (
             <>
-              <div className="flex flex-wrap gap-x-6 gap-y-1">
-                <div>
-                  <span className="text-muted-foreground">baseline</span>{' '}
-                  <span className="font-mono">{formatUsdFixed(parseFloat(totals.baseline_value_usd), 3)}</span>
+              <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 space-y-2">
+                <div className="text-xs font-medium text-foreground">1) Wynik ekonomiczny łańcucha (net PnL)</div>
+                {totals.interpretation?.economic_net_pnl_caption_pl ? (
+                  <p className="text-[11px] leading-snug">{totals.interpretation.economic_net_pnl_caption_pl}</p>
+                ) : null}
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
+                  <div>
+                    <span className="text-muted-foreground">baseline</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(parseFloat(totals.baseline_value_usd), 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">current/end</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(parseFloat(totals.current_value_usd), 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">cashflow (łącznie)</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(parseFloat(totals.realized_cashflow_usd), 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">tx fees (stream)</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(parseFloat(totals.tx_fees_usd), 4)}</span>
+                  </div>
                 </div>
-                <div>
-                  <span className="text-muted-foreground">current/end</span>{' '}
-                  <span className="font-mono">{formatUsdFixed(parseFloat(totals.current_value_usd), 3)}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">cashflow (łącznie)</span>{' '}
-                  <span className="font-mono">{formatUsdFixed(parseFloat(totals.realized_cashflow_usd), 3)}</span>
+                <div className="pt-0.5">
+                  <span className="text-muted-foreground">net PnL</span>{' '}
+                  <span className="font-mono">{formatUsdFixed(parseFloat(totals.net_pnl_usd), 3)}</span>
+                  <span className="font-mono">
+                    {' '}
+                    ({(parseFloat(totals.net_pnl_pct) * 100).toFixed(3)}%)
+                  </span>
                 </div>
               </div>
-              <div className="pt-1">
-                <span className="text-muted-foreground">net PnL</span>{' '}
-                <span className="font-mono">{formatUsdFixed(parseFloat(totals.net_pnl_usd), 3)}</span>
-                <span className="font-mono">
-                  {' '}
-                  ({(parseFloat(totals.net_pnl_pct) * 100).toFixed(3)}%)
-                </span>
+
+              <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 space-y-2">
+                <div className="text-xs font-medium text-foreground">2) Benchmark IL vs HODL (start łańcucha)</div>
+                {totals.interpretation?.il_vs_initial_hodl_caption_pl ? (
+                  <p className="text-[11px] leading-snug">{totals.interpretation.il_vs_initial_hodl_caption_pl}</p>
+                ) : null}
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
+                  <div>
+                    <span className="text-muted-foreground">HODL (koszyk startowy × ceny)</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(parseFloat(totals.hodl_value_usd), 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">IL USD</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(parseFloat(totals.il_usd), 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">IL %</span>{' '}
+                    <span className="font-mono">{(parseFloat(totals.il_pct) * 100).toFixed(3)}%</span>
+                  </div>
+                </div>
               </div>
+
               {totals.note ? <div className="text-xs">{totals.note}</div> : null}
             </>
           ) : (

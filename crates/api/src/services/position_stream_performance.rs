@@ -104,6 +104,7 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
     let Some(db) = state.db.as_ref() else {
         return Ok(());
     };
+    let schema_caps = load_ledger_row_schema_caps(db).await?;
     let path = clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path();
     if !path.exists() {
         return Ok(());
@@ -150,9 +151,12 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToString::to_string);
+        // Lifecycle rows historically used `pool_address`; keep `pool_pubkey` as preferred key
+        // but accept either so ingest remains backward-compatible.
         let pool = v
             .get("pool_pubkey")
             .and_then(|x| x.as_str())
+            .or_else(|| v.get("pool_address").and_then(|x| x.as_str()))
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToString::to_string);
@@ -176,48 +180,150 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
         });
 
         // Signature is the idempotency key when present. When absent, we still store best-effort rows.
-        sqlx::query(
-            r#"
-            INSERT INTO position_stream_ledger_rows (
-              signature, ts_utc, source, event, rebalance_session_id, position_pubkey, pool_pubkey,
-              tx_fee_lamports, fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui, fee_payer_token_deltas,
-              lp_collected_token_a_raw, lp_collected_token_b_raw, raw_json
+        if schema_caps.has_fee_payer_token_deltas && schema_caps.has_lp_collected_raw {
+            sqlx::query(
+                r#"
+                INSERT INTO position_stream_ledger_rows (
+                  signature, ts_utc, source, event, rebalance_session_id, position_pubkey, pool_pubkey,
+                  tx_fee_lamports, fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui, fee_payer_token_deltas,
+                  lp_collected_token_a_raw, lp_collected_token_b_raw, raw_json
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                ON CONFLICT (signature) DO UPDATE SET
+                  ts_utc = COALESCE(EXCLUDED.ts_utc, position_stream_ledger_rows.ts_utc),
+                  source = COALESCE(EXCLUDED.source, position_stream_ledger_rows.source),
+                  event = COALESCE(EXCLUDED.event, position_stream_ledger_rows.event),
+                  rebalance_session_id = COALESCE(EXCLUDED.rebalance_session_id, position_stream_ledger_rows.rebalance_session_id),
+                  position_pubkey = COALESCE(EXCLUDED.position_pubkey, position_stream_ledger_rows.position_pubkey),
+                  pool_pubkey = COALESCE(EXCLUDED.pool_pubkey, position_stream_ledger_rows.pool_pubkey),
+                  tx_fee_lamports = COALESCE(EXCLUDED.tx_fee_lamports, position_stream_ledger_rows.tx_fee_lamports),
+                  fee_payer_token_a_delta_ui = COALESCE(EXCLUDED.fee_payer_token_a_delta_ui, position_stream_ledger_rows.fee_payer_token_a_delta_ui),
+                  fee_payer_token_b_delta_ui = COALESCE(EXCLUDED.fee_payer_token_b_delta_ui, position_stream_ledger_rows.fee_payer_token_b_delta_ui),
+                  fee_payer_token_deltas = COALESCE(EXCLUDED.fee_payer_token_deltas, position_stream_ledger_rows.fee_payer_token_deltas),
+                  lp_collected_token_a_raw = COALESCE(EXCLUDED.lp_collected_token_a_raw, position_stream_ledger_rows.lp_collected_token_a_raw),
+                  lp_collected_token_b_raw = COALESCE(EXCLUDED.lp_collected_token_b_raw, position_stream_ledger_rows.lp_collected_token_b_raw),
+                  raw_json = EXCLUDED.raw_json
+                "#,
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-            ON CONFLICT (signature) DO UPDATE SET
-              ts_utc = COALESCE(EXCLUDED.ts_utc, position_stream_ledger_rows.ts_utc),
-              source = COALESCE(EXCLUDED.source, position_stream_ledger_rows.source),
-              event = COALESCE(EXCLUDED.event, position_stream_ledger_rows.event),
-              rebalance_session_id = COALESCE(EXCLUDED.rebalance_session_id, position_stream_ledger_rows.rebalance_session_id),
-              position_pubkey = COALESCE(EXCLUDED.position_pubkey, position_stream_ledger_rows.position_pubkey),
-              pool_pubkey = COALESCE(EXCLUDED.pool_pubkey, position_stream_ledger_rows.pool_pubkey),
-              tx_fee_lamports = COALESCE(EXCLUDED.tx_fee_lamports, position_stream_ledger_rows.tx_fee_lamports),
-              fee_payer_token_a_delta_ui = COALESCE(EXCLUDED.fee_payer_token_a_delta_ui, position_stream_ledger_rows.fee_payer_token_a_delta_ui),
-              fee_payer_token_b_delta_ui = COALESCE(EXCLUDED.fee_payer_token_b_delta_ui, position_stream_ledger_rows.fee_payer_token_b_delta_ui),
-              fee_payer_token_deltas = COALESCE(EXCLUDED.fee_payer_token_deltas, position_stream_ledger_rows.fee_payer_token_deltas),
-              lp_collected_token_a_raw = COALESCE(EXCLUDED.lp_collected_token_a_raw, position_stream_ledger_rows.lp_collected_token_a_raw),
-              lp_collected_token_b_raw = COALESCE(EXCLUDED.lp_collected_token_b_raw, position_stream_ledger_rows.lp_collected_token_b_raw),
-              raw_json = EXCLUDED.raw_json
-            "#,
-        )
-        .bind(signature)
-        .bind(ts)
-        .bind(source)
-        .bind(event)
-        .bind(sid)
-        .bind(position)
-        .bind(pool)
-        .bind(tx_fee_lamports)
-        .bind(fee_a)
-        .bind(fee_b)
-        .bind(token_deltas)
-        .bind(lp_a)
-        .bind(lp_b)
-        .bind(v)
-        .execute(db.pool())
-        .await?;
+            .bind(signature)
+            .bind(ts)
+            .bind(source)
+            .bind(event)
+            .bind(sid)
+            .bind(position)
+            .bind(pool)
+            .bind(tx_fee_lamports)
+            .bind(fee_a)
+            .bind(fee_b)
+            .bind(token_deltas)
+            .bind(lp_a)
+            .bind(lp_b)
+            .bind(v)
+            .execute(db.pool())
+            .await?;
+        } else if schema_caps.has_fee_payer_token_deltas {
+            sqlx::query(
+                r#"
+                INSERT INTO position_stream_ledger_rows (
+                  signature, ts_utc, source, event, rebalance_session_id, position_pubkey, pool_pubkey,
+                  tx_fee_lamports, fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui, fee_payer_token_deltas, raw_json
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                ON CONFLICT (signature) DO UPDATE SET
+                  ts_utc = COALESCE(EXCLUDED.ts_utc, position_stream_ledger_rows.ts_utc),
+                  source = COALESCE(EXCLUDED.source, position_stream_ledger_rows.source),
+                  event = COALESCE(EXCLUDED.event, position_stream_ledger_rows.event),
+                  rebalance_session_id = COALESCE(EXCLUDED.rebalance_session_id, position_stream_ledger_rows.rebalance_session_id),
+                  position_pubkey = COALESCE(EXCLUDED.position_pubkey, position_stream_ledger_rows.position_pubkey),
+                  pool_pubkey = COALESCE(EXCLUDED.pool_pubkey, position_stream_ledger_rows.pool_pubkey),
+                  tx_fee_lamports = COALESCE(EXCLUDED.tx_fee_lamports, position_stream_ledger_rows.tx_fee_lamports),
+                  fee_payer_token_a_delta_ui = COALESCE(EXCLUDED.fee_payer_token_a_delta_ui, position_stream_ledger_rows.fee_payer_token_a_delta_ui),
+                  fee_payer_token_b_delta_ui = COALESCE(EXCLUDED.fee_payer_token_b_delta_ui, position_stream_ledger_rows.fee_payer_token_b_delta_ui),
+                  fee_payer_token_deltas = COALESCE(EXCLUDED.fee_payer_token_deltas, position_stream_ledger_rows.fee_payer_token_deltas),
+                  raw_json = EXCLUDED.raw_json
+                "#,
+            )
+            .bind(signature)
+            .bind(ts)
+            .bind(source)
+            .bind(event)
+            .bind(sid)
+            .bind(position)
+            .bind(pool)
+            .bind(tx_fee_lamports)
+            .bind(fee_a)
+            .bind(fee_b)
+            .bind(token_deltas)
+            .bind(v)
+            .execute(db.pool())
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO position_stream_ledger_rows (
+                  signature, ts_utc, source, event, rebalance_session_id, position_pubkey, pool_pubkey,
+                  tx_fee_lamports, fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui, raw_json
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                ON CONFLICT (signature) DO UPDATE SET
+                  ts_utc = COALESCE(EXCLUDED.ts_utc, position_stream_ledger_rows.ts_utc),
+                  source = COALESCE(EXCLUDED.source, position_stream_ledger_rows.source),
+                  event = COALESCE(EXCLUDED.event, position_stream_ledger_rows.event),
+                  rebalance_session_id = COALESCE(EXCLUDED.rebalance_session_id, position_stream_ledger_rows.rebalance_session_id),
+                  position_pubkey = COALESCE(EXCLUDED.position_pubkey, position_stream_ledger_rows.position_pubkey),
+                  pool_pubkey = COALESCE(EXCLUDED.pool_pubkey, position_stream_ledger_rows.pool_pubkey),
+                  tx_fee_lamports = COALESCE(EXCLUDED.tx_fee_lamports, position_stream_ledger_rows.tx_fee_lamports),
+                  fee_payer_token_a_delta_ui = COALESCE(EXCLUDED.fee_payer_token_a_delta_ui, position_stream_ledger_rows.fee_payer_token_a_delta_ui),
+                  fee_payer_token_b_delta_ui = COALESCE(EXCLUDED.fee_payer_token_b_delta_ui, position_stream_ledger_rows.fee_payer_token_b_delta_ui),
+                  raw_json = EXCLUDED.raw_json
+                "#,
+            )
+            .bind(signature)
+            .bind(ts)
+            .bind(source)
+            .bind(event)
+            .bind(sid)
+            .bind(position)
+            .bind(pool)
+            .bind(tx_fee_lamports)
+            .bind(fee_a)
+            .bind(fee_b)
+            .bind(v)
+            .execute(db.pool())
+            .await?;
+        }
     }
     Ok(())
+}
+
+struct LedgerRowSchemaCaps {
+    has_fee_payer_token_deltas: bool,
+    has_lp_collected_raw: bool,
+}
+
+async fn load_ledger_row_schema_caps(db: &clmm_lp_data::repositories::Database) -> anyhow::Result<LedgerRowSchemaCaps> {
+    let rows = sqlx::query(
+        r#"
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = 'position_stream_ledger_rows'
+          AND table_schema = ANY(current_schemas(false))
+        "#,
+    )
+    .fetch_all(db.pool())
+    .await?;
+    let mut cols: HashSet<String> = HashSet::new();
+    for r in rows {
+        let name: String = r.try_get("column_name").unwrap_or_default();
+        if !name.trim().is_empty() {
+            cols.insert(name);
+        }
+    }
+    Ok(LedgerRowSchemaCaps {
+        has_fee_payer_token_deltas: cols.contains("fee_payer_token_deltas"),
+        has_lp_collected_raw: cols.contains("lp_collected_token_a_raw")
+            && cols.contains("lp_collected_token_b_raw"),
+    })
 }
 
 async fn maybe_ingest_ledgers(state: &AppState, skip: bool) {

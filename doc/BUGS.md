@@ -28,6 +28,81 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260420-01 — Position Detail totals lost/zeroed chain-level LP collected summary
+
+status: partially fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-20  
+fixed_in: local  
+keywords: position-detail, stream-lineage, chain_cost_summary, fees_collected_usd_total, ui-regression, lifecycle-ingest, pool_address, pool_pubkey
+
+- **Symptom:** On `PositionDetail` (`Logs / rebalances`), the totals card still showed baseline/current/tx fees/cashflow/net PnL, but chain-level **LP collected** summary disappeared after the economic-vs-IL layout update.
+- **Symptom (follow-up):** After restoring the field, some closed chains still showed zeros for tx/LP collected although lifecycle JSONL rows existed (`bot_collect_fees`, non-zero `tx_fee_lamports`).
+- **Root cause:** (1) UI refactor replaced the old totals block and omitted the `chain_cost_summary.fees_collected_usd_total` + `collect_events_total` rendering branch. (2) DB ingest/aggregation path was brittle for lifecycle rows using `pool_address` (not `pool_pubkey`) and DB fallback triggered only when **all** node values were empty, so partial DB rows could still zero tx/collect aggregates.
+- **Fix:** Restored `LP collected (sum)` in UI totals; lifecycle ingest now accepts `pool_address` as fallback for `pool_pubkey`; DB node metrics now bridge tx/collect aggregates from lifecycle JSONL when DB returns zeros for those fields.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`; `cargo test -p clmm-lp-api position_stream_lineage`.
+- **Paths:** `web/src/pages/PositionDetail.tsx`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+---
+
+### BUG-20260419-01 — Stream PnL IL/HODL silently wrong: valuation snapshot queries omitted mint columns
+
+status: fixed  
+severity: high  
+reported_by: ai  
+first_seen: 2026-04-19  
+fixed_in: local  
+keywords: stream-pnl, position_stream_pnl, hodl, il_usd, valuation_snapshots, token_mint_a, sql
+
+- **Symptom:** With rows in `position_stream_valuation_snapshots` that already stored `token_mint_a` / `token_mint_b`, `/positions/.../stream-lineage` totals still behaved like “IL unavailable” semantics: `hodl_value_usd` fell back to `baseline_value_usd`, so `il_usd` became `current_value − baseline_value` instead of baseline basket × current mint prices − LP mark.
+- **Root cause:** `compute_position_stream_pnl_for_stream_members` selected only `ts_utc, value_usd, amount_a_ui, amount_b_ui, pool_pubkey` but later read `token_mint_*` from the row — columns were never fetched, so mint paths were always empty.
+- **Fix:** Extended baseline and latest snapshot queries to include `token_mint_a`, `token_mint_b`; resolve pool mints with baseline-first + per-leg fallback to the latest snapshot; annotate `ts_utc` row decode for inference.
+- **Guards/tests:** Unit tests `pool_mints_prefers_*`, `pool_mints_falls_back_*`, `pool_mints_mixed_fallback_per_leg` in `services::position_stream_pnl`.
+- **Paths:** `crates/api/src/services/position_stream_pnl.rs`
+
+---
+
+### BUG-20260417-01 — `data_alerts_loop.ps1` fails on empty `$PSScriptRoot`
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-17  
+fixed_in: local  
+keywords: windows, powershell, data_alerts_loop, PSScriptRoot, RepoRoot, Join-Path
+
+- **Symptom:** Running `powershell -File .\tools\data_alerts_loop.ps1` failed immediately with `Join-Path : Cannot bind argument to parameter 'Path' because it is an empty string.` at param default for `RepoRoot`.
+- **Root cause:** `RepoRoot` default evaluated `Join-Path $PSScriptRoot ".."` during parameter binding; in some hosts/sessions `$PSScriptRoot` was empty, so binding failed before script logic started.
+- **Fix:** Changed `RepoRoot` default to empty and resolved it at runtime with fallbacks: `$PSScriptRoot` -> `Split-Path $MyInvocation.MyCommand.Path` -> `Get-Location`.
+- **Symptom (follow-up):** The same path-empty failure appeared in `tools/snapshot_health_alert.ps1` (and could affect scheduled-task registration helper), because they used the same default-parameter pattern.
+- **Fix (follow-up):** Applied the same runtime `RepoRoot` resolution hardening in `tools/snapshot_health_alert.ps1` and `tools/register_snapshot_health_scheduled_task.ps1`.
+- **Guards/tests:** Re-ran `tools/data_alerts_loop.ps1` with explicit minimal intervals and `-SkipSlack` to verify startup no longer fails at parameter binding.
+- **Guards/tests (follow-up):** Re-ran `powershell -File .\tools\snapshot_health_alert.ps1 -SkipSlack` and confirmed it reaches health-check execution instead of failing in parameter binding.
+- **Paths:** `tools/data_alerts_loop.ps1`, `tools/snapshot_health_alert.ps1`, `tools/register_snapshot_health_scheduled_task.ps1`
+
+---
+
+### BUG-20260416-02 — Snapshot loops stopped collecting when release CLI binary was missing
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-16  
+fixed_in: local  
+keywords: snapshots, collector-loop, run-snapshot-loop, run-snapshot-loop-5m, clmm-lp-cli, release-binary, cargo-fallback
+
+- **Symptom:** Snapshot freshness checks showed `rows_in_window~=0` for both `snapshots.jsonl` (10m) and `snapshots_5m.jsonl` (5m), while loop logs repeatedly reported `target\\release\\clmm-lp-cli.exe` not found.
+- **Symptom (follow-up):** In service-like loop context, `cargo` was not in PATH, so the first fallback attempt also failed with `The term 'cargo' is not recognized...`.
+- **Root cause:** Windows loop scripts hard-required `target/<configuration>/clmm-lp-cli.exe` and only logged errors when absent; no runtime fallback existed, so periodic collection silently stopped.
+- **Fix:** Added runtime fallback in both loop scripts: when release binary is missing, execute collector via `cargo run -q -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-run-curated-all` (and `--snapshots-suffix 5m` for 5m loop). Logs now explicitly record fallback mode on startup.
+- **Fix (follow-up):** Added cargo path resolver (`CARGO_HOME`, `%USERPROFILE%\\.cargo\\bin\\cargo.exe`, then PATH lookup) so fallback works under service contexts where PATH is minimal.
+- **Guards/tests:** Re-ran collector health scripts to confirm root cause and verify that loops have a valid execution path even without release artifact.
+- **Guards/tests (follow-up):** Loop heartbeats (`data/snapshot_logs/snapshot-loop-heartbeat-{10m,5m}.json`) + `snapshot_health_check.ps1` stale-heartbeat issues; Windows: `tools/register_snapshot_health_scheduled_task.ps1` lub `tools/data_alerts_loop.ps1` pod Shawl/NSSM — automatyczne `snapshot_health_alert` bez ręcznego sprawdzania.
+- **Paths:** `scripts/windows/run-snapshot-loop.ps1`, `scripts/windows/run-snapshot-loop-5m.ps1`, `tools/snapshot_health_check.ps1`, `tools/register_snapshot_health_scheduled_task.ps1`
+
+---
+
 ### BUG-20260415-01 — Position Detail vs Positions list: inconsistent strategy-link badge
 
 status: fixed  
@@ -352,10 +427,14 @@ keywords: rebalance, close_without_open, swap_mix, recovery, strategy
 - **Symptom:** Pozycja zamknięta jako `close_kind=rotation`, ale brak kolejnego `bot_open_position` dla tej sesji/łańcucha.
 - **Symptom (2026-04-16):** Dla sesji `facce436-7913-4173-b954-17f403d15a9d` (old PDA `4NLjjVqBtV4CVeFL224UzVpSW4Ds7g16rxuTvir78Qh3`) i `323c4f01-0526-484a-b9c4-ce820e4fc1e6` (old PDA `D6tnfq94B3WnAGeqVX3JUri9AhKfkfHNcNHviyTaBrcV`) recovery ma `attempts=13` i kończy się `open_position failed ... InstructionError(3, Custom(6012))` na `OpenPositionWithTokenExtensions`; wpisy pozostają w `data/pending-open-recovery.json` i w UI `Closed by bot, waiting for reopen`.
 - **Symptom (2026-04-16, follow-up):** Bot otworzył nową pozycję `52PR84ugSnNiaWbUAy1jrmf5YL7RqyzwvQmZ5u3wWEoC` z `rebalance_session_id=facce436-7913-4173-b954-17f403d15a9d`, ale w UI nadal potrafi pozostać wpis w `Closed by bot, waiting for reopen` (prawdopodobnie przez pozostawiony item w `data/pending-open-recovery.json`, który generuje synthetic pending-only row mimo że lifecycle ma `bot_open_position`).
+- **Symptom (2026-04-17, follow-up):** Dla sesji `2c0ab4d9-dcc6-485d-8beb-ce4a5910365a` (old PDA `DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq`) pending-open recovery rośnie do `attempts=68` z błędem `pool tick -24299 not in new range [-24264, -24160): cannot quote deposit for open`; `open_seen=false`, pozycja pozostaje w `Closed by bot, waiting for reopen`.
+- **Symptom (2026-04-17, quality follow-up):** Przy długim recovery operator nie miał standaryzowanego pola `stuck_reason` i progu alertu `attempts > N`; diagnoza opierała się na ręcznym czytaniu `last_error`.
 - **Root cause:** Rebalance flow urwał się po close + etapach swap (`bot_swap_mix_round` / `bot_swap_exact_in_attempt`) bez finalnego open; brak jawnego `rebalance_incomplete` wpisu dla tego przypadku.
+- **Root cause (follow-up 2026-04-17):** Recovery używa sztywno `intended_tick_lower/upper` z momentu close; gdy rynek przesunie się poza ten zakres, `quote_deposit_budget_in_range` odrzuca open (`tick_current` poza nowym pasmem). Ścieżka `recover_open_after_incomplete` nie stosuje adaptacji zakresu (widen/recenter), więc ponawia ten sam niepoprawny zakres.
 - **Fix:** Do wdrożenia: twardy marker `rebalance_incomplete` + trwały `pending-open` recovery gdy close zakończony, a open nie doszedł do skutku; UI powinno pokazywać taki status zamiast "po prostu closed".
-- **Guards/tests:** test scenariusza: close success + swap rounds + open failure/abort => wpis `rebalance_incomplete` + recovery artifact.
-- **Paths:** `data/ledger/orca_position_lifecycle.jsonl`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/handlers/positions.rs`
+- **Fix (2026-04-17, quality):** `pending-open` zapisuje telemetry per item (`last_attempt_at`, `stuck_reason`, `stuck_since`, `last_alert_attempts`) i klasyfikuje `stuck_reason` automatycznie z `last_error` (`tick_out_of_range`, `quote_failed`, `rpc_timeout`, `insufficient_balance`, `unknown`). Dodano próg `CLMM_PENDING_OPEN_ALERT_ATTEMPTS` (default 10): po przekroczeniu emitowany jest alert `Pending Open Stuck` (z deduplikacją per item).
+- **Guards/tests:** test scenariusza: close success + swap rounds + open failure/abort => wpis `rebalance_incomplete` + recovery artifact; dodatkowo testy klasyfikacji `stuck_reason` i progowego alertowania attempts.
+- **Paths:** `data/ledger/orca_position_lifecycle.jsonl`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/positions.rs`
 
 ### BUG-20260410-05 — Collect Fees: brak executora mimo aktywnego środowiska
 
@@ -373,16 +452,19 @@ keywords: collect_fees, executor, wallet, KEYPAIR_PATH, SOLANA_KEYPAIR, WALLET_K
 - **Symptom:** (1) `Collect Fees failed: Service unavailable: Fee collection requires executor and wallet configuration`; (2) po naprawie wallet: `Collect Fees failed: Internal error: collect_fees: read position for fee_owed`; (3) po sukcesie collect brak informacji o kwocie/tokenach zebranych fee; (4) w lineage widoczne `collect 1x` oraz `A=0/B=0` bez jasnej informacji czy to błąd czy faktycznie zero owed; (5) `LP Zebrane`: jedna noga miała wartość, druga pokazywała `-`; (6) brak szybkiego wyjaśnienia „dlaczego 0” w UI.
 - **Symptom:** (1) `Collect Fees failed: Service unavailable: Fee collection requires executor and wallet configuration`; (2) po naprawie wallet: `Collect Fees failed: Internal error: collect_fees: read position for fee_owed`; (3) po sukcesie collect brak informacji o kwocie/tokenach zebranych fee; (4) w lineage widoczne `collect 1x` oraz `A=0/B=0` bez jasnej informacji czy to błąd czy faktycznie zero owed; (5) `LP Zebrane`: jedna noga miała wartość, druga pokazywała `-`; (6) brak szybkiego wyjaśnienia „dlaczego 0” w UI; (7) komunikat collect bez czytelnego formatu oraz brak widoku collect leg values w tabeli sesji.
 - **Symptom:** (8) `Internal error: stream lineage: collect fee rows: error returned from database: kolumna "lp_collected_token_a_raw" nie istnieje` na środowiskach z nieodpaloną migracją `005_ledger_lp_collected_raw.sql`.
+- **Symptom (2026-04-17, follow-up):** `positions/{pda}/lifecycle-summary` i karty kosztów/prowizji potrafią pokazywać same zera (`tx=0`, `collect=0`) mimo że `bot-activity/ledger` dla tego samego PDA zawiera `bot_open_position`/`bot_collect_fees`/`bot_close_position` z dodatnimi `tx_fee_lamports` i legami collect.
 - **Root cause:** Dwa etapy: (a) resolver executora ładował wallet tylko z części źródeł env i proces API nie dziedziczył signer vars; (b) collect path twardo failował gdy pre-read pozycji do `fee_owed_*` nie powiedzie się, mimo że sama transakcja collect może być wykonalna.
 - **Root cause:** (c) zapytanie lineage zakładało fizyczne kolumny `lp_collected_token_*_raw` w `position_stream_ledger_rows`; na starszym schemacie były tylko w `raw_json`.
+- **Root cause (follow-up 2026-04-17):** Dwa niezależne problemy regresyjne: (d) w `lifecycle-summary` matching był de facto `session OR ELSE position` (if/else), więc wiersze z obcym `rebalance_session_id` były odrzucane nawet gdy `position_pubkey` pasował do streamu; (e) ingest lifecycle->DB zakładał nowe kolumny (`fee_payer_token_deltas`, `lp_collected_token_*_raw`) i na starszym schemacie kończył się błędem, przez co agregacje DB pozostawały puste.
 - **Fix:** Rozszerzono `load_wallet_from_env()` o fallback na `SOLANA_KEYPAIR`/`WALLET_KEYPAIR_BASE58`, dodano diagnostykę env/path oraz jawne przekazywanie signer vars w `Start-ClmmApi-8081.ps1`. Collect nie przerywa się już na błędzie odczytu `fee_owed_*`; wykonuje harvest i zapisuje authoritative leg values tylko gdy pre-read się powiedzie. API `collect_fees` zwraca teraz komunikat z kwotami obu nóg (A/B) wyliczony jako `pre_uncollected - post_uncollected` oraz dołącza szczegóły pre/post w `data`.
 - **Fix:** Rozszerzono `load_wallet_from_env()` o fallback na `SOLANA_KEYPAIR`/`WALLET_KEYPAIR_BASE58`, dodano diagnostykę env/path oraz jawne przekazywanie signer vars w `Start-ClmmApi-8081.ps1`. Collect nie przerywa się już na błędzie odczytu `fee_owed_*`; wykonuje harvest i zapisuje authoritative leg values tylko gdy pre-read się powiedzie. API `collect_fees` zwraca teraz komunikat z kwotami obu nóg (A/B) wyliczony jako `pre_uncollected - post_uncollected` oraz dołącza szczegóły pre/post w `data`. Dla lineage dodano notę jakości danych: przy `collect_events > 0` i `A/B == 0` API jawnie komunikuje, że collect został wykonany przy `fee_owed_a/b == 0`.
 - **Fix:** Rozszerzono `load_wallet_from_env()` o fallback na `SOLANA_KEYPAIR`/`WALLET_KEYPAIR_BASE58`, dodano diagnostykę env/path oraz jawne przekazywanie signer vars w `Start-ClmmApi-8081.ps1`. Collect nie przerywa się już na błędzie odczytu `fee_owed_*`; wykonuje harvest i zapisuje authoritative leg values tylko gdy pre-read się powiedzie. API `collect_fees` zwraca teraz komunikat z kwotami obu nóg (A/B) wyliczony jako `pre_uncollected - post_uncollected` oraz dołącza szczegóły pre/post w `data`. Dla lineage dodano notę jakości danych: przy `collect_events > 0` i `A/B == 0` API jawnie komunikuje, że collect został wykonany przy `fee_owed_a/b == 0`. Jeśli collect ma tylko jedną nogę zmapowaną, brakująca noga jest normalizowana do `0` (z notą), aby UI nie pokazywał `-`.
 - **Fix:** Rozszerzono `load_wallet_from_env()` o fallback na `SOLANA_KEYPAIR`/`WALLET_KEYPAIR_BASE58`, dodano diagnostykę env/path oraz jawne przekazywanie signer vars w `Start-ClmmApi-8081.ps1`. Collect nie przerywa się już na błędzie odczytu `fee_owed_*`; wykonuje harvest i zapisuje authoritative leg values tylko gdy pre-read się powiedzie. API `collect_fees` zwraca teraz komunikat z kwotami obu nóg (A/B) wyliczony jako `pre_uncollected - post_uncollected` oraz dołącza szczegóły pre/post w `data`. Dla lineage dodano notę jakości danych: przy `collect_events > 0` i `A/B == 0` API jawnie komunikuje, że collect został wykonany przy `fee_owed_a/b == 0`. Jeśli collect ma tylko jedną nogę zmapowaną, brakująca noga jest normalizowana do `0` (z notą), aby UI nie pokazywał `-`. Dodano per-node `collect_zero_diagnostics` (in-range share est., swap count est., position share est.) i render w tabeli `LP Zebrane`. Dodatkowo LP legs dla collect są teraz brane priorytetowo z Orca `harvest_position_instructions.fees_quote` (obie nogi), a nie tylko z pre-read `PositionReader`.
 - **Fix:** Rozszerzono `load_wallet_from_env()` o fallback na `SOLANA_KEYPAIR`/`WALLET_KEYPAIR_BASE58`, dodano diagnostykę env/path oraz jawne przekazywanie signer vars w `Start-ClmmApi-8081.ps1`. Collect nie przerywa się już na błędzie odczytu `fee_owed_*`; wykonuje harvest i zapisuje authoritative leg values tylko gdy pre-read się powiedzie. API `collect_fees` zwraca teraz komunikat z kwotami obu nóg (A/B) wyliczony jako `pre_uncollected - post_uncollected` oraz dołącza szczegóły pre/post w `data` (kwoty w komunikacie zaokrąglone do 3 miejsc). Dla lineage dodano notę jakości danych: przy `collect_events > 0` i `A/B == 0` API jawnie komunikuje, że collect został wykonany przy `fee_owed_a/b == 0`. Jeśli collect ma tylko jedną nogę zmapowaną, brakująca noga jest normalizowana do `0` (z notą), aby UI nie pokazywał `-`. Dodano per-node `collect_zero_diagnostics` (in-range share est., swap count est., position share est.) i render w tabeli `LP Zebrane`. Dodatkowo LP legs dla collect są teraz brane priorytetowo z Orca `harvest_position_instructions.fees_quote` (obie nogi), a nie tylko z pre-read `PositionReader`. W tabeli sesji (`Logs / rebalances`) dodano kolumnę `Collect values` z `A raw/B raw` dla collect tx.
 - **Fix:** (2026-04-13) Query w `stream-lineage` został uodporniony na drift schematu: wartości `lp_collected_token_*_raw` są czytane z `raw_json` (aliasowane do tych samych nazw), bez bezpośredniego odwołania do brakujących kolumn.
+- **Fix (2026-04-17):** `lifecycle-summary` używa teraz rzeczywistego OR (`session match` **lub** `position match`) i ma regresyjny test. Ingest `position_stream_ledger_rows` dostał detekcję kolumn `information_schema` i zapisuje fallback-variant SQL zgodny ze starszym schematem (bez optional columns), zamiast cicho tracić cały ingest.
 - **Guards/tests:** dodać unit testy resolvera źródeł wallet (ścieżka vs env key material) i test collect_fees dla scenariusza „position pre-read fails but tx still executes”.
-- **Paths:** `crates/api/src/services/position_executor.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/handlers/wallets.rs`, `tools/Start-ClmmApi-8081.ps1`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`
+- **Paths:** `crates/api/src/services/position_executor.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/handlers/wallets.rs`, `tools/Start-ClmmApi-8081.ps1`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_performance.rs`
 
 ### BUG-20260410-04 — Brak regresyjnych testów UI dla feedbacku collect/swap
 

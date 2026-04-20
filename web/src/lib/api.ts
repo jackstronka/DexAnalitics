@@ -83,6 +83,11 @@ export interface PositionStreamPerformanceResponse {
   note?: string | null
 }
 
+export interface StreamPnLInterpretation {
+  economic_net_pnl_caption_pl?: string
+  il_vs_initial_hodl_caption_pl?: string
+}
+
 export interface PositionStreamPnLResponse {
   position_address: string
   baseline_ts_utc?: string | null
@@ -96,6 +101,7 @@ export interface PositionStreamPnLResponse {
   realized_cashflow_usd: string
   net_pnl_usd: string
   net_pnl_pct: string
+  interpretation?: StreamPnLInterpretation
   note?: string | null
 }
 
@@ -296,6 +302,7 @@ export type StrategyType =
   | 'il_limit'
   | 'oor_recenter'
   | 'retouch_shift'
+  | 'last_candle'
 
 export interface Strategy {
   id: string
@@ -321,6 +328,8 @@ export interface StrategyParameters {
   rebalance_threshold_pct?: number
   max_il_pct?: number
   min_rebalance_interval_hours?: number
+  /** Candle size in seconds for `last_candle` strategy. */
+  candle_seconds?: number
   range_width_pct?: number
   /** Periodic: when true, rebalance only if position is out of range. */
   periodic_requires_out_of_range?: boolean
@@ -425,6 +434,7 @@ export interface SimulationRequest {
     | 'oor_recenter'
     | 'il_limit'
     | 'retouch_shift'
+    | 'last_candle'
   gbm_volatility?: number
   gbm_drift?: number
   periodic_interval_steps?: number

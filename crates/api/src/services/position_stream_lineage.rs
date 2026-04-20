@@ -10,9 +10,6 @@ use crate::models::{
     PositionStreamLineageResponse,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
-use crate::services::position_stream_pnl::{
-    compute_position_stream_pnl, compute_position_stream_pnl_for_stream_members,
-};
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
 };
@@ -2522,10 +2519,10 @@ async fn node_metrics(
     .await
     .map_err(|e| ApiError::internal(format!("stream lineage: tx fee sum: {e}")))?;
     let fee_lamports: i64 = fee_row.try_get("fee_lamports").unwrap_or(0);
-    let fee_lamports_u = fee_lamports.max(0) as u64;
+    let mut fee_lamports_u = fee_lamports.max(0) as u64;
 
     let (sol_usd, sol_src) = sol_usd().await;
-    let tx_fees_usd = if sol_usd > 0.0 {
+    let mut tx_fees_usd = if sol_usd > 0.0 {
         Decimal::from_f64_retain((fee_lamports_u as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
     } else {
         Decimal::ZERO
@@ -2687,8 +2684,45 @@ async fn node_metrics(
         Decimal::ZERO
     };
 
-    let (collect_events, fees_collected_usd, collect_by_mint) =
+    let (mut collect_events, mut fees_collected_usd, mut collect_by_mint) =
         lp_fees_collected_usd_from_ledger_db(state, db, position_pubkey).await?;
+
+    // When DB ledger rows are present but sparse (common after schema/drift/partial ingest),
+    // bridge tx/collect aggregates from lifecycle JSONL to avoid misleading zeros for closed chains.
+    let mut db_ledger_fallback_note = String::new();
+    if fee_lamports_u == 0 || (collect_events == 0 && fees_collected_usd.is_zero()) {
+        let lifecycle_rows = lifecycle_rows_cached_best_effort().await;
+        if fee_lamports_u == 0 {
+            let lifecycle_tx_fee_lamports: u64 = lifecycle_rows
+                .iter()
+                .filter(|r| r.position_pubkey.as_deref() == Some(position_pubkey))
+                .filter_map(|r| r.tx_fee_lamports)
+                .sum();
+            if lifecycle_tx_fee_lamports > 0 {
+                fee_lamports_u = lifecycle_tx_fee_lamports;
+                tx_fees_usd = if sol_usd > 0.0 {
+                    Decimal::from_f64_retain((fee_lamports_u as f64 / 1e9) * sol_usd)
+                        .unwrap_or(Decimal::ZERO)
+                } else {
+                    Decimal::ZERO
+                };
+                db_ledger_fallback_note
+                    .push_str(" tx_fees_from_lifecycle_fallback.");
+            }
+        }
+        if collect_events == 0 && fees_collected_usd.is_zero() {
+            let (lc_events, lc_fees_usd, lc_by_mint) =
+                lp_fees_collected_usd_from_lifecycle_rows(state, &lifecycle_rows, position_pubkey)
+                    .await;
+            if lc_events > 0 || !lc_fees_usd.is_zero() {
+                collect_events = lc_events;
+                fees_collected_usd = lc_fees_usd;
+                collect_by_mint = lc_by_mint;
+                db_ledger_fallback_note
+                    .push_str(" collect_fees_from_lifecycle_fallback.");
+            }
+        }
+    }
 
     let collected_a_ui = mint_a
         .as_deref()
@@ -2798,11 +2832,13 @@ async fn node_metrics(
         net_pnl_pct,
         note: Some(
             format!(
-                "Best-effort per-PDA. tx_fee_lamports = sum of network fees for this PDA; fees_collected_usd = bot_collect_fees legs × USD (mint map + fee_payer_token_*_delta_ui columns when present); tx fees use SOL/USD ({sol_src}). cashflow uses fee_payer_token_deltas × current mint USD prices when baseline mints are known.{}",
+                "Best-effort per-PDA. tx_fee_lamports = sum of network fees for this PDA; fees_collected_usd = bot_collect_fees legs × USD (mint map + fee_payer_token_*_delta_ui columns when present); tx fees use SOL/USD ({sol_src}). cashflow uses fee_payer_token_deltas × current mint USD prices when baseline mints are known.{}{}",
                 baseline_note
                     .as_deref()
                     .map(|n| format!(" {n}."))
                     .unwrap_or_default()
+                ,
+                db_ledger_fallback_note
             ) + collect_zero_note,
         ),
         collect_zero_diagnostics: None,
@@ -3269,18 +3305,102 @@ async fn node_metrics_from_lifecycle_best_effort(
     })
 }
 
+/// Same ordered PDA chain as [`compute_position_stream_lineage`] (oldest → newest along rotations).
+/// Used by stream PnL/IL to anchor baseline snapshot on the **first** chain member and current on the **last**
+/// (instead of global MIN/MAX `ts_utc` across unrelated PDAs in the BFS component).
+pub(crate) async fn resolve_lineage_chain_for_stream_pnl(
+    state: &AppState,
+    perf: &crate::models::PositionStreamPerformanceResponse,
+    entry: &str,
+) -> Vec<String> {
+    let entry = entry.trim();
+    let Some(db) = state.db.as_ref() else {
+        return vec![entry.to_string()];
+    };
+
+    let rows = lifecycle_rows_cached_best_effort().await;
+    let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
+    let stream_positions: Vec<String> = if stitch_suppressed {
+        vec![entry.to_string()]
+    } else {
+        perf.positions.clone()
+    };
+
+    let edge_rows = sqlx::query(
+        r#"
+        SELECT ts_utc, old_position, new_position, rebalance_session_id
+        FROM position_stream_edges
+        WHERE old_position = ANY($1) OR new_position = ANY($1)
+        "#,
+    )
+    .bind(&stream_positions)
+    .fetch_all(db.pool())
+    .await;
+
+    let Ok(mut edge_rows) = edge_rows else {
+        return vec![entry.to_string()];
+    };
+
+    let mut edges: Vec<(Option<DateTime<Utc>>, String, String, String)> = Vec::new();
+    for r in edge_rows.drain(..) {
+        let ts: Option<DateTime<Utc>> = r.try_get("ts_utc").ok();
+        let oldp: String = r.try_get("old_position").unwrap_or_default();
+        let newp: String = r.try_get("new_position").unwrap_or_default();
+        let sid: String = r.try_get("rebalance_session_id").unwrap_or_default();
+        if oldp.trim().is_empty() || newp.trim().is_empty() {
+            continue;
+        }
+        edges.push((ts, oldp, newp, sid));
+    }
+
+    let pos_set: HashSet<&str> = stream_positions.iter().map(|s| s.as_str()).collect();
+    let entry_touches_db_edge = edges.iter().any(|(_, o, n, _)| {
+        (o == entry || n == entry) && pos_set.contains(o.as_str()) && pos_set.contains(n.as_str())
+    });
+
+    let mut chain = build_lineage_chain_from_db_edges(&stream_positions, &edges, entry, 100);
+
+    if chain.len() <= 1 && !entry_touches_db_edge {
+        let rows_fb = lifecycle_rows_cached_best_effort().await;
+        if !suppress_jsonl_rotation_stitch(&rows_fb, entry) {
+            let reg_rows = registry_rows_best_effort();
+            if !reg_rows.is_empty() {
+                let rc = chain_from_registry_best_effort_rows(&reg_rows, entry, 50);
+                if rc.len() > chain.len() {
+                    chain = rc;
+                }
+            }
+
+            let lc = chain_from_lifecycle_best_effort_rows(&rows_fb, entry, 25);
+            if lc.len() > chain.len() {
+                chain = lc;
+            }
+        }
+    }
+
+    if chain.is_empty() {
+        vec![entry.to_string()]
+    } else {
+        chain
+    }
+}
+
 /// Build an ordered stream lineage chain and enrich each node with best-effort metrics.
 pub async fn compute_position_stream_lineage(
     state: &AppState,
     position_address: &str,
 ) -> Result<PositionStreamLineageResponse, ApiError> {
+    use crate::services::position_stream_pnl::{
+        compute_position_stream_pnl, compute_position_stream_pnl_for_stream_members,
+    };
+
     let entry = position_address.trim();
 
     // Connectivity + totals: reuse existing stream services.
     let perf = compute_position_stream_performance(state, entry, true).await?;
     let mut totals = compute_position_stream_pnl(state, entry).await.ok();
 
-    let Some(db) = state.db.as_ref() else {
+    if state.db.is_none() {
         let rows = lifecycle_rows_cached_best_effort().await;
         let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
         let chain = if stitch_suppressed {
@@ -3319,85 +3439,27 @@ pub async fn compute_position_stream_lineage(
                     .to_string(),
             ),
         });
-    };
+    }
 
     // When lifecycle says this mint should not inherit prior pool rotation history (manual CLI open,
     // fresh API cost session, or unanchored bot open), the DB path must not use the full undirected
     // BFS component from `compute_position_stream_performance` — that can merge unrelated PDAs.
     let rows = lifecycle_rows_cached_best_effort().await;
     let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
-    let stream_positions: Vec<String> = if stitch_suppressed {
-        vec![entry.to_string()]
-    } else {
-        perf.positions.clone()
-    };
     if stitch_suppressed {
+        let stitch_chain = vec![entry.to_string()];
         totals = compute_position_stream_pnl_for_stream_members(
             state,
             entry,
             vec![entry.to_string()],
             vec![],
+            Some(stitch_chain.as_slice()),
         )
         .await
         .ok();
     }
 
-    // Load edges among the connected component to build a linear chain.
-    let mut edge_rows = sqlx::query(
-        r#"
-        SELECT ts_utc, old_position, new_position, rebalance_session_id
-        FROM position_stream_edges
-        WHERE old_position = ANY($1) OR new_position = ANY($1)
-        "#,
-    )
-    .bind(&stream_positions)
-    .fetch_all(db.pool())
-    .await
-    .map_err(|e| ApiError::internal(format!("stream lineage: edges query: {e}")))?;
-
-    let mut edges: Vec<(Option<DateTime<Utc>>, String, String, String)> = Vec::new();
-    for r in edge_rows.drain(..) {
-        let ts: Option<DateTime<Utc>> = r.try_get("ts_utc").ok();
-        let oldp: String = r.try_get("old_position").unwrap_or_default();
-        let newp: String = r.try_get("new_position").unwrap_or_default();
-        let sid: String = r.try_get("rebalance_session_id").unwrap_or_default();
-        if oldp.trim().is_empty() || newp.trim().is_empty() {
-            continue;
-        }
-        edges.push((ts, oldp, newp, sid));
-    }
-
-    let pos_set: HashSet<&str> = stream_positions.iter().map(|s| s.as_str()).collect();
-    let entry_touches_db_edge = edges.iter().any(|(_, o, n, _)| {
-        (o == entry || n == entry) && pos_set.contains(o.as_str()) && pos_set.contains(n.as_str())
-    });
-
-    let mut chain = build_lineage_chain_from_db_edges(&stream_positions, &edges, entry, 100);
-
-    // IL ledger → `position_stream_edges` is optional; without ingested edges the DB graph is a
-    // single PDA even when `orca_position_lifecycle.jsonl` has the full close→open chain.
-    //
-    // If **any** persisted edge touches `entry`, trust the DB entry-centric chain only — JSONL/registry
-    // extensions previously re-stitched unrelated pool history (e.g. after a forked edge graph).
-    if chain.len() <= 1 && !entry_touches_db_edge {
-        let rows_fb = lifecycle_rows_cached_best_effort().await;
-        if !suppress_jsonl_rotation_stitch(&rows_fb, entry) {
-            // First fallback: registry.jsonl (cheaper and usually complete for open/close sequences).
-            let reg_rows = registry_rows_best_effort();
-            if !reg_rows.is_empty() {
-                let rc = chain_from_registry_best_effort_rows(&reg_rows, entry, 50);
-                if rc.len() > chain.len() {
-                    chain = rc;
-                }
-            }
-
-            // Second fallback: lifecycle JSONL (richer, but may omit some PDAs depending on collector config).
-            let lc = chain_from_lifecycle_best_effort_rows(&rows_fb, entry, 25);
-            if lc.len() > chain.len() {
-                chain = lc;
-            }
-        }
-    }
+    let chain = resolve_lineage_chain_for_stream_pnl(state, &perf, entry).await;
 
     if state.db.is_some() {
         let _ = persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await;
@@ -3643,6 +3705,14 @@ fn maybe_compute_totals_from_nodes(
         realized_cashflow_usd,
         net_pnl_usd,
         net_pnl_pct,
+        interpretation: crate::models::StreamPnLInterpretation {
+            economic_net_pnl_caption_pl:
+                "Wynik ekonomiczny (fallback z węzłów lineage, bez pełnych snapshotów DB): końcowy NAV + suma cashflow z węzłów − baseline pierwszego węzła − suma tx fees z węzłów."
+                    .to_string(),
+            il_vs_initial_hodl_caption_pl:
+                "Benchmark IL vs HODL: w tym trybie nie liczony (brak ilości tokenów ze snapshotów); pola il_* są zerowe."
+                    .to_string(),
+        },
         note: note.map(|s| s.to_string()),
     })
 }
