@@ -52,6 +52,14 @@ tags: domain=swaps,backtest; source=jsonl-local; freshness=near-realtime; qualit
 
 - Raw and decoded swap events for fee/proxy analytics and scenario comparisons.
 
+### `data/orca-rest/pool_volume_history.jsonl`
+
+tags: domain=backtest,strategy; source=jsonl-local; freshness=near-realtime; quality=best-effort; cost=free
+
+- Snapshot history of Orca Public API pool stats (volumes for `5m/1h/24h/7d` + TVL).
+- Produced by API collector endpoint: `POST /api/v1/pools/orca/volume-history/collect`.
+- Designed for easy joins by `pool_address` and `ts_utc` with local snapshot/backtest datasets.
+
 ## Usage rule
 
 Before adding new data collection paths:

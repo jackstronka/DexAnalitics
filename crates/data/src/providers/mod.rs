@@ -25,7 +25,8 @@ pub use jupiter::JupiterProvider;
 pub use mock::MockMarketDataProvider;
 pub use orca_rest::{
     ListPoolsQuery as OrcaListPoolsQuery, ListTokensQuery as OrcaListTokensQuery, OrcaLockInfo,
-    OrcaPoolSummary, OrcaProtocolStats, OrcaRestClient, OrcaTokenSummary, Paged as OrcaPaged,
+    OrcaPoolStats, OrcaPoolSummary, OrcaProtocolStats, OrcaRestClient, OrcaTokenSummary,
+    Paged as OrcaPaged,
     SearchPoolsQuery as OrcaSearchPoolsQuery, SearchTokensQuery as OrcaSearchTokensQuery,
     Wrapped as OrcaWrapped,
 };

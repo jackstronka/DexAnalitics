@@ -4,6 +4,10 @@
 # - data/snapshot_logs/snapshot-run-curated-all.jsonl
 # - data/snapshot_logs/snapshot-run-curated-all_5m.jsonl
 #
+# Optional loop heartbeats (scripts/windows/run-snapshot-loop*.ps1):
+# - data/snapshot_logs/snapshot-loop-heartbeat-10m.json
+# - data/snapshot_logs/snapshot-loop-heartbeat-5m.json
+#
 # Emits a JSONL health record under data/snapshot_logs/snapshot-health.jsonl and exits:
 # - 0 when healthy
 # - 1 when unhealthy (for services/alerts)
@@ -15,10 +19,16 @@ param(
     [int] $MaxAgeMinutes5m = 15,
 
     # Expect 3 Orca curated pools.
-    [int] $ExpectOrcaTarget = 3,
+    [int] $ExpectOrcaTarget = 4,
 
     # If the loop log contains a recent ERROR line, consider unhealthy.
     [int] $RecentErrorLookbackLines = 120,
+
+    # Loop heartbeat files (written each iteration by scripts/windows/run-snapshot-loop*.ps1).
+    # If a file exists but its ts_utc is older than this, NOT OK (detects dead/stuck loop process).
+    # If the file is absent, checks are skipped (backward compatible until loops are upgraded).
+    [int] $MaxHeartbeatAgeMinutes10m = 22,
+    [int] $MaxHeartbeatAgeMinutes5m = 12,
 
     # Optional: write agent-readable alert artifacts when NOT OK.
     # The agent can watch `latest.json` or scan timestamped history.
@@ -92,6 +102,8 @@ $status10Path = ".\data\snapshot_logs\snapshot-run-curated-all.jsonl"
 $status5Path = ".\data\snapshot_logs\snapshot-run-curated-all_5m.jsonl"
 $loop10Log = ".\data\snapshot_logs\snapshot-loop.log"
 $loop5Log = ".\data\snapshot_logs\snapshot-loop-5m.log"
+$heartbeat10Path = ".\data\snapshot_logs\snapshot-loop-heartbeat-10m.json"
+$heartbeat5Path = ".\data\snapshot_logs\snapshot-loop-heartbeat-5m.json"
 
 $s10 = Read-LastJsonl $status10Path
 $s5 = Read-LastJsonl $status5Path
@@ -105,6 +117,16 @@ $since10 = if ($s10ok) { $s10ok.ts_utc } else { $null }
 $since5 = if ($s5ok) { $s5ok.ts_utc } else { $null }
 $err10 = HasRecentErrorSince $loop10Log $RecentErrorLookbackLines $since10
 $err5 = HasRecentErrorSince $loop5Log $RecentErrorLookbackLines $since5
+
+function Read-HeartbeatFile([string] $path) {
+    if (!(Test-Path $path)) { return $null }
+    try { return (Get-Content $path -Raw | ConvertFrom-Json) } catch { return $null }
+}
+
+$hb10 = Read-HeartbeatFile $heartbeat10Path
+$hb5 = Read-HeartbeatFile $heartbeat5Path
+$ageHb10 = if ($hb10 -and $hb10.ts_utc) { AgeMinutesUtc ([string]$hb10.ts_utc) } else { $null }
+$ageHb5 = if ($hb5 -and $hb5.ts_utc) { AgeMinutesUtc ([string]$hb5.ts_utc) } else { $null }
 
 $issues = @()
 
@@ -130,6 +152,15 @@ if ($s5ok -and $ExpectOrcaTarget -gt 0) {
 
 if ($err10) { $issues += "recent_error_in_snapshot_loop_10m_log" }
 if ($err5) { $issues += "recent_error_in_snapshot_loop_5m_log" }
+
+if (Test-Path $heartbeat10Path) {
+    if ($null -eq $ageHb10) { $issues += "heartbeat_10m_ts_unparseable" }
+    elseif ($ageHb10 -gt $MaxHeartbeatAgeMinutes10m) { $issues += ("heartbeat_10m_stale_gt_" + $MaxHeartbeatAgeMinutes10m) }
+}
+if (Test-Path $heartbeat5Path) {
+    if ($null -eq $ageHb5) { $issues += "heartbeat_5m_ts_unparseable" }
+    elseif ($ageHb5 -gt $MaxHeartbeatAgeMinutes5m) { $issues += ("heartbeat_5m_stale_gt_" + $MaxHeartbeatAgeMinutes5m) }
+}
 
 $ok = ($issues.Count -eq 0)
 
@@ -162,6 +193,22 @@ $health = [pscustomobject]@{
     logs = @{
         loop10 = @{ path = $loop10Log; recent_error = $err10 }
         loop5 = @{ path = $loop5Log; recent_error = $err5 }
+    }
+    heartbeats = @{
+        m10 = @{
+            path         = $heartbeat10Path
+            present      = (Test-Path $heartbeat10Path)
+            ts_utc       = if ($hb10) { $hb10.ts_utc } else { $null }
+            age_minutes  = if ($null -ne $ageHb10) { [math]::Round($ageHb10, 2) } else { $null }
+            max_age_min  = $MaxHeartbeatAgeMinutes10m
+        }
+        m5 = @{
+            path         = $heartbeat5Path
+            present      = (Test-Path $heartbeat5Path)
+            ts_utc       = if ($hb5) { $hb5.ts_utc } else { $null }
+            age_minutes  = if ($null -ne $ageHb5) { [math]::Round($ageHb5, 2) } else { $null }
+            max_age_min  = $MaxHeartbeatAgeMinutes5m
+        }
     }
 }
 

@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct OrcaRestClient {
@@ -275,6 +276,18 @@ pub struct OrcaPoolSummary {
     pub token_mint_b: String,
     pub price: String,
     pub tvl_usdc: String,
+    #[serde(default)]
+    pub stats: HashMap<String, OrcaPoolStats>,
+}
+
+/// Per-period stats map entry from Orca REST (e.g. `stats["24h"]`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrcaPoolStats {
+    pub volume: Option<String>,
+    pub fees: Option<String>,
+    pub rewards: Option<String>,
+    pub yield_over_tvl: Option<String>,
 }
 
 /// Lock info payload from Orca REST (`/lock/{address}`).

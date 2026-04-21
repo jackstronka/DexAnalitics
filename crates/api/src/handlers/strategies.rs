@@ -746,6 +746,7 @@ async fn start_strategy_executor_core(
             StrategyType::OorRecenter => clmm_lp_execution::prelude::StrategyMode::OorRecenter,
             StrategyType::IlLimit => clmm_lp_execution::prelude::StrategyMode::IlLimit,
             StrategyType::RetouchShift => clmm_lp_execution::prelude::StrategyMode::RetouchShift,
+            StrategyType::LastCandle => clmm_lp_execution::prelude::StrategyMode::LastCandle,
         };
 
         // Common: width and periodic / thresholds.
@@ -782,6 +783,10 @@ async fn start_strategy_executor_core(
             .get("min_rebalance_interval_hours")
             .and_then(min_rebalance_interval_hours_from_json);
         apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_hours);
+
+        if let Some(candle_seconds) = params.get("candle_seconds").and_then(|v| v.as_u64()) {
+            decision_config.last_candle_seconds = candle_seconds.max(60);
+        }
 
         // IL-specific knobs (only meaningful for IlLimit strategy mode).
         if decision_config.strategy_mode == clmm_lp_execution::prelude::StrategyMode::IlLimit {

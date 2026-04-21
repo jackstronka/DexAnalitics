@@ -28,6 +28,77 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260421-01 — Backtests FULL: duplicate strategy labels hid different ranges; global metrics were unclear
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-21  
+fixed_in: local  
+keywords: backtests, full-run, optimize, duplicates, strategy-range, meteora, lp_share, tooltips, ranking
+
+- **Symptom:** TOP list for a pool/window could show the same strategy label multiple times (e.g. `bollinger_w20_k2.5_r48` twice) with slightly different metrics and no visible reason.
+- **Symptom:** Global ranking column `Wystapienia` looked suspicious (e.g. `320`) and users interpreted it as wins instead of count of tested variants.
+- **Symptom:** Meteora rows frequently showed very small fees (e.g. `0.03`) because API silently forced `--lp-share 0.0001` when request had no `lp_share`.
+- **Root cause:** API returned only strategy label + metrics parsed from CLI table and dropped per-row range context (`Lower($)`, `Upper($)`), while UI TOP3 selected first 3 rows after sort (not unique strategy labels). Global table lacked metric semantics hints. Meteora fallback share was hardcoded in API handler.
+- **Fix:** Added range context to API metric rows (`lower_usd`, `upper_usd`, `width_pct`), made TOP3 unique by strategy label (best variant per label for selected sort), displayed range/width in per-window table, added column/tooltips clarifying semantics (including `Wystapienia`), and removed forced Meteora fallback `lp_share=0.0001` in API.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`; `cargo check -p clmm-lp-api`.
+- **Paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`
+
+---
+
+### BUG-20260420-04 — `backtest-optimize` skipped documented strategies (`oor_recenter`, `il_limit`, `retouch_shift`)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-20  
+fixed_in: local  
+keywords: backtest-optimize, strategies, StratConfig, oor_recenter, il_limit, retouch_shift, docs-drift
+
+- **Symptom:** `backtest-optimize` results did not include all strategies described in docs, and rankings were biased toward `static` / indicator variants because `oor_recenter`, `il_limit`, `retouch_shift` were missing from the grid.
+- **Root cause:** `StratConfig` + `default_strategies()` in CLI omitted those strategy variants, while documentation still described them as part of optimize strategy catalog.
+- **Fix:** Added `OorRecenter`, `IlLimit`, `RetouchShift` to `StratConfig`, wired trigger/range logic in `run_single`, added parser support (`parse_strategy_label`), and restored those variants in `default_strategies()` (using `--il-max-pct`, `--il-close-pct`, `--il-grace-steps`).
+- **Guards/tests:** Added parser regression assertions for new labels and a grid regression test ensuring default optimize set includes the missing strategies; verified with `cargo test -p clmm-lp-cli parse_strategy_label_bollinger_and_last_candle` and `cargo test -p clmm-lp-cli default_grid_includes_documented_non_indicator_strategies`.
+- **Paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/cli/src/output/optimize_result_json.rs`, `crates/cli/src/engine/tests.rs`, `doc/BACKTEST_OPTIMIZE_STRATEGIES.md`
+
+---
+
+### BUG-20260420-03 — Stream PnL mixed chain-anchored valuation with component-wide session costs
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-20  
+fixed_in: local  
+keywords: stream-pnl, stream-lineage, bfs-component, rebalance-session-id, tx-fees, realized-cashflow, forked-edges
+
+- **Symptom:** Stream totals could show internally inconsistent scope: `baseline/current` anchored to the selected lineage chain (`start -> ... -> end`), while `tx_fees_usd` and `realized_cashflow_usd` could include rows from sibling branches in the same BFS component.
+- **Symptom (example):** In forked graph shape (`A->B->C` plus `A->X`), querying chain ending at `C` could still include `A->X` session fees/cashflow in totals.
+- **Root cause:** `compute_position_stream_pnl_for_stream_members` used `sessions` derived from full component connectivity (`compute_position_stream_performance`) for cost/cashflow aggregation, but valuation anchors were lineage-specific (first/last chain PDA).
+- **Fix:** Added chain-local session scoping in `position_stream_pnl`: derive `chain_sessions` from DB edges matching adjacent ordered chain pairs only; aggregate tx fees and token-delta cashflow by those sessions. If chain sessions are unavailable, fallback to chain positions (not component-wide sessions).
+- **Guards/tests:** Added unit tests `chain_sessions_ignore_fork_edges_outside_ordered_chain` and `chain_sessions_empty_for_single_node_chain`; verified with `cargo test -p clmm-lp-api chain_sessions_`.
+- **Paths:** `crates/api/src/services/position_stream_pnl.rs`
+
+---
+
+### BUG-20260420-02 — `experiment-config` failed to derive USD capital when pool only existed in lifecycle rows
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-20  
+fixed_in: local  
+keywords: experiment-config, derived_initial_capital_usd, pool_address, pool_pubkey, open-session, positions-handler
+
+- **Symptom:** `Detected config (open snapshot)` showed `Could not resolve pool mints to convert open-session deltas to USD; derived_initial_capital_usd unavailable.` even when lifecycle/session data existed.
+- **Root cause:** `get_position_experiment_config` resolved pool mints only from `registry_open.details.pool_address`; older/incomplete rows often had pool only in lifecycle ledger lines (`pool_address`/`pool_pubkey`) for the same `rebalance_session_id`.
+- **Fix:** Added fallback pool resolution for the open session by scanning lifecycle rows for the same session id and taking `pool_pubkey` or `pool_address` when details are missing.
+- **Guards/tests:** `cargo build -p clmm-lp-api`.
+- **Paths:** `crates/api/src/handlers/positions.rs`
+
+---
+
 ### BUG-20260420-01 — Position Detail totals lost/zeroed chain-level LP collected summary
 
 status: partially fixed  
@@ -39,8 +110,10 @@ keywords: position-detail, stream-lineage, chain_cost_summary, fees_collected_us
 
 - **Symptom:** On `PositionDetail` (`Logs / rebalances`), the totals card still showed baseline/current/tx fees/cashflow/net PnL, but chain-level **LP collected** summary disappeared after the economic-vs-IL layout update.
 - **Symptom (follow-up):** After restoring the field, some closed chains still showed zeros for tx/LP collected although lifecycle JSONL rows existed (`bot_collect_fees`, non-zero `tx_fee_lamports`).
+- **Symptom (follow-up 2):** In `Closed position` view, chain LP fee leg rows showed only token units/base units (e.g. `SOL`, `whETH`) without per-leg USD approximation, making it hard to reconcile with summed USD.
 - **Root cause:** (1) UI refactor replaced the old totals block and omitted the `chain_cost_summary.fees_collected_usd_total` + `collect_events_total` rendering branch. (2) DB ingest/aggregation path was brittle for lifecycle rows using `pool_address` (not `pool_pubkey`) and DB fallback triggered only when **all** node values were empty, so partial DB rows could still zero tx/collect aggregates.
 - **Fix:** Restored `LP collected (sum)` in UI totals; lifecycle ingest now accepts `pool_address` as fallback for `pool_pubkey`; DB node metrics now bridge tx/collect aggregates from lifecycle JSONL when DB returns zeros for those fields.
+- **Fix (follow-up 2):** Added per-leg USD approximation in chain fee leg rows (`≈ $...`) using current mint prices from Jupiter for displayed token mints; keeps `—` when mint price is unavailable.
 - **Guards/tests:** `npx tsc --noEmit` in `web/`; `cargo test -p clmm-lp-api position_stream_lineage`.
 - **Paths:** `web/src/pages/PositionDetail.tsx`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/services/position_stream_lineage.rs`
 
@@ -60,6 +133,23 @@ keywords: stream-pnl, position_stream_pnl, hodl, il_usd, valuation_snapshots, to
 - **Fix:** Extended baseline and latest snapshot queries to include `token_mint_a`, `token_mint_b`; resolve pool mints with baseline-first + per-leg fallback to the latest snapshot; annotate `ts_utc` row decode for inference.
 - **Guards/tests:** Unit tests `pool_mints_prefers_*`, `pool_mints_falls_back_*`, `pool_mints_mixed_fallback_per_leg` in `services::position_stream_pnl`.
 - **Paths:** `crates/api/src/services/position_stream_pnl.rs`
+
+---
+
+### BUG-20260417-02 — Backtests FULL run: `unexpected argument '--include-strategy-families'` (stale CLI)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-17  
+fixed_in: local  
+keywords: backtests, backtest-optimize, include-strategy-families, clmm-lp-cli, api, resolve_clmm_lp_cli_path
+
+- **Symptom:** Web **Backtests** → FULL comparison failed with `exit Some(2)` and stderr: `unexpected argument '--include-strategy-families' found` (CLI suggested `--indicator-strategies`).
+- **Root cause:** API spawned an **older** `clmm-lp-cli` binary (commonly `target/debug/clmm-lp-cli.exe` next to `cargo run` API) that predates `--include-strategy-families`, while the API always passed that flag for strategy-family filtering.
+- **Fix:** `resolve_clmm_lp_cli_path` now prefers **`target/release` before `target/debug`** under `CLMM_REPO_ROOT` (and same order for `CLMM_API_TARGET_DIR` / `CARGO_TARGET_DIR`) and only falls back to “next to API exe” after those candidates. Full-matrix handler probes `backtest-optimize --help`; omits the flag for **full-catalog** runs on legacy CLI, and **fails fast** with a clear rebuild message when a **subset** of strategies is selected but the CLI cannot filter families.
+- **Fix (follow-up):** Probe result cache key includes the CLI binary **mtime**, so rebuilding `clmm-lp-cli` invalidates stale “unsupported” results without restarting `clmm-lp-api`.
+- **Paths:** `crates/api/src/handlers/backtests.rs`
 
 ---
 

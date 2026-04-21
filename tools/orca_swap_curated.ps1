@@ -1,9 +1,10 @@
-# Swap on curated mainnet Orca pools (3 pairs from STARTUP.md) in any leg direction.
+# Swap on curated mainnet Orca pools (4 pairs from STARTUP.md) in any leg direction.
 #
 # Token order per pool matches `orca-pool-read` (mint_a = SymbolA, mint_b = SymbolB):
 #   SOL_USDC:    SOL (wSOL) <-> USDC
 #   WHETH_SOL:   SOL (wSOL) <-> WHETH (portal)
 #   CBBTC_USDC:  cbBTC <-> USDC
+#   CBBTC_WBTC:  cbBTC <-> WBTC (portal)
 #
 # Mapping to `orca-swap --specified-mint`:
 #   exact-in:  amount is in **From** token (you spend From).
@@ -15,10 +16,10 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\orca_swap_curated.ps1 -ListPairs
 #   powershell ... -File .\tools\orca_swap_curated.ps1 -Pair SOL_USDC -From SOL -To USDC -SwapType exact-in -AmountRaw 1000000 -Keypair $kp -Execute
 #
-# Aliases: WSOL->SOL, ETH/WETH->WHETH, BTC/WBTC->CBBTC (case-insensitive).
+# Aliases: WSOL->SOL, ETH/WETH->WHETH; for CBBTC_USDC only: WBTC/BTC->cbBTC mint (legacy).
 
 param(
-  [ValidateSet("SOL_USDC", "WHETH_SOL", "CBBTC_USDC", "")]
+  [ValidateSet("SOL_USDC", "WHETH_SOL", "CBBTC_USDC", "CBBTC_WBTC", "")]
   [string] $Pair = "",
 
   [string] $From = "",
@@ -68,7 +69,7 @@ if ($ListPairs.IsPresent) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Pair)) {
-  Fail "Pass -Pair SOL_USDC | WHETH_SOL | CBBTC_USDC, or use -ListPairs."
+  Fail "Pass -Pair SOL_USDC | WHETH_SOL | CBBTC_USDC | CBBTC_WBTC, or use -ListPairs."
 }
 if ([string]::IsNullOrWhiteSpace($From) -or [string]::IsNullOrWhiteSpace($To)) {
   Fail "Pass -From and -To using symbols for that pair (see -ListPairs)."
@@ -134,14 +135,12 @@ if ([string]::IsNullOrWhiteSpace($Owner)) {
 }
 
 $pe = Get-OrcaCuratedMainnetPoolById $Pair
-$fSym = Normalize-OrcaCuratedTokenSymbol $From
-$tSym = Normalize-OrcaCuratedTokenSymbol $To
-if ($fSym -eq $tSym) {
+
+$fromResolved = Resolve-OrcaCuratedMintForSymbol $pe $From
+$toResolved = Resolve-OrcaCuratedMintForSymbol $pe $To
+if ($fromResolved.Symbol -eq $toResolved.Symbol) {
   Fail "-From and -To must name the two different tokens in the pair."
 }
-
-$fromResolved = Resolve-OrcaCuratedMintForSymbol $pe $fSym
-$toResolved = Resolve-OrcaCuratedMintForSymbol $pe $tSym
 
 # Ensure From/To span both legs (second resolve already validates membership).
 $specifiedMint = $null

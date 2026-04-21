@@ -74,6 +74,14 @@ fn create_base_router(state: AppState) -> Router {
         )
         // Pool routes
         .route("/pools", get(handlers::list_pools))
+        .route(
+            "/pools/orca/volume-history",
+            get(handlers::get_orca_volume_history),
+        )
+        .route(
+            "/pools/orca/volume-history/collect",
+            post(handlers::collect_orca_volume_history),
+        )
         .route("/pools/{address}", get(handlers::get_pool))
         .route("/pools/{address}/state", get(handlers::get_pool_state))
         .route(
@@ -118,6 +126,12 @@ fn create_base_router(state: AppState) -> Router {
             "/backtests/from-open-position",
             post(handlers::backtest_from_open_position),
         )
+        .route(
+            "/backtests/strategy-catalog",
+            get(handlers::get_backtest_strategy_catalog),
+        )
+        .route("/backtests/full", post(handlers::start_backtest_full))
+        .route("/backtests/full/{id}", get(handlers::get_backtest_full_job))
         .route("/backtests/{id}", get(handlers::get_backtest_job))
         // Bot activity (JSONL ledger / registry; Slack digest)
         .route("/bot-activity/ledger", get(handlers::get_bot_ledger))

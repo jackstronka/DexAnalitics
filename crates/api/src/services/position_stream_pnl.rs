@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::Row;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 use tokio::time::{Duration, timeout};
 
@@ -112,6 +112,63 @@ fn decimal_from_json(v: &Value) -> Option<Decimal> {
     None
 }
 
+fn chain_session_ids_from_edges(
+    chain: &[String],
+    edges: &[(String, String, String)],
+) -> Vec<String> {
+    if chain.len() < 2 {
+        return Vec::new();
+    }
+    let mut adjacent_pairs: HashSet<(&str, &str)> = HashSet::new();
+    for w in chain.windows(2) {
+        if let [a, b] = w {
+            adjacent_pairs.insert((a.as_str(), b.as_str()));
+        }
+    }
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for (sid, oldp, newp) in edges {
+        let sid_t = sid.trim();
+        if sid_t.is_empty() {
+            continue;
+        }
+        if adjacent_pairs.contains(&(oldp.as_str(), newp.as_str())) {
+            out.insert(sid_t.to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
+async fn chain_sessions_from_db(
+    db: &clmm_lp_data::repositories::Database,
+    chain: &[String],
+) -> Result<Vec<String>, ApiError> {
+    if chain.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT rebalance_session_id, old_position, new_position
+        FROM position_stream_edges
+        WHERE old_position = ANY($1) AND new_position = ANY($1)
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream pnl: chain sessions query: {e}")))?;
+    let mut edges: Vec<(String, String, String)> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let sid: String = r.try_get("rebalance_session_id").unwrap_or_default();
+        let oldp: String = r.try_get("old_position").unwrap_or_default();
+        let newp: String = r.try_get("new_position").unwrap_or_default();
+        if oldp.trim().is_empty() || newp.trim().is_empty() {
+            continue;
+        }
+        edges.push((sid, oldp, newp));
+    }
+    Ok(chain_session_ids_from_edges(chain, &edges))
+}
+
 async fn sol_usd() -> (f64, String) {
     let mut mints: BTreeSet<String> = BTreeSet::new();
     mints.insert(WSOL_MINT.to_string());
@@ -166,6 +223,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     positions: Vec<String>,
     sessions: Vec<String>,
     lineage_chain: Option<&[String]>,
+    settlement_strict: bool,
 ) -> Result<PositionStreamPnLResponse, ApiError> {
     let Some(db) = state.db.as_ref() else {
         return Ok(stream_pnl_db_disabled_response(position_address));
@@ -175,6 +233,16 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     let start_pubkey = anchor_chain.and_then(|c| c.first().map(|s| s.as_str()));
     let end_pubkey = anchor_chain.and_then(|c| c.last().map(|s| s.as_str()));
     let use_lineage_anchor = anchor_chain.is_some();
+    let chain_vec: Vec<String> = anchor_chain
+        .map(|c| c.to_vec())
+        .unwrap_or_else(|| positions.clone());
+    let chain_sessions = chain_sessions_from_db(db, &chain_vec).await?;
+    let scoped_sessions = if !chain_sessions.is_empty() {
+        chain_sessions
+    } else {
+        Vec::new()
+    };
+    let use_chain_session_scope = !scoped_sessions.is_empty();
 
     let mut baseline_row = if let Some(pk) = start_pubkey {
         sqlx::query(BASELINE_SNAPSHOT_FIRST_PDA_SQL)
@@ -206,7 +274,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     let seed_pk_for_baseline = start_pubkey.unwrap_or_else(|| position_address.trim());
 
-    if baseline_row.is_none() {
+    if baseline_row.is_none() && !settlement_strict {
         // Best-effort self-seed: valuation snapshot for chain **start** PDA (or entry) when missing.
         if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(seed_pk_for_baseline)
             && let Ok(Ok(pos)) = timeout(
@@ -274,7 +342,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     let seed_pk_for_current = end_pubkey.unwrap_or_else(|| position_address.trim());
 
-    if current_row.is_none() {
+    if current_row.is_none() && !settlement_strict {
         if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(seed_pk_for_current)
             && let Ok(Ok(pos)) = timeout(
                 Duration::from_secs(2),
@@ -354,7 +422,11 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             net_pnl_usd: Decimal::ZERO,
             net_pnl_pct: Decimal::ZERO,
             interpretation: stream_pnl_interpretation_pl(use_lineage_anchor, false),
-            note: Some("No valuation snapshots yet (even after best-effort self-seed). Check DB migrations and RPC health.".to_string()),
+            note: Some(if settlement_strict {
+                "Settlement v1 requires persisted valuation snapshots (self-seed disabled). Baseline snapshot unavailable.".to_string()
+            } else {
+                "No valuation snapshots yet (even after best-effort self-seed). Check DB migrations and RPC health.".to_string()
+            }),
         });
     };
 
@@ -379,7 +451,31 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     // Convert tx fees to USD using SOL/USD now (best-effort).
     let (sol_usd, sol_src) = sol_usd().await;
-    let tx_fee_lamports: i64 = if !sessions.is_empty() {
+    let tx_fee_lamports: i64 = if use_chain_session_scope {
+        sqlx::query(
+            r#"SELECT COALESCE(SUM(tx_fee_lamports), 0) AS fee_lamports
+               FROM position_stream_ledger_rows
+               WHERE rebalance_session_id = ANY($1)"#,
+        )
+        .bind(&scoped_sessions)
+        .fetch_one(db.pool())
+        .await
+        .map_err(|e| ApiError::internal(format!("stream pnl: tx fee sum: {e}")))?
+        .try_get("fee_lamports")
+        .unwrap_or(0)
+    } else if !chain_vec.is_empty() {
+        sqlx::query(
+            r#"SELECT COALESCE(SUM(tx_fee_lamports), 0) AS fee_lamports
+               FROM position_stream_ledger_rows
+               WHERE position_pubkey = ANY($1)"#,
+        )
+        .bind(&chain_vec)
+        .fetch_one(db.pool())
+        .await
+        .map_err(|e| ApiError::internal(format!("stream pnl: tx fee sum: {e}")))?
+        .try_get("fee_lamports")
+        .unwrap_or(0)
+    } else if !sessions.is_empty() {
         sqlx::query(
             r#"SELECT COALESCE(SUM(tx_fee_lamports), 0) AS fee_lamports
                FROM position_stream_ledger_rows
@@ -388,21 +484,11 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         .bind(&sessions)
         .fetch_one(db.pool())
         .await
-        .map_err(|e| ApiError::internal(format!("stream pnl: tx fee sum: {e}")))?
+        .map_err(|e| ApiError::internal(format!("stream pnl: tx fee sum (legacy sessions): {e}")))?
         .try_get("fee_lamports")
         .unwrap_or(0)
     } else {
-        sqlx::query(
-            r#"SELECT COALESCE(SUM(tx_fee_lamports), 0) AS fee_lamports
-               FROM position_stream_ledger_rows
-               WHERE position_pubkey = ANY($1)"#,
-        )
-        .bind(&positions)
-        .fetch_one(db.pool())
-        .await
-        .map_err(|e| ApiError::internal(format!("stream pnl: tx fee sum: {e}")))?
-        .try_get("fee_lamports")
-        .unwrap_or(0)
+        0
     };
     let tx_fee_lamports_u = tx_fee_lamports.max(0) as u64;
     let tx_fees_usd = if sol_usd > 0.0 {
@@ -414,7 +500,27 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     // Realized cashflow from lifecycle rows: sum fee_payer_token_deltas for the stream.
     // We don't yet have stable token symbols here; we treat it as USD using current mint prices.
-    let rows = if !sessions.is_empty() {
+    let rows = if use_chain_session_scope {
+        sqlx::query(
+            r#"SELECT fee_payer_token_deltas
+               FROM position_stream_ledger_rows
+               WHERE rebalance_session_id = ANY($1) AND fee_payer_token_deltas IS NOT NULL"#,
+        )
+        .bind(&scoped_sessions)
+        .fetch_all(db.pool())
+        .await
+        .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows: {e}")))?
+    } else if !chain_vec.is_empty() {
+        sqlx::query(
+            r#"SELECT fee_payer_token_deltas
+               FROM position_stream_ledger_rows
+               WHERE position_pubkey = ANY($1) AND fee_payer_token_deltas IS NOT NULL"#,
+        )
+        .bind(&chain_vec)
+        .fetch_all(db.pool())
+        .await
+        .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows: {e}")))?
+    } else if !sessions.is_empty() {
         sqlx::query(
             r#"SELECT fee_payer_token_deltas
                FROM position_stream_ledger_rows
@@ -423,17 +529,9 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         .bind(&sessions)
         .fetch_all(db.pool())
         .await
-        .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows: {e}")))?
+        .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows (legacy sessions): {e}")))?
     } else {
-        sqlx::query(
-            r#"SELECT fee_payer_token_deltas
-               FROM position_stream_ledger_rows
-               WHERE position_pubkey = ANY($1) AND fee_payer_token_deltas IS NOT NULL"#,
-        )
-        .bind(&positions)
-        .fetch_all(db.pool())
-        .await
-        .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows: {e}")))?
+        Vec::new()
     };
 
     let mut mint_deltas: BTreeMap<String, Decimal> = BTreeMap::new();
@@ -521,19 +619,24 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         net_pnl_pct,
         interpretation: stream_pnl_interpretation_pl(use_lineage_anchor, hodl_basket_ok),
         note: Some(format!(
-            "Best-effort.{anchor} IL/HODL: baseline basket (open amounts at chain start) × current mint USD prices when pool mints are known ({price_src}). tx fees in USD use SOL/USD ({sol_src}). realized_cashflow uses lifecycle fee_payer_token_deltas × mint USD prices ({price_src}).",
+            "Best-effort.{anchor} IL/HODL: baseline basket (open amounts at chain start) × current mint USD prices when pool mints are known ({price_src}). tx fees in USD use SOL/USD ({sol_src}). realized_cashflow uses lifecycle fee_payer_token_deltas × mint USD prices ({price_src}). cost/cashflow scope={scope}.",
             anchor = if use_lineage_anchor {
                 " LP mark vs HODL uses first→last position in rotation lineage;"
             } else {
                 ""
             },
+            scope = if use_chain_session_scope {
+                "chain sessions only"
+            } else {
+                "chain positions fallback"
+            }
         )),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::pool_mints_for_hodl;
+    use super::{chain_session_ids_from_edges, pool_mints_for_hodl};
 
     #[test]
     fn pool_mints_prefers_baseline_over_current() {
@@ -558,6 +661,26 @@ mod tests {
         );
         assert_eq!(v, vec!["A", "B2"]);
     }
+
+    #[test]
+    fn chain_sessions_ignore_fork_edges_outside_ordered_chain() {
+        let chain = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let edges = vec![
+            ("s1".to_string(), "A".to_string(), "B".to_string()),
+            ("s2".to_string(), "B".to_string(), "C".to_string()),
+            ("sx".to_string(), "A".to_string(), "X".to_string()),
+        ];
+        let out = chain_session_ids_from_edges(&chain, &edges);
+        assert_eq!(out, vec!["s1".to_string(), "s2".to_string()]);
+    }
+
+    #[test]
+    fn chain_sessions_empty_for_single_node_chain() {
+        let chain = vec!["A".to_string()];
+        let edges = vec![("s1".to_string(), "A".to_string(), "B".to_string())];
+        let out = chain_session_ids_from_edges(&chain, &edges);
+        assert!(out.is_empty());
+    }
 }
 
 pub async fn compute_position_stream_pnl(
@@ -578,6 +701,28 @@ pub async fn compute_position_stream_pnl(
         perf.positions,
         perf.sessions,
         Some(lineage_chain.as_slice()),
+        false,
+    )
+    .await
+}
+
+pub async fn compute_position_stream_pnl_settlement_v1(
+    state: &AppState,
+    position_address: &str,
+) -> Result<PositionStreamPnLResponse, ApiError> {
+    if state.db.is_none() {
+        return Ok(stream_pnl_db_disabled_response(position_address));
+    }
+    let perf = compute_position_stream_performance(state, position_address, false).await?;
+    let lineage_chain =
+        resolve_lineage_chain_for_stream_pnl(state, &perf, position_address.trim()).await;
+    compute_position_stream_pnl_for_stream_members(
+        state,
+        position_address,
+        perf.positions,
+        perf.sessions,
+        Some(lineage_chain.as_slice()),
+        true,
     )
     .await
 }

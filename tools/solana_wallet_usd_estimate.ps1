@@ -73,6 +73,7 @@ $mintStableUsd = @{
 $mintToCoinGeckoId = @{
   "So11111111111111111111111111111111111111112" = "solana"
   "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij" = "bitcoin"
+  "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh" = "bitcoin"
   "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs" = "ethereum"
 }
 $wsolMint = "So11111111111111111111111111111111111111112"
@@ -137,6 +138,7 @@ foreach ($kv in $byMint.GetEnumerator()) {
   $u = $ui * $p.Usd
   $sym = if ($m -eq "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") { "USDC" }
   elseif ($m -eq "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij") { "cbBTC~" }
+  elseif ($m -eq "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh") { "WBTC~" }
   elseif ($m -eq "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs") { "whETH~" }
   elseif ($m -eq "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB") { "USDT" }
   else { "SPL" }
@@ -152,7 +154,7 @@ $out = [ordered]@{
   owner          = [string]$state.owner
   rpc_url_used   = [string]$state.rpc_url_used
   total_usd_estimate = [math]::Round($total, 2)
-  disclaimer     = "Estimate only: CoinGecko spot, USDC=1 USD, cbBTC priced as BTC, whETH as ETH; unpriced mints=0."
+  disclaimer     = "Estimate only: CoinGecko spot, USDC=1 USD, cbBTC/WBTC(portal) priced as BTC, whETH as ETH; unpriced mints=0."
   rows           = @($rows)
 }
 

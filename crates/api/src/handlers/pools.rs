@@ -2,14 +2,15 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    ListPoolsResponse, PoolResponse, PoolStateResponse, QuoteOpenBudgetRequest,
+    ListPoolsResponse, OrcaVolumeCollectResponse, OrcaVolumeHistoryQuery, OrcaVolumeHistoryResponse,
+    OrcaVolumeSnapshotRow, PoolResponse, PoolStateResponse, QuoteOpenBudgetRequest,
     QuoteOpenBudgetResponse, SwapCostEstimateResponse,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaRestClient};
 use clmm_lp_protocols::ledger::swap_cost_estimate::{
@@ -22,8 +23,49 @@ use rust_decimal::prelude::FromPrimitive;
 use solana_sdk::pubkey::Pubkey;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Mint;
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
 use std::collections::BTreeSet;
 use std::str::FromStr;
+
+fn parse_decimal_opt(v: Option<&String>) -> Option<Decimal> {
+    v.and_then(|s| s.parse::<f64>().ok())
+        .and_then(Decimal::from_f64)
+}
+
+fn volume_for_period(
+    stats: &std::collections::HashMap<String, clmm_lp_data::providers::OrcaPoolStats>,
+    period: &str,
+) -> Option<Decimal> {
+    let st = stats.get(period)?;
+    parse_decimal_opt(st.volume.as_ref())
+}
+
+fn map_orca_pool_to_response(p: clmm_lp_data::providers::OrcaPoolSummary) -> PoolResponse {
+    PoolResponse {
+        address: p.address,
+        protocol: "orca_whirlpool".to_string(),
+        token_mint_a: p.token_mint_a,
+        token_mint_b: p.token_mint_b,
+        current_tick: p.tick_current_index,
+        tick_spacing: p.tick_spacing as i32,
+        price: Decimal::from_str_exact(&p.price).unwrap_or(Decimal::ZERO),
+        liquidity: p.liquidity,
+        fee_rate_bps: p.fee_rate,
+        volume_24h_usd: volume_for_period(&p.stats, "24h"),
+        volume_1h_usd: volume_for_period(&p.stats, "1h"),
+        volume_5m_usd: volume_for_period(&p.stats, "5m"),
+        volume_7d_usd: volume_for_period(&p.stats, "7d"),
+        tvl_usd: p.tvl_usdc.parse::<f64>().ok().and_then(Decimal::from_f64),
+        apy_estimate: None,
+    }
+}
+
+fn orca_volume_history_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("data")
+        .join("orca-rest")
+        .join("pool_volume_history.jsonl")
+}
 
 /// List available pools.
 #[utoipa::path(
@@ -52,20 +94,7 @@ pub async fn list_pools(State(_state): State<AppState>) -> ApiResult<Json<ListPo
     let pools = paged
         .data
         .into_iter()
-        .map(|p| PoolResponse {
-            address: p.address,
-            protocol: "orca_whirlpool".to_string(),
-            token_mint_a: p.token_mint_a,
-            token_mint_b: p.token_mint_b,
-            current_tick: p.tick_current_index,
-            tick_spacing: p.tick_spacing as i32,
-            price: Decimal::from_str_exact(&p.price).unwrap_or(Decimal::ZERO),
-            liquidity: p.liquidity,
-            fee_rate_bps: p.fee_rate,
-            volume_24h_usd: None,
-            tvl_usd: p.tvl_usdc.parse::<f64>().ok().and_then(Decimal::from_f64),
-            apy_estimate: None,
-        })
+        .map(map_orca_pool_to_response)
         .collect::<Vec<_>>();
 
     Ok(Json(ListPoolsResponse {
@@ -112,11 +141,141 @@ pub async fn get_pool(
         liquidity: pool_state.liquidity.to_string(),
         fee_rate_bps: pool_state.fee_rate_bps,
         volume_24h_usd: None,
+        volume_1h_usd: None,
+        volume_5m_usd: None,
+        volume_7d_usd: None,
         tvl_usd: None,
         apy_estimate: None,
     };
 
     Ok(Json(response))
+}
+
+/// Fetch current Orca volumes and append normalized rows to local JSONL history.
+#[utoipa::path(
+    post,
+    path = "/pools/orca/volume-history/collect",
+    tag = "Pools",
+    responses(
+        (status = 200, description = "Orca volume snapshot stored", body = OrcaVolumeCollectResponse)
+    )
+)]
+pub async fn collect_orca_volume_history() -> ApiResult<Json<OrcaVolumeCollectResponse>> {
+    let base_url = std::env::var("ORCA_PUBLIC_API_BASE_URL")
+        .unwrap_or_else(|_| "https://api.orca.so/v2/solana".to_string());
+    let client = OrcaRestClient::new(base_url);
+    let stats_windows = vec![
+        "5m".to_string(),
+        "1h".to_string(),
+        "24h".to_string(),
+        "7d".to_string(),
+    ];
+    let q = OrcaListPoolsQuery {
+        size: Some(200),
+        stats: Some(stats_windows.join(",")),
+        ..Default::default()
+    };
+    let paged = client
+        .list_pools(q)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows: Vec<OrcaVolumeSnapshotRow> = paged
+        .data
+        .into_iter()
+        .map(|p| OrcaVolumeSnapshotRow {
+            ts_utc: now.clone(),
+            source: "orca_public_api".to_string(),
+            pool_address: p.address,
+            token_mint_a: p.token_mint_a,
+            token_mint_b: p.token_mint_b,
+            fee_rate_bps: p.fee_rate,
+            tvl_usd: p.tvl_usdc.parse::<f64>().ok().and_then(Decimal::from_f64),
+            volume_5m_usd: volume_for_period(&p.stats, "5m"),
+            volume_1h_usd: volume_for_period(&p.stats, "1h"),
+            volume_24h_usd: volume_for_period(&p.stats, "24h"),
+            volume_7d_usd: volume_for_period(&p.stats, "7d"),
+        })
+        .collect();
+
+    let path = orca_volume_history_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApiError::internal(format!("create history dir failed: {e}")))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| ApiError::internal(format!("open history file failed: {e}")))?;
+    for row in &rows {
+        let line = serde_json::to_string(row)
+            .map_err(|e| ApiError::internal(format!("serialize history row failed: {e}")))?;
+        file.write_all(line.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|e| ApiError::internal(format!("append history row failed: {e}")))?;
+    }
+
+    Ok(Json(OrcaVolumeCollectResponse {
+        collected_at_utc: now,
+        path: path.to_string_lossy().to_string(),
+        rows_appended: rows.len(),
+        stats_windows,
+    }))
+}
+
+/// Read persisted Orca volume history rows.
+#[utoipa::path(
+    get,
+    path = "/pools/orca/volume-history",
+    tag = "Pools",
+    params(
+        ("pool_address" = Option<String>, Query, description = "Optional pool address filter"),
+        ("limit" = Option<u32>, Query, description = "Max rows to return (default 200, max 5000)")
+    ),
+    responses(
+        (status = 200, description = "Persisted Orca volume snapshots", body = OrcaVolumeHistoryResponse)
+    )
+)]
+pub async fn get_orca_volume_history(
+    Query(q): Query<OrcaVolumeHistoryQuery>,
+) -> ApiResult<Json<OrcaVolumeHistoryResponse>> {
+    let path = orca_volume_history_path();
+    let limit = q.limit.unwrap_or(200).min(5000) as usize;
+    if !path.exists() {
+        return Ok(Json(OrcaVolumeHistoryResponse {
+            path: path.to_string_lossy().to_string(),
+            rows: Vec::new(),
+        }));
+    }
+    let f = std::fs::File::open(&path)
+        .map_err(|e| ApiError::internal(format!("open history file failed: {e}")))?;
+    let r = BufReader::new(f);
+    let mut rows: Vec<OrcaVolumeSnapshotRow> = Vec::new();
+    for line in r.lines().map_while(Result::ok) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<OrcaVolumeSnapshotRow>(t) else {
+            continue;
+        };
+        if let Some(ref want_pool) = q.pool_address {
+            if row.pool_address.trim() != want_pool.trim() {
+                continue;
+            }
+        }
+        rows.push(row);
+    }
+    if rows.len() > limit {
+        let start = rows.len() - limit;
+        rows = rows[start..].to_vec();
+    }
+    Ok(Json(OrcaVolumeHistoryResponse {
+        path: path.to_string_lossy().to_string(),
+        rows,
+    }))
 }
 
 /// Get current pool state.

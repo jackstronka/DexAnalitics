@@ -483,6 +483,30 @@ mod tests {
     fn parse_strategy_label_bollinger_and_last_candle() {
         use crate::backtest_engine::parse_strategy_label;
         assert_eq!(
+            parse_strategy_label("oor_recenter"),
+            Some(StratConfig::OorRecenter)
+        );
+        assert_eq!(
+            parse_strategy_label("retouch_shift"),
+            Some(StratConfig::RetouchShift)
+        );
+        assert_eq!(
+            parse_strategy_label("il_limit_5%_grace_0"),
+            Some(StratConfig::IlLimit {
+                max_il_pct: 0.05,
+                close_il_pct: None,
+                grace_steps: 0,
+            })
+        );
+        assert_eq!(
+            parse_strategy_label("il_limit_5%_close_12%_grace_3"),
+            Some(StratConfig::IlLimit {
+                max_il_pct: 0.05,
+                close_il_pct: Some(0.12),
+                grace_steps: 3,
+            })
+        );
+        assert_eq!(
             parse_strategy_label("bollinger_w20_k2_r12"),
             Some(StratConfig::Bollinger {
                 window: 20,

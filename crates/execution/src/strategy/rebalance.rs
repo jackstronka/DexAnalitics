@@ -322,6 +322,34 @@ fn widen_ticks_around_current(
     (lo, hi)
 }
 
+fn adapt_recover_open_ticks_if_needed(
+    tick_current: i32,
+    tick_spacing: u16,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> ((i32, i32), bool) {
+    // Happy path: intended range still contains current spot tick.
+    if tick_current >= tick_lower && tick_current < tick_upper {
+        return ((tick_lower, tick_upper), false);
+    }
+    if !reopen_auto_widen_enabled() {
+        return ((tick_lower, tick_upper), false);
+    }
+    for step in 1..=reopen_auto_widen_max_steps() {
+        let (lo, hi) = widen_ticks_around_current(
+            tick_current,
+            tick_spacing,
+            tick_lower,
+            tick_upper,
+            step,
+        );
+        if tick_current >= lo && tick_current < hi {
+            return ((lo, hi), true);
+        }
+    }
+    ((tick_lower, tick_upper), false)
+}
+
 /// SPL Associated Token Account (classic SPL token program), same derivation as `spl_associated_token_account`.
 fn associated_token_address(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     spl_associated_token_address::get_associated_token_address(owner, mint, &spl_token::id())
@@ -633,6 +661,7 @@ impl RebalanceExecutor {
     ///
     /// Uses **synthetic** relative prices from `pool.price` and mint decimals (no paid price API).
     /// Returns the number of swap transactions submitted.
+    #[allow(clippy::too_many_arguments)]
     async fn ensure_swap_mix_for_rebalance_open(
         &self,
         pool: &Pubkey,
@@ -1402,33 +1431,33 @@ impl RebalanceExecutor {
                             "open_prev_end_value_usd": prev_end_value_usd,
                             "open_wallet_notional_usd": wallet_notional
                         });
-                        if let Some(q) = quote_opt.as_ref() {
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.insert(
-                                    "open_quote_estimated_value_usd".to_string(),
-                                    serde_json::json!(q.estimated_value_usd),
-                                );
-                                obj.insert(
-                                    "open_quote_token_max_a".to_string(),
-                                    serde_json::json!(q.token_max_a),
-                                );
-                                obj.insert(
-                                    "open_quote_token_max_b".to_string(),
-                                    serde_json::json!(q.token_max_b),
-                                );
-                                obj.insert(
-                                    "open_quote_amount_a_raw".to_string(),
-                                    serde_json::json!(q.amount_a),
-                                );
-                                obj.insert(
-                                    "open_quote_amount_b_raw".to_string(),
-                                    serde_json::json!(q.amount_b),
-                                );
-                                obj.insert(
-                                    "open_quote_liquidity".to_string(),
-                                    serde_json::json!(q.liquidity.to_string()),
-                                );
-                            }
+                        if let Some(q) = quote_opt.as_ref()
+                            && let Some(obj) = v.as_object_mut()
+                        {
+                            obj.insert(
+                                "open_quote_estimated_value_usd".to_string(),
+                                serde_json::json!(q.estimated_value_usd),
+                            );
+                            obj.insert(
+                                "open_quote_token_max_a".to_string(),
+                                serde_json::json!(q.token_max_a),
+                            );
+                            obj.insert(
+                                "open_quote_token_max_b".to_string(),
+                                serde_json::json!(q.token_max_b),
+                            );
+                            obj.insert(
+                                "open_quote_amount_a_raw".to_string(),
+                                serde_json::json!(q.amount_a),
+                            );
+                            obj.insert(
+                                "open_quote_amount_b_raw".to_string(),
+                                serde_json::json!(q.amount_b),
+                            );
+                            obj.insert(
+                                "open_quote_liquidity".to_string(),
+                                serde_json::json!(q.liquidity.to_string()),
+                            );
                         }
                         v
                     }),
@@ -1996,12 +2025,31 @@ impl RebalanceExecutor {
                 return result;
             }
         };
+        let ((planned_tick_lower, planned_tick_upper), adapted_ticks) =
+            adapt_recover_open_ticks_if_needed(
+                pool_state.tick_current,
+                pool_state.tick_spacing,
+                p.new_tick_lower,
+                p.new_tick_upper,
+            );
+        if adapted_ticks {
+            info!(
+                op = "orca_rebalance",
+                stage = "recover_open",
+                tick_current = pool_state.tick_current,
+                old_tick_lower = p.new_tick_lower,
+                old_tick_upper = p.new_tick_upper,
+                new_tick_lower = planned_tick_lower,
+                new_tick_upper = planned_tick_upper,
+                "recover_open adapted stale intended range to include current tick"
+            );
+        }
 
         match self
             .open_new_range_with_wallet_mix(
                 &p.pool,
-                p.new_tick_lower,
-                p.new_tick_upper,
+                planned_tick_lower,
+                planned_tick_upper,
                 &pool_state,
                 1,
                 1,
@@ -2056,8 +2104,8 @@ impl RebalanceExecutor {
                 RebalanceData {
                     old_tick_lower: p.new_tick_lower,
                     old_tick_upper: p.new_tick_upper,
-                    new_tick_lower: p.new_tick_lower,
-                    new_tick_upper: p.new_tick_upper,
+                    new_tick_lower: planned_tick_lower,
+                    new_tick_upper: planned_tick_upper,
                     old_liquidity: 0,
                     new_liquidity: result.liquidity_added,
                     tx_cost_lamports: result.tx_cost_lamports,
@@ -2299,6 +2347,7 @@ impl RebalanceExecutor {
     }
 
     /// Opens a new position.
+    #[allow(clippy::too_many_arguments)]
     async fn open_position(
         &self,
         _pool: &Pubkey,
@@ -2988,6 +3037,37 @@ mod tests {
         // 1.5 * $2 + 3.0 * $1 = $6
         let v = prev_end_value_usd_from_close_amounts(1_500_000, 3_000_000, 6, 6, 2.0, 1.0);
         assert!((v - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn adapt_recover_open_ticks_keeps_in_range_unchanged() {
+        let ((lo, hi), changed) = adapt_recover_open_ticks_if_needed(-100, 64, -128, 0);
+        assert_eq!((lo, hi), (-128, 0));
+        assert!(!changed);
+    }
+
+    #[test]
+    fn adapt_recover_open_ticks_widens_stale_range() {
+        let ((lo, hi), changed) = adapt_recover_open_ticks_if_needed(-24299, 64, -24264, -24160);
+        assert!(changed);
+        assert!(lo <= -24299 && -24299 < hi);
+    }
+
+    #[test]
+    fn integration_recovery_tick_drift_adapts_to_current_tick() {
+        // Integration-style invariant for pending-open recovery:
+        // stale intended range must be adapted so a retry quote can target a range containing spot.
+        let drifted_tick = -24299;
+        let intended = (-24264, -24160);
+        let ((lo, hi), changed) = adapt_recover_open_ticks_if_needed(
+            drifted_tick,
+            64,
+            intended.0,
+            intended.1,
+        );
+        assert!(changed);
+        assert_ne!((lo, hi), intended);
+        assert!(lo <= drifted_tick && drifted_tick < hi);
     }
 
     #[tokio::test]

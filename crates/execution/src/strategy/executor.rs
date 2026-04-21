@@ -19,6 +19,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -72,6 +73,12 @@ impl Default for ExecutorConfig {
 
 type ReopenHook = Arc<dyn Fn(Pubkey, Pubkey) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy)]
+struct PriceSample {
+    ts_unix: i64,
+    price_ab: Decimal,
+}
+
 /// Strategy executor for automated position management.
 pub struct StrategyExecutor {
     /// Position monitor.
@@ -103,6 +110,8 @@ pub struct StrategyExecutor {
     skip_evaluation_for: Arc<RwLock<HashSet<solana_sdk::pubkey::Pubkey>>>,
     /// Latest evaluation snapshot per position (best-effort, in-memory only).
     last_eval: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, PositionEvalSnapshot>>>,
+    /// In-memory pool price samples per position for `LastCandle` strategy mode.
+    price_samples: Arc<RwLock<HashMap<solana_sdk::pubkey::Pubkey, VecDeque<PriceSample>>>>,
     /// Optional JSON file for [`pending_open`] recovery (`CLMM_PENDING_OPEN_RECOVERY_PATH`).
     pending_open_recovery_path: Mutex<Option<PathBuf>>,
     /// Optional notifier for executor-level alerts (e.g. rebalance incomplete).
@@ -164,6 +173,7 @@ impl StrategyExecutor {
             optimization_run_id: Mutex::new(None),
             skip_evaluation_for: Arc::new(RwLock::new(HashSet::new())),
             last_eval: Arc::new(RwLock::new(HashMap::new())),
+            price_samples: Arc::new(RwLock::new(HashMap::new())),
             pending_open_recovery_path: Mutex::new(
                 std::env::var("CLMM_PENDING_OPEN_RECOVERY_PATH")
                     .ok()
@@ -648,6 +658,7 @@ impl StrategyExecutor {
             return Ok(());
         }
         let max_a = pending_open::max_recovery_attempts();
+        let alert_threshold = pending_open::attempts_alert_threshold();
         let mut kept: Vec<super::pending_open::PendingOpenItem> = Vec::new();
 
         for mut item in std::mem::take(&mut store.items) {
@@ -655,6 +666,7 @@ impl StrategyExecutor {
                 continue;
             }
             item.attempts += 1;
+            item.last_attempt_at = Some(chrono::Utc::now().to_rfc3339());
             let pool = solana_sdk::pubkey::Pubkey::from_str(item.pool.trim())
                 .map_err(|e| anyhow::anyhow!("pending pool pubkey: {e}"))?;
             let closed = solana_sdk::pubkey::Pubkey::from_str(item.closed_position_nft.trim())
@@ -714,6 +726,41 @@ impl StrategyExecutor {
                 }
             } else {
                 item.last_error = res.error.clone();
+                let stuck_reason = classify_pending_open_stuck_reason(item.last_error.as_deref());
+                if item.stuck_reason.as_deref() != Some(stuck_reason) {
+                    item.stuck_since = Some(chrono::Utc::now().to_rfc3339());
+                }
+                item.stuck_reason = Some(stuck_reason.to_string());
+
+                if should_emit_pending_open_stuck_alert(
+                    item.attempts,
+                    alert_threshold,
+                    item.last_alert_attempts,
+                ) {
+                    item.last_alert_attempts = Some(item.attempts);
+                    warn!(
+                        pool = %pool,
+                        closed_position = %closed,
+                        attempts = item.attempts,
+                        threshold = alert_threshold,
+                        stuck_reason = stuck_reason,
+                        error = item.last_error.as_deref().unwrap_or("unknown"),
+                        "pending_open recovery marked as stuck"
+                    );
+                    self.emit_executor_alert(
+                        Alert::new(
+                            AlertLevel::Warning,
+                            AlertType::Custom("Pending Open Stuck".to_string()),
+                            format!(
+                                "Pending-open stuck: pool {} position {} attempts={} reason={}",
+                                pool, closed, item.attempts, stuck_reason
+                            ),
+                        )
+                        .with_position(&closed)
+                        .with_pool(&pool),
+                    )
+                    .await;
+                }
                 if item.attempts < max_a {
                     kept.push(item);
                 } else {
@@ -854,12 +901,24 @@ impl StrategyExecutor {
             } else {
                 None
             };
+        let cfg = self.decision_engine.config();
+        let last_candle_ticks = if cfg.strategy_mode == StrategyMode::LastCandle {
+            self.record_price_and_compute_last_closed_candle_ticks(
+                &position.address,
+                &pool,
+                cfg.last_candle_seconds.max(60),
+            )
+            .await
+        } else {
+            None
+        };
 
         let context = DecisionContext {
             position: position.clone(),
             pool: pool.clone(),
             hours_since_rebalance,
             retouch_armed,
+            last_candle_ticks,
         };
 
         let decision = self.decision_engine.decide(&context);
@@ -920,6 +979,59 @@ impl StrategyExecutor {
         u64::MAX
     }
 
+    async fn record_price_and_compute_last_closed_candle_ticks(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &WhirlpoolState,
+        candle_seconds: u64,
+    ) -> Option<(i32, i32)> {
+        let now = chrono::Utc::now().timestamp();
+        let cs = candle_seconds.max(60) as i64;
+        let current_bucket = now / cs;
+        let last_closed_bucket = current_bucket.saturating_sub(1);
+        let keep_after = now.saturating_sub(cs.saturating_mul(4));
+
+        let mut samples = self.price_samples.write().await;
+        let entry = samples.entry(*position).or_insert_with(VecDeque::new);
+        entry.push_back(PriceSample {
+            ts_unix: now,
+            price_ab: pool.price,
+        });
+        while entry
+            .front()
+            .is_some_and(|s| s.ts_unix < keep_after || entry.len() > 4096)
+        {
+            entry.pop_front();
+        }
+
+        let mut low = Decimal::MAX;
+        let mut high = Decimal::ZERO;
+        let mut found = false;
+        for s in entry.iter() {
+            if s.ts_unix / cs == last_closed_bucket {
+                low = low.min(s.price_ab);
+                high = high.max(s.price_ab);
+                found = true;
+            }
+        }
+
+        if !found || low <= Decimal::ZERO || high <= low {
+            return None;
+        }
+
+        let mut lo = clmm_lp_protocols::prelude::price_to_tick(low);
+        let mut hi = clmm_lp_protocols::prelude::price_to_tick(high);
+        let spacing = pool.tick_spacing as i32;
+        if spacing > 0 {
+            lo = lo.div_euclid(spacing) * spacing;
+            hi = ((hi + spacing - 1).div_euclid(spacing)) * spacing;
+        }
+        if hi <= lo {
+            hi = lo + spacing.max(1);
+        }
+        Some((lo, hi))
+    }
+
     /// Executes a decision.
     async fn execute_decision(
         &self,
@@ -951,6 +1063,7 @@ impl StrategyExecutor {
                     StrategyMode::RetouchShift => RebalanceReason::RetouchShift,
                     StrategyMode::Periodic => RebalanceReason::Periodic,
                     StrategyMode::OorRecenter => RebalanceReason::RangeExit,
+                    StrategyMode::LastCandle => RebalanceReason::RangeExit,
                     StrategyMode::Threshold => {
                         if !position.in_range {
                             RebalanceReason::RangeExit
@@ -1039,6 +1152,13 @@ impl StrategyExecutor {
                                         .clone(),
                                     attempts: 0,
                                     last_error: result.error.clone(),
+                                    last_attempt_at: None,
+                                    stuck_reason: Some(
+                                        classify_pending_open_stuck_reason(result.error.as_deref())
+                                            .to_string(),
+                                    ),
+                                    stuck_since: Some(chrono::Utc::now().to_rfc3339()),
+                                    last_alert_attempts: None,
                                     created_at: chrono::Utc::now().to_rfc3339(),
                                 },
                             );
@@ -1302,6 +1422,40 @@ fn clamp_decimal_liquidity_to_u128(amount: &Decimal, max_liquidity: u128) -> Opt
     Some(u.min(max_liquidity))
 }
 
+fn classify_pending_open_stuck_reason(last_error: Option<&str>) -> &'static str {
+    let Some(err) = last_error.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "unknown";
+    };
+    let e = err.to_ascii_lowercase();
+    if e.contains("not in new range") || e.contains("tick") && e.contains("range") {
+        return "tick_out_of_range";
+    }
+    if e.contains("quote") || e.contains("cannot quote deposit") {
+        return "quote_failed";
+    }
+    if e.contains("timeout") || e.contains("timed out") {
+        return "rpc_timeout";
+    }
+    if e.contains("insufficient")
+        || e.contains("insufficient funds")
+        || e.contains("insufficient balance")
+    {
+        return "insufficient_balance";
+    }
+    "unknown"
+}
+
+fn should_emit_pending_open_stuck_alert(
+    attempts: u32,
+    threshold: u32,
+    last_alert_attempts: Option<u32>,
+) -> bool {
+    if attempts < threshold || threshold == 0 {
+        return false;
+    }
+    last_alert_attempts.is_none_or(|last| last < threshold)
+}
+
 #[cfg(test)]
 mod clamp_tests {
     use super::*;
@@ -1327,5 +1481,32 @@ mod clamp_tests {
         assert_eq!(target, Some(0));
         assert!(allow.is_some());
         assert_eq!(allow.expect("allowlist should exist").len(), 0);
+    }
+
+    #[test]
+    fn classify_pending_open_stuck_reason_prefers_tick_out_of_range() {
+        let reason = classify_pending_open_stuck_reason(Some(
+            "pool tick -24299 not in new range [-24264, -24160): cannot quote deposit for open",
+        ));
+        assert_eq!(reason, "tick_out_of_range");
+    }
+
+    #[test]
+    fn classify_pending_open_stuck_reason_detects_timeout_and_balance() {
+        assert_eq!(
+            classify_pending_open_stuck_reason(Some("rpc timed out during simulation")),
+            "rpc_timeout"
+        );
+        assert_eq!(
+            classify_pending_open_stuck_reason(Some("insufficient funds for instruction")),
+            "insufficient_balance"
+        );
+    }
+
+    #[test]
+    fn pending_open_stuck_alert_threshold_emits_once_per_item() {
+        assert!(!should_emit_pending_open_stuck_alert(4, 5, None));
+        assert!(should_emit_pending_open_stuck_alert(5, 5, None));
+        assert!(!should_emit_pending_open_stuck_alert(6, 5, Some(5)));
     }
 }

@@ -20,6 +20,7 @@ import Logs from '@/pages/Logs'
 import Scripts from '@/pages/Scripts'
 import Wallet from '@/pages/Wallet'
 import Swap from '@/pages/Swap'
+import Backtests from '@/pages/Backtests'
 
 function App() {
   return (
@@ -60,6 +61,7 @@ function App() {
             <Route path="settings" element={<Settings />} />
             <Route path="logs" element={<Logs />} />
             <Route path="bot-activity" element={<BotActivity />} />
+            <Route path="backtests" element={<Backtests />} />
           </Route>
         </Routes>
         <Toaster />

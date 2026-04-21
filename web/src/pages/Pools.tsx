@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +8,7 @@ import { getPools } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
 
 export default function Pools() {
+  const [volumeWindow, setVolumeWindow] = useState<'5m' | '1h' | '24h' | '7d'>('24h')
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['pools'],
     queryFn: getPools,
@@ -23,10 +25,23 @@ export default function Pools() {
 
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Pools</h1>
-        <Button variant="outline" size="sm" onClick={() => refetch()}>
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <select
+            className="rounded border bg-background px-2 py-1 text-sm"
+            value={volumeWindow}
+            onChange={(e) => setVolumeWindow(e.target.value as '5m' | '1h' | '24h' | '7d')}
+            title="Okno czasowe dla kolumny Volume"
+          >
+            <option value="5m">Volume 5m</option>
+            <option value="1h">Volume 1h</option>
+            <option value="24h">Volume 24h</option>
+            <option value="7d">Volume 7d</option>
+          </select>
+          <Button variant="outline" size="sm" onClick={() => refetch()}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -60,7 +75,7 @@ export default function Pools() {
                     <th className="pb-3 font-medium">Pair</th>
                     <th className="pb-3 font-medium">Protocol</th>
                     <th className="pb-3 font-medium text-right">TVL</th>
-                    <th className="pb-3 font-medium text-right">24h Volume</th>
+                    <th className="pb-3 font-medium text-right">Volume ({volumeWindow})</th>
                     <th className="pb-3 font-medium text-right">Fee APY</th>
                   </tr>
                 </thead>
@@ -70,7 +85,15 @@ export default function Pools() {
                     const feePct = (pool.fee_rate_bps ?? 0) / 100
                     const addr = pool.address ?? 'unknown'
                     const tvl = pool.tvl_usd != null ? String(pool.tvl_usd) : '0'
-                    const vol = pool.volume_24h_usd != null ? String(pool.volume_24h_usd) : '0'
+                    const volRaw =
+                      volumeWindow === '5m'
+                        ? pool.volume_5m_usd
+                        : volumeWindow === '1h'
+                          ? pool.volume_1h_usd
+                          : volumeWindow === '7d'
+                            ? pool.volume_7d_usd
+                            : pool.volume_24h_usd
+                    const vol = volRaw != null ? String(volRaw) : '0'
                     const apy = pool.apy_estimate != null ? String(pool.apy_estimate) : '0'
                     return (
                     <tr key={addr} className="border-b last:border-0">

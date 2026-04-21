@@ -148,6 +148,12 @@ export default function StrategyDetail() {
                 <span>{strategy.parameters.range_width_pct}%</span>
               </div>
             )}
+            {strategy.parameters.candle_seconds !== undefined && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Candle seconds</span>
+                <span>{strategy.parameters.candle_seconds}s</span>
+              </div>
+            )}
             {strategy.parameters.position_addresses &&
               strategy.parameters.position_addresses.length > 0 && (
                 <div className="pt-2 border-t border-border">

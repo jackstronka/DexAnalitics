@@ -41,6 +41,7 @@ import {
   formatUsdcPriceRange,
   shortenAddress,
 } from '@/lib/utils'
+import { getMetricsMode } from '@/lib/metricsMode'
 
 /** Wrapped SOL mint — network fees are in native SOL (lamports). */
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -242,6 +243,9 @@ export default function PositionDetail() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [actionInfo, setActionInfo] = useState<string | null>(null)
   const [backtestJobId, setBacktestJobId] = useState<string | null>(null)
+  const [showOnlyNonZeroBreakdown, setShowOnlyNonZeroBreakdown] = useState(true)
+  const metricsMode = useMemo(() => getMetricsMode(), [])
+  const isSettlementMode = metricsMode === 'settlement_v1'
 
   const { data: position, isLoading, isError, error } = useQuery({
     queryKey: ['position', address],
@@ -279,22 +283,41 @@ export default function PositionDetail() {
   })
 
   const { data: streamPnl } = useQuery({
-    queryKey: ['position-stream-pnl', address],
-    queryFn: () => getPositionStreamPnL(address!),
+    queryKey: ['position-stream-pnl', address, metricsMode],
+    queryFn: () => getPositionStreamPnL(address!, metricsMode),
     enabled: !!address,
     retry: 0,
     staleTime: 30_000,
   })
 
   const lineageQ = useQuery({
-    queryKey: ['position-stream-lineage', address],
-    queryFn: () => getPositionStreamLineage(address!),
+    queryKey: ['position-stream-lineage', address, metricsMode],
+    queryFn: () => getPositionStreamLineage(address!, metricsMode),
     enabled: !!address,
     retry: 0,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   })
   const streamLineage = lineageQ.data
+  const totalsSourceBadge = useMemo(() => {
+    const note = (streamLineage?.totals?.note ?? '').toLowerCase()
+    if (isSettlementMode || note.includes('settlement v1') || note.includes('self-seed disabled')) {
+      return {
+        label: 'source: persisted settlement',
+        className: 'border-emerald-600/40 bg-emerald-500/10 text-emerald-300',
+      }
+    }
+    if (note.includes('self-seed')) {
+      return {
+        label: 'source: live seeded',
+        className: 'border-amber-600/40 bg-amber-500/10 text-amber-300',
+      }
+    }
+    return {
+      label: 'source: live snapshots',
+      className: 'border-border/70 bg-background/70 text-muted-foreground',
+    }
+  }, [isSettlementMode, streamLineage?.totals?.note])
 
   const chainSet = useMemo(() => {
     const addr = address?.trim() ?? ''
@@ -665,6 +688,12 @@ export default function PositionDetail() {
         </Link>
         <div className="min-w-0 space-y-1 flex-1">
           <h1 className="text-3xl font-bold">Position Details</h1>
+          <div className="text-xs text-muted-foreground">
+            Tryb metryk:{' '}
+            <span className="font-medium text-foreground">
+              {isSettlementMode ? 'Settlement v1' : 'Live stream'}
+            </span>
+          </div>
           {position.token_a_label && position.token_b_label ? (
             <div className="text-lg font-semibold">
               {position.token_a_label} / {position.token_b_label}
@@ -1461,10 +1490,28 @@ export default function PositionDetail() {
 
                 {streamLineage.totals ? (
                   <div className="space-y-3">
+                    <div className="flex justify-end">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowOnlyNonZeroBreakdown((v) => !v)}
+                      >
+                        {showOnlyNonZeroBreakdown ? 'Pokaż wszystkie pozycje' : 'Pokaż tylko niezerowe'}
+                      </Button>
+                    </div>
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                      <div className="text-xs font-medium text-foreground">Economic chain result (net PnL)</div>
+                      <div className="text-xs font-medium text-foreground">
+                        {isSettlementMode
+                          ? 'Settlement v1 — wynik ekonomiczny łańcucha (net PnL)'
+                          : 'Wynik ekonomiczny łańcucha (net PnL)'}
+                      </div>
+                      <div
+                        className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${totalsSourceBadge.className}`}
+                      >
+                        {totalsSourceBadge.label}
+                      </div>
                       <p className="text-[10px] text-muted-foreground leading-snug">
-                        End NAV + ledger cashflow − baseline − SOL tx fees (USD). Not the same metric as IL vs HODL.
+                        End NAV + cashflow z ledgera − baseline − opłaty sieci SOL (USD). To inna metryka niż IL vs HODL.
                       </p>
                       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
@@ -1533,11 +1580,29 @@ export default function PositionDetail() {
                           </span>
                         </div>
                       </div>
+                      {streamLineage.nodes?.length ? (
+                        <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                          {streamLineage.nodes.map((n) => {
+                            const lam = n.tx_fee_lamports ?? 0
+                            if (showOnlyNonZeroBreakdown && lam <= 0) return null
+                            return (
+                              <div key={`tx-breakdown-${n.position_address}`} className="font-mono">
+                                {shortenAddress(n.position_address, 6)}: {lam.toLocaleString()} λ ·{' '}
+                                {formatUsdField(n.tx_fees_usd, 4)}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : null}
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                      <div className="text-xs font-medium text-foreground">IL vs initial basket (benchmark)</div>
+                      <div className="text-xs font-medium text-foreground">
+                        {isSettlementMode
+                          ? 'Settlement v1 — IL vs koszyk początkowy (benchmark)'
+                          : 'IL vs koszyk początkowy (benchmark)'}
+                      </div>
                       <p className="text-[10px] text-muted-foreground leading-snug">
-                        LP mark vs hypothetical HODL of deposit tokens at chain start, at current mint USD prices.
+                        Wartość LP vs hipotetyczny HODL tokenów depozytu na starcie łańcucha, przy bieżących cenach mintów (USD).
                       </p>
                       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
@@ -1552,6 +1617,56 @@ export default function PositionDetail() {
                           <span className="text-muted-foreground">IL %</span>{' '}
                           <span className="font-mono">{formatPercentFixed(streamLineage.totals.il_pct, 3)}</span>
                         </div>
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
+                      <div className="text-xs font-medium text-foreground">Rozbicie LP zebrane (per PDA)</div>
+                      <div className="text-[10px] text-muted-foreground leading-snug">
+                        Składowe budujące łączną wartość `LP zebrane` dla całego łańcucha.
+                      </div>
+                      <div className="space-y-1 text-xs text-muted-foreground">
+                        {streamLineage.nodes.map((n) => {
+                          const collects = n.collect_events ?? 0
+                          const hasA =
+                            n.fees_collected_token_a_ui != null || n.fees_collected_token_a_raw != null
+                          const hasB =
+                            n.fees_collected_token_b_ui != null || n.fees_collected_token_b_raw != null
+                          if (showOnlyNonZeroBreakdown && collects <= 0 && !hasA && !hasB) return null
+                          return (
+                            <div key={`fee-breakdown-${n.position_address}`} className="space-y-0.5">
+                              <div className="font-mono">
+                                {shortenAddress(n.position_address, 6)}:{' '}
+                                {formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)} · {collects}x collect
+                              </div>
+                              {(n.token_a_label || n.token_b_label) && (hasA || hasB) ? (
+                                <div className="pl-3 font-mono">
+                                  {n.token_a_label ? (
+                                    <div>
+                                      {n.token_a_label}: {String(n.fees_collected_token_a_ui ?? '—')}
+                                      {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw) ? (
+                                        <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                          {' '}
+                                          {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw)}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                  {n.token_b_label ? (
+                                    <div>
+                                      {n.token_b_label}: {String(n.fees_collected_token_b_ui ?? '—')}
+                                      {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw) ? (
+                                        <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                          {' '}
+                                          {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw)}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                            </div>
+                          )
+                        })}
                       </div>
                     </div>
                     {streamLineage.totals.note ? (

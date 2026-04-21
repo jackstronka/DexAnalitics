@@ -1179,6 +1179,18 @@ pub struct PoolResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub volume_24h_usd: Option<Decimal>,
+    /// 1h volume in USD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub volume_1h_usd: Option<Decimal>,
+    /// 5m volume in USD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub volume_5m_usd: Option<Decimal>,
+    /// 7d volume in USD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub volume_7d_usd: Option<Decimal>,
     /// TVL in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
@@ -1196,6 +1208,59 @@ pub struct ListPoolsResponse {
     pub pools: Vec<PoolResponse>,
     /// Total count.
     pub total: usize,
+}
+
+/// Query params for reading persisted Orca volume snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaVolumeHistoryQuery {
+    /// Optional pool address filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
+    /// Max rows returned (default: 200, max: 5000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One persisted Orca volume snapshot row (JSONL).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaVolumeSnapshotRow {
+    pub ts_utc: String,
+    pub source: String,
+    pub pool_address: String,
+    pub token_mint_a: String,
+    pub token_mint_b: String,
+    pub fee_rate_bps: u16,
+    #[schema(value_type = Option<String>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tvl_usd: Option<Decimal>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_5m_usd: Option<Decimal>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_1h_usd: Option<Decimal>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_24h_usd: Option<Decimal>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_7d_usd: Option<Decimal>,
+}
+
+/// Response from collecting and persisting Orca volume snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaVolumeCollectResponse {
+    pub collected_at_utc: String,
+    pub path: String,
+    pub rows_appended: usize,
+    pub stats_windows: Vec<String>,
+}
+
+/// Response for reading persisted Orca volume snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrcaVolumeHistoryResponse {
+    pub path: String,
+    pub rows: Vec<OrcaVolumeSnapshotRow>,
 }
 
 /// Orca lock info (proxy of Orca Public REST `/lock/{address}`).
@@ -1585,6 +1650,112 @@ pub struct BacktestJobResponse {
     pub stderr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// One strategy family available in FULL backtest matrix UI.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestStrategyCatalogEntry {
+    /// Stable id for filtering (e.g. `static`, `threshold`, `last_candle`).
+    pub id: String,
+    /// Display label.
+    pub label: String,
+    /// Human-readable parameter hints for this family.
+    pub parameters: Vec<String>,
+}
+
+/// `GET /backtests/strategy-catalog` response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestStrategyCatalogResponse {
+    pub strategies: Vec<BacktestStrategyCatalogEntry>,
+}
+
+/// Request for `POST /backtests/full` (matrix run across pools/windows with full optimize ranking).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFullRequest {
+    /// Hours windows to run (expected: 24, 48, 72, 96).
+    pub windows_hours: Vec<u32>,
+    /// Optional strategy-family filters for grid generation (`--include-strategy-families`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_strategy_ids: Option<Vec<String>>,
+    /// Include indicator families (Bollinger + LastCandle variants) in optimize grid.
+    #[serde(default = "default_true")]
+    pub include_indicator_strategies: bool,
+    /// Objective for optimize ranking (`vs-hodl`, `fees`, `composite`, `pnl`, `risk-adj`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    /// Optional curated pool ids subset (default: all curated pools with snapshots).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_ids: Option<Vec<String>>,
+    /// Optional LP share override (recommended for Meteora snapshot-only mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp_share: Option<f64>,
+    /// Capital in USD used in each simulation run (`--capital` for `backtest-optimize`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capital_usd: Option<f64>,
+    /// Optional target threshold: keep only rows with `vs_hodl >= target_vs_hodl_usd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_vs_hodl_usd: Option<f64>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One row from optimize ranking table (parsed from CLI output).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFullMetricRow {
+    pub rank: u32,
+    pub strategy: String,
+    /// Lower bound of the tested LP range (USD).
+    pub lower_usd: f64,
+    /// Upper bound of the tested LP range (USD).
+    pub upper_usd: f64,
+    /// Width of the tested range in percent (`(upper-lower)/mid * 100`).
+    pub width_pct: f64,
+    pub score: f64,
+    pub fees: f64,
+    pub rebalances: u32,
+    pub pnl: f64,
+    pub vs_hodl: f64,
+    pub tir_pct: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub il_like_pct: Option<f64>,
+}
+
+/// One pool+window matrix result.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFullWindowResult {
+    pub pool_id: String,
+    pub pool_label: String,
+    pub pool_address: String,
+    pub protocol: String,
+    pub window_hours: u32,
+    pub metrics: Vec<BacktestFullMetricRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFullJobStatusResponse {
+    pub id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestFullJobResponse {
+    pub id: String,
+    pub status: String,
+    pub started_ts_utc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<BacktestFullWindowResult>>,
 }
 
 // ============================================================================

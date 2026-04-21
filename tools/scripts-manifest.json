@@ -151,6 +151,18 @@
       ]
     },
     {
+      "id": "register_snapshot_health_scheduled_task",
+      "path": "tools/register_snapshot_health_scheduled_task.ps1",
+      "summary": "Jednorazowa rejestracja zadania Harmonogramu Windows: co N minut uruchamia tools/snapshot_health_alert.ps1 (Slack przy NOT OK).",
+      "when_to_use": "Windows, repo root z .env (SLACK_WEBHOOK_URL); alternatywa dla Shawl/NSSM + data_alerts_loop.ps1.",
+      "risk": "low",
+      "runnable": true,
+      "actions": [
+        "run",
+        "copy_command"
+      ]
+    },
+    {
       "id": "devnet_rebalance_wallet_half",
       "path": "tools/devnet_rebalance_wallet_half.ps1",
       "summary": "Rebalans polowkowy portfela na devnecie: z WSL odczytuje balans SOL i devUSDC, wylicza plan swapow tak, aby wartosc w SOL i devUSDC zblizyla sie do ~50/50; opcjonalnie zamyka/ponownie otwiera wskazana pozycje i przy -Execute wysyla transakcje.",

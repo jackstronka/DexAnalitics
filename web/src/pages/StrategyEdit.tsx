@@ -58,6 +58,7 @@ export default function StrategyEdit() {
   const [rebalanceThresholdPct, setRebalanceThresholdPct] = useState<number | ''>('')
   const [maxIlPct, setMaxIlPct] = useState<number | ''>('')
   const [minRebalanceIntervalHours, setMinRebalanceIntervalHours] = useState<number | ''>('')
+  const [candleSeconds, setCandleSeconds] = useState<number | ''>('')
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
   const [dryRun, setDryRun] = useState(true)
   const [autoExecute, setAutoExecute] = useState(false)
@@ -78,6 +79,7 @@ export default function StrategyEdit() {
     setMaxIlPct(numOrEmpty(p.max_il_pct))
     setRebalanceThresholdPct(numOrEmpty(p.rebalance_threshold_pct))
     setMinRebalanceIntervalHours(numOrEmpty(p.min_rebalance_interval_hours))
+    setCandleSeconds(numOrEmpty(p.candle_seconds))
     setPeriodicRequiresOutOfRange(Boolean(p.periodic_requires_out_of_range))
     setAutoStart(p.auto_start === undefined ? true : Boolean(p.auto_start))
     // Default to old behavior when absent.
@@ -108,6 +110,7 @@ export default function StrategyEdit() {
       case 'threshold':
       case 'oor_recenter':
       case 'retouch_shift':
+      case 'last_candle':
         setMaxIlPct('')
         break
       default:
@@ -173,6 +176,7 @@ export default function StrategyEdit() {
       maxIlPct,
       rebalanceThresholdPct,
       minRebalanceIntervalHours,
+      candleSeconds,
       periodicRequiresOutOfRange,
       rebalanceOnRangeExitImmediately,
       autoStart,
@@ -287,6 +291,7 @@ export default function StrategyEdit() {
                   <option value="il_limit">IL Limit</option>
                   <option value="oor_recenter">OOR recenter</option>
                   <option value="retouch_shift">Retouch shift</option>
+                  <option value="last_candle">Last candle</option>
                 </select>
               </div>
 
@@ -343,6 +348,25 @@ export default function StrategyEdit() {
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
+                {strategyType === 'last_candle' ? (
+                  <div>
+                    <FieldLabel
+                      htmlFor="edit-candle-seconds"
+                      label="Candle seconds (optional)"
+                      tooltip={TOOLTIPS.candleSeconds}
+                    />
+                    <input
+                      id="edit-candle-seconds"
+                      type="number"
+                      step="60"
+                      min={60}
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={candleSeconds}
+                      onChange={(e) => setCandleSeconds(readOptionalNumber(e.target.value))}
+                      placeholder="e.g. 3600"
+                    />
+                  </div>
+                ) : null}
                 <div>
                   <FieldLabel
                     htmlFor="edit-rebalance-threshold"

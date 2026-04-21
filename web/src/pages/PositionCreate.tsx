@@ -239,6 +239,10 @@ export default function PositionCreate() {
         label: 'cbBTC/USDC (0.04%)',
         address: 'HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM',
       },
+      {
+        label: 'WBTC/cbBTC (0.01%)',
+        address: '4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72',
+      },
     ],
     [],
   )

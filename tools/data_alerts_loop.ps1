@@ -26,7 +26,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string] $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+  [string] $RepoRoot = "",
   [int] $SnapshotIntervalSeconds = 600,
   [int] $QuickVerifyIntervalSeconds = 3600,
   [switch] $SkipQuickVerify,
@@ -35,7 +35,9 @@ param(
   [int] $SnapshotThrottleMinutes = 15,
   [int] $MaxAgeMinutes10m = 25,
   [int] $MaxAgeMinutes5m = 15,
-  [int] $ExpectOrcaTarget = 3,
+  [int] $MaxHeartbeatAgeMinutes10m = 22,
+  [int] $MaxHeartbeatAgeMinutes5m = 12,
+  [int] $ExpectOrcaTarget = 4,
   # Forwarded to quick_verify_alert
   [int] $QuickVerifyThrottleMinutes = 60,
   [switch] $QuickVerifySkipDecodeAudit
@@ -43,6 +45,22 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if (-not $RepoRoot) {
+  $scriptDir = $null
+  if ($PSScriptRoot) {
+    $scriptDir = $PSScriptRoot
+  } elseif ($MyInvocation.MyCommand.Path) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  }
+
+  if ($scriptDir) {
+    $RepoRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
+  } else {
+    # Last resort keeps script runnable in unusual hosts where script metadata is unavailable.
+    $RepoRoot = (Get-Location).Path
+  }
+}
 
 Set-Location $RepoRoot
 
@@ -75,6 +93,8 @@ while ($true) {
       MinMinutesBetweenSameIssues = $SnapshotThrottleMinutes
       MaxAgeMinutes10m            = $MaxAgeMinutes10m
       MaxAgeMinutes5m           = $MaxAgeMinutes5m
+      MaxHeartbeatAgeMinutes10m = $MaxHeartbeatAgeMinutes10m
+      MaxHeartbeatAgeMinutes5m  = $MaxHeartbeatAgeMinutes5m
       ExpectOrcaTarget            = $ExpectOrcaTarget
     }
     if ($SkipSlack) { $snapArgs.SkipSlack = $true }

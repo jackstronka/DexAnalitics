@@ -35,7 +35,8 @@ Write-Host ""
 $pools = @(
     "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE", # SOL/USDC
     "HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF", # whETH/SOL
-    "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM"  # cbBTC/USDC
+    "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM", # cbBTC/USDC
+    "4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72"  # WBTC/cbBTC
 )
 
 foreach ($pool in $pools) {

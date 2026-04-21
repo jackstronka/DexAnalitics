@@ -29,6 +29,7 @@ Długowieczne procesy utrzymujące spójność snapshotów i alertów bez zewnę
 
 Mechanizmy automatyzacji:
 - `tools/data_alerts_loop.ps1`: pętla “co X sekund/minut” uruchamia `snapshot_health_alert.ps1` oraz opcjonalnie `quick_verify_alert.ps1`. Docelowo uruchamiane pod **Shawl / NSSM**.
+- `tools/register_snapshot_health_scheduled_task.ps1`: **jednorazowa** rejestracja zadania Harmonogramu Windows (**CLMM-SnapshotHealthAlert**), które co kilka minut odpala `snapshot_health_alert.ps1` — bez ręcznego sprawdzania (wymaga `.env` z `SLACK_WEBHOOK_URL`, chyba że `-SkipSlack`).
 - `tools/run_snapshot_health_monitor_loop.ps1`: pętla “health-only” (bez Slacka), stale dopisuje logi snapshotów.
 - `tools/run_snapshot_backtest_prep_loop.ps1`: pętla odświeżająca snapshoty i przygotowująca cache przez `snapshot-backtest-prep` (może być `-Loop` jako tryb ciągły, albo jednorazowo pod Task Scheduler).
 
@@ -83,11 +84,12 @@ Poniżej jest dopięte “kto to obsługuje” (od strony odpowiedzialności) i 
 |---|---|---|---|
 | `clmm-lp snapshot-run-curated-all` | Data Collector (bot/ops) | Task Scheduler (daily) | Odświeża snapshoty oraz JSONL statusy dla snapshotów 10m/5m |
 | `clmm-lp swaps-sync+enrich-curated-all` | Data Collector (bot/ops) | Task Scheduler (daily) | Sync swapów + enrich/decoded dane dla pipeline’u backtest/fees |
-| `tools/snapshot_health_check.ps1` | Data Quality Gate | wywoływane przez wrapper (one-shot) | Sprawdza świeżość + brak błędów w logach snapshot loop (10m/5m) |
+| `tools/snapshot_health_check.ps1` | Data Quality Gate | wywoływane przez wrapper (one-shot) | Świeżość OK-runów JSONL + (opcj.) heartbeat pętli `run-snapshot-loop*.ps1` + ERROR w logach |
 | `tools/snapshot_health_alert.ps1` | Data Ops Alerting | triggered shot (najczęściej Task Scheduler / cron) albo wywołania w `data_alerts_loop` | Na NOT OK wysyła Slack (z throttle) |
 | `tools/quick_verify_data.ps1` | Data Quality Gate | wywoływane przez wrapper (one-shot) | Agreguje readiness + `data-health-check` + opcjonalnie decode audit |
 | `tools/quick_verify_alert.ps1` | Data Ops Alerting | triggered shot (najczęściej hourly) albo wywołania w `data_alerts_loop` | Na NO-GO wysyła Slack (throttle) |
 | `tools/data_alerts_loop.ps1` | Data Ops Alerting | automatic long-lived (Shawl/NSSM) | Jednym procesem robi cyklicznie `snapshot_health_alert` i `quick_verify_alert` |
+| `tools/register_snapshot_health_scheduled_task.ps1` | Data Ops Alerting | **jednorazowa** rejestracja taska Windows (potem automatycznie) | Harmonogram: co N min `snapshot_health_alert` → Slack przy NOT OK |
 | `tools/run_snapshot_backtest_prep_loop.ps1` | Research / Backtest Ops | triggered shot albo loop (one-shot + scheduler) | Buduje cache `data/backtest-snapshot-cache` pod `backtest-optimize --price-path-source snapshots` |
 | `tools/run_ops_ingest_loop.ps1` | Data Collector (bot/ops) | automatic long-lived (Shawl/NSSM) | Wrapuje `clmm-lp-cli ops-ingest-loop` pod usługę (ingest: snapshots → swaps sync → enrich → audit → health-check) + opcjonalny Slack na non-zero exit |
 | `tools/run_snapshot_health_monitor_loop.ps1` | Data Quality Gate | automatic long-lived (loop) | Tylko loguje “health” do plików, bez Slacka |

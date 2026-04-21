@@ -36,6 +36,11 @@ export const STRATEGY_COPY: Record<
     body:
       'Poza zakresem: przesuwanie jednej krawędzi (retouch), szerokość pasma zachowana; szczegóły w doc (RetouchShift).',
   },
+  last_candle: {
+    title: 'Last candle',
+    body:
+      'Poza zakresem: nowe granice z ostatniej zamkniętej świecy (low/high). Gdy brak świecy lub jest płaska, fallback do pasma z Range Width %.',
+  },
 }
 
 export type FieldKey = 'rangeWidth' | 'maxIl' | 'rebalanceThreshold' | 'minInterval'
@@ -77,6 +82,12 @@ export const FIELD_ENABLED: Record<StrategyType, Record<FieldKey, boolean>> = {
     rebalanceThreshold: true,
     minInterval: true,
   },
+  last_candle: {
+    rangeWidth: true,
+    maxIl: false,
+    rebalanceThreshold: false,
+    minInterval: true,
+  },
 }
 
 export const TOOLTIPS = {
@@ -97,6 +108,8 @@ export const TOOLTIPS = {
     'Tryb czasowy: rebalance okresowy może wykonać się po upływie N godzin od poprzedniego rebalance. Licznik resetuje się po każdej wykonanej akcji.',
   minIntervalOther:
     'Minimalna liczba godzin między rebalance’ami tam, gdzie silnik egzekwuje odstęp (np. przy limit IL).',
+  candleSeconds:
+    'Rozmiar świecy dla strategii last_candle w sekundach (np. 900 = 15m, 3600 = 1h). Używana jest ostatnia w pełni zamknięta świeca.',
   periodicRequiresOor:
     'Gdy włączone: rebalance okresowy wykona się tylko wtedy, gdy w chwili wyzwolenia (po upływie interwału) pozycja jest poza zakresem (OOR). Gdy wyłączone: rebalance okresowy wykona się po interwale niezależnie od in-range/OOR.',
   rebalanceOnRangeExitImmediately:
@@ -146,6 +159,7 @@ export function buildParameters(
     maxIlPct: number | ''
     rebalanceThresholdPct: number | ''
     minRebalanceIntervalHours: number | ''
+    candleSeconds: number | ''
     periodicRequiresOutOfRange: boolean
     rebalanceOnRangeExitImmediately: boolean
     autoStart: boolean
@@ -166,6 +180,12 @@ export function buildParameters(
     const n = Number(state.minRebalanceIntervalHours)
     if (Number.isFinite(n) && n >= 0) {
       p.min_rebalance_interval_hours = Math.floor(n)
+    }
+  }
+  if (strategyType === 'last_candle' && state.candleSeconds !== '') {
+    const n = Number(state.candleSeconds)
+    if (Number.isFinite(n) && n > 0) {
+      p.candle_seconds = Math.max(60, Math.floor(n))
     }
   }
 

@@ -272,6 +272,68 @@ export interface BacktestJobResponse {
   note?: string | null
 }
 
+export interface BacktestStrategyCatalogEntry {
+  id: string
+  label: string
+  parameters: string[]
+}
+
+export interface BacktestStrategyCatalogResponse {
+  strategies: BacktestStrategyCatalogEntry[]
+}
+
+export interface BacktestFullRequest {
+  windows_hours: number[]
+  include_strategy_ids?: string[]
+  include_indicator_strategies?: boolean
+  objective?: string
+  pool_ids?: string[]
+  lp_share?: number
+  capital_usd?: number
+  target_vs_hodl_usd?: number
+}
+
+export interface BacktestFullMetricRow {
+  rank: number
+  strategy: string
+  lower_usd: number
+  upper_usd: number
+  width_pct: number
+  score: number
+  fees: number
+  rebalances: number
+  pnl: number
+  vs_hodl: number
+  tir_pct: number
+  il_like_pct?: number | null
+}
+
+export interface BacktestFullWindowResult {
+  pool_id: string
+  pool_label: string
+  pool_address: string
+  protocol: string
+  window_hours: number
+  metrics: BacktestFullMetricRow[]
+  note?: string | null
+}
+
+export interface BacktestFullJobStatusResponse {
+  id: string
+  status: string
+  note?: string | null
+}
+
+export interface BacktestFullJobResponse {
+  id: string
+  status: string
+  started_ts_utc: string
+  finished_ts_utc?: string | null
+  stderr?: string | null
+  note?: string | null
+  results?: BacktestFullWindowResult[] | null
+}
+
 export interface PositionExperimentConfigResponse {
   position_address: string
   open_session_id?: string | null
@@ -369,6 +431,9 @@ export interface Pool {
   liquidity: string
   fee_rate_bps: number
   volume_24h_usd?: string | null
+  volume_1h_usd?: string | null
+  volume_5m_usd?: string | null
+  volume_7d_usd?: string | null
   tvl_usd?: string | null
   apy_estimate?: string | null
 }
@@ -699,13 +764,18 @@ export const getPositionStreamPerformance = (address: string) =>
   fetchJson<PositionStreamPerformanceResponse>(
     `/positions/${encodeURIComponent(address)}/stream-performance`,
   )
-export const getPositionStreamPnL = (address: string) =>
-  fetchJson<PositionStreamPnLResponse>(`/positions/${encodeURIComponent(address)}/stream-pnl`)
-export const getPositionStreamLineage = (address: string) =>
+export const getPositionStreamPnL = (address: string, mode: 'live' | 'settlement_v1' = 'live') =>
+  fetchJson<PositionStreamPnLResponse>(
+    `/positions/${encodeURIComponent(address)}/stream-pnl?${new URLSearchParams({ mode })}`,
+  )
+export const getPositionStreamLineage = (
+  address: string,
+  mode: 'live' | 'settlement_v1' = 'live',
+) =>
   // Lineage reconstruction can be slow when DB is disabled and API scans JSONL.
   // Keep this above the default 15s UI timeout to avoid false "no lineage" states.
   fetchJsonWithTimeout<PositionStreamLineageResponse>(
-    `/positions/${encodeURIComponent(address)}/stream-lineage`,
+    `/positions/${encodeURIComponent(address)}/stream-lineage?${new URLSearchParams({ mode })}`,
     120_000,
   )
 export const getPositionLifecycleSummary = (address: string) =>
@@ -727,6 +797,18 @@ export const runBacktestFromOpenPosition = (body: BacktestFromOpenPositionReques
 
 export const getBacktestJob = (id: string) =>
   fetchJson<BacktestJobResponse>(`/backtests/${encodeURIComponent(id)}`)
+
+export const getBacktestStrategyCatalog = () =>
+  fetchJson<BacktestStrategyCatalogResponse>('/backtests/strategy-catalog')
+
+export const startBacktestFull = (body: BacktestFullRequest) =>
+  fetchJsonLong<BacktestFullJobStatusResponse>('/backtests/full', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const getBacktestFullJob = (id: string) =>
+  fetchJson<BacktestFullJobResponse>(`/backtests/full/${encodeURIComponent(id)}`)
 
 export const getPositionExperimentConfig = (address: string) =>
   fetchJson<PositionExperimentConfigResponse>(

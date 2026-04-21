@@ -1,3 +1,163 @@
+## 2026-04-21 — Orca volume history snapshots: persist + API endpoints
+
+keywords: api, pools, orca, volume, stats, history, jsonl, backtest, data-catalog
+
+- **What:** Added multi-window volume mapping from Orca REST (`5m`, `1h`, `24h`, `7d`) into `PoolResponse` for `/pools` and `/orca/pools*`.
+- **What:** Added persistent history collector endpoint `POST /pools/orca/volume-history/collect` that snapshots Orca pool stats and appends normalized rows to `data/orca-rest/pool_volume_history.jsonl`.
+- **What:** Added query endpoint `GET /pools/orca/volume-history` with optional `pool_address` + `limit` filtering to reuse historical Orca volume points in analytics/backtests.
+- **Why:** Keep current Orca telemetry available after it ages out upstream and make it joinable with local datasets (`pool_address`, `ts_utc`).
+- **paths:** `crates/data/src/providers/orca_rest.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/pools.rs`, `crates/api/src/handlers/orca.rs`, `crates/api/src/routes.rs`, `doc/DATA_CATALOG.md`
+
+## 2026-04-21 — Backtests FULL clarity: unique TOP strategies, range context, Meteora lp_share fallback removal
+
+keywords: api, web, backtests, full-run, ranking, tooltip, strategy-range, meteora, lp_share
+
+- **What (API):** `BacktestFullMetricRow` now carries `lower_usd`, `upper_usd`, `width_pct` parsed from optimize ranking table, so frontend can distinguish same strategy label across different tested ranges.
+- **What (API):** Removed implicit Meteora fallback `--lp-share 0.0001` in FULL run handler; API now forwards `lp_share` only when explicitly provided by request.
+- **What (web):** TOP3 cards now keep unique strategy labels (best variant per label for selected sort), and show variant range inline.
+- **What (web):** Per-pool table now includes `Range (USD)` + `Width%`; global table includes semantic hints/tooltips (especially for `Wystapienia`).
+- **Why:** Users reported confusing duplicates and unclear aggregate semantics; silent small `lp_share` fallback made Meteora fees look unrealistically tiny.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`, `doc/BUGS.md`
+
+## 2026-04-21 — Backtests UI: objective selector with descriptions and use-cases
+
+keywords: web, backtests, objective, vs-hodl, fees, pnl, composite, risk-adj, ux
+
+- **What:** Replaced free-text `Objective` input in Backtests with a controlled selector listing all supported values (`vs-hodl`, `fees`, `pnl`, `composite`, `risk-adj`).
+- **What:** Added inline Polish descriptions and practical “przyklad uzycia” hints for each objective, so operators can choose ranking mode without remembering CLI semantics.
+- **Why:** Prevent invalid objective strings and reduce ambiguity between ranking objective vs post-filtering (`target_vs_hodl_usd`).
+- **paths:** `web/src/pages/Backtests.tsx`
+
+## 2026-04-21 — Backtests UI polish: empty defaults, pair grouping, strategy tooltips
+
+keywords: web, backtests, ui, target_vs_hodl, lp_share, sorting, tooltip, bollinger
+
+- **What:** `LP share` and `Cel vs HODL` now start empty in UI; `parseOptionalNumber` treats blank input as `undefined` (instead of `0`), so empty fields do not accidentally enforce filtering/overrides.
+- **What:** Result cards in “Strategie spelniajace target” are sorted by pool first, then window, so the same pair appears next to itself across windows.
+- **What:** Added hover tooltips for strategy labels (TOP cards, global ranking, per-pool table), including decode for `bollinger_w.._k.._r..` and other common compact labels.
+- **Why:** Improve readability and prevent confusing “Brak strategii...” caused by unintended default filtering.
+- **paths:** `web/src/pages/Backtests.tsx`
+
+## 2026-04-21 — Backtests UI: show `LP share` only for Meteora selections
+
+keywords: web, backtests, lp_share, meteora, ui
+
+- **What:** `Backtests` page now renders `LP share` input only when at least one selected pool is Meteora (`METEORA_*`), and sends `lp_share` in the FULL-run request only in that case.
+- **Why:** For Orca/Raydium runs this knob is usually irrelevant/noisy in UI; operators asked to keep it visible only where it matters operationally.
+- **paths:** `web/src/pages/Backtests.tsx`
+
+## 2026-04-20 — Backtests FULL: CLI family filter + capital USD + vsHODL target gate
+
+keywords: cli, api, web, backtest-optimize, include-strategy-families, capital-usd, vs-hodl-target
+
+- **What (CLI):** Added `backtest-optimize --include-strategy-families` (comma-separated) to prune grid generation before simulation (`static`, `threshold`, `periodic`, `oor_recenter`, `il_limit`, `retouch_shift`, `bollinger`, `last_candle`).
+- **What (API):** `POST /backtests/full` now forwards selected families directly to CLI (real compute-time filtering), forwards `capital_usd` to `--capital`, and supports `target_vs_hodl_usd` to keep only strategies with `vs_hodl >= target`.
+- **What (web):** Backtests page now has inputs for simulation capital USD and target vs HODL USD, and sends those to FULL run.
+- **Why:** Operators requested actionable screening: compute only selected strategy families and quickly list candidates that beat a required absolute edge over HODL.
+- **Guards/tests:** `cargo check -p clmm-lp-cli`; `cargo check -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/cli/src/main.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/pages/Backtests.tsx`, `web/src/lib/api.ts`
+
+## 2026-04-20 — Backtests UI + FULL matrix API (24/48/72/96h)
+
+keywords: api, web, backtests, backtest-optimize, full-matrix, strategy-catalog, curated-pools, metrics-table
+
+- **What (API):** Added new endpoints for Backtests module: strategy catalog (`GET /backtests/strategy-catalog`), FULL matrix start (`POST /backtests/full`), and job status/results (`GET /backtests/full/{id}`).
+- **What (API):** FULL matrix runner executes `clmm-lp-cli backtest-optimize --full-ranking` across curated pools and selected windows, parses ranking table rows into structured metrics, and supports strategy-family filtering on returned rows.
+- **What (web):** Added new `Backtests` page + menu entry with strategy/parameter catalog, selectable windows/pools, FULL run trigger, live job polling, and result tables (rank/score/pnl/vs_hodl/fees/tir/il-like/rebalances).
+- **Why:** Operators needed a dedicated UI section to compare all implemented strategy families and view consistent multi-window benchmark results from one workflow.
+- **Guards/tests:** `cargo check -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/api/src/handlers/backtests.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `web/src/pages/Backtests.tsx`, `web/src/lib/api.ts`, `web/src/App.tsx`, `web/src/components/Layout.tsx`
+
+## 2026-04-20 — `backtest-optimize`: restored missing strategy families in CLI grid
+
+keywords: clmm-lp-cli, backtest-optimize, StratConfig, oor_recenter, il_limit, retouch_shift, optimize-result-json
+
+- **What:** Extended CLI optimize strategy enum and runtime with `OorRecenter`, `IlLimit { max/close/grace }`, and `RetouchShift` (including label parsing + reporting/JSON export mapping).
+- **What:** `default_strategies()` now includes these variants again, and uses `--il-max-pct` / `--il-close-pct` / `--il-grace-steps` to parameterize `IlLimit`.
+- **What:** Added regression tests for label parsing and default-grid membership to prevent future silent strategy drops.
+- **Why:** Production/user runs showed mismatch between documented strategy catalog and actual optimize grid, which skewed rankings (often toward `static`) and reduced comparability across sessions.
+- **Guards/tests:** `cargo check -p clmm-lp-cli`; `cargo test -p clmm-lp-cli parse_strategy_label_bollinger_and_last_candle`; `cargo test -p clmm-lp-cli default_grid_includes_documented_non_indicator_strategies`.
+- **paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/cli/src/output/optimize_result_json.rs`, `crates/cli/src/engine/tests.rs`, `doc/BUGS.md`
+
+## 2026-04-20 — Stream PnL: scope tx fees/cashflow to ordered lineage chain sessions
+
+keywords: api, stream-pnl, stream-lineage, rebalance-session-id, tx-fees, realized-cashflow, bfs-component, fork
+
+- **What:** `compute_position_stream_pnl_for_stream_members` now derives `chain_sessions` from `position_stream_edges` using adjacent ordered pairs in the resolved lineage chain (old->new) and uses that scope for tx fee and cashflow aggregation.
+- **What:** When no chain-local sessions are found, aggregation falls back to chain positions (`position_pubkey IN chain`) instead of component-wide session scope.
+- **What:** Added regression tests for forked connectivity (`A->B->C` + `A->X`) to ensure sibling branch sessions do not leak into queried chain totals.
+- **Why:** Stream totals previously mixed chain-anchored valuation (`first/last PDA`) with component-wide cost/cashflow (`sessions` from BFS component), producing inconsistent "start->end" economics in fork/noise scenarios.
+- **Guards/tests:** `cargo test -p clmm-lp-api chain_sessions_ -- --nocapture`.
+- **paths:** `crates/api/src/services/position_stream_pnl.rs`, `doc/BUGS.md`
+
+## 2026-04-20 — Backend split for metrics mode: `mode=settlement_v1` on stream endpoints
+
+keywords: api, web, settlement_v1, stream-pnl, stream-lineage, query-mode, persisted-snapshots
+
+- **What:** Added optional query mode to `GET /positions/{address}/stream-pnl` and `GET /positions/{address}/stream-lineage` (`mode=live|settlement_v1`).
+- **What:** New backend path `compute_position_stream_pnl_settlement_v1` computes totals in strict mode (persisted DB snapshots only; no live self-seed snapshot writes).
+- **What:** In settlement mode, `stream-lineage` totals are replaced with strict settlement totals and response note is annotated accordingly.
+- **What (web):** API client and position pages now pass selected metrics mode from settings to stream endpoints.
+- **Why:** Settlement mode must run równolegle do live mode and allow operator switching without silently mixing in on-the-fly live valuation seeding.
+- **Guards/tests:** `cargo build -p clmm-lp-api`, `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-20 — UI toggle for `Settlement v1` vs `Live stream` metrics mode
+
+keywords: web, settings, settlement_v1, live-stream, position-detail, closed-position, localstorage
+
+- **What:** Added a persisted metrics mode switch in `Settings` (`pnl_mode` in `clmm-settings`) with options `live` and `settlement_v1`.
+- **What:** `PositionDetail` and `ClosedPositionDetail` now read the selected mode and display an explicit mode badge, plus settlement-aware section titles for stream/IL blocks.
+- **Why:** Product needs a parallel settlement path that can be enabled by operators without replacing the current live stream view.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/lib/metricsMode.ts`, `web/src/pages/Settings.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-20 — `experiment-config`: derive open-session USD capital with lifecycle pool fallback
+
+keywords: api, positions-handler, experiment-config, derived_initial_capital_usd, pool_address, lifecycle-ledger
+
+- **What:** In `get_position_experiment_config`, pool mint resolution now falls back from `registry_open.details.pool_address` to lifecycle session rows (`pool_pubkey` or `pool_address`) for the same `rebalance_session_id`.
+- **Why:** Some open snapshot/detail records omit `pool_address`, which previously made `derived_initial_capital_usd` unavailable despite sufficient session ledger data.
+- **Guards/tests:** `cargo build -p clmm-lp-api`.
+- **paths:** `crates/api/src/handlers/positions.rs`, `doc/BUGS.md`
+
+## 2026-04-20 — PositionDetail: mirrored per-PDA chain cost/fee breakdown with non-zero toggle
+
+keywords: web, position-detail, stream-lineage, chain-cost-summary, breakdown, toggle
+
+- **What:** Added line-item breakdown sections in `PositionDetail` under stream totals: per-PDA network tx fees and per-PDA LP collected components.
+- **What:** Added `Show only non-zero` / `Show all positions` toggle to keep long chains readable while preserving full audit trace on demand.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-20 — ClosedPositionDetail: per-PDA breakdown lists under chain tx/LP totals
+
+keywords: web, closed-position, chain-cost-summary, tx-fees, lp-collected, per-pda-breakdown
+
+- **What:** Added line-item breakdown lists under chain-level `Koszt sieci (tx)` and `Prowizje LP zebrane` cards in `ClosedPositionDetail` (per PDA contribution, with collect counts and token-leg rows).
+- **What:** Added a toggle (`Pokaż tylko niezerowe` / `Pokaż wszystkie pozycje`) to reduce noise on long chains.
+- **Why:** Operators needed quick auditability of what composes aggregate totals without manually scanning the full history table.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-20 — ClosedPositionDetail: line-item breakdown under network/LP totals
+
+keywords: web, closed-position, stream-lineage, chain-cost-summary, breakdown, auditability
+
+- **What:** Added per-PDA line-item lists under chain-level `Koszt sieci (tx)` and `Prowizje LP zebrane` totals (address, amount, collect count, and token-leg details) in `ClosedPositionDetail`.
+- **Why:** Operators needed explicit decomposition of totals to verify which closed positions contributed to aggregate network costs and harvested fees.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-04-20 — ClosedPositionDetail: per-leg USD for aggregated LP fee token rows
+
+keywords: web, closed-position, chain-cost-summary, lp-fees, jupiter-prices, usd
+
+- **What:** In `ClosedPositionDetail` chain fee section, token-leg rows now show `≈ $...` per leg (using `getJupiterPricesUsd` and entry-node mints) in addition to UI amount/base units.
+- **Why:** Operators could see total USD for collected LP fees, but leg rows had only token units and were difficult to reconcile quickly.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/ClosedPositionDetail.tsx`, `doc/BUGS.md`
+
 ## 2026-04-20 — Lifecycle->DB ingest hardening + tx/collect fallback for lineage node costs
 
 keywords: api, stream-lineage, lifecycle-ingest, position_stream_ledger_rows, pool_address, tx_fees, collect_fees
@@ -95,6 +255,14 @@ keywords: execution, rebalance, pending_open, recovery, intended_tick_range, wid
 - **Why:** Prevent endless pending-open loops where recovery retries the same stale out-of-range ticks (`pool tick ... not in new range`) after market drift between close and reopen.
 - **Guards/tests:** Added unit tests for unchanged in-range behavior and widen-on-stale behavior (`adapt_recover_open_ticks_*`).
 - **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+## 2026-04-17 — Backtests FULL: prefer release `clmm-lp-cli` + probe `--include-strategy-families`
+
+keywords: api, backtests, backtest-optimize, clmm-lp-cli, resolve_clmm_lp_cli_path, include-strategy-families
+
+- **What:** `resolve_clmm_lp_cli_path` now collects candidates in order: explicit `CLMM_LP_CLI_PATH`, then repo `target/release` before `target/debug` (and `CLMM_API_TARGET_DIR` / `CARGO_TARGET_DIR` with the same ordering), then the CLI next to `clmm-lp-api` — avoids picking a stale debug CLI when a fresh release build exists.
+- **What:** FULL backtest matrix probes `backtest-optimize --help` (cached per **path + exe mtime**) to decide whether `--include-strategy-families` is supported; legacy CLIs still work for full-catalog runs (flag omitted), while subset strategy selection fails fast with an actionable rebuild message. Mtime in the cache key avoids a long-lived false negative after `cargo build` without API restart.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `doc/BUGS.md`
 
 ## 2026-04-17 — PowerShell hardening: safe `RepoRoot` bootstrap in `data_alerts_loop`
 

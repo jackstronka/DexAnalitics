@@ -8,7 +8,7 @@ use clmm_lp_domain::math::fee_math::calculate_effective_fee_rate;
 use clmm_lp_protocols::orca::pool_reader::WhirlpoolReader;
 use clmm_lp_protocols::rpc::RpcProvider;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::backtest_engine::StratConfig;
@@ -118,15 +118,16 @@ pub fn default_strategies(
     static_only: bool,
     indicator_strategies: bool,
     snapshot_mode: bool,
-    _il_max_pct: f64,
-    _il_close_pct: Option<f64>,
-    _il_grace_steps: u64,
+    il_max_pct: f64,
+    il_close_pct: Option<f64>,
+    il_grace_steps: u64,
 ) -> Vec<StratConfig> {
     if static_only {
         vec![StratConfig::Static]
     } else {
         let mut v = vec![
             StratConfig::Static,
+            StratConfig::OorRecenter,
             StratConfig::Threshold(0.02),
             StratConfig::Threshold(0.03),
             StratConfig::Threshold(0.05),
@@ -138,6 +139,12 @@ pub fn default_strategies(
             StratConfig::Periodic(24),
             StratConfig::Periodic(48),
             StratConfig::Periodic(72),
+            StratConfig::IlLimit {
+                max_il_pct: il_max_pct / 100.0,
+                close_il_pct: il_close_pct.map(|v| v / 100.0),
+                grace_steps: il_grace_steps,
+            },
+            StratConfig::RetouchShift,
         ];
         if indicator_strategies {
             // Three σ-width presets (`k` in `SMA ± k·σ`): narrower (1.5σ), classic (2σ), wider (2.5σ).
@@ -181,6 +188,41 @@ pub fn default_strategies(
     }
 }
 
+fn strategy_family_name(s: &StratConfig) -> &'static str {
+    match s {
+        StratConfig::Static => "static",
+        StratConfig::OorRecenter => "oor_recenter",
+        StratConfig::Threshold(_) => "threshold",
+        StratConfig::Periodic(_) => "periodic",
+        StratConfig::IlLimit { .. } => "il_limit",
+        StratConfig::RetouchShift => "retouch_shift",
+        StratConfig::Bollinger { .. } => "bollinger",
+        StratConfig::LastCandle { .. } | StratConfig::LastCandleTime { .. } => "last_candle",
+    }
+}
+
+/// Keep only selected strategy families (e.g. `static,threshold,il_limit`).
+pub fn filter_strategies_by_families(
+    strategies: Vec<StratConfig>,
+    include_families: Option<&[String]>,
+) -> Vec<StratConfig> {
+    let Some(raw) = include_families else {
+        return strategies;
+    };
+    let wanted: HashSet<String> = raw
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return strategies;
+    }
+    strategies
+        .into_iter()
+        .filter(|s| wanted.contains(strategy_family_name(s)))
+        .collect()
+}
+
 /// Presets for `backtest-optimize --indicator-strategies`: wall-clock labels assume **15 min / step** (`--resolution-seconds 900`).
 const LAST_CANDLE_OPTIMIZE_GRID: &[(u64, u64)] = &[
     // 15-minute candle (1 step)
@@ -208,3 +250,33 @@ const LAST_CANDLE_OPTIMIZE_GRID: &[(u64, u64)] = &[
     (4, 16),
     (4, 48),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{default_strategies, filter_strategies_by_families};
+    use crate::backtest_engine::StratConfig;
+
+    #[test]
+    fn default_grid_includes_documented_non_indicator_strategies() {
+        let v = default_strategies(false, false, true, 5.0, Some(12.0), 3);
+        assert!(v.contains(&StratConfig::Static));
+        assert!(v.contains(&StratConfig::OorRecenter));
+        assert!(v.contains(&StratConfig::RetouchShift));
+        assert!(v.contains(&StratConfig::IlLimit {
+            max_il_pct: 0.05,
+            close_il_pct: Some(0.12),
+            grace_steps: 3,
+        }));
+    }
+
+    #[test]
+    fn filter_strategies_by_family_keeps_requested_only() {
+        let v = default_strategies(false, true, true, 5.0, Some(12.0), 3);
+        let include = vec!["static".to_string(), "il_limit".to_string()];
+        let filtered = filter_strategies_by_families(v, Some(&include));
+        assert!(filtered.contains(&StratConfig::Static));
+        assert!(filtered.iter().any(|s| matches!(s, StratConfig::IlLimit { .. })));
+        assert!(!filtered.iter().any(|s| matches!(s, StratConfig::Threshold(_))));
+        assert!(!filtered.iter().any(|s| matches!(s, StratConfig::Bollinger { .. })));
+    }
+}

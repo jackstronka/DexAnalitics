@@ -42,6 +42,7 @@ Use `Restart=always` and `RestartSec=10` for crash recovery. For **API** instead
   - **[NSSM](https://nssm.cc/)** — jako aplikacja `powershell.exe`, argumenty `-NoProfile -ExecutionPolicy Bypass -File …\data_alerts_loop.ps1`, katalog roboczy = root repo; stdout/stderr do pliku (np. `data/snapshot_logs/`).
   - **Ręcznie / RDP:** jedno okno PowerShell z pętlą (tylko na dev).
 - **Task Scheduler:** nadal OK dla **jednorazowych** zadań lub jeśli wolisz harmonogram OS; nie jest wymagany, gdy używasz `data_alerts_loop.ps1`.
+- **Szybka rejestracja (Windows):** [`tools/register_snapshot_health_scheduled_task.ps1`](../tools/register_snapshot_health_scheduled_task.ps1) — tworzy zadanie **CLMM-SnapshotHealthAlert** wywołujące `tools/snapshot_health_alert.ps1` co kilka minut (domyślnie 5), bez ręcznego odpalania checków.
 - **Orca bot (CLI):** jak wcześniej — Task Scheduler lub NSSM/Shawl z `orca_bot_run_supervised.ps1`.
 
 ### Docker
@@ -126,6 +127,7 @@ PATH=/home/TWOJ_USER/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 | 3 | **Rust / `cargo`** | Wymagane dla **`quick_verify_alert`** (wewnątrz `cargo run` CLI). |
 | 4 | **Shell:** **`pwsh` tylko na Linuxie** (cron); na **Windows** wystarczy **`powershell.exe`** (wbudowany) | Ścieżki bezwzględne w cronie / „Start in”. |
 | 5 | **Test ręczny** z rootu repo | Windows: `powershell` → `.\tools\…`; Linux: `pwsh` → `./tools/…` |
+| 5b | **Automatyczny monitoring snapshotów** | Windows: `.\tools\register_snapshot_health_scheduled_task.ps1` **lub** Shawl/NSSM + `tools\data_alerts_loop.ps1` — inaczej `snapshot_health_alert` nie wykryje problemu sam z siebie. |
 | 6 | (Opcja) **Slack** — kanał, webhook, filtry powiadomień | Po stronie UI Slacka. |
 
 ### Slack (Incoming Webhook)

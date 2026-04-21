@@ -1,5 +1,5 @@
-# Curated Orca mainnet (3 pairs): one entry point for swaps, preflight, open, close, fund (cbBTC/USDC), smoke.
-# Pool IDs and mints: `tools/orca_curated_mainnet_pools.ps1` (SOL_USDC, WHETH_SOL, CBBTC_USDC).
+# Curated Orca mainnet (4 pairs): one entry point for swaps, preflight, open, close, fund (cbBTC/USDC), smoke.
+# Pool IDs and mints: `tools/orca_curated_mainnet_pools.ps1` (SOL_USDC, WHETH_SOL, CBBTC_USDC, CBBTC_WBTC).
 #
 # Usage (repo root):
 #   . .\tools\mainnet_rpc_env.ps1
@@ -26,7 +26,7 @@ param(
   [ValidateSet("Help", "ListPairs", "Preflight", "Open", "Close", "Swap", "FundCbBtc", "Smoke")]
   [string] $Action = "Help",
 
-  [ValidateSet("SOL_USDC", "WHETH_SOL", "CBBTC_USDC", "")]
+  [ValidateSet("SOL_USDC", "WHETH_SOL", "CBBTC_USDC", "CBBTC_WBTC", "")]
   [string] $Pair = "",
 
   # Close
@@ -89,10 +89,11 @@ if ([string]::IsNullOrWhiteSpace($Keypair)) {
 
 function Show-Help {
   Write-Host @"
-Curated Orca mainnet - 3 pairs (see tools/orca_curated_mainnet_pools.ps1):
+Curated Orca mainnet - 4 pairs (see tools/orca_curated_mainnet_pools.ps1):
   SOL_USDC    SOL/USDC
   WHETH_SOL   whETH/SOL
   CBBTC_USDC  cbBTC/USDC
+  CBBTC_WBTC  cbBTC/WBTC
 
 Actions (this script):
   -Action ListPairs          List pools, mints, swap examples
@@ -109,7 +110,7 @@ Underlying scripts (direct use):
   tools/orca_position_open_preflight.ps1   - balances vs deposit
   tools/orca_position_open_then_close_quick.ps1 - -OpenOnly adds live position without close
   tools/orca_fund_cbbtc_usdc_open.ps1      - fund wallet for cbBTC/USDC position
-  tools/orca_position_smoke_curated_pools.ps1 - regression: all 3 pools
+  tools/orca_position_smoke_curated_pools.ps1 - regression: all curated pools
 
 Build CLI: tools/build_clmm_lp_cli.ps1
 "@
@@ -138,7 +139,7 @@ if (-not $env:SOLANA_RPC_URL -or [string]::IsNullOrWhiteSpace($env:SOLANA_RPC_UR
 }
 
 if ($Action -eq "Preflight") {
-  if ([string]::IsNullOrWhiteSpace($Pair)) { Fail "Preflight requires -Pair SOL_USDC|WHETH_SOL|CBBTC_USDC" }
+  if ([string]::IsNullOrWhiteSpace($Pair)) { Fail "Preflight requires -Pair SOL_USDC|WHETH_SOL|CBBTC_USDC|CBBTC_WBTC" }
   if ($AmountA -eq 0 -or $AmountB -eq 0) { Fail "Preflight requires -AmountA and -AmountB > 0" }
   $pe = Get-OrcaCuratedMainnetPoolById $Pair
   $pf = Join-Path $PSScriptRoot "orca_position_open_preflight.ps1"

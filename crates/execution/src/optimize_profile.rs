@@ -101,8 +101,7 @@ pub fn decision_config_from_optimize_result(
             })?;
         }
         "last_candle" => {
-            // Backtest recent-candle logic → live: recenter when out of range only.
-            cfg.strategy_mode = StrategyMode::OorRecenter;
+            cfg.strategy_mode = StrategyMode::LastCandle;
         }
         other => {
             return Err(OptimizeProfileError::UnknownStrategyKind(other.to_string()));
@@ -191,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_last_candle_to_oor_recenter() {
+    fn maps_last_candle_to_native_mode() {
         let f = minimal_file(OptimizeWinner {
             strategy_label: "last_candle".to_string(),
             strategy_kind: "last_candle".to_string(),
@@ -205,7 +204,7 @@ mod tests {
             il_grace_steps: None,
         });
         let c = decision_config_from_optimize_result(&f).unwrap();
-        assert_eq!(c.strategy_mode, StrategyMode::OorRecenter);
+        assert_eq!(c.strategy_mode, StrategyMode::LastCandle);
     }
 
     #[test]

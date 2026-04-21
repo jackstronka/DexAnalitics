@@ -10,6 +10,7 @@ $script:OrcaPreflightMintLabel = @{
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"     = "USDC"
   "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"     = "whETH (portal)"
   "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij"     = "cbBTC"
+  "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh"     = "WBTC (portal)"
 }
 
 function Get-OrcaPreflightMintLabel([string]$m) {

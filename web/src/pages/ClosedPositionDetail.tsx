@@ -4,7 +4,14 @@ import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
-import { getBacktestJob, getPositionExperimentConfig, getPositionLifecycleSummary, getPositionStreamLineage, runBacktestFromClosedPosition } from '@/lib/api'
+import {
+  getBacktestJob,
+  getJupiterPricesUsd,
+  getPositionExperimentConfig,
+  getPositionLifecycleSummary,
+  getPositionStreamLineage,
+  runBacktestFromClosedPosition,
+} from '@/lib/api'
 import {
   FEE_BASE_UNITS_TOOLTIP,
   formatDate,
@@ -18,6 +25,7 @@ import {
 } from '@/lib/utils'
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
+import { getMetricsMode } from '@/lib/metricsMode'
 
 function usdOrDash(v: string | number, digits = 3): string {
   const n = typeof v === 'string' ? parseFloat(v) : v
@@ -37,6 +45,8 @@ function valuationQualityLabel(q?: string | null): string | null {
 export default function ClosedPositionDetail() {
   const { address } = useParams<{ address: string }>()
   const pos = (address ?? '').trim()
+  const metricsMode = getMetricsMode()
+  const isSettlementMode = metricsMode === 'settlement_v1'
 
   const lifecycleQ = useQuery({
     queryKey: ['position-lifecycle-summary', pos],
@@ -47,8 +57,8 @@ export default function ClosedPositionDetail() {
   })
 
   const lineageQ = useQuery({
-    queryKey: ['position-stream-lineage', pos],
-    queryFn: () => getPositionStreamLineage(pos),
+    queryKey: ['position-stream-lineage', pos, metricsMode],
+    queryFn: () => getPositionStreamLineage(pos, metricsMode),
     enabled: pos.length > 0,
     staleTime: 30_000,
     retry: 0,
@@ -57,8 +67,48 @@ export default function ClosedPositionDetail() {
   const data = lifecycleQ.data
   const streamLineage = lineageQ.data
   const totals = streamLineage?.totals ?? null
+  const totalsSourceBadge = (() => {
+    const note = (totals?.note ?? '').toLowerCase()
+    if (isSettlementMode || note.includes('settlement v1') || note.includes('self-seed disabled')) {
+      return {
+        label: 'source: persisted settlement',
+        className: 'border-emerald-600/40 bg-emerald-500/10 text-emerald-300',
+      }
+    }
+    if (note.includes('self-seed')) {
+      return {
+        label: 'source: live seeded',
+        className: 'border-amber-600/40 bg-amber-500/10 text-amber-300',
+      }
+    }
+    return {
+      label: 'source: live snapshots',
+      className: 'border-border/70 bg-background/70 text-muted-foreground',
+    }
+  })()
   const entryNode = streamLineage?.nodes.find((n) => n.position_address === pos)
   const chainCost = streamLineage?.chain_cost_summary
+  const chainPriceMints = [
+    entryNode?.token_mint_a?.trim(),
+    entryNode?.token_mint_b?.trim(),
+  ].filter((m): m is string => Boolean(m))
+
+  const chainPricesQ = useQuery({
+    queryKey: ['closed-chain-fee-prices', ...chainPriceMints],
+    queryFn: () => getJupiterPricesUsd(chainPriceMints),
+    enabled: chainPriceMints.length > 0,
+    staleTime: 30_000,
+    retry: 1,
+  })
+  const chainPrices = chainPricesQ.data ?? {}
+
+  const formatLegUsd = (ui: string | number | null | undefined, mint?: string | null) => {
+    const amount = ui == null ? NaN : parseFloat(String(ui))
+    if (!Number.isFinite(amount)) return '—'
+    const px = mint ? chainPrices[mint] : undefined
+    if (!Number.isFinite(px)) return '—'
+    return formatUsdFixed(amount * Number(px), 6)
+  }
 
   const formatUsdCollectedOrDash = (usd: string | null | undefined, collects: number | null | undefined) => {
     const v = parseFloat(String(usd ?? '0'))
@@ -78,6 +128,7 @@ export default function ClosedPositionDetail() {
   })
 
   const [backtestJobId, setBacktestJobId] = useState<string | null>(null)
+  const [showOnlyNonZeroBreakdown, setShowOnlyNonZeroBreakdown] = useState(true)
 
   const runBacktestM = useMutation({
     mutationFn: async () => {
@@ -120,6 +171,12 @@ export default function ClosedPositionDetail() {
           </Link>
           <div className="min-w-0">
             <h1 className="text-2xl font-bold truncate">Closed position</h1>
+            <div className="text-xs text-muted-foreground">
+              Tryb metryk:{' '}
+              <span className="font-medium text-foreground">
+                {isSettlementMode ? 'Settlement v1' : 'Live stream'}
+              </span>
+            </div>
             {entryNode?.token_a_label || entryNode?.token_b_label || entryNode?.token_mint_a || entryNode?.token_mint_b ? (
               <div className="mt-1">
                 <PoolPairLabels
@@ -267,6 +324,15 @@ export default function ClosedPositionDetail() {
           <CardContent className="space-y-3 text-sm">
             {chainCost ? (
               <>
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowOnlyNonZeroBreakdown((v) => !v)}
+                  >
+                    {showOnlyNonZeroBreakdown ? 'Pokaż wszystkie pozycje' : 'Pokaż tylko niezerowe'}
+                  </Button>
+                </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
                   <div className="text-xs text-muted-foreground uppercase tracking-wide">Koszt sieci (tx) — suma</div>
                   <div className="font-mono text-lg mt-0.5">
@@ -274,6 +340,20 @@ export default function ClosedPositionDetail() {
                     <span className="text-muted-foreground"> · </span>
                     {formatUsdFixed(parseFloat(chainCost.tx_fees_usd_total), 4)}
                   </div>
+                  {streamLineage?.nodes?.length ? (
+                    <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                      {streamLineage.nodes.map((n) => {
+                        const lam = n.tx_fee_lamports ?? 0
+                        if (showOnlyNonZeroBreakdown && lam <= 0) return null
+                        return (
+                          <div key={`tx-${n.position_address}`} className="font-mono">
+                            {shortenAddress(n.position_address, 6)}: {lam.toLocaleString()} lamports ·{' '}
+                            {formatUsdFixed(parseFloat(String(n.tx_fees_usd ?? '0')), 4)}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
                   <div className="text-xs text-muted-foreground uppercase tracking-wide">Prowizje LP zebrane — suma</div>
@@ -296,6 +376,15 @@ export default function ClosedPositionDetail() {
                           <span className="font-mono text-foreground/90">
                             {String(chainCost.fees_collected_token_a_ui_total ?? '—')}
                           </span>
+                          <span className="font-mono text-muted-foreground">
+                            {' '}
+                            (≈{' '}
+                            {formatLegUsd(
+                              chainCost.fees_collected_token_a_ui_total,
+                              entryNode.token_mint_a,
+                            )}
+                            )
+                          </span>
                           {formatFeeBaseUnitsClause(chainCost.fees_collected_token_a_raw_total) ? (
                             <span className="font-mono text-muted-foreground" title={FEE_BASE_UNITS_TOOLTIP}>
                               {' '}
@@ -310,6 +399,15 @@ export default function ClosedPositionDetail() {
                           <span className="font-mono text-foreground/90">
                             {String(chainCost.fees_collected_token_b_ui_total ?? '—')}
                           </span>
+                          <span className="font-mono text-muted-foreground">
+                            {' '}
+                            (≈{' '}
+                            {formatLegUsd(
+                              chainCost.fees_collected_token_b_ui_total,
+                              entryNode.token_mint_b,
+                            )}
+                            )
+                          </span>
                           {formatFeeBaseUnitsClause(chainCost.fees_collected_token_b_raw_total) ? (
                             <span className="font-mono text-muted-foreground" title={FEE_BASE_UNITS_TOOLTIP}>
                               {' '}
@@ -318,6 +416,52 @@ export default function ClosedPositionDetail() {
                           ) : null}
                         </div>
                       ) : null}
+                    </div>
+                  ) : null}
+                  {streamLineage?.nodes?.length ? (
+                    <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                      {streamLineage.nodes.map((n) => {
+                        const collects = n.collect_events ?? 0
+                        const usdMain = formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)
+                        const hasA =
+                          n.fees_collected_token_a_ui != null || n.fees_collected_token_a_raw != null
+                        const hasB =
+                          n.fees_collected_token_b_ui != null || n.fees_collected_token_b_raw != null
+                        if (showOnlyNonZeroBreakdown && collects <= 0 && !hasA && !hasB) return null
+                        return (
+                          <div key={`fee-${n.position_address}`} className="space-y-0.5">
+                            <div className="font-mono">
+                              {shortenAddress(n.position_address, 6)}: {usdMain} · {collects}x collect
+                            </div>
+                            {(n.token_a_label || n.token_b_label) && (hasA || hasB) ? (
+                              <div className="pl-3 font-mono">
+                                {n.token_a_label ? (
+                                  <div>
+                                    {n.token_a_label}: {String(n.fees_collected_token_a_ui ?? '—')}
+                                    {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw) ? (
+                                      <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                        {' '}
+                                        {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                                {n.token_b_label ? (
+                                  <div>
+                                    {n.token_b_label}: {String(n.fees_collected_token_b_ui ?? '—')}
+                                    {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw) ? (
+                                      <span title={FEE_BASE_UNITS_TOOLTIP}>
+                                        {' '}
+                                        {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        )
+                      })}
                     </div>
                   ) : null}
                 </div>
@@ -333,7 +477,11 @@ export default function ClosedPositionDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Stream — dwie definicje (nie mylić)</CardTitle>
+          <CardTitle>
+            {isSettlementMode
+              ? 'Settlement v1 — dwie definicje (nie mylić)'
+              : 'Stream — dwie definicje (nie mylić)'}
+          </CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
             Wynik ekonomiczny vs benchmark IL/HODL — osobno od karty „koszty sieci vs LP fee” powyżej.
           </p>
@@ -343,6 +491,11 @@ export default function ClosedPositionDetail() {
             <>
               <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 space-y-2">
                 <div className="text-xs font-medium text-foreground">1) Wynik ekonomiczny łańcucha (net PnL)</div>
+                <div
+                  className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${totalsSourceBadge.className}`}
+                >
+                  {totalsSourceBadge.label}
+                </div>
                 {totals.interpretation?.economic_net_pnl_caption_pl ? (
                   <p className="text-[11px] leading-snug">{totals.interpretation.economic_net_pnl_caption_pl}</p>
                 ) : null}

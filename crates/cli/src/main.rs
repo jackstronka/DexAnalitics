@@ -508,6 +508,9 @@ enum Commands {
         /// Include Bollinger Bands + last-candle anchor strategies in the optimize grid (6 BB + 14 last-candle presets; more rows).
         #[arg(long, default_value_t = false)]
         indicator_strategies: bool,
+        /// Comma-separated strategy families to include in grid generation (e.g. `static,threshold,il_limit`).
+        #[arg(long, value_delimiter = ',')]
+        include_strategy_families: Option<Vec<String>>,
 
         /// Write machine-readable grid winner JSON for bots / API (`clmm-lp-execution::optimize_profile`).
         #[arg(long, value_name = "PATH")]
@@ -2779,6 +2782,7 @@ async fn main() -> Result<()> {
             retouch_repeat_extra_move_pct,
             retouch_repeat_off,
             indicator_strategies,
+            include_strategy_families,
             optimize_result_json,
             optimize_result_json_copy_dir,
         } => {
@@ -3342,7 +3346,7 @@ async fn main() -> Result<()> {
                 .map(|w| (w * steps_per_window)..((w + 1) * steps_per_window))
                 .collect();
 
-            let strategies: Vec<StratConfig> =
+            let strategies: Vec<StratConfig> = crate::commands::backtest_optimize::filter_strategies_by_families(
                 crate::commands::backtest_optimize::default_strategies(
                     *static_only,
                     *indicator_strategies,
@@ -3350,7 +3354,15 @@ async fn main() -> Result<()> {
                     *il_max_pct,
                     *il_close_pct,
                     *il_grace_steps,
+                ),
+                include_strategy_families.as_deref(),
+            );
+            if strategies.is_empty() {
+                anyhow::bail!(
+                    "No strategies left after --include-strategy-families filter. Requested: {:?}",
+                    include_strategy_families
                 );
+            }
 
             let min_frac = (*min_range_pct / 100.0).clamp(0.001, 1.0);
             let max_frac = (*max_range_pct / 100.0).clamp(min_frac + 0.001, 2.0);

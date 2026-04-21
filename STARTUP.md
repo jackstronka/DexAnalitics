@@ -299,7 +299,7 @@ cargo run -p clmm-lp-cli --bin clmm-lp-cli -- backtest \
 
 **Automation (Windows):** `tools/run_snapshot_backtest_prep_loop.ps1` — runs step (1)+(2); schedule every 30 minutes or use `-Loop -IntervalMinutes 30`.
 
-**Spis skryptów w `tools/` + priorytety alertów (snapshot → Slack):** [`doc/SCRIPTS_CATALOG.md`](doc/SCRIPTS_CATALOG.md). **Bez Task Scheduler:** `tools/data_alerts_loop.ps1` pod **Shawl/NSSM** (snapshot + quick verify w jednej pętli). Pojedyncze strzały: `tools/snapshot_health_alert.ps1`, `tools/quick_verify_alert.ps1`. Wymagane `SLACK_WEBHOOK_URL` w `.env` — [`doc/OPERATIONAL_CONTINUITY.md`](doc/OPERATIONAL_CONTINUITY.md).
+**Spis skryptów w `tools/` + priorytety alertów (snapshot → Slack):** [`doc/SCRIPTS_CATALOG.md`](doc/SCRIPTS_CATALOG.md). **Windows + Harmonogram zadań (jednorazowo):** `tools/register_snapshot_health_scheduled_task.ps1` rejestruje cykliczne `snapshot_health_alert`. **Bez Task Scheduler:** `tools/data_alerts_loop.ps1` pod **Shawl/NSSM** (snapshot + quick verify w jednej pętli). Pojedyncze strzały: `tools/snapshot_health_alert.ps1`, `tools/quick_verify_alert.ps1`. Wymagane `SLACK_WEBHOOK_URL` w `.env` — [`doc/OPERATIONAL_CONTINUITY.md`](doc/OPERATIONAL_CONTINUITY.md).
 
 ### Compare: Orca snapshots 5m vs 10m (last full hour, ±1/2/3%)
 
@@ -807,6 +807,7 @@ Store a small curated list of pool addresses we care about, so we can:
 - **SOL/USDC** (**0.04%**) : `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE` (DefiLlama TVL: `a5c85bc8-eb41-45c0-a520-d18d7529c0d8`)
 - **whETH/SOL** (**0.05%**) : `HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF` (DefiLlama TVL: `69c64232-ef1a-45f2-b49b-daeb2a906873`)
 - **cbBTC/USDC** (**0.04%**) : `HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM` (DefiLlama TVL: `2651188f-6b05-473e-9cfb-977a4ad094ba`)
+- **WBTC/cbBTC** (**0.01%**) : `4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72`
 - **syrupUSDC/USDC** (**0.01%**) : (pool address TBD)
 - **USDG/USDC** (**0.01%**) : (pool address TBD)
 

@@ -61,9 +61,19 @@ pub type StepData = StepDataPoint;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StratConfig {
     Static,
+    /// Rebalance only when the price exits the current range.
+    OorRecenter,
     Threshold(f64),
     /// Steps between rebalances (label uses `h` suffix historically; value is **step count**).
     Periodic(u64),
+    /// IL-like guard (vs HODL, ex-fees): rebalance on OOR or when |IL-like| crosses threshold.
+    IlLimit {
+        max_il_pct: f64,
+        close_il_pct: Option<f64>,
+        grace_steps: u64,
+    },
+    /// Shift only the exiting edge (keep width in A/B), one retouch per OOR episode.
+    RetouchShift,
     /// Bollinger: last `window` closes (A/B), bands `SMA ± k·σ`; rebalance every `rebalance_steps` steps.
     Bollinger {
         window: u32,
@@ -81,6 +91,20 @@ pub enum StratConfig {
         candle_seconds: u64,
         rebalance_seconds: u64,
     },
+}
+
+fn calculate_retouch_range_ab(
+    current_lower_ab: Decimal,
+    current_upper_ab: Decimal,
+    current_price_ab: Decimal,
+) -> (Decimal, Decimal) {
+    if current_price_ab > current_upper_ab {
+        let overflow = current_price_ab - current_upper_ab;
+        (current_lower_ab + overflow, current_price_ab)
+    } else {
+        let overflow = current_lower_ab - current_price_ab;
+        (current_price_ab, current_upper_ab - overflow)
+    }
 }
 
 /// Build step data (price, volume, share) for each candle.
@@ -335,14 +359,35 @@ pub fn run_single(
     let mut in_range_steps: u64 = 0;
     let mut secs_since_rebalance: u64 = 0;
     let mut prev_ts: Option<u64> = None;
+    let mut retouch_armed: bool = true;
+    let (hodl_amt_a, hodl_amt_b) = hodl::hodl_amounts_50_50_usd(step_data, capital_dec);
 
     // equity curve for max drawdown
     let mut peak_equity = capital_dec;
     let mut max_drawdown = Decimal::ZERO;
     let strat_name = match strat {
         StratConfig::Static => "static".to_string(),
+        StratConfig::OorRecenter => "oor_recenter".to_string(),
         StratConfig::Threshold(p) => format!("threshold_{:.0}%", p * 100.0),
         StratConfig::Periodic(h) => format!("periodic_{}h", h),
+        StratConfig::IlLimit {
+            max_il_pct,
+            close_il_pct,
+            grace_steps,
+        } => {
+            let max_label = max_il_pct * 100.0;
+            if let Some(close) = close_il_pct {
+                format!(
+                    "il_limit_{:.0}%_close_{:.0}%_grace_{}",
+                    max_label,
+                    close * 100.0,
+                    grace_steps
+                )
+            } else {
+                format!("il_limit_{:.0}%_grace_{}", max_label, grace_steps)
+            }
+        }
+        StratConfig::RetouchShift => "retouch_shift".to_string(),
         StratConfig::Bollinger {
             window,
             k,
@@ -405,6 +450,7 @@ pub fn run_single(
         }
         if in_range {
             in_range_steps += 1;
+            retouch_armed = true;
         }
 
         let pool_fees = if let Some(ref idx) = swap_index {
@@ -484,6 +530,12 @@ pub fn run_single(
         let amt_a = crate::engine::pricing::from_base_units(amt_a_base, token_a_decimals);
         let amt_b = crate::engine::pricing::from_base_units(amt_b_base, token_b_decimals);
         let position_value_usd = (amt_a * p.price_usd.value) + (amt_b * p.quote_usd);
+        let hodl_now = (hodl_amt_a * p.price_usd.value) + (hodl_amt_b * p.quote_usd);
+        let il_like_now_pct = if capital_dec > Decimal::ZERO {
+            (position_value_usd + total_rebalance_cost - hodl_now) / capital_dec
+        } else {
+            Decimal::ZERO
+        };
 
         // `position_value_usd` is already net of any rebalance costs that were paid when
         // reopening the position (we redeploy `position_value_usd - tx_cost`).
@@ -501,6 +553,7 @@ pub fn run_single(
 
         let should_rebalance = match strat {
             StratConfig::Static => false,
+            StratConfig::OorRecenter => !in_range,
             StratConfig::Threshold(th) => {
                 if !in_range {
                     true
@@ -515,6 +568,24 @@ pub fn run_single(
                 }
             }
             StratConfig::Periodic(interval) => steps_since_rebalance >= interval,
+            StratConfig::IlLimit {
+                max_il_pct,
+                close_il_pct,
+                grace_steps,
+            } => {
+                if !in_range {
+                    true
+                } else if steps_since_rebalance <= grace_steps {
+                    false
+                } else {
+                    let max_il = Decimal::from_f64(max_il_pct).unwrap_or(Decimal::ZERO);
+                    let close_il = close_il_pct
+                        .and_then(Decimal::from_f64)
+                        .unwrap_or(max_il);
+                    il_like_now_pct.abs() >= max_il || il_like_now_pct.abs() >= close_il
+                }
+            }
+            StratConfig::RetouchShift => !in_range && retouch_armed,
             StratConfig::Bollinger {
                 window,
                 rebalance_steps,
@@ -540,6 +611,9 @@ pub fn run_single(
             // Re-deploy current position value minus tx cost; fees are NOT compounded here.
             let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
             let (new_lower_ab, new_upper_ab) = match strat {
+                StratConfig::RetouchShift => {
+                    calculate_retouch_range_ab(current_lower_ab, current_upper_ab, price_ab)
+                }
                 StratConfig::Bollinger { window, k, .. } => {
                     let w = window as usize;
                     let start = i + 1 - w;
@@ -640,6 +714,9 @@ pub fn run_single(
             };
             current_lower_ab = new_lower_ab;
             current_upper_ab = new_upper_ab;
+            if let StratConfig::RetouchShift = strat {
+                retouch_armed = false;
+            }
 
             // Convert AB bounds to USD using current quote USD for liquidity estimation.
             let new_lower_usd = current_lower_ab * p.quote_usd;
@@ -787,6 +864,40 @@ pub fn parse_strategy_label(name: &str) -> Option<StratConfig> {
         let pct_str = rest.trim_end_matches('%').trim();
         let pct = pct_str.parse::<f64>().ok()?;
         return Some(StratConfig::Threshold(pct / 100.0));
+    }
+    if name == "oor_recenter" {
+        return Some(StratConfig::OorRecenter);
+    }
+    if name == "retouch_shift" {
+        return Some(StratConfig::RetouchShift);
+    }
+    if let Some(rest) = name.strip_prefix("il_limit_") {
+        let mut max_il_pct: Option<f64> = None;
+        let mut close_il_pct: Option<f64> = None;
+        let mut grace_steps: Option<u64> = None;
+        for part in rest.split('_') {
+            if let Some(v) = part.strip_suffix('%') {
+                if max_il_pct.is_none() {
+                    max_il_pct = v.parse::<f64>().ok().map(|x| x / 100.0);
+                } else if close_il_pct.is_none() {
+                    close_il_pct = v.parse::<f64>().ok().map(|x| x / 100.0);
+                }
+            } else if part == "close" {
+                continue;
+            } else if let Some(v) = part.strip_prefix("grace") {
+                if v.is_empty() {
+                    continue;
+                }
+                grace_steps = v.parse::<u64>().ok();
+            } else if grace_steps.is_none() {
+                grace_steps = part.parse::<u64>().ok();
+            }
+        }
+        return Some(StratConfig::IlLimit {
+            max_il_pct: max_il_pct?,
+            close_il_pct,
+            grace_steps: grace_steps.unwrap_or(0),
+        });
     }
     if let Some(rest) = name.strip_prefix("periodic_") {
         let num_str = rest.trim_end_matches('h').trim();

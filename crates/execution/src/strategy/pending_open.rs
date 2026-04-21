@@ -29,6 +29,15 @@ pub struct PendingOpenItem {
     pub optimization_run_id: Option<String>,
     pub attempts: u32,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_attempt_at: Option<String>,
+    #[serde(default)]
+    pub stuck_reason: Option<String>,
+    #[serde(default)]
+    pub stuck_since: Option<String>,
+    /// Highest attempts value for which a "stuck" alert has already been emitted.
+    #[serde(default)]
+    pub last_alert_attempts: Option<u32>,
     pub created_at: String,
 }
 
@@ -75,9 +84,17 @@ pub fn max_recovery_attempts() -> u32 {
         .unwrap_or(100)
 }
 
+pub fn attempts_alert_threshold() -> u32 {
+    std::env::var("CLMM_PENDING_OPEN_ALERT_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| (1..=10_000).contains(&n))
+        .unwrap_or(10)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PendingOpenStore;
+    use super::{PendingOpenStore, attempts_alert_threshold};
 
     #[test]
     fn pending_open_store_parses_and_keeps_dismissed_sessions() {
@@ -90,5 +107,34 @@ mod tests {
         assert_eq!(parsed.dismissed_session_ids.len(), 2);
         assert_eq!(parsed.dismissed_session_ids[0], "sid-1");
         assert_eq!(parsed.dismissed_session_ids[1], "sid-2");
+    }
+
+    #[test]
+    fn pending_open_item_defaults_new_telemetry_fields() {
+        let raw = serde_json::json!({
+            "items": [{
+                "pool": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+                "intended_tick_lower": -24328,
+                "intended_tick_upper": -24224,
+                "closed_position_nft": "DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq",
+                "reason": "RangeExit",
+                "optimization_run_id": null,
+                "attempts": 3,
+                "last_error": "quote failed",
+                "created_at": "2026-04-17T09:00:00Z"
+            }]
+        });
+        let parsed: PendingOpenStore =
+            serde_json::from_value(raw).expect("must parse pending-open store");
+        let item = parsed.items.first().expect("item");
+        assert!(item.last_attempt_at.is_none());
+        assert!(item.stuck_reason.is_none());
+        assert!(item.stuck_since.is_none());
+        assert!(item.last_alert_attempts.is_none());
+    }
+
+    #[test]
+    fn alert_attempt_threshold_has_safe_default() {
+        assert!(attempts_alert_threshold() >= 1);
     }
 }

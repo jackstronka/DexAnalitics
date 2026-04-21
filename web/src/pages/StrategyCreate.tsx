@@ -40,6 +40,7 @@ export default function StrategyCreate() {
   const [rebalanceThresholdPct, setRebalanceThresholdPct] = useState<number | ''>('')
   const [maxIlPct, setMaxIlPct] = useState<number | ''>('')
   const [minRebalanceIntervalHours, setMinRebalanceIntervalHours] = useState<number | ''>('')
+  const [candleSeconds, setCandleSeconds] = useState<number | ''>('')
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
   // Semantics toggles (defaults = old behavior).
   const [periodicRequiresOutOfRange, setPeriodicRequiresOutOfRange] = useState(false)
@@ -62,6 +63,7 @@ export default function StrategyCreate() {
       case 'threshold':
       case 'oor_recenter':
       case 'retouch_shift':
+      case 'last_candle':
         setMaxIlPct('')
         break
       default:
@@ -127,6 +129,7 @@ export default function StrategyCreate() {
         maxIlPct,
         rebalanceThresholdPct,
         minRebalanceIntervalHours,
+        candleSeconds,
         periodicRequiresOutOfRange,
         rebalanceOnRangeExitImmediately,
         autoStart,
@@ -237,6 +240,7 @@ export default function StrategyCreate() {
                   <option value="il_limit">IL Limit</option>
                   <option value="oor_recenter">OOR recenter</option>
                   <option value="retouch_shift">Retouch shift</option>
+                  <option value="last_candle">Last candle</option>
                 </select>
               </div>
 
@@ -297,6 +301,25 @@ export default function StrategyCreate() {
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
+                {strategyType === 'last_candle' ? (
+                  <div>
+                    <FieldLabel
+                      htmlFor="candle-seconds"
+                      label="Candle seconds (optional)"
+                      tooltip={TOOLTIPS.candleSeconds}
+                    />
+                    <input
+                      id="candle-seconds"
+                      type="number"
+                      step="60"
+                      min={60}
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={candleSeconds}
+                      onChange={(e) => setCandleSeconds(readOptionalNumber(e.target.value))}
+                      placeholder="e.g. 3600"
+                    />
+                  </div>
+                ) : null}
                 <div>
                   <FieldLabel
                     htmlFor="rebalance-threshold"

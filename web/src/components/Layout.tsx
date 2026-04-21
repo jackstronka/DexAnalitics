@@ -12,6 +12,7 @@ import {
   X,
   Terminal,
   ScrollText,
+  BarChart3,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -28,6 +29,7 @@ const navigation = [
   { name: 'Positions', href: '/positions', icon: Activity },
   { name: 'Closed', href: '/positions/closed', icon: History },
   { name: 'Strategies', href: '/strategies', icon: Target },
+  { name: 'Backtests', href: '/backtests', icon: BarChart3 },
   { name: 'Pools', href: '/pools', icon: Droplets },
   { name: 'Scripts', href: '/scripts', icon: Terminal },
   { name: 'Logs', href: '/logs', icon: ScrollText },

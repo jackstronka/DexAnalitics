@@ -4,7 +4,9 @@ param(
     [int] $IntervalSeconds = 60,
     [int] $MaxAgeMinutes10m = 25,
     [int] $MaxAgeMinutes5m = 15,
-    [int] $ExpectOrcaTarget = 3
+    [int] $MaxHeartbeatAgeMinutes10m = 22,
+    [int] $MaxHeartbeatAgeMinutes5m = 12,
+    [int] $ExpectOrcaTarget = 4
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +31,8 @@ while ($true) {
             -RepoRoot $RepoRoot `
             -MaxAgeMinutes10m $MaxAgeMinutes10m `
             -MaxAgeMinutes5m $MaxAgeMinutes5m `
+            -MaxHeartbeatAgeMinutes10m $MaxHeartbeatAgeMinutes10m `
+            -MaxHeartbeatAgeMinutes5m $MaxHeartbeatAgeMinutes5m `
             -ExpectOrcaTarget $ExpectOrcaTarget 2>&1
         foreach ($l in @($out)) { Add-Content -Path $logFile -Value $l }
         Log ("exit code: {0}" -f $LASTEXITCODE)

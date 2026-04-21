@@ -18,7 +18,9 @@ use crate::services::position_stream_lineage::{
     infer_parent_position_from_lifecycle_best_effort,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
-use crate::services::position_stream_pnl::compute_position_stream_pnl;
+use crate::services::position_stream_pnl::{
+    compute_position_stream_pnl, compute_position_stream_pnl_settlement_v1,
+};
 use crate::services::strategy_service::{
     append_position_address_to_strategy, heal_rotated_strategy_link_best_effort,
     remove_position_address_from_all_strategies,
@@ -81,6 +83,21 @@ async fn fetch_mint_decimals_best_effort(
 pub struct CostSessionQuery {
     #[serde(default)]
     cost_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamModeQuery {
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+impl StreamModeQuery {
+    fn is_settlement_v1(&self) -> bool {
+        self.mode
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|m| m.eq_ignore_ascii_case("settlement_v1"))
+    }
 }
 
 /// Best-effort experiment config derived from `registry_open.details` and open-session lifecycle rows.
@@ -211,14 +228,47 @@ pub async fn get_position_experiment_config(
             }
 
             // Convert only pool leg mints (A and B) to USD at current free prices.
+            // Prefer registry_open.details.pool_address, but for older rows fallback to
+            // lifecycle session rows where pool is recorded as `pool_address`.
+            let mut pool_address = open_details
+                .as_ref()
+                .and_then(|d| d.get("pool_address"))
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if pool_address.is_none() {
+                for line in txt.lines() {
+                    let t = line.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+                        continue;
+                    };
+                    if v.get("rebalance_session_id")
+                        .and_then(|x| x.as_str())
+                        .map(str::trim)
+                        != Some(sid)
+                    {
+                        continue;
+                    }
+                    pool_address = v
+                        .get("pool_pubkey")
+                        .and_then(|x| x.as_str())
+                        .or_else(|| v.get("pool_address").and_then(|x| x.as_str()))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    if pool_address.is_some() {
+                        break;
+                    }
+                }
+            }
             let pool_state =
                 clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
                     .get_pool_state(
-                        open_details
-                            .as_ref()
-                            .and_then(|d| d.get("pool_address"))
-                            .and_then(|x| x.as_str())
-                            .unwrap_or(""),
+                        pool_address.as_deref().unwrap_or(""),
                     )
                     .await;
             // If pool not in details (it often isn't), fall back to resolving by reading last closed list? Keep best-effort.
@@ -778,13 +828,12 @@ pub async fn get_position_lifecycle_summary(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let matches = if let Some(ref sid) = session_id {
-            sessions.iter().any(|x| x == sid)
-        } else if let Some(ref p) = position_pubkey {
-            positions.iter().any(|x| x == p)
-        } else {
-            false
-        };
+        let matches = lifecycle_row_matches_stream_members(
+            session_id.as_deref(),
+            position_pubkey.as_deref(),
+            &sessions,
+            &positions,
+        );
         if !matches {
             continue;
         }
@@ -1015,6 +1064,58 @@ pub async fn get_position_lifecycle_summary(
         session_summaries,
         note,
     }))
+}
+
+fn lifecycle_row_matches_stream_members(
+    session_id: Option<&str>,
+    position_pubkey: Option<&str>,
+    sessions: &[String],
+    positions: &[String],
+) -> bool {
+    let matches_session = session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some_and(|sid| sessions.iter().any(|x| x == sid));
+    let matches_position = position_pubkey
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some_and(|p| positions.iter().any(|x| x == p));
+    matches_session || matches_position
+}
+
+#[cfg(test)]
+mod lifecycle_summary_tests {
+    use super::lifecycle_row_matches_stream_members;
+
+    #[test]
+    fn lifecycle_row_matches_by_position_even_when_session_unknown() {
+        let sessions = vec!["session-known".to_string()];
+        let positions = vec!["DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq".to_string()];
+
+        let matched = lifecycle_row_matches_stream_members(
+            Some("session-external"),
+            Some("DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq"),
+            &sessions,
+            &positions,
+        );
+
+        assert!(matched);
+    }
+
+    #[test]
+    fn lifecycle_row_does_not_match_unrelated_session_and_position() {
+        let sessions = vec!["session-known".to_string()];
+        let positions = vec!["DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq".to_string()];
+
+        let matched = lifecycle_row_matches_stream_members(
+            Some("session-external"),
+            Some("11111111111111111111111111111111"),
+            &sessions,
+            &positions,
+        );
+
+        assert!(!matched);
+    }
 }
 
 /// Get a specific position.
@@ -1399,10 +1500,15 @@ pub async fn get_position_stream_performance(
 pub async fn get_position_stream_pnl(
     State(state): State<AppState>,
     Path(address): Path<String>,
+    Query(mode_q): Query<StreamModeQuery>,
 ) -> ApiResult<Json<PositionStreamPnLResponse>> {
     let pos = address.trim();
     Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
-    let resp = compute_position_stream_pnl(&state, pos).await?;
+    let resp = if mode_q.is_settlement_v1() {
+        compute_position_stream_pnl_settlement_v1(&state, pos).await?
+    } else {
+        compute_position_stream_pnl(&state, pos).await?
+    };
     Ok(Json(resp))
 }
 
@@ -1422,10 +1528,22 @@ pub async fn get_position_stream_pnl(
 pub async fn get_position_stream_lineage(
     State(state): State<AppState>,
     Path(address): Path<String>,
+    Query(mode_q): Query<StreamModeQuery>,
 ) -> ApiResult<Json<PositionStreamLineageResponse>> {
     let pos = address.trim();
     Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
-    let resp = compute_position_stream_lineage(&state, pos).await?;
+    let mut resp = compute_position_stream_lineage(&state, pos).await?;
+    if mode_q.is_settlement_v1() {
+        resp.totals = Some(compute_position_stream_pnl_settlement_v1(&state, pos).await?);
+        let mut note = resp.note.unwrap_or_default();
+        if !note.is_empty() {
+            note.push(' ');
+        }
+        note.push_str(
+            "Settlement v1 mode: totals are computed from persisted DB snapshots only (no live self-seed).",
+        );
+        resp.note = Some(note);
+    }
     Ok(Json(resp))
 }
 

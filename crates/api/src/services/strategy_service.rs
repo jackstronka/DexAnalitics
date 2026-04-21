@@ -353,6 +353,7 @@ impl StrategyService {
                 StrategyType::OorRecenter => StrategyMode::OorRecenter,
                 StrategyType::IlLimit => StrategyMode::IlLimit,
                 StrategyType::RetouchShift => StrategyMode::RetouchShift,
+                StrategyType::LastCandle => StrategyMode::LastCandle,
             },
             ..DecisionConfig::default()
         };
@@ -387,6 +388,10 @@ impl StrategyService {
                 .get("min_rebalance_interval_hours")
                 .and_then(min_rebalance_interval_hours_from_json);
             apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_hours);
+
+            if let Some(candle_seconds) = params.get("candle_seconds").and_then(|v| v.as_u64()) {
+                decision_config.last_candle_seconds = candle_seconds.max(60);
+            }
 
             // IL-specific knobs (only meaningful for IlLimit strategy mode).
             if let StrategyMode::IlLimit = decision_config.strategy_mode {

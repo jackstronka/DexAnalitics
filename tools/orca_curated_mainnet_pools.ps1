@@ -35,6 +35,15 @@ $script:OrcaCuratedMainnetPools = @(
     MintB   = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     SymbolA = "CBBTC"
     SymbolB = "USDC"
+  },
+  @{
+    Id      = "CBBTC_WBTC"
+    Label   = "cbBTC/WBTC 0.01%"
+    Pool    = "4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72"
+    MintA   = "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij"
+    MintB   = "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh"
+    SymbolA = "CBBTC"
+    SymbolB = "WBTC"
   }
 )
 
@@ -56,7 +65,6 @@ function Normalize-OrcaCuratedTokenSymbol {
   $u = $Symbol.Trim().ToUpperInvariant()
   if ($u -eq "WSOL") { return "SOL" }
   if ($u -eq "ETH" -or $u -eq "WETH") { return "WHETH" }
-  if ($u -eq "BTC" -or $u -eq "WBTC") { return "CBBTC" }
   return $u
 }
 
@@ -65,7 +73,12 @@ function Resolve-OrcaCuratedMintForSymbol {
     [Parameter(Mandatory)][hashtable]$PoolEntry,
     [Parameter(Mandatory)][string]$Symbol
   )
+  $raw = $Symbol.Trim().ToUpperInvariant()
   $s = Normalize-OrcaCuratedTokenSymbol $Symbol
+  # Legacy alias: cbBTC/USDC tooling historically accepted WBTC/BTC as names for the cbBTC mint.
+  if ($PoolEntry.Id -eq "CBBTC_USDC" -and ($raw -eq "WBTC" -or $raw -eq "BTC")) {
+    $s = "CBBTC"
+  }
   if ($s -eq $PoolEntry.SymbolA) { return @{ Mint = [string]$PoolEntry.MintA; Symbol = $s } }
   if ($s -eq $PoolEntry.SymbolB) { return @{ Mint = [string]$PoolEntry.MintB; Symbol = $s } }
   throw ("Token '" + $Symbol + "' is not part of pair " + $PoolEntry.Id + " (" + $PoolEntry.SymbolA + " <-> " + $PoolEntry.SymbolB + ").")

@@ -1,15 +1,20 @@
 import { useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { getMetricsMode, type MetricsMode } from '@/lib/metricsMode'
 
 export default function Settings() {
+  const [metricsMode, setMetricsMode] = useState<MetricsMode>(() => getMetricsMode())
   const [apiKey, setApiKey] = useState('')
   const [rpcUrl, setRpcUrl] = useState('https://api.mainnet-beta.solana.com')
   const [dryRun, setDryRun] = useState(true)
 
   const handleSave = () => {
     // Save settings to localStorage or API
-    localStorage.setItem('clmm-settings', JSON.stringify({ apiKey, rpcUrl, dryRun }))
+    localStorage.setItem(
+      'clmm-settings',
+      JSON.stringify({ apiKey, rpcUrl, dryRun, pnl_mode: metricsMode }),
+    )
     alert('Settings saved!')
   }
 
@@ -72,6 +77,27 @@ export default function Settings() {
               />
             </button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Metrics Mode</CardTitle>
+          <CardDescription>Select metrics source for position views</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <label className="text-sm font-medium">PnL/IL Mode</label>
+          <select
+            value={metricsMode}
+            onChange={(e) => setMetricsMode(e.target.value as MetricsMode)}
+            className="w-full px-3 py-2 rounded-md border bg-background"
+          >
+            <option value="live">Live stream (current default)</option>
+            <option value="settlement_v1">Settlement v1</option>
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Settlement v1 uses finalized interpretation labels in position detail cards.
+          </p>
         </CardContent>
       </Card>
 

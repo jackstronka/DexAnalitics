@@ -26,6 +26,13 @@ fn rest_client(state: &AppState) -> OrcaRestClient {
 }
 
 fn map_pool(p: clmm_lp_data::providers::OrcaPoolSummary) -> PoolResponse {
+    let volume = |period: &str| {
+        p.stats
+            .get(period)
+            .and_then(|s| s.volume.as_ref())
+            .and_then(|s| s.parse::<f64>().ok())
+            .and_then(Decimal::from_f64)
+    };
     PoolResponse {
         address: p.address,
         protocol: "orca_whirlpool".to_string(),
@@ -36,7 +43,10 @@ fn map_pool(p: clmm_lp_data::providers::OrcaPoolSummary) -> PoolResponse {
         price: Decimal::from_str_exact(&p.price).unwrap_or(Decimal::ZERO),
         liquidity: p.liquidity,
         fee_rate_bps: p.fee_rate,
-        volume_24h_usd: None,
+        volume_24h_usd: volume("24h"),
+        volume_1h_usd: volume("1h"),
+        volume_5m_usd: volume("5m"),
+        volume_7d_usd: volume("7d"),
         tvl_usd: p.tvl_usdc.parse::<f64>().ok().and_then(Decimal::from_f64),
         apy_estimate: None,
     }

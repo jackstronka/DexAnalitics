@@ -3454,6 +3454,7 @@ pub async fn compute_position_stream_lineage(
             vec![entry.to_string()],
             vec![],
             Some(stitch_chain.as_slice()),
+            false,
         )
         .await
         .ok();

@@ -20,6 +20,8 @@ pub enum StrategyMode {
     OorRecenter,
     /// Shift only the exiting edge towards current price, once per out-of-range episode.
     RetouchShift,
+    /// Rebalance on range-exit using low/high from the last closed candle.
+    LastCandle,
     /// IL-based close/rebalance (legacy / future).
     IlLimit,
 }
@@ -50,6 +52,8 @@ pub struct DecisionConfig {
     pub threshold_pct: Decimal,
     /// Range width for new positions (as percentage).
     pub range_width_pct: Decimal,
+    /// Candle size in seconds for `LastCandle` mode.
+    pub last_candle_seconds: u64,
     /// Whether to auto-collect fees.
     pub auto_collect_fees: bool,
     /// Minimum fees to collect in USD.
@@ -70,6 +74,7 @@ impl Default for DecisionConfig {
             rebalance_on_range_exit_immediately: true,
             threshold_pct: Decimal::new(5, 3),    // 0.5% by default
             range_width_pct: Decimal::new(10, 2), // 10%
+            last_candle_seconds: 3600,
             auto_collect_fees: true,
             min_fees_to_collect: Decimal::new(10, 0), // $10
         }
@@ -87,6 +92,8 @@ pub struct DecisionContext {
     pub hours_since_rebalance: u64,
     /// For `RetouchShift`: whether we are allowed to retouch given the current out-of-range episode.
     pub retouch_armed: Option<bool>,
+    /// Optional tick band derived from last closed candle low/high.
+    pub last_candle_ticks: Option<(i32, i32)>,
 }
 
 /// Decision engine for automated strategy execution.
@@ -248,6 +255,34 @@ impl DecisionEngine {
                     new_tick_lower: new_lower,
                     new_tick_upper: new_upper,
                 };
+            }
+            StrategyMode::LastCandle => {
+                if !position.in_range {
+                    if !cfg.rebalance_on_range_exit_immediately
+                        && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                    {
+                        debug!(
+                            hours_since_rebalance = context.hours_since_rebalance,
+                            min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                            "LastCandle: out of range but waiting for rebalance interval"
+                        );
+                        return Decision::Hold;
+                    }
+                    let (new_lower, new_upper) = context
+                        .last_candle_ticks
+                        .unwrap_or_else(|| self.calculate_new_range(pool));
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        has_last_candle_ticks = context.last_candle_ticks.is_some(),
+                        "LastCandle: out of range"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+                Decision::Hold
             }
 
             StrategyMode::IlLimit => {
@@ -442,6 +477,7 @@ mod tests {
             pool,
             hours_since_rebalance: 48,
             retouch_armed: None,
+            last_candle_ticks: None,
         }
     }
 
@@ -545,5 +581,41 @@ mod tests {
             matches!(decision, Decision::Hold),
             "expected Hold, got {decision:?}"
         );
+    }
+
+    #[test]
+    fn test_last_candle_uses_candle_ticks_when_out_of_range() {
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandle,
+            ..DecisionConfig::default()
+        };
+        let engine = DecisionEngine::new(cfg);
+        let mut context = create_test_context(false, Decimal::ZERO);
+        context.last_candle_ticks = Some((-512, 512));
+
+        let decision = engine.decide(&context);
+        match decision {
+            Decision::Rebalance {
+                new_tick_lower,
+                new_tick_upper,
+            } => {
+                assert_eq!(new_tick_lower, -512);
+                assert_eq!(new_tick_upper, 512);
+            }
+            other => panic!("expected Rebalance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_last_candle_falls_back_without_candle_ticks() {
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandle,
+            ..DecisionConfig::default()
+        };
+        let engine = DecisionEngine::new(cfg);
+        let context = create_test_context(false, Decimal::ZERO);
+
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Rebalance { .. }));
     }
 }
