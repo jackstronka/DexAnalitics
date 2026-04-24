@@ -1371,6 +1371,7 @@ async fn linked_strategies_for_position_diagnostics(
                         requires_transaction: snap.requires_transaction,
                         auto_execute: snap.auto_execute,
                         hours_since_rebalance: snap.hours_since_rebalance,
+                        minutes_since_rebalance: snap.minutes_since_rebalance,
                     })
             } else {
                 None

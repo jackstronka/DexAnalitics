@@ -39,8 +39,9 @@ export default function StrategyCreate() {
   const [strategyType, setStrategyType] = useState<StrategyType>('static_range')
   const [rebalanceThresholdPct, setRebalanceThresholdPct] = useState<number | ''>('')
   const [maxIlPct, setMaxIlPct] = useState<number | ''>('')
-  const [minRebalanceIntervalHours, setMinRebalanceIntervalHours] = useState<number | ''>('')
-  const [candleSeconds, setCandleSeconds] = useState<number | ''>('')
+  const [minRebalanceIntervalMinutes, setMinRebalanceIntervalMinutes] = useState<number | ''>('')
+  const [retouchOffsetPct, setRetouchOffsetPct] = useState<number | ''>('')
+  const [candleMinutes, setCandleMinutes] = useState<number | ''>('')
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
   // Semantics toggles (defaults = old behavior).
   const [periodicRequiresOutOfRange, setPeriodicRequiresOutOfRange] = useState(false)
@@ -54,7 +55,7 @@ export default function StrategyCreate() {
       case 'static_range':
         setMaxIlPct('')
         setRebalanceThresholdPct('')
-        setMinRebalanceIntervalHours('')
+        setMinRebalanceIntervalMinutes('')
         break
       case 'periodic':
         setMaxIlPct('')
@@ -64,6 +65,7 @@ export default function StrategyCreate() {
       case 'oor_recenter':
       case 'retouch_shift':
       case 'last_candle':
+      case 'last_candle_periodic':
         setMaxIlPct('')
         break
       default:
@@ -73,6 +75,9 @@ export default function StrategyCreate() {
     // Periodic-only toggle is ignored unless the type is periodic.
     if (strategyType !== 'periodic') {
       setPeriodicRequiresOutOfRange(false)
+    }
+    if (strategyType !== 'retouch_shift') {
+      setRetouchOffsetPct('')
     }
   }, [strategyType])
 
@@ -111,11 +116,11 @@ export default function StrategyCreate() {
       })
       return
     }
-    if (strategyType === 'periodic' && minRebalanceIntervalHours === 0) {
+    if (strategyType === 'periodic' && minRebalanceIntervalMinutes === 0) {
       toast({
         title: 'Invalid interval for Periodic',
         description:
-          'For Periodic strategy, interval must be at least 1 hour or left empty.',
+          'For Periodic strategy, interval must be at least 1 minute or left empty.',
         variant: 'destructive',
       })
       return
@@ -128,8 +133,9 @@ export default function StrategyCreate() {
         rangeWidthPct,
         maxIlPct,
         rebalanceThresholdPct,
-        minRebalanceIntervalHours,
-        candleSeconds,
+        minRebalanceIntervalMinutes,
+        retouchOffsetPct,
+        candleMinutes,
         periodicRequiresOutOfRange,
         rebalanceOnRangeExitImmediately,
         autoStart,
@@ -147,9 +153,9 @@ export default function StrategyCreate() {
 
   const minIntervalLabel = useMemo(() => {
     if (strategyType === 'periodic') {
-      return 'Rebalance co N godzin'
+      return 'Rebalance co N minut'
     }
-    return 'Min. rebalance spacing (h)'
+    return 'Min. rebalance spacing (min)'
   }, [strategyType])
 
   const rebalanceThresholdTooltip = useMemo(() => {
@@ -241,6 +247,7 @@ export default function StrategyCreate() {
                   <option value="oor_recenter">OOR recenter</option>
                   <option value="retouch_shift">Retouch shift</option>
                   <option value="last_candle">Last candle</option>
+                  <option value="last_candle_periodic">Last candle (periodic)</option>
                 </select>
               </div>
 
@@ -301,23 +308,42 @@ export default function StrategyCreate() {
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
-                {strategyType === 'last_candle' ? (
+                {strategyType === 'retouch_shift' ? (
                   <div>
                     <FieldLabel
-                      htmlFor="candle-seconds"
-                      label="Candle seconds (optional)"
+                      htmlFor="retouch-offset-pct"
+                      label="Retouch offset % (optional)"
+                      tooltip={TOOLTIPS.retouchOffsetPct}
+                    />
+                    <input
+                      id="retouch-offset-pct"
+                      type="number"
+                      step="0.01"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={retouchOffsetPct}
+                      onChange={(e) => setRetouchOffsetPct(readOptionalNumber(e.target.value))}
+                      placeholder="e.g. 0.1 or -0.1"
+                    />
+                  </div>
+                ) : null}
+                {strategyType === 'last_candle' || strategyType === 'last_candle_periodic' ? (
+                  <div>
+                    <FieldLabel
+                      htmlFor="candle-minutes"
+                      label="Candle interval (min, optional)"
                       tooltip={TOOLTIPS.candleSeconds}
                     />
                     <input
-                      id="candle-seconds"
+                      id="candle-minutes"
                       type="number"
-                      step="60"
-                      min={60}
+                      step="1"
+                      min={1}
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                      value={candleSeconds}
-                      onChange={(e) => setCandleSeconds(readOptionalNumber(e.target.value))}
-                      placeholder="e.g. 3600"
+                      value={candleMinutes}
+                      onChange={(e) => setCandleMinutes(readOptionalNumber(e.target.value))}
+                      placeholder="e.g. 60"
                     />
+                    <p className="mt-1 text-xs text-muted-foreground">Examples: 15, 30, 60.</p>
                   </div>
                 ) : null}
                 <div>
@@ -360,19 +386,20 @@ export default function StrategyCreate() {
                       'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
                       inputDisabled,
                     )}
-                    value={minRebalanceIntervalHours}
+                    value={minRebalanceIntervalMinutes}
                     onChange={(e) =>
-                      setMinRebalanceIntervalHours(readOptionalNumber(e.target.value))
+                      setMinRebalanceIntervalMinutes(readOptionalNumber(e.target.value))
                     }
-                    placeholder="e.g. 24"
+                    placeholder="e.g. 60"
                   />
+                  <p className="mt-1 text-xs text-muted-foreground">Examples: 15 = 15m, 60 = 1h, 240 = 4h.</p>
                 </div>
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
                 <p className="text-sm font-medium text-foreground">Semantyka rebalance</p>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {strategyType !== 'periodic' && (
+                  {strategyType !== 'periodic' && strategyType !== 'last_candle_periodic' && (
                     <div className="flex items-start gap-2">
                       <input
                         id="create-rebalance-on-exit"

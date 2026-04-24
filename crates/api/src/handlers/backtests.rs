@@ -2,6 +2,8 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
+    BacktestAutoTuneApplyResponse, BacktestAutoTuneStartRequest, BacktestAutoTuneStatusResponse,
+    BacktestAutoTuneWinner,
     BacktestFromClosedPositionRequest, BacktestFromOpenPositionRequest, BacktestFullJobResponse,
     BacktestFullJobStatusResponse, BacktestFullMetricRow, BacktestFullRequest,
     BacktestFullWindowResult, BacktestJobResponse, BacktestJobStatusResponse,
@@ -24,18 +26,35 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
 use tokio::sync::RwLock;
+use tokio::time::{Duration, sleep};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 static JOBS: LazyLock<RwLock<HashMap<String, BacktestJobResponse>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static FULL_JOBS: LazyLock<RwLock<HashMap<String, BacktestFullJobResponse>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+static AUTO_TUNE_STOP: LazyLock<Mutex<Option<std::sync::Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(None));
+static AUTO_TUNE_STATUS: LazyLock<RwLock<BacktestAutoTuneStatusResponse>> = LazyLock::new(|| {
+    RwLock::new(BacktestAutoTuneStatusResponse {
+        running: false,
+        interval_minutes: 30,
+        started_ts_utc: None,
+        last_tick_ts_utc: None,
+        next_tick_ts_utc: None,
+        latest_job_id: None,
+        latest_winner: None,
+        note: Some("Auto-tune is stopped".to_string()),
+    })
+});
 
-/// Cache: `(exe path | mtime secs)` -> whether `backtest-optimize --help` lists `--include-strategy-families`.
+/// Cache: `(exe path | mtime secs)` -> `backtest-optimize --help` text.
 /// Key includes modification time so a rebuilt `clmm-lp-cli` is re-probed without restarting API.
-static CLI_SUPPORTS_INCLUDE_STRATEGY_FAMILIES: LazyLock<Mutex<HashMap<String, bool>>> =
+static CLI_BACKTEST_OPTIMIZE_HELP_TEXT: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn clmm_lp_cli_filename() -> &'static str {
@@ -116,22 +135,25 @@ fn resolve_clmm_lp_cli_path(repo_root: Option<&str>) -> Result<PathBuf, String> 
     )
 }
 
-fn probe_backtest_optimize_help_has_include_strategy_families(cli_path: &std::path::Path) -> bool {
+fn probe_backtest_optimize_help_text(cli_path: &std::path::Path) -> String {
     std::process::Command::new(cli_path)
         .args(["backtest-optimize", "--help"])
         .output()
         .map(|o| {
-            let combined = format!(
+            format!(
                 "{}{}",
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
-            );
-            combined.contains("include-strategy-families")
+            )
         })
-        .unwrap_or(false)
+        .unwrap_or_default()
 }
 
 fn cli_supports_include_strategy_families(cli_path: &std::path::Path) -> bool {
+    cli_backtest_optimize_help_text(cli_path).contains("include-strategy-families")
+}
+
+fn cli_backtest_optimize_help_text(cli_path: &std::path::Path) -> String {
     let cache_key = match std::fs::metadata(cli_path)
         .and_then(|m| m.modified())
         .ok()
@@ -139,16 +161,16 @@ fn cli_supports_include_strategy_families(cli_path: &std::path::Path) -> bool {
     {
         Some(d) => format!("{}|{}", cli_path.to_string_lossy(), d.as_secs()),
         None => {
-            return probe_backtest_optimize_help_has_include_strategy_families(cli_path);
+            return probe_backtest_optimize_help_text(cli_path);
         }
     };
-    let mut guard = CLI_SUPPORTS_INCLUDE_STRATEGY_FAMILIES.lock().unwrap();
+    let mut guard = CLI_BACKTEST_OPTIMIZE_HELP_TEXT.lock().unwrap();
     if let Some(v) = guard.get(&cache_key) {
-        return *v;
+        return v.clone();
     }
-    let supported = probe_backtest_optimize_help_has_include_strategy_families(cli_path);
-    guard.insert(cache_key, supported);
-    supported
+    let help_text = probe_backtest_optimize_help_text(cli_path);
+    guard.insert(cache_key, help_text.clone());
+    help_text
 }
 
 fn is_full_strategy_catalog(include_ids: &std::collections::HashSet<String>) -> bool {
@@ -394,7 +416,7 @@ fn strategy_catalog() -> Vec<BacktestStrategyCatalogEntry> {
         BacktestStrategyCatalogEntry {
             id: "retouch_shift".to_string(),
             label: "Retouch shift".to_string(),
-            parameters: vec!["width_pct".to_string()],
+            parameters: vec!["width_pct".to_string(), "retouch_offset_pct".to_string()],
         },
         BacktestStrategyCatalogEntry {
             id: "bollinger".to_string(),
@@ -1172,6 +1194,72 @@ pub async fn start_backtest_full(
     let lp_share = req.lp_share;
     let capital_usd = req.capital_usd.unwrap_or(7000.0).max(0.0);
     let target_vs_hodl_usd = req.target_vs_hodl_usd;
+    let static_deviation_pct = req.static_deviation_pct;
+    let static_manual_lower = req.static_manual_lower;
+    let static_manual_upper = req.static_manual_upper;
+    let oor_recenter_deviation_pct = req.oor_recenter_deviation_pct;
+    if let Some(d) = static_deviation_pct
+        && (!d.is_finite() || d <= 0.0 || d >= 100.0)
+    {
+        return Err(ApiError::bad_request(
+            "static_deviation_pct must be in (0,100)",
+        ));
+    }
+    if let Some(d) = oor_recenter_deviation_pct
+        && (!d.is_finite() || d <= 0.0 || d >= 100.0)
+    {
+        return Err(ApiError::bad_request(
+            "oor_recenter_deviation_pct must be in (0,100)",
+        ));
+    }
+    if static_deviation_pct.is_some() && oor_recenter_deviation_pct.is_some() {
+        return Err(ApiError::bad_request(
+            "Use only one of static_deviation_pct or oor_recenter_deviation_pct",
+        ));
+    }
+    let static_manual_set = static_manual_lower.is_some() || static_manual_upper.is_some();
+    if static_manual_set {
+        let (Some(lower), Some(upper)) = (static_manual_lower, static_manual_upper) else {
+            return Err(ApiError::bad_request(
+                "Provide both static_manual_lower and static_manual_upper",
+            ));
+        };
+        if !lower.is_finite() || !upper.is_finite() || lower <= 0.0 || upper <= 0.0 || lower >= upper {
+            return Err(ApiError::bad_request(
+                "static_manual_lower/static_manual_upper must be finite, >0 and lower<upper",
+            ));
+        }
+        if pools.len() != 1 {
+            return Err(ApiError::bad_request(
+                "Manual static lower/upper range requires selecting exactly one pool",
+            ));
+        }
+        if static_deviation_pct.is_some() {
+            return Err(ApiError::bad_request(
+                "Use either static_deviation_pct or static_manual_lower/static_manual_upper",
+            ));
+        }
+    }
+    if let Some(v) = req.retouch_offset_pct
+        && !v.is_finite()
+    {
+        return Err(ApiError::bad_request(
+            "retouch_offset_pct must be a finite number",
+        ));
+    }
+    let threshold_grid_pct = req.threshold_grid_pct.clone();
+    let threshold_min_rebalance_interval_hours = req.threshold_min_rebalance_interval_hours;
+    let threshold_rebalance_on_range_exit_immediately =
+        req.threshold_rebalance_on_range_exit_immediately;
+    let periodic_grid_steps = req.periodic_grid_steps.clone();
+    let retouch_offset_pct = req.retouch_offset_pct;
+    let bollinger_window_grid = req.bollinger_window_grid.clone();
+    let bollinger_k_grid = req.bollinger_k_grid.clone();
+    let bollinger_rebalance_steps_grid = req.bollinger_rebalance_steps_grid.clone();
+    let last_candle_steps_grid = req.last_candle_steps_grid.clone();
+    let last_candle_rebalance_steps_grid = req.last_candle_rebalance_steps_grid.clone();
+    let last_candle_seconds_grid = req.last_candle_seconds_grid.clone();
+    let last_candle_rebalance_seconds_grid = req.last_candle_rebalance_seconds_grid.clone();
     let job_id = id.clone();
 
     tokio::spawn(async move {
@@ -1188,6 +1276,10 @@ pub async fn start_backtest_full(
                 return;
             }
         };
+        info!(
+            "backtests/full: using clmm-lp-cli binary at {}",
+            cli_path.display()
+        );
 
         let supports_include_strategy_families = cli_supports_include_strategy_families(&cli_path);
         let full_strategy_catalog_selected = is_full_strategy_catalog(&include_ids);
@@ -1198,6 +1290,109 @@ pub async fn start_backtest_full(
                 cur.stderr = Some(format!(
                     "clmm-lp-cli at {} does not support --include-strategy-families (binary too old for this UI filter). Rebuild: `cargo build --release -p clmm-lp-cli` (or `cargo build -p clmm-lp-cli`), restart API, or set CLMM_LP_CLI_PATH to the rebuilt binary.",
                     cli_path.display()
+                ));
+                cur.finished_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+                w.insert(job_id.clone(), cur);
+            }
+            return;
+        }
+
+        let help_text = cli_backtest_optimize_help_text(&cli_path);
+        let threshold_oor_flag_accepts_value = help_text
+            .contains("--threshold-rebalance-on-range-exit-immediately <");
+        let threshold_grid_requested = threshold_grid_pct
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let threshold_min_rebalance_hours_requested = threshold_min_rebalance_interval_hours.is_some();
+        let threshold_oor_immediate_requested =
+            threshold_rebalance_on_range_exit_immediately.is_some();
+        let periodic_grid_requested = periodic_grid_steps
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let static_manual_lower_requested = static_manual_lower.is_some();
+        let static_manual_upper_requested = static_manual_upper.is_some();
+        let retouch_offset_requested = retouch_offset_pct.is_some();
+        let bollinger_window_grid_requested = bollinger_window_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let bollinger_k_grid_requested = bollinger_k_grid.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        let bollinger_rebalance_steps_grid_requested = bollinger_rebalance_steps_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let last_candle_steps_grid_requested = last_candle_steps_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let last_candle_rebalance_steps_grid_requested = last_candle_rebalance_steps_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let last_candle_seconds_grid_requested = last_candle_seconds_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let last_candle_rebalance_seconds_grid_requested = last_candle_rebalance_seconds_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let requested_grid_overrides = [
+            ("--threshold-grid-pct", threshold_grid_requested),
+            (
+                "--threshold-min-rebalance-interval-hours",
+                threshold_min_rebalance_hours_requested,
+            ),
+            (
+                "--threshold-rebalance-on-range-exit-immediately",
+                threshold_oor_immediate_requested,
+            ),
+            ("--periodic-grid-steps", periodic_grid_requested),
+            ("--static-manual-lower", static_manual_lower_requested),
+            ("--static-manual-upper", static_manual_upper_requested),
+            ("--retouch-offset-pct", retouch_offset_requested),
+            ("--bollinger-window-grid", bollinger_window_grid_requested),
+            ("--bollinger-k-grid", bollinger_k_grid_requested),
+            (
+                "--bollinger-rebalance-steps-grid",
+                bollinger_rebalance_steps_grid_requested,
+            ),
+            ("--last-candle-steps-grid", last_candle_steps_grid_requested),
+            (
+                "--last-candle-rebalance-steps-grid",
+                last_candle_rebalance_steps_grid_requested,
+            ),
+            ("--last-candle-seconds-grid", last_candle_seconds_grid_requested),
+            (
+                "--last-candle-rebalance-seconds-grid",
+                last_candle_rebalance_seconds_grid_requested,
+            ),
+        ];
+        let missing_grid_flags: Vec<&str> = requested_grid_overrides
+            .iter()
+            .filter_map(|(flag, requested)| {
+                if *requested && !help_text.contains(flag.trim_start_matches("--")) {
+                    Some(*flag)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !missing_grid_flags.is_empty() {
+            warn!(
+                "backtests/full: clmm-lp-cli {} missing requested optimize-grid flags: {}",
+                cli_path.display(),
+                missing_grid_flags.join(", ")
+            );
+            let mut w = FULL_JOBS.write().await;
+            if let Some(mut cur) = w.get(&job_id).cloned() {
+                cur.status = "failed".to_string();
+                cur.stderr = Some(format!(
+                    "clmm-lp-cli at {} does not support requested optimize-grid flags: {}. Rebuild CLI (`cargo build --release -p clmm-lp-cli` or `cargo build -p clmm-lp-cli`) and restart API, or set CLMM_LP_CLI_PATH to the rebuilt binary.",
+                    cli_path.display(),
+                    missing_grid_flags.join(", ")
                 ));
                 cur.finished_ts_utc = Some(chrono::Utc::now().to_rfc3339());
                 w.insert(job_id.clone(), cur);
@@ -1235,9 +1430,20 @@ pub async fn start_backtest_full(
                 cmd.arg("--snapshot-protocol").arg(pool.protocol);
                 cmd.arg("--snapshot-pool-address").arg(pool.pool_address);
                 cmd.arg("--hours").arg(h.to_string());
-                cmd.arg("--min-range-pct").arg("1");
-                cmd.arg("--max-range-pct").arg("15");
-                cmd.arg("--range-steps").arg("10");
+                if let Some(dev_pct) = static_deviation_pct.or(oor_recenter_deviation_pct) {
+                    let width_pct = 2.0 * dev_pct;
+                    cmd.arg("--min-range-pct").arg(width_pct.to_string());
+                    cmd.arg("--max-range-pct").arg(width_pct.to_string());
+                    cmd.arg("--range-steps").arg("1");
+                } else {
+                    cmd.arg("--min-range-pct").arg("1");
+                    cmd.arg("--max-range-pct").arg("15");
+                    cmd.arg("--range-steps").arg("10");
+                }
+                if let (Some(lower), Some(upper)) = (static_manual_lower, static_manual_upper) {
+                    cmd.arg("--static-manual-lower").arg(lower.to_string());
+                    cmd.arg("--static-manual-upper").arg(upper.to_string());
+                }
                 cmd.arg("--objective").arg(&objective);
                 cmd.arg("--capital").arg(capital_usd.to_string());
                 cmd.arg("--full-ranking");
@@ -1248,6 +1454,101 @@ pub async fn start_backtest_full(
                 }
                 if include_indicators {
                     cmd.arg("--indicator-strategies");
+                }
+                if let Some(v) = threshold_grid_pct.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--threshold-grid-pct").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = threshold_min_rebalance_interval_hours {
+                    cmd.arg("--threshold-min-rebalance-interval-hours")
+                        .arg(v.to_string());
+                }
+                if let Some(v) = threshold_rebalance_on_range_exit_immediately {
+                    if threshold_oor_flag_accepts_value {
+                        cmd.arg("--threshold-rebalance-on-range-exit-immediately")
+                            .arg(v.to_string());
+                    } else if v {
+                        // Backward compatibility for older CLI binaries where this is a switch-only flag.
+                        cmd.arg("--threshold-rebalance-on-range-exit-immediately");
+                    } else {
+                        // Older CLI cannot express explicit false for this option.
+                        // We skip the flag to avoid parse errors and let CLI defaults apply.
+                        warn!(
+                            "backtests/full: CLI at {} does not accept explicit false for --threshold-rebalance-on-range-exit-immediately; using CLI default",
+                            cli_path.display()
+                        );
+                    }
+                }
+                if let Some(v) = periodic_grid_steps.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--periodic-grid-steps").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = retouch_offset_pct {
+                    cmd.arg("--retouch-offset-pct").arg(v.to_string());
+                }
+                if let Some(v) = bollinger_window_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--bollinger-window-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = bollinger_k_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--bollinger-k-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = bollinger_rebalance_steps_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--bollinger-rebalance-steps-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = last_candle_steps_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--last-candle-steps-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = last_candle_rebalance_steps_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--last-candle-rebalance-steps-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = last_candle_seconds_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--last-candle-seconds-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                if let Some(v) = last_candle_rebalance_seconds_grid.as_ref().filter(|v| !v.is_empty()) {
+                    cmd.arg("--last-candle-rebalance-seconds-grid").arg(
+                        v.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
                 }
                 if let Some(share) = lp_share {
                     cmd.arg("--lp-share").arg(share.to_string());
@@ -1324,4 +1625,303 @@ pub async fn get_backtest_full_job(Path(id): Path<String>) -> ApiResult<Json<Bac
         .cloned()
         .ok_or_else(|| ApiError::not_found("Full backtest job not found"))?;
     Ok(Json(j))
+}
+
+fn pick_auto_tune_winner(results: &[BacktestFullWindowResult]) -> Option<BacktestAutoTuneWinner> {
+    let mut best: Option<BacktestAutoTuneWinner> = None;
+    for r in results {
+        for m in &r.metrics {
+            let cand = BacktestAutoTuneWinner {
+                pool_id: r.pool_id.clone(),
+                pool_label: r.pool_label.clone(),
+                window_hours: r.window_hours,
+                strategy: m.strategy.clone(),
+                width_pct: m.width_pct,
+                score: m.score,
+                pnl: m.pnl,
+                vs_hodl: m.vs_hodl,
+                fees: m.fees,
+                rebalances: m.rebalances,
+                tir_pct: m.tir_pct,
+            };
+            let replace = best
+                .as_ref()
+                .map(|b| cand.score > b.score)
+                .unwrap_or(true);
+            if replace {
+                best = Some(cand);
+            }
+        }
+    }
+    best
+}
+
+#[utoipa::path(
+    post,
+    path = "/backtests/auto-tune/start",
+    tag = "Analytics",
+    request_body = BacktestAutoTuneStartRequest,
+    responses((status = 200, description = "Auto-tune status", body = BacktestAutoTuneStatusResponse))
+)]
+pub async fn start_backtest_auto_tune(
+    State(state): State<AppState>,
+    Json(req): Json<BacktestAutoTuneStartRequest>,
+) -> ApiResult<Json<BacktestAutoTuneStatusResponse>> {
+    let interval_minutes = req.interval_minutes.unwrap_or(30).max(1);
+    {
+        let st = AUTO_TUNE_STATUS.read().await;
+        if st.running {
+            return Err(ApiError::Conflict(
+                "Auto-tune is already running".to_string(),
+            ));
+        }
+    }
+
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    {
+        let mut g = AUTO_TUNE_STOP.lock().expect("auto tune stop lock");
+        *g = Some(stop.clone());
+    }
+    {
+        let mut st = AUTO_TUNE_STATUS.write().await;
+        st.running = true;
+        st.interval_minutes = interval_minutes;
+        st.started_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+        st.last_tick_ts_utc = None;
+        st.next_tick_ts_utc = Some(
+            (chrono::Utc::now() + chrono::Duration::minutes(interval_minutes as i64)).to_rfc3339(),
+        );
+        st.note = Some("Auto-tune loop started".to_string());
+    }
+
+    let state_c = state.clone();
+    let full_req = req.full_request.clone();
+    tokio::spawn(async move {
+        while !stop.load(Ordering::Relaxed) {
+            {
+                let mut st = AUTO_TUNE_STATUS.write().await;
+                st.last_tick_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+                st.next_tick_ts_utc = Some(
+                    (chrono::Utc::now() + chrono::Duration::minutes(interval_minutes as i64))
+                        .to_rfc3339(),
+                );
+                st.note = Some("Running full optimize cycle".to_string());
+            }
+
+            let started = start_backtest_full(State(state_c.clone()), Json(full_req.clone())).await;
+            let Ok(Json(job_status)) = started else {
+                let mut st = AUTO_TUNE_STATUS.write().await;
+                st.note = Some("Failed to start full backtest job".to_string());
+                sleep(Duration::from_secs(10)).await;
+                continue;
+            };
+
+            {
+                let mut st = AUTO_TUNE_STATUS.write().await;
+                st.latest_job_id = Some(job_status.id.clone());
+            }
+
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let snapshot = {
+                    let r = FULL_JOBS.read().await;
+                    r.get(job_status.id.trim()).cloned()
+                };
+                if let Some(j) = snapshot
+                    && j.status != "running"
+                {
+                    if j.status == "succeeded" || j.status == "partial" {
+                        let mut st = AUTO_TUNE_STATUS.write().await;
+                        if let Some(results) = j.results.as_ref() {
+                            let winner = pick_auto_tune_winner(results);
+                            st.latest_winner = winner;
+                        }
+                        st.note = if j.status == "partial" {
+                            Some("Full optimize cycle completed (partial)".to_string())
+                        } else {
+                            Some("Full optimize cycle completed".to_string())
+                        };
+                    } else {
+                        let mut st = AUTO_TUNE_STATUS.write().await;
+                        st.note = Some("Full optimize cycle failed".to_string());
+                    }
+                    break;
+                }
+                sleep(Duration::from_secs(5)).await;
+            }
+
+            let mut slept = 0u64;
+            let target = interval_minutes.saturating_mul(60);
+            while slept < target && !stop.load(Ordering::Relaxed) {
+                sleep(Duration::from_secs(5)).await;
+                slept = slept.saturating_add(5);
+            }
+        }
+
+        {
+            let mut st = AUTO_TUNE_STATUS.write().await;
+            st.running = false;
+            st.next_tick_ts_utc = None;
+            st.note = Some("Auto-tune loop stopped".to_string());
+        }
+        let mut g = AUTO_TUNE_STOP.lock().expect("auto tune stop lock");
+        *g = None;
+    });
+
+    Ok(Json(AUTO_TUNE_STATUS.read().await.clone()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/backtests/auto-tune/stop",
+    tag = "Analytics",
+    responses((status = 200, description = "Auto-tune status", body = BacktestAutoTuneStatusResponse))
+)]
+pub async fn stop_backtest_auto_tune() -> ApiResult<Json<BacktestAutoTuneStatusResponse>> {
+    if let Some(flag) = AUTO_TUNE_STOP
+        .lock()
+        .expect("auto tune stop lock")
+        .as_ref()
+        .cloned()
+    {
+        flag.store(true, Ordering::Relaxed);
+    }
+    {
+        let mut st = AUTO_TUNE_STATUS.write().await;
+        st.note = Some("Stopping auto-tune loop...".to_string());
+    }
+    Ok(Json(AUTO_TUNE_STATUS.read().await.clone()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/backtests/auto-tune/status",
+    tag = "Analytics",
+    responses((status = 200, description = "Auto-tune status", body = BacktestAutoTuneStatusResponse))
+)]
+pub async fn get_backtest_auto_tune_status() -> ApiResult<Json<BacktestAutoTuneStatusResponse>> {
+    Ok(Json(AUTO_TUNE_STATUS.read().await.clone()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/backtests/auto-tune/apply/{strategy_id}",
+    tag = "Analytics",
+    params(("strategy_id" = String, Path, description = "Strategy id to update")),
+    responses((status = 200, description = "Apply result", body = BacktestAutoTuneApplyResponse))
+)]
+pub async fn apply_backtest_auto_tune_to_strategy(
+    State(state): State<AppState>,
+    Path(strategy_id): Path<String>,
+) -> ApiResult<Json<BacktestAutoTuneApplyResponse>> {
+    let winner = AUTO_TUNE_STATUS
+        .read()
+        .await
+        .latest_winner
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("No auto-tune winner available yet"))?;
+
+    let mut strategies = state.strategies.write().await;
+    let strategy = strategies
+        .get_mut(strategy_id.trim())
+        .ok_or_else(|| ApiError::not_found("Strategy not found"))?;
+    let cfg_obj = strategy
+        .config
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("strategy config must be object"))?;
+
+    let mut params = cfg_obj
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !params.is_object() {
+        params = serde_json::json!({});
+    }
+    let p = params.as_object_mut().expect("object");
+    p.insert(
+        "range_width_pct".to_string(),
+        serde_json::json!(winner.width_pct),
+    );
+
+    let s = winner.strategy.to_ascii_lowercase();
+    let strategy_type = if s.starts_with("threshold_") {
+        let pct_token = s
+            .trim_start_matches("threshold_")
+            .split('_')
+            .next()
+            .unwrap_or("0")
+            .trim_end_matches('%');
+        if let Ok(v) = pct_token.parse::<f64>() {
+            p.insert("rebalance_threshold_pct".to_string(), serde_json::json!(v));
+        }
+        if let Some(ix) = s.find("_min")
+            && let Some(rest) = s.get(ix + 4..)
+            && let Some(hs) = rest.split('h').next()
+            && let Ok(h) = hs.parse::<u64>()
+        {
+            p.insert(
+                "min_rebalance_interval_minutes".to_string(),
+                serde_json::json!(h.saturating_mul(60)),
+            );
+        }
+        if s.contains("_oordelayed") {
+            p.insert(
+                "rebalance_on_range_exit_immediately".to_string(),
+                serde_json::json!(false),
+            );
+        } else if s.contains("_oorimmediate") {
+            p.insert(
+                "rebalance_on_range_exit_immediately".to_string(),
+                serde_json::json!(true),
+            );
+        }
+        "threshold"
+    } else if s.starts_with("periodic_") {
+        let hs = s
+            .trim_start_matches("periodic_")
+            .trim_end_matches('h')
+            .split('_')
+            .next()
+            .unwrap_or("24");
+        if let Ok(h) = hs.parse::<u64>() {
+            p.insert(
+                "min_rebalance_interval_minutes".to_string(),
+                serde_json::json!(h.saturating_mul(60)),
+            );
+        }
+        "periodic"
+    } else if s == "oor_recenter" {
+        "oor_recenter"
+    } else if s.starts_with("retouch_shift") {
+        if let Some(rest) = s.strip_prefix("retouch_shift_off")
+            && let Some(pct_s) = rest.strip_suffix("pct")
+            && let Ok(pct) = pct_s.parse::<f64>()
+        {
+            p.insert("retouch_offset_pct".to_string(), serde_json::json!(pct));
+        }
+        "retouch_shift"
+    } else if s.starts_with("il_limit_") {
+        "il_limit"
+    } else if s.starts_with("last_candle_") {
+        "last_candle"
+    } else if s == "static" {
+        "static_range"
+    } else {
+        "static_range"
+    };
+
+    cfg_obj.insert("strategy_type".to_string(), serde_json::json!(strategy_type));
+    cfg_obj.insert("parameters".to_string(), params);
+    strategy.updated_at = chrono::Utc::now();
+    let snapshot = strategies.clone();
+    drop(strategies);
+    crate::state::try_persist_strategies_best_effort(&snapshot);
+
+    Ok(Json(BacktestAutoTuneApplyResponse {
+        strategy_id,
+        updated: true,
+        note: "Applied latest auto-tune winner to strategy config. Restart strategy if running to reload executor config.".to_string(),
+    }))
 }

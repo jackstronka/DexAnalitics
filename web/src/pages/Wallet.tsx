@@ -1,5 +1,5 @@
 import { useQuery, useQueries } from '@tanstack/react-query'
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { DollarSign, TrendingDown, TrendingUp, Wallet as WalletIcon, ArrowRight, Copy } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -36,6 +36,7 @@ export default function Wallet() {
     return window.localStorage.getItem(LS_SELECTED_WALLET_ID) || ''
   })
   const [showZeroTokens, setShowZeroTokens] = useState(false)
+  const [walletAutoRetryCount, setWalletAutoRetryCount] = useState(0)
 
   const { data: wallets } = useQuery({
     queryKey: ['wallets'],
@@ -73,6 +74,27 @@ export default function Wallet() {
   const bLoad = balancesQuery.isLoading
   const bErr = balancesQuery.isError
   const bError = balancesQuery.error
+  const MAX_WALLET_AUTO_RETRIES = 4
+  const shouldAutoRetryTokens =
+    !!ownerPk &&
+    !bLoad &&
+    !bErr &&
+    !!balances &&
+    balances.tokens.length === 0 &&
+    walletAutoRetryCount < MAX_WALLET_AUTO_RETRIES
+
+  useEffect(() => {
+    setWalletAutoRetryCount(0)
+  }, [ownerPk])
+
+  useEffect(() => {
+    if (!shouldAutoRetryTokens) return
+    const id = window.setTimeout(() => {
+      setWalletAutoRetryCount((c) => c + 1)
+      void balancesQuery.refetch()
+    }, 4500)
+    return () => window.clearTimeout(id)
+  }, [shouldAutoRetryTokens, balancesQuery])
 
   const WSOL_MINT = 'So11111111111111111111111111111111111111112'
 
@@ -260,7 +282,14 @@ export default function Wallet() {
                 </div>
 
                 {balances.tokens.length === 0 ? (
-                  <div className="text-muted-foreground text-xs">Brak tokenów SPL (lub brak dostępu RPC).</div>
+                  <div className="text-muted-foreground text-xs space-y-1">
+                    <div>Brak tokenów SPL (lub chwilowy problem RPC).</div>
+                    {shouldAutoRetryTokens && (
+                      <div>
+                        Ponawiam pobieranie tokenów SPL automatycznie… próba {walletAutoRetryCount + 1}/{MAX_WALLET_AUTO_RETRIES}.
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">

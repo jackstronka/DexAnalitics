@@ -28,57 +28,80 @@ fn json_f64(v: &serde_json::Value) -> Option<f64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
 }
 
-/// Parse `parameters.min_rebalance_interval_hours` from JSON (integer or float).
-pub(crate) fn min_rebalance_interval_hours_from_json(value: &serde_json::Value) -> Option<u64> {
-    if let Some(u) = value.as_u64() {
-        return Some(u);
-    }
-    if let Some(f) = value.as_f64()
-        && f.is_finite()
-        && f >= 0.0
+/// Parse interval from JSON minutes field (preferred) with optional legacy hours fallback.
+pub(crate) fn min_rebalance_interval_minutes_from_params(
+    params: &serde_json::Value,
+) -> Option<u64> {
+    let parse_u64_like = |value: &serde_json::Value| {
+        if let Some(u) = value.as_u64() {
+            return Some(u);
+        }
+        if let Some(f) = value.as_f64()
+            && f.is_finite()
+            && f >= 0.0
+        {
+            return Some(f.floor() as u64);
+        }
+        value
+            .as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|f| f.is_finite() && *f >= 0.0)
+            .map(|f| f.floor() as u64)
+    };
+
+    if let Some(v) = params.get("min_rebalance_interval_minutes")
+        && let Some(minutes) = parse_u64_like(v)
     {
-        return Some(f.floor() as u64);
+        return Some(minutes);
     }
-    value
-        .as_str()
-        .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|f| f.is_finite() && *f >= 0.0)
-        .map(|f| f.floor() as u64)
+    if let Some(v) = params.get("min_rebalance_interval_hours")
+        && let Some(hours) = parse_u64_like(v)
+    {
+        return Some(hours.saturating_mul(60));
+    }
+    None
 }
 
 /// Applies optional interval semantics to a decision config.
 ///
 /// Rules:
-/// - `Some(n)` sets the minimum interval gate to `n` for all modes.
-/// - For `Periodic`, `Some(0)` is clamped to `1` defensively to avoid
+/// - `Some(n)` sets the minimum interval gate to `n` minutes for all modes.
+/// - For `Periodic` and `LastCandlePeriodic`, `Some(0)` is clamped to `1` defensively to avoid
 ///   rebalance-every-eval-tick loops from direct API payloads.
 /// - `None` means "optional not set":
 ///   - `Periodic`: disable timer-triggering by setting an unreachable interval.
-///   - non-`Periodic`: remove spacing gate (`min_rebalance_interval_hours=0`).
+///   - `LastCandlePeriodic`: keep default interval from [`DecisionConfig`] (24h).
+///   - non-`Periodic`: remove spacing gate (`min_rebalance_interval_minutes=0`).
 pub(crate) fn apply_optional_interval_to_decision_config(
     decision_config: &mut DecisionConfig,
-    maybe_min_hours: Option<u64>,
+    maybe_min_minutes: Option<u64>,
 ) {
-    match maybe_min_hours {
-        Some(min_hours) => {
-            let periodic_hours = if matches!(decision_config.strategy_mode, StrategyMode::Periodic)
-                && min_hours == 0
+    match maybe_min_minutes {
+        Some(min_minutes) => {
+            let periodic_like = matches!(
+                decision_config.strategy_mode,
+                StrategyMode::Periodic | StrategyMode::LastCandlePeriodic
+            );
+            let periodic_minutes = if periodic_like && min_minutes == 0
             {
                 warn!(
-                    "periodic strategy received min_rebalance_interval_hours=0; clamping to 1h to avoid rebalance every eval tick"
+                    "periodic-like strategy received min_rebalance_interval_minutes=0; clamping to 1 minute to avoid rebalance every eval tick"
                 );
                 1
             } else {
-                min_hours
+                min_minutes
             };
-            decision_config.periodic_interval_hours = periodic_hours;
-            decision_config.min_rebalance_interval_hours = min_hours;
+            decision_config.periodic_interval_minutes = periodic_minutes;
+            decision_config.min_rebalance_interval_minutes = min_minutes;
         }
         None => {
             if matches!(decision_config.strategy_mode, StrategyMode::Periodic) {
-                decision_config.periodic_interval_hours = u64::MAX;
+                decision_config.periodic_interval_minutes = u64::MAX;
+            } else if matches!(decision_config.strategy_mode, StrategyMode::LastCandlePeriodic) {
+                decision_config.min_rebalance_interval_minutes =
+                    DecisionConfig::default().min_rebalance_interval_minutes;
             } else {
-                decision_config.min_rebalance_interval_hours = 0;
+                decision_config.min_rebalance_interval_minutes = 0;
             }
         }
     }
@@ -354,6 +377,7 @@ impl StrategyService {
                 StrategyType::IlLimit => StrategyMode::IlLimit,
                 StrategyType::RetouchShift => StrategyMode::RetouchShift,
                 StrategyType::LastCandle => StrategyMode::LastCandle,
+                StrategyType::LastCandlePeriodic => StrategyMode::LastCandlePeriodic,
             },
             ..DecisionConfig::default()
         };
@@ -383,11 +407,13 @@ impl StrategyService {
                 decision_config.threshold_pct = Decimal::from_f64_retain(threshold / 100.0)
                     .unwrap_or(decision_config.threshold_pct);
             }
+            if let Some(v) = params.get("retouch_offset_pct").and_then(json_f64) {
+                decision_config.retouch_offset_pct =
+                    Decimal::from_f64_retain(v / 100.0).unwrap_or(decision_config.retouch_offset_pct);
+            }
 
-            let maybe_min_hours = params
-                .get("min_rebalance_interval_hours")
-                .and_then(min_rebalance_interval_hours_from_json);
-            apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_hours);
+            let maybe_min_minutes = min_rebalance_interval_minutes_from_params(params);
+            apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_minutes);
 
             if let Some(candle_seconds) = params.get("candle_seconds").and_then(|v| v.as_u64()) {
                 decision_config.last_candle_seconds = candle_seconds.max(60);
@@ -1045,20 +1071,24 @@ pub async fn heal_rotated_strategy_link_best_effort(
 mod managed_allowlist_tests {
     use super::{
         apply_optional_interval_to_decision_config,
-        managed_allowlist_pubkeys_for_strategy_parameters, min_rebalance_interval_hours_from_json,
+        managed_allowlist_pubkeys_for_strategy_parameters, min_rebalance_interval_minutes_from_params,
     };
     use clmm_lp_execution::prelude::{DecisionConfig, StrategyMode};
     use solana_sdk::pubkey::Pubkey;
 
     #[test]
-    fn min_rebalance_interval_parses_json_number_and_string() {
+    fn min_rebalance_interval_minutes_parse_prefers_minutes_with_hours_fallback() {
         assert_eq!(
-            min_rebalance_interval_hours_from_json(&serde_json::json!(0)),
-            Some(0)
+            min_rebalance_interval_minutes_from_params(
+                &serde_json::json!({"min_rebalance_interval_minutes": 15})
+            ),
+            Some(15)
         );
         assert_eq!(
-            min_rebalance_interval_hours_from_json(&serde_json::json!("2")),
-            Some(2)
+            min_rebalance_interval_minutes_from_params(
+                &serde_json::json!({"min_rebalance_interval_hours": "2"})
+            ),
+            Some(120)
         );
     }
 
@@ -1069,10 +1099,10 @@ mod managed_allowlist_tests {
             ..DecisionConfig::default()
         };
         apply_optional_interval_to_decision_config(&mut cfg, None);
-        assert_eq!(cfg.periodic_interval_hours, u64::MAX);
+        assert_eq!(cfg.periodic_interval_minutes, u64::MAX);
         assert_eq!(
-            cfg.min_rebalance_interval_hours,
-            DecisionConfig::default().min_rebalance_interval_hours
+            cfg.min_rebalance_interval_minutes,
+            DecisionConfig::default().min_rebalance_interval_minutes
         );
     }
 
@@ -1083,7 +1113,7 @@ mod managed_allowlist_tests {
             ..DecisionConfig::default()
         };
         apply_optional_interval_to_decision_config(&mut cfg, None);
-        assert_eq!(cfg.min_rebalance_interval_hours, 0);
+        assert_eq!(cfg.min_rebalance_interval_minutes, 0);
     }
 
     #[test]
@@ -1093,16 +1123,37 @@ mod managed_allowlist_tests {
             ..DecisionConfig::default()
         };
         apply_optional_interval_to_decision_config(&mut periodic_cfg, Some(0));
-        assert_eq!(periodic_cfg.min_rebalance_interval_hours, 0);
-        assert_eq!(periodic_cfg.periodic_interval_hours, 1);
+        assert_eq!(periodic_cfg.min_rebalance_interval_minutes, 0);
+        assert_eq!(periodic_cfg.periodic_interval_minutes, 1);
 
         let mut oor_cfg = DecisionConfig {
             strategy_mode: StrategyMode::OorRecenter,
             ..DecisionConfig::default()
         };
         apply_optional_interval_to_decision_config(&mut oor_cfg, Some(0));
-        assert_eq!(oor_cfg.min_rebalance_interval_hours, 0);
-        assert_eq!(oor_cfg.periodic_interval_hours, 0);
+        assert_eq!(oor_cfg.min_rebalance_interval_minutes, 0);
+        assert_eq!(oor_cfg.periodic_interval_minutes, 0);
+
+        let mut last_candle_periodic_cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandlePeriodic,
+            ..DecisionConfig::default()
+        };
+        apply_optional_interval_to_decision_config(&mut last_candle_periodic_cfg, Some(0));
+        assert_eq!(last_candle_periodic_cfg.min_rebalance_interval_minutes, 0);
+        assert_eq!(last_candle_periodic_cfg.periodic_interval_minutes, 1);
+    }
+
+    #[test]
+    fn optional_interval_none_keeps_default_for_last_candle_periodic() {
+        let mut cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandlePeriodic,
+            ..DecisionConfig::default()
+        };
+        apply_optional_interval_to_decision_config(&mut cfg, None);
+        assert_eq!(
+            cfg.min_rebalance_interval_minutes,
+            DecisionConfig::default().min_rebalance_interval_minutes
+        );
     }
 
     #[test]

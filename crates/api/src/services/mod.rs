@@ -8,6 +8,8 @@ pub mod lifecycle_ledger_aggregates;
 pub mod optimization_runner;
 pub mod orca_read_service;
 pub mod orca_tx_service;
+pub mod position_agent_llm;
+pub mod position_agent_service;
 pub mod position_executor;
 pub mod position_service;
 pub mod position_stream_lineage;

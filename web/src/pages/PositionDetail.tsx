@@ -9,6 +9,8 @@ import { PoolPairLabels } from '@/components/PoolPairLabels'
 import { PositionLifecycleTimeline } from '@/components/PositionLifecycleTimeline'
 import {
   getPosition,
+  getPositionAgentChatUi,
+  getPositionAgentSupervisor,
   getPositionDiagnostics,
   getPositionStreamPerformance,
   getPositionStreamPnL,
@@ -25,7 +27,10 @@ import {
   getJupiterPricesUsd,
   linkPositionStrategy,
   runBacktestFromOpenPosition,
+  sendPositionAgentLlmReply,
+  startPositionAgent,
   suggestPositionStrategy,
+  triggerPositionAgentScan,
 } from '@/lib/api'
 import type { Strategy } from '@/lib/api'
 import {
@@ -142,6 +147,27 @@ function parseNum(v: unknown): number | null {
   return null
 }
 
+function estimateNowUsdcFromPosition(position: {
+  range_usdc_quote?: string | null
+  token_a_label?: string | null
+  token_b_label?: string | null
+  token_price_a_usd?: number | null
+  token_price_b_usd?: number | null
+}): number | null {
+  const quote = (position.range_usdc_quote ?? '').toLowerCase()
+  const labelA = (position.token_a_label ?? '').toLowerCase()
+  const labelB = (position.token_b_label ?? '').toLowerCase()
+  if (quote && labelA && quote.includes(labelA) && typeof position.token_price_a_usd === 'number') {
+    return position.token_price_a_usd
+  }
+  if (quote && labelB && quote.includes(labelB) && typeof position.token_price_b_usd === 'number') {
+    return position.token_price_b_usd
+  }
+  if (labelA === 'usdc' && typeof position.token_price_b_usd === 'number') return position.token_price_b_usd
+  if (labelB === 'usdc' && typeof position.token_price_a_usd === 'number') return position.token_price_a_usd
+  return null
+}
+
 /** ~USD for tx fee in lamports, using SOL/USD from Jupiter proxy (`solUsd` per 1 SOL). */
 function lamportsToUsdDisplay(lamports: unknown, solUsd: number): string {
   if (solUsd <= 0) return '—'
@@ -244,6 +270,7 @@ export default function PositionDetail() {
   const [actionInfo, setActionInfo] = useState<string | null>(null)
   const [backtestJobId, setBacktestJobId] = useState<string | null>(null)
   const [showOnlyNonZeroBreakdown, setShowOnlyNonZeroBreakdown] = useState(true)
+  const [agentInput, setAgentInput] = useState('')
   const metricsMode = useMemo(() => getMetricsMode(), [])
   const isSettlementMode = metricsMode === 'settlement_v1'
 
@@ -264,6 +291,21 @@ export default function PositionDetail() {
     enabled: !!address,
     retry: 0,
     staleTime: 15_000,
+  })
+
+  const agentUiQ = useQuery({
+    queryKey: ['position-agent-ui', address],
+    queryFn: () => getPositionAgentChatUi(address!),
+    enabled: !!address,
+    retry: 0,
+    staleTime: 15_000,
+  })
+  const agentSupervisorQ = useQuery({
+    queryKey: ['position-agent-supervisor', address],
+    queryFn: () => getPositionAgentSupervisor(address!),
+    enabled: !!address,
+    retry: 0,
+    staleTime: 30_000,
   })
 
   const suggestQ = useQuery({
@@ -607,6 +649,60 @@ export default function PositionDetail() {
     onSuccess: (r) => setBacktestJobId(r.id),
   })
 
+  const startAgentM = useMutation({
+    mutationFn: () => startPositionAgent(address!),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['position-agent-ui', address] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setActionInfo(null)
+      setActionError(`Agent start failed: ${msg}`)
+    },
+  })
+
+  const scanAgentM = useMutation({
+    mutationFn: () => triggerPositionAgentScan(address!, true),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['position-agent-ui', address] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setActionInfo(null)
+      setActionError(`Agent scan failed: ${msg}`)
+    },
+  })
+
+  const sendAgentM = useMutation({
+    mutationFn: async (content: string) => sendPositionAgentLlmReply(address!, content),
+    onSuccess: (resp) => {
+      setAgentInput('')
+      const src = resp.meta.used_fallback
+        ? `fallback (${resp.meta.provider})`
+        : `${resp.meta.provider}${resp.meta.model ? `:${resp.meta.model}` : ''}`
+      setActionInfo(`Agent reply source: ${src}`)
+      void queryClient.invalidateQueries({ queryKey: ['position-agent-ui', address] })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      setActionInfo(null)
+      setActionError(`Agent message failed: ${msg}`)
+    },
+  })
+
+  function quickActionPrompt(action: string): string | null {
+    switch (action) {
+      case 'compare_7d_ranges':
+        return 'Porownaj moj obecny range z top 3 zakresami z ostatnich 7 dni i podaj konkretne widełki.'
+      case 'compare_30d_ranges':
+        return 'Porownaj moj obecny range z top 3 zakresami z ostatnich 30 dni i podaj konkretne widełki.'
+      case 'cross_pair_scan':
+        return 'Zrob cross-pair scan i zaproponuj conservative/balanced/aggressive alokacje kapitalu.'
+      default:
+        return null
+    }
+  }
+
   const backtestJobQ = useQuery({
     queryKey: ['backtest-job-open', backtestJobId],
     queryFn: () => getBacktestJob(backtestJobId!),
@@ -672,7 +768,7 @@ export default function PositionDetail() {
   )
   const rangeLo = parseNum(position.range_lower_usdc)
   const rangeHi = parseNum(position.range_upper_usdc)
-  const rangeNow = parseNum(position.range_usdc_quote)
+  const rangeNow = estimateNowUsdcFromPosition(position)
   const hasRangeBar = rangeLo !== null && rangeHi !== null && rangeNow !== null && rangeHi > rangeLo
   const rangeMarkerPct = hasRangeBar
     ? Math.max(0, Math.min(100, ((rangeNow - rangeLo) / (rangeHi - rangeLo)) * 100))
@@ -728,6 +824,12 @@ export default function PositionDetail() {
             className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
             Logs / rebalances
+          </Tabs.Trigger>
+          <Tabs.Trigger
+            value="agent"
+            className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+          >
+            Position Agent
           </Tabs.Trigger>
         </Tabs.List>
 
@@ -987,8 +1089,11 @@ export default function PositionDetail() {
                             <div className="mt-2 text-xs font-mono text-muted-foreground space-y-1">
                               <div>last_eval: {s.last_eval.ts_utc}</div>
                               <div>
-                                tick_current: {s.last_eval.pool_tick_current} · in_range: {s.last_eval.in_range ? 'yes' : 'no'} · hours_since_rebalance:{' '}
-                                {s.last_eval.hours_since_rebalance ?? '—'}
+                                tick_current: {s.last_eval.pool_tick_current} · in_range: {s.last_eval.in_range ? 'yes' : 'no'} · minutes_since_rebalance:{' '}
+                                {s.last_eval.minutes_since_rebalance ??
+                                  (typeof s.last_eval.hours_since_rebalance === 'number'
+                                    ? s.last_eval.hours_since_rebalance * 60
+                                    : '—')}
                               </div>
                               <div>
                                 decision: {s.last_eval.decision} · requires_tx: {s.last_eval.requires_transaction ? 'yes' : 'no'} · auto_execute:{' '}
@@ -1813,6 +1918,176 @@ export default function PositionDetail() {
           {ledgerRows.length === 0 && ledgerAnyPresent && (
             <p className="text-muted-foreground text-sm">No matching lines yet for this address.</p>
           )}
+        </Tabs.Content>
+
+        <Tabs.Content value="agent" className="mt-4 space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Position Agent</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Agent monitoruje tę pozycję w tle i może podpowiadać lepsze zakresy oraz alternatywy cross-pair.
+              </p>
+              {!agentUiQ.data?.session ? (
+                <Button
+                  onClick={() => startAgentM.mutate()}
+                  disabled={startAgentM.isPending}
+                >
+                  {startAgentM.isPending ? 'Starting…' : 'Start agent supervision'}
+                </Button>
+              ) : (
+                <div className="text-xs text-muted-foreground space-y-1">
+                  <div>Status: {agentUiQ.data.session.status}</div>
+                  <div>Scan interval: {agentUiQ.data.session.scan_interval_hours}h</div>
+                  <div>
+                    Last scan: {agentUiQ.data.session.last_scan_ts_utc ? formatDate(agentUiQ.data.session.last_scan_ts_utc) : '—'}
+                  </div>
+                  <div>
+                    Next scan: {agentUiQ.data.session.next_scan_ts_utc ? formatDate(agentUiQ.data.session.next_scan_ts_utc) : '—'}
+                  </div>
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => scanAgentM.mutate()}
+                  disabled={scanAgentM.isPending || !agentUiQ.data?.session}
+                >
+                  {scanAgentM.isPending ? 'Scanning…' : 'Scan now'}
+                </Button>
+                {agentUiQ.data?.quick_actions?.map((qa) => (
+                  <Button
+                    key={qa}
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-[10px]"
+                    disabled={!agentUiQ.data?.session || sendAgentM.isPending || scanAgentM.isPending}
+                    onClick={() => {
+                      if (qa === 'scan_now') {
+                        scanAgentM.mutate()
+                        return
+                      }
+                      const p = quickActionPrompt(qa)
+                      if (p) {
+                        setAgentInput(p)
+                        sendAgentM.mutate(p)
+                      }
+                    }}
+                  >
+                    {qa}
+                  </Button>
+                ))}
+              </div>
+              {agentUiQ.data?.suggested_prompts?.length ? (
+                <div className="space-y-1">
+                  <div className="text-xs text-muted-foreground">Suggested prompts:</div>
+                  {agentUiQ.data.suggested_prompts.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      className="text-left text-xs text-primary hover:underline block"
+                      onClick={() => setAgentInput(p)}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={agentInput}
+                  onChange={(e) => setAgentInput(e.target.value)}
+                  placeholder="Napisz do agenta..."
+                />
+                <Button
+                  onClick={() => {
+                    const text = agentInput.trim()
+                    if (!text) return
+                    sendAgentM.mutate(text)
+                  }}
+                  disabled={sendAgentM.isPending || !agentInput.trim()}
+                >
+                  Send
+                </Button>
+              </div>
+              {agentSupervisorQ.data ? (
+                <div className="rounded-md border border-border/60 bg-muted/10 p-3 space-y-2">
+                  <div className="text-xs font-medium text-foreground">Supervisor: koszt i wynik od wejścia</div>
+                  <div className="grid gap-2 text-xs sm:grid-cols-2">
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Entry capital</span>
+                      <span className="font-mono">{formatUsdFixed(agentSupervisorQ.data.entry_capital_usd, 3)}</span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Current value</span>
+                      <span className="font-mono">{formatUsdFixed(agentSupervisorQ.data.current_value_usd, 3)}</span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Earnings total</span>
+                      <span className="font-mono text-green-500">
+                        {formatUsdFixed(agentSupervisorQ.data.earnings_total_usd, 3)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Costs total</span>
+                      <span className="font-mono text-yellow-500">
+                        {formatUsdFixed(agentSupervisorQ.data.costs_total_usd, 3)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Net since entry</span>
+                      <span
+                        className={
+                          parseFloat(String(agentSupervisorQ.data.net_since_entry_pct)) >= 0
+                            ? 'font-mono text-green-500'
+                            : 'font-mono text-red-500'
+                        }
+                      >
+                        {formatUsdFixed(agentSupervisorQ.data.net_since_entry_usd, 3)} (
+                        {formatPercentFixed(agentSupervisorQ.data.net_since_entry_pct, 3)})
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Rebalances / hours</span>
+                      <span className="font-mono">
+                        {agentSupervisorQ.data.rebalance_count} / {agentSupervisorQ.data.elapsed_hours ?? '—'}
+                      </span>
+                    </div>
+                  </div>
+                  {agentSupervisorQ.data.scenarios?.length ? (
+                    <div className="space-y-2 pt-1">
+                      <div className="text-[11px] text-muted-foreground">Scenariusze co dalej:</div>
+                      {agentSupervisorQ.data.scenarios.map((s) => (
+                        <div key={s.scenario} className="rounded border border-border/60 px-2 py-1.5 text-xs">
+                          <div className="font-medium">{s.scenario}</div>
+                          <div className="text-muted-foreground">{s.expectation}</div>
+                          <div>{s.suggested_action}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="rounded-md border max-h-96 overflow-auto">
+                <div className="p-3 space-y-2">
+                  {(agentUiQ.data?.messages ?? []).map((m) => (
+                    <div key={m.id} className="text-sm">
+                      <div className="text-[10px] text-muted-foreground">
+                        {m.role} · {m.kind} · {formatDate(m.ts_utc)}
+                      </div>
+                      <div>{m.content}</div>
+                    </div>
+                  ))}
+                  {!agentUiQ.data?.messages?.length ? (
+                    <div className="text-sm text-muted-foreground">No messages yet.</div>
+                  ) : null}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </Tabs.Content>
       </Tabs.Root>
     </div>

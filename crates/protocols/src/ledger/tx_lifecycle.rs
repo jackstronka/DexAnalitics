@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
+use std::io::{BufRead, BufReader};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -112,6 +113,44 @@ pub fn ledger_read_path() -> PathBuf {
         }
     }
     ledger_path()
+}
+
+/// Best-effort check if lifecycle ledger already contains a bot open row for a session id.
+///
+/// Used by execution guardrails to avoid duplicate opens in one `rebalance_session_id`.
+#[must_use]
+pub fn session_has_bot_open_position(rebalance_session_id: &str) -> bool {
+    let sid = rebalance_session_id.trim();
+    if sid.is_empty() {
+        return false;
+    }
+    let p = ledger_read_path();
+    let Ok(f) = std::fs::File::open(&p) else {
+        return false;
+    };
+    let r = BufReader::new(f);
+    for line in r.lines().map_while(Result::ok) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+            continue;
+        };
+        let ev = v.get("event").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if ev != "bot_open_position" && ev != "bot_open_position_full_range" {
+            continue;
+        }
+        let row_sid = v
+            .get("rebalance_session_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        if row_sid == sid {
+            return true;
+        }
+    }
+    false
 }
 
 fn message_static_pubkeys(tx_root: &serde_json::Value) -> Option<Vec<String>> {

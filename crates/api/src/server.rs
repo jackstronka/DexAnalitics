@@ -76,6 +76,37 @@ fn spawn_stranded_reconcile_watchdog() {
     });
 }
 
+fn agent_background_interval_secs() -> u64 {
+    std::env::var("CLMM_AGENT_BACKGROUND_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(120)
+}
+
+fn spawn_position_agent_background_worker() {
+    let secs = agent_background_interval_secs();
+    info!(
+        interval_secs = secs,
+        env = "CLMM_AGENT_BACKGROUND_INTERVAL_SECS",
+        "Position agent background worker enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(secs)).await;
+            match crate::services::position_agent_service::run_periodic_scan_tick() {
+                Ok(scanned) if scanned > 0 => {
+                    info!(scanned_positions = scanned, "position agent background scan tick completed");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "position agent background scan tick failed");
+                }
+            }
+        }
+    });
+}
+
 async fn maybe_autostart_strategies(state: &AppState) {
     if !env_autostart_strategies_on_boot() {
         return;
@@ -235,6 +266,7 @@ impl ApiServer {
         seed_monitor_from_registry(self.state.monitor.clone()).await;
         maybe_autostart_strategies(&self.state).await;
         spawn_stranded_reconcile_watchdog();
+        spawn_position_agent_background_worker();
 
         let router = self.build_router();
 
@@ -259,6 +291,7 @@ impl ApiServer {
         seed_monitor_from_registry(self.state.monitor.clone()).await;
         maybe_autostart_strategies(&self.state).await;
         spawn_stranded_reconcile_watchdog();
+        spawn_position_agent_background_worker();
 
         let router = self.build_router();
 

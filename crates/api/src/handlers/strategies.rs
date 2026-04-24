@@ -11,7 +11,7 @@ use crate::services::optimization_runner::{
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::services::strategy_service::{
-    apply_optional_interval_to_decision_config, min_rebalance_interval_hours_from_json,
+    apply_optional_interval_to_decision_config, min_rebalance_interval_minutes_from_params,
     wire_executor_allowlist_and_reopen_hook,
 };
 use crate::state::{AlertUpdate, AppState, StrategyState};
@@ -747,6 +747,9 @@ async fn start_strategy_executor_core(
             StrategyType::IlLimit => clmm_lp_execution::prelude::StrategyMode::IlLimit,
             StrategyType::RetouchShift => clmm_lp_execution::prelude::StrategyMode::RetouchShift,
             StrategyType::LastCandle => clmm_lp_execution::prelude::StrategyMode::LastCandle,
+            StrategyType::LastCandlePeriodic => {
+                clmm_lp_execution::prelude::StrategyMode::LastCandlePeriodic
+            }
         };
 
         // Common: width and periodic / thresholds.
@@ -773,16 +776,18 @@ async fn start_strategy_executor_core(
             decision_config.threshold_pct =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(decision_config.threshold_pct);
         }
+        if let Some(val) = params.get("retouch_offset_pct").and_then(json_f64) {
+            decision_config.retouch_offset_pct =
+                Decimal::from_f64_retain(val / 100.0).unwrap_or(decision_config.retouch_offset_pct);
+        }
 
         if let Some(val) = params.get("max_il_pct").and_then(json_f64) {
             decision_config.il_close_threshold =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(Decimal::new(15, 2));
         }
 
-        let maybe_min_hours = params
-            .get("min_rebalance_interval_hours")
-            .and_then(min_rebalance_interval_hours_from_json);
-        apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_hours);
+        let maybe_min_minutes = min_rebalance_interval_minutes_from_params(params);
+        apply_optional_interval_to_decision_config(&mut decision_config, maybe_min_minutes);
 
         if let Some(candle_seconds) = params.get("candle_seconds").and_then(|v| v.as_u64()) {
             decision_config.last_candle_seconds = candle_seconds.max(60);

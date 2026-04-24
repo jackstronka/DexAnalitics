@@ -1,6 +1,6 @@
 //! Rebalancing execution logic.
 
-use crate::lifecycle::{FeesCollectedData, LifecycleTracker, RebalanceData, RebalanceReason};
+use crate::lifecycle::{LifecycleTracker, RebalanceData, RebalanceReason};
 use crate::transaction::TransactionManager;
 use crate::wallet::Wallet;
 use anyhow::Context;
@@ -14,7 +14,11 @@ use solana_sdk::signature::Signature;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Account as SplTokenAccount;
 use spl_token::state::Mint as SplMint;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -124,6 +128,49 @@ fn no_close_unless_reopen_feasible() -> bool {
         .as_deref()
         .map(|v| v == "1" || v == "true" || v == "yes" || v == "on")
         .unwrap_or(true)
+}
+
+/// Per-process guardrail for "at most one open per rebalance_session_id".
+///
+/// - `inflight`: currently executing open path for a session id.
+/// - `completed`: an open already succeeded for that session id in this process lifetime.
+static OPEN_GUARD_INFLIGHT: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static OPEN_GUARD_COMPLETED: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn try_reserve_open_session(session_id: &str) -> bool {
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return true;
+    }
+    {
+        let done = OPEN_GUARD_COMPLETED.lock().unwrap();
+        if done.contains(sid) {
+            return false;
+        }
+    }
+    let mut inflight = OPEN_GUARD_INFLIGHT.lock().unwrap();
+    if inflight.contains(sid) {
+        return false;
+    }
+    inflight.insert(sid.to_string());
+    true
+}
+
+fn release_open_session_reservation(session_id: &str, mark_completed: bool) {
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return;
+    }
+    {
+        let mut inflight = OPEN_GUARD_INFLIGHT.lock().unwrap();
+        inflight.remove(sid);
+    }
+    if mark_completed {
+        let mut done = OPEN_GUARD_COMPLETED.lock().unwrap();
+        done.insert(sid.to_string());
+    }
 }
 
 /// Swap-mix/open: widen tick range when reopen quote is too small.
@@ -1298,6 +1345,8 @@ impl RebalanceExecutor {
         pool: &Pubkey,
         new_tick_lower: i32,
         new_tick_upper: i32,
+        prev_tick_lower: Option<i32>,
+        prev_tick_upper: Option<i32>,
         pool_state: &WhirlpoolState,
         amount_a_before_calc: u64,
         amount_b_before_calc: u64,
@@ -1311,6 +1360,47 @@ impl RebalanceExecutor {
             );
         };
 
+        if let Some(sid) = ledger_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if clmm_lp_protocols::ledger::tx_lifecycle::session_has_bot_open_position(sid) {
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_open_guard_blocked",
+                    "open_guard",
+                    Some(*pool),
+                    Some(*log_position),
+                    Some(sid.to_string()),
+                    serde_json::json!({
+                        "reason": "session_already_has_open_row",
+                        "new_tick_lower": new_tick_lower,
+                        "new_tick_upper": new_tick_upper
+                    }),
+                )
+                .await;
+                return Err(format!(
+                    "open guard: rebalance session {sid} already has bot_open_position row; blocking duplicate open"
+                ));
+            }
+            if !try_reserve_open_session(sid) {
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_open_guard_blocked",
+                    "open_guard",
+                    Some(*pool),
+                    Some(*log_position),
+                    Some(sid.to_string()),
+                    serde_json::json!({
+                        "reason": "session_open_inflight_or_completed",
+                        "new_tick_lower": new_tick_lower,
+                        "new_tick_upper": new_tick_upper
+                    }),
+                )
+                .await;
+                return Err(format!(
+                    "open guard: rebalance session {sid} already inflight/completed in this process; blocking duplicate open"
+                ));
+            }
+        }
+
         let swap_rounds = self
             .ensure_swap_mix_for_rebalance_open(
                 pool,
@@ -1322,8 +1412,16 @@ impl RebalanceExecutor {
                 log_position,
                 ledger_session_id.clone(),
             )
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+        let swap_rounds = match swap_rounds {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(sid) = ledger_session_id.as_deref() {
+                    release_open_session_reservation(sid, false);
+                }
+                return Err(e.to_string());
+            }
+        };
 
         let max_open_attempts = rebalance_open_max_attempts();
         let mut new_position: Option<Pubkey> = None;
@@ -1431,6 +1529,16 @@ impl RebalanceExecutor {
                             "open_prev_end_value_usd": prev_end_value_usd,
                             "open_wallet_notional_usd": wallet_notional
                         });
+                        if let Some(obj) = v.as_object_mut() {
+                            if let Some(prev) = prev_tick_lower {
+                                obj.insert("prev_tick_lower".to_string(), serde_json::json!(prev));
+                            }
+                            if let Some(prev) = prev_tick_upper {
+                                obj.insert("prev_tick_upper".to_string(), serde_json::json!(prev));
+                            }
+                            obj.insert("new_tick_lower".to_string(), serde_json::json!(new_tick_lower));
+                            obj.insert("new_tick_upper".to_string(), serde_json::json!(new_tick_upper));
+                        }
                         if let Some(q) = quote_opt.as_ref()
                             && let Some(obj) = v.as_object_mut()
                         {
@@ -1499,6 +1607,9 @@ impl RebalanceExecutor {
         let new_position = match new_position {
             Some(p) => p,
             None => {
+                if let Some(sid) = ledger_session_id.as_deref() {
+                    release_open_session_reservation(sid, false);
+                }
                 let e = last_open_err.unwrap_or_else(|| "unknown error".to_string());
                 let hint = " Close succeeded but open failed after retries — funds should be in wallet ATAs; token mix for new range may still require a swap before open.";
                 error!(
@@ -1520,6 +1631,10 @@ impl RebalanceExecutor {
                 return Err(format!("{e}{hint}"));
             }
         };
+
+        if let Some(sid) = ledger_session_id.as_deref() {
+            release_open_session_reservation(sid, true);
+        }
 
         Ok((new_position, swap_rounds))
     }
@@ -1614,46 +1729,7 @@ impl RebalanceExecutor {
         let amount_a_before = params.amount_a_before.or(Some(amount_a_before_calc));
         let amount_b_before = params.amount_b_before.or(Some(amount_b_before_calc));
 
-        // Step 1: Collect fees if configured
-        if self.config.collect_fees_first {
-            match self
-                .collect_fees(
-                    &params.position,
-                    &params.pool,
-                    Some(rebalance_session_id.clone()),
-                )
-                .await
-            {
-                Ok(fees) => {
-                    result.fees_collected = Some(fees);
-                    result.tx_cost_lamports += 5000; // Approximate
-
-                    // Record in lifecycle
-                    self.lifecycle
-                        .record_fees_collected(
-                            params.position,
-                            params.pool,
-                            FeesCollectedData {
-                                fees_a: fees.0,
-                                fees_b: fees.1,
-                                fees_usd: Decimal::ZERO, // Would need price oracle
-                            },
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    warn!(
-                        op = "orca_rebalance",
-                        stage = "collect_fees",
-                        position = %params.position,
-                        pool = %params.pool,
-                        error = %e,
-                        "Failed to collect fees, continuing"
-                    );
-                }
-            }
-        }
-        // Step 2 (guardrail): ensure reopen is feasible *before* closing, using current wallet balances.
+        // Step 1 (guardrail): ensure reopen is feasible *before* closing, using current wallet balances.
         // If not feasible, we skip the close so we don't leave the operator with 0 positions.
         let mut planned_tick_lower = params.new_tick_lower;
         let mut planned_tick_upper = params.new_tick_upper;
@@ -1813,14 +1889,20 @@ impl RebalanceExecutor {
             }
         }
 
-        // Step 3: Close old position (includes decreasing all liquidity + collecting remaining fees)
+        // Step 2: Close old position (includes decreasing all liquidity + collecting remaining fees)
         result.liquidity_removed = params.current_liquidity;
         let (close_amount_a_raw, close_amount_b_raw) = self
             .read_close_amounts_best_effort(&params.position, &params.pool)
             .await
             .unwrap_or((amount_a_before_calc, amount_b_before_calc));
         let close_ledger_details = with_close_amounts_in_details(
-            Some(serde_json::json!({ "close_kind":"rotation" })),
+            Some(serde_json::json!({
+                "close_kind":"rotation",
+                "old_tick_lower": params.current_tick_lower,
+                "old_tick_upper": params.current_tick_upper,
+                "planned_new_tick_lower": planned_tick_lower,
+                "planned_new_tick_upper": planned_tick_upper
+            })),
             close_amount_a_raw,
             close_amount_b_raw,
         );
@@ -1848,7 +1930,7 @@ impl RebalanceExecutor {
         result.old_position_closed_on_chain = true;
         result.tx_cost_lamports += 5000;
 
-        // Step 4: Open new position — swap-mix + retries (see [`Self::open_new_range_with_wallet_mix`]).
+        // Step 3: Open new position — swap-mix + retries (see [`Self::open_new_range_with_wallet_mix`]).
         let pool_reader = WhirlpoolReader::new(self.provider.clone());
         let pool_state = match pool_reader.get_pool_state(&params.pool.to_string()).await {
             Ok(s) => s,
@@ -1873,9 +1955,11 @@ impl RebalanceExecutor {
                 &params.pool,
                 planned_tick_lower,
                 planned_tick_upper,
+                Some(params.current_tick_lower),
+                Some(params.current_tick_upper),
                 &pool_state,
-                amount_a_before_calc,
-                amount_b_before_calc,
+                close_amount_a_raw,
+                close_amount_b_raw,
                 &params.position,
                 Some(rebalance_session_id.clone()),
             )
@@ -2045,14 +2129,23 @@ impl RebalanceExecutor {
             );
         }
 
+        let (recovered_amount_a_raw, recovered_amount_b_raw) =
+            close_amounts_from_lifecycle_best_effort(
+                &p.closed_position_nft,
+                p.rebalance_session_id.as_deref(),
+            )
+            .unwrap_or((1, 1));
+
         match self
             .open_new_range_with_wallet_mix(
                 &p.pool,
                 planned_tick_lower,
                 planned_tick_upper,
+                Some(p.new_tick_lower),
+                Some(p.new_tick_upper),
                 &pool_state,
-                1,
-                1,
+                recovered_amount_a_raw,
+                recovered_amount_b_raw,
                 &p.closed_position_nft,
                 p.rebalance_session_id.clone(),
             )
@@ -2925,6 +3018,60 @@ fn with_close_amounts_in_details(
     Some(serde_json::Value::Object(obj))
 }
 
+fn close_amounts_from_lifecycle_row(
+    row: &serde_json::Value,
+    closed_position: &Pubkey,
+    rebalance_session_id: Option<&str>,
+) -> Option<(u64, u64)> {
+    let event = row.get("event")?.as_str()?.trim();
+    if event != "bot_close_position" {
+        return None;
+    }
+    let row_position = row.get("position_pubkey")?.as_str()?.trim();
+    if row_position != closed_position.to_string() {
+        return None;
+    }
+    if let Some(sid) = rebalance_session_id {
+        let row_sid = row
+            .get("rebalance_session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if row_sid != sid {
+            return None;
+        }
+    }
+    let details = row.get("details")?.as_object()?;
+    let close_amount_a_raw = details.get("close_amount_a_raw")?.as_u64()?;
+    let close_amount_b_raw = details.get("close_amount_b_raw")?.as_u64()?;
+    Some((close_amount_a_raw, close_amount_b_raw))
+}
+
+fn close_amounts_from_lifecycle_best_effort(
+    closed_position: &Pubkey,
+    rebalance_session_id: Option<&str>,
+) -> Option<(u64, u64)> {
+    let path = clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path();
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut latest_match: Option<(u64, u64)> = None;
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if let Some(amounts) =
+            close_amounts_from_lifecycle_row(&row, closed_position, rebalance_session_id)
+        {
+            latest_match = Some(amounts);
+        }
+    }
+    latest_match
+}
+
 fn validate_execution_result(
     op_name: &str,
     result: &clmm_lp_protocols::orca::executor::ExecutionResult,
@@ -3014,6 +3161,24 @@ mod tests {
             obj.get("close_amount_b_raw").and_then(|v| v.as_u64()),
             Some(456)
         );
+    }
+
+    #[test]
+    fn close_amounts_from_lifecycle_row_parses_matching_close() {
+        let closed_position = Pubkey::new_unique();
+        let sid = "sid-123";
+        let row = serde_json::json!({
+            "event": "bot_close_position",
+            "position_pubkey": closed_position.to_string(),
+            "rebalance_session_id": sid,
+            "details": {
+                "close_amount_a_raw": 3648,
+                "close_amount_b_raw": 588
+            }
+        });
+        let parsed =
+            close_amounts_from_lifecycle_row(&row, &closed_position, Some(sid)).expect("parsed");
+        assert_eq!(parsed, (3648, 588));
     }
 
     #[test]

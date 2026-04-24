@@ -53,9 +53,10 @@ pub fn decision_config_from_optimize_result(
         }
         "periodic" => {
             cfg.strategy_mode = StrategyMode::Periodic;
-            cfg.periodic_interval_hours = w
+            cfg.periodic_interval_minutes = w
                 .periodic_interval_hours
-                .ok_or(OptimizeProfileError::PeriodicMissingHours)?;
+                .ok_or(OptimizeProfileError::PeriodicMissingHours)?
+                .saturating_mul(60);
         }
         "threshold" => {
             cfg.strategy_mode = StrategyMode::Threshold;
@@ -86,7 +87,7 @@ pub fn decision_config_from_optimize_result(
                 })?;
             }
             if let Some(g) = w.il_grace_steps {
-                // Backtest uses "steps"; live IlLimit uses hours — treat grace as 0 hours when unknown.
+                // Backtest uses "steps"; live IlLimit uses minutes — treat grace as 0 minutes when unknown.
                 let _ = g;
             }
         }
@@ -166,7 +167,7 @@ mod tests {
         });
         let c = decision_config_from_optimize_result(&f).unwrap();
         assert_eq!(c.strategy_mode, StrategyMode::Periodic);
-        assert_eq!(c.periodic_interval_hours, 24);
+        assert_eq!(c.periodic_interval_minutes, 24 * 60);
         assert_eq!(c.range_width_pct, Decimal::from_f64_retain(0.08).unwrap());
     }
 

@@ -31,6 +31,46 @@ fn create_base_router(state: AppState) -> Router {
         // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
         .route("/positions/closed", get(handlers::list_closed_positions))
+        .route(
+            "/positions/{address}/agent-chat",
+            get(handlers::get_position_agent_chat),
+        )
+        .route(
+            "/positions/{address}/agent-chat/ui",
+            get(handlers::get_position_agent_chat_ui),
+        )
+        .route(
+            "/positions/{address}/agent/start",
+            post(handlers::start_position_agent),
+        )
+        .route(
+            "/positions/{address}/agent/message",
+            post(handlers::post_position_agent_message),
+        )
+        .route(
+            "/positions/{address}/agent/llm-reply",
+            post(handlers::post_position_agent_llm_reply),
+        )
+        .route(
+            "/positions/{address}/agent/scan-now",
+            post(handlers::trigger_position_agent_scan),
+        )
+        .route(
+            "/positions/{address}/agent/supervisor",
+            get(handlers::get_position_agent_supervisor),
+        )
+        .route(
+            "/agent/worker/settings",
+            get(handlers::get_agent_worker_settings),
+        )
+        .route(
+            "/agent/worker/settings",
+            put(handlers::put_agent_worker_settings),
+        )
+        .route(
+            "/agent/worker/status",
+            get(handlers::get_agent_worker_status),
+        )
         .route("/positions/{address}/pnl", get(handlers::get_position_pnl))
         .route(
             "/positions/{address}/suggest-strategy",
@@ -74,6 +114,10 @@ fn create_base_router(state: AppState) -> Router {
         )
         // Pool routes
         .route("/pools", get(handlers::list_pools))
+        .route("/data/snapshots", get(handlers::get_data_snapshots))
+        .route("/data/swaps", get(handlers::get_data_swaps))
+        .route("/data/agent/decisions", get(handlers::get_agent_decisions))
+        .route("/data/agent/decisions", post(handlers::post_agent_decision))
         .route(
             "/pools/orca/volume-history",
             get(handlers::get_orca_volume_history),
@@ -132,6 +176,22 @@ fn create_base_router(state: AppState) -> Router {
         )
         .route("/backtests/full", post(handlers::start_backtest_full))
         .route("/backtests/full/{id}", get(handlers::get_backtest_full_job))
+        .route(
+            "/backtests/auto-tune/start",
+            post(handlers::start_backtest_auto_tune),
+        )
+        .route(
+            "/backtests/auto-tune/stop",
+            post(handlers::stop_backtest_auto_tune),
+        )
+        .route(
+            "/backtests/auto-tune/status",
+            get(handlers::get_backtest_auto_tune_status),
+        )
+        .route(
+            "/backtests/auto-tune/apply/{strategy_id}",
+            post(handlers::apply_backtest_auto_tune_to_strategy),
+        )
         .route("/backtests/{id}", get(handlers::get_backtest_job))
         // Bot activity (JSONL ledger / registry; Slack digest)
         .route("/bot-activity/ledger", get(handlers::get_bot_ledger))

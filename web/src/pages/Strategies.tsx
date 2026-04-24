@@ -3,7 +3,13 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Plus, Play, Square, RefreshCw, Pencil } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { getStrategies, startStrategy, stopStrategy } from '@/lib/api'
+import {
+  applyBacktestAutoTuneToStrategy,
+  getBacktestAutoTuneStatus,
+  getStrategies,
+  startStrategy,
+  stopStrategy,
+} from '@/lib/api'
 
 export default function Strategies() {
   const queryClient = useQueryClient()
@@ -11,6 +17,11 @@ export default function Strategies() {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
+  })
+  const autoTuneQ = useQuery({
+    queryKey: ['backtests-auto-tune-status'],
+    queryFn: getBacktestAutoTuneStatus,
+    refetchInterval: 15_000,
   })
 
   const startMutation = useMutation({
@@ -20,6 +31,10 @@ export default function Strategies() {
 
   const stopMutation = useMutation({
     mutationFn: stopStrategy,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategies'] }),
+  })
+  const applyAutoTuneMutation = useMutation({
+    mutationFn: applyBacktestAutoTuneToStrategy,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategies'] }),
   })
 
@@ -43,6 +58,12 @@ export default function Strategies() {
             Create Strategy
           </Button>
         </div>
+      </div>
+      <div className="text-xs text-muted-foreground">
+        Auto-Tune winner:{' '}
+        {autoTuneQ.data?.latest_winner
+          ? `${autoTuneQ.data.latest_winner.strategy} (${autoTuneQ.data.latest_winner.pool_label}, ${autoTuneQ.data.latest_winner.window_hours}h)`
+          : 'brak (uruchom Auto-Tune w Backtests)'}
       </div>
 
       {isLoading ? (
@@ -83,6 +104,15 @@ export default function Strategies() {
                   </div>
                 ) : null}
                 <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1"
+                    disabled={!autoTuneQ.data?.latest_winner || applyAutoTuneMutation.isPending}
+                    onClick={() => applyAutoTuneMutation.mutate(strategy.id)}
+                  >
+                    Apply Auto-Tune
+                  </Button>
                   <Link to={`/strategies/${strategy.id}/edit`} className="flex-1">
                     <Button variant="secondary" size="sm" className="w-full">
                       <Pencil className="h-4 w-4 mr-2" />

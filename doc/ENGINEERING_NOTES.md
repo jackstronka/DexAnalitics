@@ -1,3 +1,260 @@
+## 2026-04-24 — Wallet UX: auto-retry SPL token fetch when initial response is empty
+
+keywords: wallet, spl, rpc, retry, ui, balances
+
+- **What:** Added bounded auto-retry loop on Wallet page when `/wallets/balances` returns SOL but empty token list (no hard error), so users no longer need manual page refresh in common transient-RPC cases.
+- **UX:** Shows retry progress message (`attempt X/Y`) while polling.
+- **paths:** `web/src/pages/Wallet.tsx`
+
+## 2026-04-24 — Static manual lower/upper now honored as absolute bounds (not derived width)
+
+keywords: backtests, static, manual-range, absolute-bounds, clmm-lp-cli, clmm-lp-api
+
+- **What:** Introduced dedicated CLI flags `--static-manual-lower` / `--static-manual-upper` and API passthrough for single-pool manual static runs.
+- **Behavior change:** Static manual range is now applied as absolute initial bounds for `static` strategy only; no conversion to `% width` proxy.
+- **Why:** Previous implementation converted manual bounds to symmetric width around midpoint, which drifted with per-window entry anchors and produced varying static ranges.
+- **paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/main.rs`, `crates/api/src/handlers/backtests.rs`
+
+## 2026-04-24 — Auto-Tune status fix: treat FULL `succeeded/partial` as completed cycles
+
+keywords: auto-tune, backtests, full-optimize, status, partial, winner, api
+
+- **What:** Fixed Auto-Tune loop status mapping to consider FULL job statuses `succeeded` and `partial` as completed (instead of expecting non-existent `done`).
+- **Behavior:** Auto-Tune now updates `latest_winner` when results are present and sets note to `completed` / `completed (partial)` accordingly; only real failures remain `failed`.
+- **paths:** `crates/api/src/handlers/backtests.rs`
+
+## 2026-04-24 — CLI bool parsing fix for threshold OOR toggle in FULL backtests
+
+keywords: backtests, clmm-lp-cli, clap, threshold, bool-flag, api-integration
+
+- **What:** Updated `backtest-optimize` CLI arg `threshold_rebalance_on_range_exit_immediately` to use `ArgAction::Set`, so API can pass explicit values (`true`/`false`) without parse errors.
+- **Why:** FULL jobs were failing with `unexpected argument 'true'` because API sent `--threshold-rebalance-on-range-exit-immediately true`, while CLI treated the option as switch-only.
+- **Compatibility:** API now auto-detects (via CLI `--help`) whether this flag accepts an explicit value and falls back to switch-only style for older binaries, preventing hard failures when a stale CLI is resolved at runtime.
+- **paths:** `crates/cli/src/main.rs`
+
+## 2026-04-24 — Backtests static: manual lower/upper range for single-pool runs
+
+keywords: backtests, static, manual-range, lower-upper, single-pool, ui, api, validation
+
+- **What (web UX):** Added two inputs for static manual range (`static_manual_lower`, `static_manual_upper`) in Backtests. Fields are enabled only when exactly one pool is selected; for multiple pools UI guides users to `static_deviation_pct`.
+- **Priority rule:** When valid manual lower/upper is provided (single pool), frontend sends manual fields and omits `static_deviation_pct` (manual range wins).
+- **What (API):** Extended `BacktestFullRequest` with `static_manual_lower` / `static_manual_upper`; added validation (both required, finite, `>0`, `lower<upper`, exactly one selected pool).
+- **Execution behavior:** API maps manual lower/upper to a single pinned width grid for static runs (implied symmetric deviation from midpoint), preserving existing `backtest-optimize` flow.
+- **paths:** `web/src/pages/Backtests.tsx`, `web/src/lib/api.ts`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`
+
+## 2026-04-24 — RetouchShift offset in % (backtest + live strategy parity)
+
+keywords: retouch_shift, retouch_offset_pct, backtests, strategy-config, decision-engine, api, web, clmm-lp-cli
+
+- **What (engine):** Extended backtest `StratConfig::RetouchShift` with `retouch_offset_pct` (ratio), so after OOR retouch the whole new band can be shifted vs the touching price (`0` = edge touches price, `+` right shift, `-` left shift). Added label/parse support for `retouch_shift_off...pct`.
+- **What (CLI/API FULL):** Added `--retouch-offset-pct` to `backtest-optimize`, exposed `retouch_offset_pct` in `BacktestFullRequest` and forwarded from API/web Backtests form.
+- **What (live strategies):** Added `retouch_offset_pct` in strategy parameters and wired it into `DecisionConfig` (`decision.rs`) so live `RetouchShift` uses the same percent-based shift semantics.
+- **What (web UX):** Added `retouch_offset_pct` input in Backtests grid and in Strategy Create/Edit for `retouch_shift`; surfaced value in strategy detail/position summaries.
+- **paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/main.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/cli/src/engine/tests.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `crates/execution/src/strategy/decision.rs`, `web/src/pages/Backtests.tsx`, `web/src/lib/api.ts`, `web/src/lib/strategyFormShared.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/StrategyDetail.tsx`, `web/src/pages/Positions.tsx`
+
+## 2026-04-24 — Auto-Tune MVP: background FULL optimize loop + strategy apply action
+
+keywords: backtests, auto-tune, scheduler, full-optimize, strategies, apply, api, web
+
+- **What (API):** Added Auto-Tune endpoints: start/stop/status plus apply-latest-winner to strategy (`/backtests/auto-tune/*`). Loop runs in background, periodically triggers FULL backtest optimize, polls job completion, and stores latest winner snapshot.
+- **What (selection):** Winner is selected from FULL results by best score across pool/window rows and exposed in status payload.
+- **What (strategy apply):** Added endpoint to apply latest winner into a strategy config (`strategy_type` + key parameters like `range_width_pct`, threshold/periodic knobs parsed from winner label). Note for running strategies: restart required to reload executor config.
+- **What (web):** Added Auto-Tune controls in Backtests (interval + start/stop + live status/winner card) and `Apply Auto-Tune` button per strategy in Strategies page.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`, `web/src/pages/Strategies.tsx`
+
+## 2026-04-24 — Threshold parity upgrade: backtest supports bot-like OOR gating params
+
+keywords: backtests, threshold, bot-parity, clmm-lp-cli, clmm-lp-api, web, strategy-grid
+
+- **What (engine):** Extended `StratConfig::Threshold` with `min_rebalance_interval_hours` and `rebalance_on_range_exit_immediately`, so backtest threshold can mimic bot behavior for OOR handling (immediate vs delayed by cooldown).
+- **What (CLI/API):** Added `backtest-optimize` flags `--threshold-min-rebalance-interval-hours` and `--threshold-rebalance-on-range-exit-immediately`; exposed matching fields in `BacktestFullRequest` and forwarded them from API handler.
+- **What (web UX):** Added a dedicated `Threshold` parameter block in Backtests grid section with fields for threshold grid, OOR cooldown hours, and immediate-OOR toggle.
+- **Compatibility:** Legacy `threshold_<pct>%` label parsing remains supported; extended labels with suffixes still parse as threshold for JSON export.
+- **paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/cli/src/main.rs`, `crates/cli/src/output/optimize_result_json.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`
+
+## 2026-04-24 — FULL backtests: fixed static range via `±X%` from entry
+
+keywords: backtests, static, range, entry-price, api, web, clmm-lp-api
+
+- **What:** Added optional `static_deviation_pct` to `POST /backtests/full` and web Backtests form. When set (e.g. `10`), API pins optimize range grid to a single width: `min_range_pct = max_range_pct = 2 * X`, `range_steps = 1`, which yields a fixed range equivalent to `entry * (1±X%)`.
+- **Why:** Enable explicit static/no-rebalance evaluation with a concrete operator-selected range, instead of only the default width sweep.
+- **Validation:** API rejects invalid values outside `(0,100)`.
+- **UX update:** Added a separate `Out-of-range recenter` section in grid config with dedicated field `oor_recenter_deviation_pct` (instead of shared-width control). API enforces mutual exclusivity: set only one of `static_deviation_pct` or `oor_recenter_deviation_pct`.
+- **paths:** `web/src/pages/Backtests.tsx`, `web/src/lib/api.ts`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`
+
+## 2026-04-24 — Backtests Periodic defaults to bot-like wall-clock mode (legacy step mode hidden)
+
+keywords: backtests, periodic, wall-clock, parity, clmm-lp-cli, api, web, legacy-mode
+
+- **What:** `StratConfig::Periodic` now rebalances by elapsed wall-clock time (`interval_hours * 3600` from snapshot/candle timestamps), matching live bot semantics. Added hidden legacy variant `StratConfig::PeriodicSteps` for backward compatibility of old step-based behavior.
+- **What (labels/parsing):** Added parser support for `periodic_steps_<n>` labels and kept `periodic_<h>` as the default public periodic mode.
+- **What (grid/docs):** Kept API/CLI field/flag names (`periodic_grid_steps`, `--periodic-grid-steps`) for compatibility, but documented them as **hours** now; updated Backtests UI help/defaults accordingly and marked step-based periodic as legacy-hidden.
+- **Guards/tests:** Added/updated CLI tests for hourly periodic on irregular timestamps, legacy step periodic behavior, and strategy-label parsing; verified with `cargo test -p clmm-lp-cli periodic_` and parser regression, plus `npx tsc --noEmit` in `web/`.
+- **paths:** `crates/cli/src/backtest_engine.rs`, `crates/cli/src/engine/tests.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/cli/src/output/optimize_result_json.rs`, `crates/cli/src/main.rs`, `crates/api/src/models.rs`, `web/src/pages/Backtests.tsx`
+
+## 2026-04-23 — Backtests: clarify `oor_recenter` vs `retouch_shift` (when FULL metrics match)
+
+keywords: web, backtests, oor_recenter, retouch_shift, run_single, clmm-lp-cli, tests
+
+- **What:** Documented in UI help that both strategies are no-op until OOR; identical-looking FULL rows often mean **no OOR** or a **single OOR plateau** (one rebalance each). Added CLI regression tests proving divergence on a monotonic climb after OOR (`oor_recenter` strictly more rebalances than `retouch_shift` for the constructed path).
+- **paths:** `web/src/pages/Backtests.tsx`, `crates/cli/src/engine/tests.rs`, `doc/BUGS.md`
+
+## 2026-04-23 — Backtests FULL grid: separate CSV parsers for u64 vs float (fixes 422)
+
+keywords: web, backtests, full-run, backtest-full, periodic_grid_steps, serde, 422, api
+
+- **What:** `Backtests` page now parses comma-separated grids with `parseCsvUInt64s` for fields that map to API `Vec<u64>` and `parseCsvFloats` for `threshold_grid_pct` / `bollinger_k_grid`; fractional tokens are no longer sent as JSON floats into integer slots (which caused Axum `422 Unprocessable Entity`).
+- **What (defaults):** Initial form state aligned with the operator preset (capital 8000 USD, threshold `1,2,3,4`, periodic steps as integers `1,2,3,4`, Bollinger/last-candle grids as in UI catalog).
+- **paths:** `web/src/pages/Backtests.tsx`, `doc/BUGS.md`
+
+## 2026-04-23 — Lineage continuity no longer overwrites explicit open baseline
+
+keywords: api, stream-lineage, baseline, rotation, continuity, open_amount_raw, dust
+
+- **What:** `apply_session_continuity_from_lifecycle_rows` now applies `prev_end -> next baseline` only when next node baseline is missing (`0`), instead of unconditional overwrite for session-matched close/open pairs.
+- **Why:** In dust-open incidents, node baseline could be validly derived from open row data (`open_amount_raw` / caps path) but was later replaced by previous node end (~$4), producing contradictory UI (`start ~4`, `current ~0`) for the same PDA.
+- **Guards/tests:** Added regression test `continuity_from_session_does_not_override_existing_baseline` in lineage tests; `cargo check -p clmm-lp-api` passes (note: `cargo test -p clmm-lp-api ...` is currently blocked by unrelated pre-existing compile error in `devnet_e2e_tests`).
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-04-22 — Rebalance/recovery open sizing now anchored to close amounts (dust-open fix)
+
+keywords: execution, rebalance, recovery, open-target, dust, lifecycle-ledger, close-amounts
+
+- **What:** Rebalance open path now uses authoritative `close_amount_a_raw`/`close_amount_b_raw` (read immediately before close) to compute target notional in `open_new_range_with_wallet_mix`, instead of pre-close derived `amount_*_before_calc`.
+- **What (recovery):** `recover_open_after_incomplete` now recovers close amounts from lifecycle close rows (`bot_close_position` + `details.close_amount_*_raw`, matched by closed PDA and optional session id) before opening a replacement range.
+- **Why:** User-reported chain showed transition from ~$2.4 close values to ~$0.000 opens; root cause was dust-sized open target inputs (`1,1` in recovery and stale/tiny pre-close amounts in open sizing path).
+- **Guards/tests:** Added unit regression `close_amounts_from_lifecycle_row_parses_matching_close`; verified with `cargo test -p clmm-lp-execution close_amounts_from_lifecycle_row_parses_matching_close -- --nocapture` and `cargo check -p clmm-lp-execution`.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+## 2026-04-22 — Live rebalance interval switched to minute granularity (UI + execution)
+
+## 2026-04-22 — Cashflow semantics fixed (exclude principal) + collect only on close paths
+
+keywords: api, execution, lineage, cashflow, net-pnl, collect-fees, rebalance, close
+
+- **What (API lineage):** Per-node realized cashflow in DB path now excludes lifecycle principal legs (`bot_open_position` / `bot_close_position`) and sums only non-principal `fee_payer_token_deltas` (collect/swap/other operational flows).
+- **What (execution):** Removed preflight-time fee collection from rebalance rotation flow; this avoids paying tx fees for `bot_collect_fees` when reopen preflight later fails.
+- **What (strategy loop):** Disabled standalone `Decision::CollectFees` emission in decision loop so collection is not triggered as an independent periodic action.
+- **Policy now:** Fee collection happens on close/rebalance-close paths (the close flow), aligning behavior across strategies.
+- **Why:** User observed repeated zero-owed collect tx and unintuitive `cashflow` in position history due to principal mixing.
+- **Guards/tests:** `cargo check -p clmm-lp-execution -p clmm-lp-api`; added decision-engine regression test to prevent standalone collect decision.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/decision.rs`, `doc/BUGS.md`
+
+## 2026-04-22 — Live rebalance interval switched to minute granularity (UI + execution)
+
+keywords: api, execution, web, strategy, rebalance, interval, minutes, last-candle-periodic
+
+- **What (execution):** Decision engine now evaluates spacing/timer gates in **minutes** (`minutes_since_rebalance`) instead of hour-rounded values, so sub-hour intervals work as configured.
+- **What (API):** Added `parameters.min_rebalance_interval_minutes` (preferred) while keeping `min_rebalance_interval_hours` as backward-compatible fallback (`hours * 60`).
+- **What (mapping):** Strategy config parsing now prefers minutes and applies interval semantics in minutes for `Periodic` and `LastCandlePeriodic` (`0` clamp to `1 minute` to avoid per-tick spam).
+- **What (web):** Strategy Create/Edit forms now configure interval in minutes and send `min_rebalance_interval_minutes`; Strategy Detail/Positions render minute-based summaries (with legacy-hours fallback conversion).
+- **What (diagnostics):** Position strategy `last_eval` snapshot now includes `minutes_since_rebalance` (hours retained for compatibility).
+- **Guards/tests:** `cargo check -p clmm-lp-execution -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/execution/src/strategy/decision.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/optimize_profile.rs`, `crates/api/src/models.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/handlers/positions.rs`, `web/src/lib/api.ts`, `web/src/lib/strategyFormShared.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/StrategyDetail.tsx`, `web/src/pages/Positions.tsx`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-22 — New live strategy mode: Last candle (periodic)
+
+keywords: execution, api, web, strategy, last-candle, periodic, rebalance, interval
+
+- **What (execution):** Added a new strategy mode `LastCandlePeriodic` in decision engine. It rebalances on a time interval (`min_rebalance_interval_hours`) regardless of in-range/OOR, while still building range from last closed candle low/high with fallback to `Range Width %`.
+- **What (execution/runtime):** Executor now computes `last_candle_ticks` for both `LastCandle` and `LastCandlePeriodic`; rebalance reason for periodic variant is tagged as `Periodic`.
+- **What (API):** Added `StrategyType::LastCandlePeriodic` and wired strategy-type -> decision-mode mapping in both strategy start paths (`handlers/strategies` and `strategy_service`).
+- **What (config semantics):** Interval helper now treats `LastCandlePeriodic` as periodic-like for `0 -> 1h` defensive clamp and keeps default interval (24h) when interval is omitted, avoiding accidental rebalance-on-every-eval-tick.
+- **What (web):** Added explicit `last_candle_periodic` option in strategy create/edit forms with separate copy/description, shared candle-seconds input, and clear type-safe API support.
+- **Guards/tests:** `cargo check -p clmm-lp-execution -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`); new unit tests in decision engine + interval helper.
+- **paths:** `crates/execution/src/strategy/decision.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/services/simulation_analytics.rs`, `web/src/lib/api.ts`, `web/src/lib/strategyFormShared.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`
+
+## 2026-04-22 — Position Agent Supervisor: entry/cost/earnings snapshot + scenario playbook
+
+keywords: api, web, position-agent, supervisor, stream-pnl, stream-lineage, costs, earnings, scenarios
+
+- **What (API):** Added `GET /positions/{address}/agent/supervisor` that returns one supervision snapshot for a position stream: `entry_capital_usd`, `current_value_usd`, cumulative `costs_total_usd`, cumulative `earnings_total_usd`, `net_since_entry_usd`, `net_since_entry_pct`, elapsed hours, rebalance count, plus scenario playbook (`bullish`, `bearish`, `sideways`).
+- **What (API model):** Added typed schemas `AgentPositionSupervisorResponse` and `AgentSupervisorScenario` in OpenAPI + TS client.
+- **What (web):** `PositionDetail -> Position Agent` now renders a new “Supervisor: koszt i wynik od wejścia” block with financial summary and scenario recommendations, so operator sees chain performance and next actions in one place.
+- **Why:** Extend Position Agent from generic chat to explicit cost/profit supervision over full position history, with actionable recommendations for likely market regimes.
+- **Guards/tests:** `cargo check -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/agent.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-22 — Rebalance open guard + Logs range comparison for close/open events
+
+keywords: execution, rebalance, duplicate-open, rebalance-session-id, lifecycle-ledger, logs, range-visualization
+
+- **What (execution):** Added a session-level open guard to prevent duplicate `bot_open_position` in one `rebalance_session_id`. Guard checks both persisted ledger (`session_has_bot_open_position`) and in-process inflight/completed session sets; blocked attempts emit `bot_open_guard_blocked` diagnostic rows.
+- **What (execution/log details):** Enriched close/open lifecycle details with range context (`old_tick_lower/upper`, `planned_new_tick_lower/upper`, `prev_tick_lower/upper`, `new_tick_lower/upper`) so open/close reasoning is visible in logs without deep trace correlation.
+- **What (web logs):** In `Logs` session view, added compact graphical tick-range panels for close/open rows: close shows active+planned ranges; open shows previous vs current range side-by-side for fast operator scan.
+- **Why:** User incident showed an orphaned second open (`85A...`) in one session; prior telemetry could confirm duplicate open happened, but did not provide hard guardrail nor operator-friendly range context in logs.
+- **Guards/tests:** `cargo check -p clmm-lp-execution`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/pages/Logs.tsx`, `doc/BUGS.md`
+
+## 2026-04-21 — Logs lifecycle UX: session view + Solscan + JSON details
+
+keywords: web, logs, lifecycle-ledger, solscan, ux, rebalance-session
+
+- **What:** `Logs` → *Lifecycle ledger* defaults to a **session-grouped** view (group by `rebalance_session_id` within the current page/limit), with short Polish summaries, Solscan links for signatures plus pool/position accounts, and expandable `details` JSON. Raw columns remain behind **Tabela surowa**.
+- **Why:** Plain JSONL rows felt opaque; operators need chained open/close/collect context and quick on-chain verification.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/Logs.tsx`
+
+## 2026-04-21 — Position agent MVP: per-position chat + scan insights API
+
+keywords: api, agent, position, chat, supervision, scan, recommendations, jsonl
+
+- **What:** Added per-position agent endpoints: `GET /positions/{address}/agent-chat`, `POST /positions/{address}/agent/start`, `POST /positions/{address}/agent/message`, `POST /positions/{address}/agent/scan-now`.
+- **What:** Added persistent local store in `data/agent/position_agent_state.json` (sessions + chat history) and append-only events log `data/agent/position_agent_events.jsonl`.
+- **What:** Added typed API models for agent session/chat/scan responses and documented them in OpenAPI (`Agent` tag).
+- **Follow-up:** Added background worker (`CLMM_AGENT_BACKGROUND_INTERVAL_SECS`, default `120`) that periodically scans due active sessions (`next_scan_ts_utc`) and appends insights automatically.
+- **Follow-up 2:** Added global worker settings + status endpoints (`GET/PUT /agent/worker/settings`, `GET /agent/worker/status`) with persisted files `data/agent/agent_worker_settings.json` and `data/agent/agent_worker_status.json`.
+- **Follow-up 3:** Added `GET /positions/{address}/agent-chat/ui` payload with quick actions and suggested prompts, so UI tab can render without client-side hardcoding.
+- **Follow-up 4 (web):** Added `Position Agent` tab in `PositionDetail` with start supervision, manual `scan-now`, message send, suggested prompts, and timeline rendering from `agent-chat/ui`.
+- **Follow-up 5 (web):** Added `Agent` status column in `Positions` table with active/inactive badge and next planned scan time for each monitored position.
+- **Follow-up 6 (LLM plugin):** Added provider abstraction (`position_agent_llm`) with mode switch by env (`CLMM_AGENT_LLM_MODE`) and OpenAI-compatible adapter (`CLMM_AGENT_LLM_URL`, `CLMM_AGENT_LLM_API_KEY`, `CLMM_AGENT_LLM_MODEL`) plus safe fallback when provider is disabled/unavailable.
+- **Follow-up 7 (API):** Added explicit endpoint `POST /positions/{address}/agent/llm-reply` (prompt + optional context -> persisted agent message + source metadata), and updated default chat message path to use the same provider/fallback flow.
+- **Why:** Deliver first MVP for “agent under supervision” flow: each open position can have an attached conversation and quick range/cross-pair insights, without paid external data dependencies.
+- **Guards/tests:** `cargo check -p clmm-lp-api`.
+- **Guards/tests (web):** `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/api/src/handlers/agent.rs`, `crates/api/src/services/position_agent_service.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/api/src/handlers/mod.rs`, `crates/api/src/services/mod.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-21 — Position Agent UX activation: quick actions wired + visible LLM source
+
+keywords: web, position-agent, quick-actions, llm-reply, fallback, ux, position-detail
+
+- **What:** Wired `Position Agent` quick actions in `PositionDetail` to real behavior (`scan_now` trigger and prefilled prompt sends for compare/cross-pair actions).
+- **What:** Switched agent send path in UI from `/agent/message` to `/agent/llm-reply` so frontend receives provider metadata and displays reply source (`fallback/provider:model`) after each response.
+- **Why:** Users reported the tab felt non-functional because action pills were non-clickable and fallback replies looked indistinguishable from proper model answers.
+- **Guards/tests:** `npx tsc --noEmit` (in `web/`).
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`, `doc/BUGS.md`
+
+## 2026-04-21 — Agent/state race guard + PositionDetail range marker fix
+
+keywords: api, agent, concurrency, json-state, message-id, ui, position-detail, range-marker
+
+- **What (API):** Added a process-local lock around per-position agent JSON state read/modify/write paths (`get_or_create_session`, `append_message`, `touch_scan`, `due_sessions`, `list_chat`) to prevent concurrent lost updates from HTTP requests and background worker ticks.
+- **What (API):** Switched agent chat message id generation from millisecond timestamp to UUID v4 to avoid collisions under burst/concurrent writes.
+- **What (web):** Fixed Position Detail range marker (`NOW`) to derive current USDC price from token labels + token USD prices, instead of parsing the descriptive `range_usdc_quote` string.
+- **Why:** Review surfaced concurrency/data-loss risk in agent persistence and non-working `NOW` marker despite valid ranges.
+- **Guards/tests:** `cargo check -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/api/src/services/position_agent_service.rs`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-04-21 — Agent decisions JSONL + read/write API
+
+keywords: api, agent, decisions, jsonl, orchestration, data, join-friendly
+
+- **What:** Added persistent local feed `data/agent/agent_decisions.jsonl` with two endpoints: `GET /data/agent/decisions` (filters: `strategy_id`, `source`, `from`, `to`, `limit`) and `POST /data/agent/decisions` (append one decision row).
+- **What:** Defined normalized decision row schema with canonical keys (`ts_utc`, `source`) and join-friendly optional ids (`position_id`, `chain_id`, `session_id`) plus free-form `decision` payload.
+- **Why:** Provide first writable orchestration primitive so AI/operator decisions are queryable over time and joinable with market/position datasets.
+- **Guards/tests:** `cargo check -p clmm-lp-api`.
+- **paths:** `crates/api/src/handlers/data.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`
+
+## 2026-04-21 — Normalized local market feeds via API (`/data/snapshots`, `/data/swaps`)
+
+keywords: api, data, snapshots, swaps, jsonl, normalization, join-friendly, orchestration
+
+- **What:** Added `GET /data/snapshots` and `GET /data/swaps` backed by local JSONL stores (`data/pool-snapshots/**/snapshots*.jsonl`, `data/swaps/**/*swap*.jsonl`).
+- **What:** Added shared filters (`protocol`, `pool`, `from`, `to`, `limit`) and normalized response rows with canonical keys (`ts_utc`, `protocol`, `pool_address`) plus optional join-friendly ids (`position_id`, `chain_id`, `session_id`).
+- **Why:** Create an API-first, queryable slice for historical market datasets that can be joined with persisted Orca telemetry and reused by future agent/orchestration flows.
+- **Guards/tests:** `cargo check -p clmm-lp-api`.
+- **paths:** `crates/api/src/handlers/data.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/mod.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`
+
 ## 2026-04-21 — Orca volume history snapshots: persist + API endpoints
 
 keywords: api, pools, orca, volume, stats, history, jsonl, backtest, data-catalog
@@ -45,6 +302,17 @@ keywords: web, backtests, lp_share, meteora, ui
 - **What:** `Backtests` page now renders `LP share` input only when at least one selected pool is Meteora (`METEORA_*`), and sends `lp_share` in the FULL-run request only in that case.
 - **Why:** For Orca/Raydium runs this knob is usually irrelevant/noisy in UI; operators asked to keep it visible only where it matters operationally.
 - **paths:** `web/src/pages/Backtests.tsx`
+
+## 2026-04-20 — Backtests: configurable strategy parameter grids from frontend
+
+keywords: web, api, cli, backtest-optimize, strategy-grid, threshold, periodic, bollinger, last-candle
+
+- **What (CLI):** Extended `backtest-optimize` with optional grid overrides: `--threshold-grid-pct`, `--periodic-grid-steps`, `--bollinger-window-grid`, `--bollinger-k-grid`, `--bollinger-rebalance-steps-grid`, `--last-candle-steps-grid`, `--last-candle-rebalance-steps-grid`, `--last-candle-seconds-grid`, `--last-candle-rebalance-seconds-grid`.
+- **What (API):** `POST /backtests/full` now accepts and forwards the above grid options to CLI so runs can be parameterized from UI, not only defaults.
+- **What (web):** Added a dedicated “Konfiguracja parametrow strategii (grid)” block in Backtests with editable CSV inputs and short impact descriptions per parameter.
+- **Why:** Operators requested full control over backtest strategy parameter sets directly from frontend, with explanatory context for each parameter’s effect.
+- **Guards/tests:** `cargo check -p clmm-lp-cli`; `cargo check -p clmm-lp-api`; `npx tsc --noEmit` (in `web/`).
+- **paths:** `crates/cli/src/main.rs`, `crates/cli/src/commands/backtest_optimize.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`
 
 ## 2026-04-20 — Backtests FULL: CLI family filter + capital USD + vsHODL target gate
 

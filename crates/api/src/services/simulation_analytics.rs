@@ -117,6 +117,10 @@ pub async fn run_dashboard_simulation(
                 .rebalance_on_out_of_range(true);
             simulate_with_strategy(&config, &mut gbm, &mut volume_model, &liquidity_model, &s)
         }
+        StrategyType::LastCandlePeriodic => {
+            let s = PeriodicRebalance::new(periodic_interval, range_width_pct);
+            simulate_with_strategy(&config, &mut gbm, &mut volume_model, &liquidity_model, &s)
+        }
     };
 
     let summary = &result.summary;

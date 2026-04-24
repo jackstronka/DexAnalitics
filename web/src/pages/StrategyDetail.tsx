@@ -136,16 +136,27 @@ export default function StrategyDetail() {
                 <span>{strategy.parameters.max_il_pct}%</span>
               </div>
             )}
-            {strategy.parameters.min_rebalance_interval_hours !== undefined && (
+            {(strategy.parameters.min_rebalance_interval_minutes !== undefined ||
+              strategy.parameters.min_rebalance_interval_hours !== undefined) && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Min Rebalance Interval</span>
-                <span>{strategy.parameters.min_rebalance_interval_hours}h</span>
+                <span>
+                  {strategy.parameters.min_rebalance_interval_minutes ??
+                    (strategy.parameters.min_rebalance_interval_hours ?? 0) * 60}
+                  m
+                </span>
               </div>
             )}
             {strategy.parameters.range_width_pct !== undefined && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Range Width</span>
                 <span>{strategy.parameters.range_width_pct}%</span>
+              </div>
+            )}
+            {strategy.parameters.retouch_offset_pct !== undefined && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Retouch Offset</span>
+                <span>{strategy.parameters.retouch_offset_pct}%</span>
               </div>
             )}
             {strategy.parameters.candle_seconds !== undefined && (

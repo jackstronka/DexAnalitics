@@ -51,6 +51,7 @@ export interface PositionLastEvalSnapshot {
   requires_transaction: boolean
   auto_execute: boolean
   hours_since_rebalance?: number | null
+  minutes_since_rebalance?: number | null
 }
 
 export interface PositionStrategyDiagnostics {
@@ -69,6 +70,68 @@ export interface PositionDiagnosticsResponse {
   in_monitor: boolean
   monitor_in_range?: boolean | null
   linked_strategies: PositionStrategyDiagnostics[]
+}
+
+export interface AgentPositionSession {
+  position_address: string
+  status: string
+  started_ts_utc: string
+  last_scan_ts_utc?: string | null
+  next_scan_ts_utc?: string | null
+  scan_interval_hours: number
+}
+
+export interface AgentChatMessage {
+  id: string
+  position_address: string
+  ts_utc: string
+  role: string
+  kind: string
+  content: string
+}
+
+export interface AgentChatUiPayload {
+  position_address: string
+  session?: AgentPositionSession | null
+  messages: AgentChatMessage[]
+  quick_actions: string[]
+  suggested_prompts: string[]
+}
+
+export interface AgentLlmReplyMeta {
+  provider: string
+  used_fallback: boolean
+  model?: string | null
+}
+
+export interface AgentLlmReplyResponse {
+  position_address: string
+  message: AgentChatMessage
+  meta: AgentLlmReplyMeta
+}
+
+export interface AgentSupervisorScenario {
+  scenario: 'bullish' | 'bearish' | 'sideways' | string
+  expectation: string
+  suggested_action: string
+}
+
+export interface AgentPositionSupervisor {
+  position_address: string
+  entry_capital_usd: string
+  current_value_usd: string
+  earnings_total_usd: string
+  costs_total_usd: string
+  net_since_entry_usd: string
+  net_since_entry_pct: string
+  rebalance_count: number
+  elapsed_hours?: number | null
+  entry_token_a_ui?: string | null
+  entry_token_b_ui?: string | null
+  entry_token_a_label?: string | null
+  entry_token_b_label?: string | null
+  scenarios: AgentSupervisorScenario[]
+  note?: string | null
 }
 
 export interface PositionStreamPerformanceResponse {
@@ -291,6 +354,26 @@ export interface BacktestFullRequest {
   lp_share?: number
   capital_usd?: number
   target_vs_hodl_usd?: number
+  /** Optional fixed static deviation from entry, e.g. 10 => range = entry * (1 ± 10%). */
+  static_deviation_pct?: number
+  /** Static (single pool): manual lower bound. */
+  static_manual_lower?: number
+  /** Static (single pool): manual upper bound. */
+  static_manual_upper?: number
+  /** Optional fixed OOR-recenter deviation from entry, e.g. 10 => range = entry * (1 ± 10%). */
+  oor_recenter_deviation_pct?: number
+  threshold_grid_pct?: number[]
+  threshold_min_rebalance_interval_hours?: number
+  threshold_rebalance_on_range_exit_immediately?: boolean
+  periodic_grid_steps?: number[]
+  retouch_offset_pct?: number
+  bollinger_window_grid?: number[]
+  bollinger_k_grid?: number[]
+  bollinger_rebalance_steps_grid?: number[]
+  last_candle_steps_grid?: number[]
+  last_candle_rebalance_steps_grid?: number[]
+  last_candle_seconds_grid?: number[]
+  last_candle_rebalance_seconds_grid?: number[]
 }
 
 export interface BacktestFullMetricRow {
@@ -334,6 +417,42 @@ export interface BacktestFullJobResponse {
   results?: BacktestFullWindowResult[] | null
 }
 
+export interface BacktestAutoTuneStartRequest {
+  interval_minutes?: number
+  full_request: BacktestFullRequest
+}
+
+export interface BacktestAutoTuneWinner {
+  pool_id: string
+  pool_label: string
+  window_hours: number
+  strategy: string
+  width_pct: number
+  score: number
+  pnl: number
+  vs_hodl: number
+  fees: number
+  rebalances: number
+  tir_pct: number
+}
+
+export interface BacktestAutoTuneStatusResponse {
+  running: boolean
+  interval_minutes: number
+  started_ts_utc?: string | null
+  last_tick_ts_utc?: string | null
+  next_tick_ts_utc?: string | null
+  latest_job_id?: string | null
+  latest_winner?: BacktestAutoTuneWinner | null
+  note?: string | null
+}
+
+export interface BacktestAutoTuneApplyResponse {
+  strategy_id: string
+  updated: boolean
+  note: string
+}
+
 export interface PositionExperimentConfigResponse {
   position_address: string
   open_session_id?: string | null
@@ -365,6 +484,7 @@ export type StrategyType =
   | 'oor_recenter'
   | 'retouch_shift'
   | 'last_candle'
+  | 'last_candle_periodic'
 
 export interface Strategy {
   id: string
@@ -388,9 +508,13 @@ export type OptimizeApplyPolicy =
 
 export interface StrategyParameters {
   rebalance_threshold_pct?: number
+  retouch_offset_pct?: number
   max_il_pct?: number
+  /** Legacy fallback (hours). UI should prefer minutes. */
   min_rebalance_interval_hours?: number
-  /** Candle size in seconds for `last_candle` strategy. */
+  /** Preferred live interval field (minutes). */
+  min_rebalance_interval_minutes?: number
+  /** Candle size in seconds for `last_candle` / `last_candle_periodic` strategy. */
   candle_seconds?: number
   range_width_pct?: number
   /** Periodic: when true, rebalance only if position is out of range. */
@@ -754,6 +878,40 @@ export function closedPositionsListQueryOptions(
 /** Matches API on-chain router timeout (`API_ONCHAIN_REQUEST_TIMEOUT_SECS`, default 120s): many RPC + prices. */
 export const getPosition = (address: string) =>
   fetchJsonWithTimeout<Position>(`/positions/${encodeURIComponent(address)}`, 120_000)
+export const getPositionAgentChatUi = (address: string) =>
+  fetchJson<AgentChatUiPayload>(`/positions/${encodeURIComponent(address)}/agent-chat/ui`)
+export const startPositionAgent = (address: string, scanIntervalHours?: number) =>
+  fetchJson<{ session: AgentPositionSession }>(`/positions/${encodeURIComponent(address)}/agent/start`, {
+    method: 'POST',
+    body: JSON.stringify(
+      scanIntervalHours && Number.isFinite(scanIntervalHours)
+        ? { scan_interval_hours: Math.max(1, Math.floor(scanIntervalHours)) }
+        : {},
+    ),
+  })
+export const sendPositionAgentMessage = (address: string, content: string) =>
+  fetchJson<AgentChatMessage>(`/positions/${encodeURIComponent(address)}/agent/message`, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  })
+export const sendPositionAgentLlmReply = (
+  address: string,
+  prompt: string,
+  context?: Record<string, unknown>,
+) =>
+  fetchJson<AgentLlmReplyResponse>(`/positions/${encodeURIComponent(address)}/agent/llm-reply`, {
+    method: 'POST',
+    body: JSON.stringify(
+      context && Object.keys(context).length > 0 ? { prompt, context } : { prompt },
+    ),
+  })
+export const triggerPositionAgentScan = (address: string, includeCrossPairScan = true) =>
+  fetchJson(`/positions/${encodeURIComponent(address)}/agent/scan-now`, {
+    method: 'POST',
+    body: JSON.stringify({ include_cross_pair_scan: includeCrossPairScan }),
+  })
+export const getPositionAgentSupervisor = (address: string) =>
+  fetchJson<AgentPositionSupervisor>(`/positions/${encodeURIComponent(address)}/agent/supervisor`)
 export const getPositionDiagnostics = (address: string) =>
   fetchJson<PositionDiagnosticsResponse>(`/positions/${encodeURIComponent(address)}/diagnostics`)
 export const suggestPositionStrategy = (address: string) =>
@@ -809,6 +967,28 @@ export const startBacktestFull = (body: BacktestFullRequest) =>
 
 export const getBacktestFullJob = (id: string) =>
   fetchJson<BacktestFullJobResponse>(`/backtests/full/${encodeURIComponent(id)}`)
+
+export const startBacktestAutoTune = (body: BacktestAutoTuneStartRequest) =>
+  fetchJsonLong<BacktestAutoTuneStatusResponse>('/backtests/auto-tune/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const stopBacktestAutoTune = () =>
+  fetchJson<BacktestAutoTuneStatusResponse>('/backtests/auto-tune/stop', {
+    method: 'POST',
+  })
+
+export const getBacktestAutoTuneStatus = () =>
+  fetchJson<BacktestAutoTuneStatusResponse>('/backtests/auto-tune/status')
+
+export const applyBacktestAutoTuneToStrategy = (strategyId: string) =>
+  fetchJson<BacktestAutoTuneApplyResponse>(
+    `/backtests/auto-tune/apply/${encodeURIComponent(strategyId)}`,
+    {
+      method: 'POST',
+    },
+  )
 
 export const getPositionExperimentConfig = (address: string) =>
   fetchJson<PositionExperimentConfigResponse>(

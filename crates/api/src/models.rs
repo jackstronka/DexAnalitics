@@ -260,6 +260,8 @@ pub struct PositionLastEvalSnapshot {
     pub auto_execute: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hours_since_rebalance: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes_since_rebalance: Option<u64>,
 }
 
 /// Uncollected LP fees from the Whirlpool position account (`fee_owed_a` / `fee_owed_b`), in human
@@ -986,6 +988,8 @@ pub enum StrategyType {
     RetouchShift,
     /// Recenter from the last fully closed candle band (low/high), fallback to width%.
     LastCandle,
+    /// Rebalance periodically (time-based) using last closed candle band (or width fallback).
+    LastCandlePeriodic,
 }
 
 /// Strategy parameters.
@@ -1002,6 +1006,10 @@ pub struct StrategyParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub rebalance_threshold_pct: Option<Decimal>,
+    /// RetouchShift only: shift full retouched band by this percent (e.g. 0.1 => +0.1%).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub retouch_offset_pct: Option<Decimal>,
     /// Maximum IL percentage.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
@@ -1012,6 +1020,9 @@ pub struct StrategyParameters {
     /// Minimum rebalance interval in hours.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rebalance_interval_hours: Option<u64>,
+    /// Minimum rebalance interval in minutes (preferred live/UI field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_rebalance_interval_minutes: Option<u64>,
     /// Candle size for `last_candle` in seconds (e.g. 900 = 15m, 3600 = 1h).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candle_seconds: Option<u64>,
@@ -1695,10 +1706,109 @@ pub struct BacktestFullRequest {
     /// Optional target threshold: keep only rows with `vs_hodl >= target_vs_hodl_usd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_vs_hodl_usd: Option<f64>,
+    /// Optional fixed static deviation from entry in percent (`±X%` around entry).
+    /// When set, optimize range grid is pinned to one width:
+    /// `width_pct = 2 * static_deviation_pct` (so `10` => range `entry * (1±10%)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_deviation_pct: Option<f64>,
+    /// Static only (single selected pool): manual lower range bound in price units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_manual_lower: Option<f64>,
+    /// Static only (single selected pool): manual upper range bound in price units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_manual_upper: Option<f64>,
+    /// Optional fixed OOR-recenter deviation from entry in percent (`±X%` around entry).
+    /// When set, optimize range grid is pinned to one width:
+    /// `width_pct = 2 * oor_recenter_deviation_pct` (so `10` => range `entry * (1±10%)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oor_recenter_deviation_pct: Option<f64>,
+    /// Override threshold grid in percent, e.g. `[2,3,5,7,10,15]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_grid_pct: Option<Vec<f64>>,
+    /// Threshold mode: minimum interval (hours) before OOR-triggered rebalance when immediate OOR is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_min_rebalance_interval_hours: Option<u64>,
+    /// Threshold mode: if true, OOR triggers immediate rebalance (bot parity default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_rebalance_on_range_exit_immediately: Option<bool>,
+    /// Override periodic strategy grid in hours (legacy field name kept), e.g. `[12,24,48,72]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub periodic_grid_steps: Option<Vec<u64>>,
+    /// RetouchShift only: shift full retouched band by this percent (UI value, e.g. `0.1` => +0.1%).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retouch_offset_pct: Option<f64>,
+    /// Override bollinger windows, e.g. `[20,30]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bollinger_window_grid: Option<Vec<u64>>,
+    /// Override bollinger k values, e.g. `[1.5,2.0,2.5]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bollinger_k_grid: Option<Vec<f64>>,
+    /// Override bollinger rebalance steps, e.g. `[24,48]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bollinger_rebalance_steps_grid: Option<Vec<u64>>,
+    /// Override last-candle candle steps (non-snapshot mode), e.g. `[1,2,3,4]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_candle_steps_grid: Option<Vec<u64>>,
+    /// Override last-candle rebalance steps (non-snapshot mode), e.g. `[4,16,48]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_candle_rebalance_steps_grid: Option<Vec<u64>>,
+    /// Override last-candle candle seconds (snapshot mode), e.g. `[900,1800,3600]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_candle_seconds_grid: Option<Vec<u64>>,
+    /// Override last-candle rebalance seconds (snapshot mode), e.g. `[900,1800,3600,14400]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_candle_rebalance_seconds_grid: Option<Vec<u64>>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Request for starting periodic auto-tune loop based on FULL backtests.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestAutoTuneStartRequest {
+    /// Interval between full optimize cycles (minutes), e.g. 15 or 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u64>,
+    /// Template request used for each `POST /backtests/full` cycle.
+    pub full_request: BacktestFullRequest,
+}
+
+/// Latest winner snapshot extracted from FULL optimize results.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestAutoTuneWinner {
+    pub pool_id: String,
+    pub pool_label: String,
+    pub window_hours: u32,
+    pub strategy: String,
+    pub width_pct: f64,
+    pub score: f64,
+    pub pnl: f64,
+    pub vs_hodl: f64,
+    pub fees: f64,
+    pub rebalances: u32,
+    pub tir_pct: f64,
+}
+
+/// Current auto-tune loop status.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestAutoTuneStatusResponse {
+    pub running: bool,
+    pub interval_minutes: u64,
+    pub started_ts_utc: Option<String>,
+    pub last_tick_ts_utc: Option<String>,
+    pub next_tick_ts_utc: Option<String>,
+    pub latest_job_id: Option<String>,
+    pub latest_winner: Option<BacktestAutoTuneWinner>,
+    pub note: Option<String>,
+}
+
+/// Response for applying latest auto-tune winner to a strategy config.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestAutoTuneApplyResponse {
+    pub strategy_id: String,
+    pub updated: bool,
+    pub note: String,
 }
 
 /// One row from optimize ranking table (parsed from CLI output).
@@ -2086,6 +2196,234 @@ pub struct RunScriptRequest {
 }
 
 // ============================================================================
+// Position Agent (per-position supervision + chat)
+// ============================================================================
+
+/// Start/ensure per-position agent supervision.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct AgentSessionRequest {
+    /// Background scan interval in hours (default: 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_interval_hours: Option<u64>,
+}
+
+/// Agent supervision session tied to one position.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentPositionSession {
+    pub position_address: String,
+    /// `active` or future states (paused/stopped).
+    pub status: String,
+    pub started_ts_utc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_scan_ts_utc: Option<String>,
+    pub scan_interval_hours: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentSessionResponse {
+    pub session: AgentPositionSession,
+}
+
+/// User message to the position agent chat.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentMessageRequest {
+    pub content: String,
+}
+
+/// Optional context for LLM answer generation.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct AgentLlmContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
+}
+
+/// Explicit request to generate one agent answer (LLM plugin path with fallback).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentLlmReplyRequest {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<AgentLlmContext>,
+}
+
+/// One chat message in a position agent thread.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentChatMessage {
+    pub id: String,
+    pub position_address: String,
+    pub ts_utc: String,
+    /// `user` or `agent`.
+    pub role: String,
+    /// `question` | `info` | `insight` | `action`.
+    pub kind: String,
+    pub content: String,
+}
+
+/// Position chat timeline with session metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentChatResponse {
+    pub position_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentPositionSession>,
+    pub messages: Vec<AgentChatMessage>,
+}
+
+/// Trigger immediate analysis for this position.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct AgentScanRequest {
+    /// Include cross-pair opportunity suggestions (default: true).
+    #[serde(default = "default_true")]
+    pub include_cross_pair_scan: bool,
+}
+
+/// Result of immediate agent scan.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentScanResponse {
+    pub position_address: String,
+    pub scanned_ts_utc: String,
+    pub include_cross_pair_scan: bool,
+    pub recommendations: Vec<String>,
+    pub session: AgentPositionSession,
+}
+
+/// Point-in-time scenario used by position supervisor.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentSupervisorScenario {
+    /// `bullish`, `bearish`, `sideways`.
+    pub scenario: String,
+    /// One-line expectation for this market regime.
+    pub expectation: String,
+    /// Suggested operator action for this scenario.
+    pub suggested_action: String,
+}
+
+/// Cost/profit supervision snapshot for one position stream.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentPositionSupervisorResponse {
+    pub position_address: String,
+    /// Earliest known baseline value for the chain (`stream_pnl.baseline_value_usd`).
+    #[schema(value_type = String)]
+    pub entry_capital_usd: Decimal,
+    /// Current live value from `GET /positions/{address}` valuation path when available.
+    #[schema(value_type = String)]
+    pub current_value_usd: Decimal,
+    /// Realized + collected LP earnings proxy across chain.
+    #[schema(value_type = String)]
+    pub earnings_total_usd: Decimal,
+    /// Network tx costs across chain.
+    #[schema(value_type = String)]
+    pub costs_total_usd: Decimal,
+    /// Since-entry net result: `current + earnings - entry - costs`.
+    #[schema(value_type = String)]
+    pub net_since_entry_usd: Decimal,
+    /// Since-entry net result in percent of entry capital.
+    #[schema(value_type = String)]
+    pub net_since_entry_pct: Decimal,
+    /// Number of rebalance/open-close sessions known for this chain.
+    pub rebalance_count: u64,
+    /// Elapsed wall time from chain baseline timestamp to now (best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_hours: Option<i64>,
+    /// Baseline token leg quantities, if available from lineage head node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub entry_token_a_ui: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub entry_token_b_ui: Option<Decimal>,
+    /// Baseline token leg labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_token_a_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_token_b_label: Option<String>,
+    /// Scenario playbook derived from current stream condition.
+    pub scenarios: Vec<AgentSupervisorScenario>,
+    /// Data quality / provenance note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Global settings for the position-agent background worker.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentWorkerSettings {
+    pub enabled: bool,
+    /// Default per-position scan interval used when starting session without explicit value.
+    pub default_position_scan_interval_hours: u64,
+    /// Cross-pair scan cadence hint for recommendations.
+    pub cross_pair_scan_interval_hours: u64,
+    /// Whether background scans include cross-pair recommendations by default.
+    pub include_cross_pair_scan: bool,
+}
+
+impl Default for AgentWorkerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_position_scan_interval_hours: 4,
+            cross_pair_scan_interval_hours: 4,
+            include_cross_pair_scan: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct AgentWorkerSettingsUpdateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_position_scan_interval_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_pair_scan_interval_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_cross_pair_scan: Option<bool>,
+}
+
+/// Last-known background worker runtime status.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentWorkerStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tick_ts_utc: Option<String>,
+    pub ticks_total: u64,
+    pub scanned_positions_total: u64,
+    pub scanned_positions_last_tick: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// UI-focused payload for position-agent tab.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentChatUiPayload {
+    pub position_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentPositionSession>,
+    pub messages: Vec<AgentChatMessage>,
+    pub quick_actions: Vec<String>,
+    pub suggested_prompts: Vec<String>,
+}
+
+/// Source metadata for generated answer.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentLlmReplyMeta {
+    /// `disabled_fallback` or provider name (e.g. `openai_compatible`).
+    pub provider: String,
+    pub used_fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentLlmReplyResponse {
+    pub position_address: String,
+    pub message: AgentChatMessage,
+    pub meta: AgentLlmReplyMeta,
+}
+
+// ============================================================================
 // Wallets (local keypairs directory + on-chain balances)
 // ============================================================================
 
@@ -2188,6 +2526,171 @@ pub struct JupiterPricesResponse {
     pub returned: usize,
     /// Map: mint -> USD price.
     pub prices: std::collections::BTreeMap<String, f64>,
+}
+
+// ============================================================================
+// Data feed endpoints (normalized JSONL reads)
+// ============================================================================
+
+/// Common query params for normalized market-data feeds.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MarketDataQuery {
+    /// Optional protocol filter (`orca`, `raydium`, `meteora`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Optional pool address filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    /// Optional lower timestamp bound (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Optional upper timestamp bound (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Max rows returned (default: 500, max: 10_000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One normalized snapshots row from `data/pool-snapshots/**/snapshots*.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MarketSnapshotRow {
+    pub ts_utc: String,
+    pub protocol: String,
+    pub pool_address: String,
+    pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub price_ab: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liquidity_active_raw: Option<u128>,
+    /// Join-friendly optional keys used by other feeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Response for `GET /data/snapshots`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MarketSnapshotsResponse {
+    pub scanned_files: usize,
+    pub rows_returned: usize,
+    pub rows: Vec<MarketSnapshotRow>,
+}
+
+/// One normalized swaps row from `data/swaps/**/{swaps,decoded_swaps}.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MarketSwapRow {
+    pub ts_utc: String,
+    pub protocol: String,
+    pub pool_address: String,
+    pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub amount_in: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub amount_out: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub fee_usd: Option<Decimal>,
+    /// Join-friendly optional keys used by other feeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Response for `GET /data/swaps`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MarketSwapsResponse {
+    pub scanned_files: usize,
+    pub rows_returned: usize,
+    pub rows: Vec<MarketSwapRow>,
+}
+
+/// Query params for persisted agent decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentDecisionsQuery {
+    /// Optional strategy id filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    /// Optional decision source filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Optional lower timestamp bound (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Optional upper timestamp bound (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Max rows returned (default: 500, max: 10000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Request body for appending one agent decision row to local JSONL.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentDecisionWriteRequest {
+    /// Event timestamp (RFC3339 UTC recommended). If missing, API sets current UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_utc: Option<String>,
+    /// Decision source (e.g. `agent`, `operator`, `autotune`).
+    pub source: String,
+    /// Optional strategy id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    /// Join-friendly optional ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Free-form payload with the decision details.
+    #[schema(value_type = Object)]
+    pub decision: serde_json::Value,
+}
+
+/// One persisted row from `data/agent/agent_decisions.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentDecisionRow {
+    pub ts_utc: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[schema(value_type = Object)]
+    pub decision: serde_json::Value,
+}
+
+/// Response for `GET /data/agent/decisions`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentDecisionsResponse {
+    pub path: String,
+    pub file_missing: bool,
+    pub rows_returned: usize,
+    pub rows: Vec<AgentDecisionRow>,
+}
+
+/// Response for `POST /data/agent/decisions`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentDecisionWriteResponse {
+    pub path: String,
+    pub written: bool,
+    pub row: AgentDecisionRow,
 }
 
 #[cfg(test)]

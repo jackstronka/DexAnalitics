@@ -1,9 +1,11 @@
 //! Request handlers for API endpoints.
 
 pub mod aerodrome_slipstream;
+pub mod agent;
 pub mod analytics;
 pub mod backtests;
 pub mod bot_activity;
+pub mod data;
 pub mod health;
 pub mod orca;
 pub mod orca_onchain;
@@ -30,9 +32,11 @@ mod pools_tests;
 mod tx_tests;
 
 pub use aerodrome_slipstream::*;
+pub use agent::*;
 pub use analytics::*;
 pub use backtests::*;
 pub use bot_activity::*;
+pub use data::*;
 pub use health::*;
 pub use orca::*;
 pub use orca_onchain::*;

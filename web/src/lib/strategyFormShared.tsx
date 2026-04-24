@@ -14,7 +14,7 @@ export const STRATEGY_COPY: Record<
   periodic: {
     title: 'Okresowa',
     body:
-      'Rebalance co ustaloną liczbę godzin od ostatniego rebalance’u. Domyślnie działa „po staremu”: zegar tyka niezależnie od tego, czy jesteś w zakresie. Opcjonalnie możesz włączyć wariant „tylko gdy OOR”.',
+      'Rebalance co ustaloną liczbę minut od ostatniego rebalance’u. Domyślnie działa „po staremu”: zegar tyka niezależnie od tego, czy jesteś w zakresie. Opcjonalnie możesz włączyć wariant „tylko gdy OOR”.',
   },
   threshold: {
     title: 'Próg (cena)',
@@ -40,6 +40,11 @@ export const STRATEGY_COPY: Record<
     title: 'Last candle',
     body:
       'Poza zakresem: nowe granice z ostatniej zamkniętej świecy (low/high). Gdy brak świecy lub jest płaska, fallback do pasma z Range Width %.',
+  },
+  last_candle_periodic: {
+    title: 'Last candle (periodic)',
+    body:
+      'Tryb interwałowy: rebalance co N minut niezależnie od in-range/OOR. Granice są z ostatniej zamkniętej świecy (low/high), a przy braku świecy lub płaskiej świecy fallback do pasma z Range Width %.',
   },
 }
 
@@ -88,6 +93,12 @@ export const FIELD_ENABLED: Record<StrategyType, Record<FieldKey, boolean>> = {
     rebalanceThreshold: false,
     minInterval: true,
   },
+  last_candle_periodic: {
+    rangeWidth: true,
+    maxIl: false,
+    rebalanceThreshold: false,
+    minInterval: true,
+  },
 }
 
 export const TOOLTIPS = {
@@ -105,15 +116,17 @@ export const TOOLTIPS = {
   rebalanceThresholdIl:
     'Tryb limit IL: gdy |IL| przekroczy ten próg (i spełnione są reguły odstępu), rekomendowany jest rebalance.',
   minIntervalPeriodic:
-    'Tryb czasowy: rebalance okresowy może wykonać się po upływie N godzin od poprzedniego rebalance. Licznik resetuje się po każdej wykonanej akcji.',
+    'Tryb czasowy: rebalance okresowy może wykonać się po upływie N minut od poprzedniego rebalance. Licznik resetuje się po każdej wykonanej akcji.',
   minIntervalOther:
-    'Minimalna liczba godzin między rebalance’ami tam, gdzie silnik egzekwuje odstęp (np. przy limit IL).',
+    'Minimalna liczba minut między rebalance’ami tam, gdzie silnik egzekwuje odstęp (np. przy limit IL).',
   candleSeconds:
-    'Rozmiar świecy dla strategii last_candle w sekundach (np. 900 = 15m, 3600 = 1h). Używana jest ostatnia w pełni zamknięta świeca.',
+    'Rozmiar świecy dla strategii last_candle / last_candle_periodic w minutach (np. 15, 30, 60). Używana jest ostatnia w pełni zamknięta świeca.',
   periodicRequiresOor:
     'Gdy włączone: rebalance okresowy wykona się tylko wtedy, gdy w chwili wyzwolenia (po upływie interwału) pozycja jest poza zakresem (OOR). Gdy wyłączone: rebalance okresowy wykona się po interwale niezależnie od in-range/OOR.',
   rebalanceOnRangeExitImmediately:
-    'Gdy włączone, wyjście poza zakres może od razu wywołać rebalance (close+open). Gdy wyłączone, OOR jest tylko sygnałem i rebalance czeka na interwał minimalny. Uwaga: to ustawienie nie dotyczy strategii Periodic.',
+    'Gdy włączone, wyjście poza zakres może od razu wywołać rebalance (close+open). Gdy wyłączone, OOR jest tylko sygnałem i rebalance czeka na interwał minimalny. Uwaga: to ustawienie nie dotyczy strategii Periodic oraz Last candle (periodic).',
+  retouchOffsetPct:
+    'Tylko RetouchShift: przesuwa cały nowy zakres po retouch o X% ceny. 0 = krawędź dotyka ceny OOR; dodatni przesuwa zakres w prawo, ujemny w lewo.',
   dryRun:
     'Gdy włączone, executor nie wykonuje prawdziwych transakcji on-chain (tryb bezpieczny).',
   autoExecute:
@@ -158,8 +171,9 @@ export function buildParameters(
     rangeWidthPct: number | ''
     maxIlPct: number | ''
     rebalanceThresholdPct: number | ''
-    minRebalanceIntervalHours: number | ''
-    candleSeconds: number | ''
+    minRebalanceIntervalMinutes: number | ''
+    retouchOffsetPct: number | ''
+    candleMinutes: number | ''
     periodicRequiresOutOfRange: boolean
     rebalanceOnRangeExitImmediately: boolean
     autoStart: boolean
@@ -176,23 +190,28 @@ export function buildParameters(
   if (e.rebalanceThreshold && state.rebalanceThresholdPct !== '') {
     p.rebalance_threshold_pct = Number(state.rebalanceThresholdPct)
   }
-  if (e.minInterval && state.minRebalanceIntervalHours !== '') {
-    const n = Number(state.minRebalanceIntervalHours)
+  if (strategyType === 'retouch_shift' && state.retouchOffsetPct !== '') {
+    p.retouch_offset_pct = Number(state.retouchOffsetPct)
+  }
+  if (e.minInterval && state.minRebalanceIntervalMinutes !== '') {
+    const n = Number(state.minRebalanceIntervalMinutes)
     if (Number.isFinite(n) && n >= 0) {
-      p.min_rebalance_interval_hours = Math.floor(n)
+      p.min_rebalance_interval_minutes = Math.floor(n)
     }
   }
-  if (strategyType === 'last_candle' && state.candleSeconds !== '') {
-    const n = Number(state.candleSeconds)
+  if ((strategyType === 'last_candle' || strategyType === 'last_candle_periodic') && state.candleMinutes !== '') {
+    const n = Number(state.candleMinutes)
     if (Number.isFinite(n) && n > 0) {
-      p.candle_seconds = Math.max(60, Math.floor(n))
+      p.candle_seconds = Math.max(60, Math.floor(n * 60))
     }
   }
 
   // Optional execution semantics toggles.
   // We always send them so the behavior is explicit and visible in the saved config.
   p.periodic_requires_out_of_range = state.periodicRequiresOutOfRange
-  p.rebalance_on_range_exit_immediately = state.rebalanceOnRangeExitImmediately
+  if (strategyType !== 'periodic' && strategyType !== 'last_candle_periodic') {
+    p.rebalance_on_range_exit_immediately = state.rebalanceOnRangeExitImmediately
+  }
   p.auto_start = state.autoStart
 
   return p

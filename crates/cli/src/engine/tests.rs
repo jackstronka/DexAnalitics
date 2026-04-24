@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_rebalance_costs_are_charged_once() {
+    fn periodic_hourly_rebalance_costs_are_charged_once() {
         let mut steps = Vec::new();
         for i in 0..5u64 {
             let mut s = step(dec!(20), dec!(100));
@@ -103,9 +103,9 @@ mod tests {
         );
 
         assert_eq!(summary.total_fees, Decimal::ZERO);
-        // Periodic(1): rebalance when `steps_since_rebalance >= 1`, so every step fires (5× here).
-        assert_eq!(summary.rebalance_count, 5);
-        assert_eq!(summary.total_rebalance_cost, tx_cost * Decimal::from(5u32));
+        // First step has no elapsed wall-clock yet; then each 1h step fires.
+        assert_eq!(summary.rebalance_count, 4);
+        assert_eq!(summary.total_rebalance_cost, tx_cost * Decimal::from(4u32));
 
         assert!(
             (summary.final_value - (capital - summary.total_rebalance_cost)).abs() < dec!(0.0001)
@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn total_il_is_zero_with_multiple_rebalances_and_constant_price() {
+    fn total_il_is_zero_with_multiple_periodic_rebalances_and_constant_price() {
         let mut steps = Vec::new();
         for i in 0..6u64 {
             let mut s = step(dec!(20), dec!(100));
@@ -144,6 +144,67 @@ mod tests {
         assert!(summary.total_fees.is_zero());
         assert!(summary.rebalance_count >= 5);
         assert!(summary.final_il_pct.abs() < dec!(0.0001));
+    }
+
+    #[test]
+    fn periodic_hourly_respects_wall_clock_on_irregular_steps() {
+        let mut steps = Vec::new();
+        for (i, ts) in [0_u64, 60, 120, 180, 240, 3600, 7200]
+            .iter()
+            .enumerate()
+        {
+            let mut s = step(dec!(20), dec!(100));
+            s.step_volume_usd = Decimal::ZERO;
+            s.start_timestamp = *ts;
+            s.tick_current = Some(i as i32);
+            steps.push(s);
+        }
+
+        let (_lo, _hi, _name, summary) = run_single(
+            &steps,
+            Price::new(dec!(2000)),
+            2000.0,
+            0.20,
+            StratConfig::Periodic(1),
+            dec!(1000),
+            dec!(0),
+            dec!(0.0),
+            None,
+            9,
+            9,
+            None,
+            None,
+        );
+        // Only at ts=3600 and ts=7200.
+        assert_eq!(summary.rebalance_count, 2);
+    }
+
+    #[test]
+    fn periodic_steps_legacy_still_rebalances_each_step() {
+        let mut steps = Vec::new();
+        for i in 0..5u64 {
+            let mut s = step(dec!(20), dec!(100));
+            s.step_volume_usd = Decimal::ZERO;
+            s.start_timestamp = i * 3600;
+            steps.push(s);
+        }
+
+        let (_lo, _hi, _name, summary) = run_single(
+            &steps,
+            Price::new(dec!(2000)),
+            2000.0,
+            0.20,
+            StratConfig::PeriodicSteps(1),
+            dec!(1000),
+            dec!(0),
+            dec!(0.0),
+            None,
+            9,
+            9,
+            None,
+            None,
+        );
+        assert_eq!(summary.rebalance_count, 5);
     }
 
     #[test]
@@ -189,7 +250,11 @@ mod tests {
             Price::new(dec!(2000)),
             2000.0,
             0.20,
-            StratConfig::Threshold(0.01),
+            StratConfig::Threshold {
+                threshold_pct: 0.01,
+                min_rebalance_interval_hours: 0,
+                rebalance_on_range_exit_immediately: true,
+            },
             capital,
             tx_cost,
             dec!(0.0),
@@ -488,7 +553,15 @@ mod tests {
         );
         assert_eq!(
             parse_strategy_label("retouch_shift"),
-            Some(StratConfig::RetouchShift)
+            Some(StratConfig::RetouchShift {
+                retouch_offset_pct: 0.0,
+            })
+        );
+        assert_eq!(
+            parse_strategy_label("retouch_shift_off0.1000pct"),
+            Some(StratConfig::RetouchShift {
+                retouch_offset_pct: 0.001,
+            })
         );
         assert_eq!(
             parse_strategy_label("il_limit_5%_grace_0"),
@@ -542,6 +615,10 @@ mod tests {
                 candle_seconds: 3600,
                 rebalance_seconds: 14400,
             })
+        );
+        assert_eq!(
+            parse_strategy_label("periodic_steps_3"),
+            Some(StratConfig::PeriodicSteps(3))
         );
     }
 
@@ -603,5 +680,129 @@ mod tests {
             None,
         );
         assert_eq!(summary.rebalance_count, 1);
+    }
+
+    /// `OorRecenter` vs `RetouchShift` share the same code path until the first OOR event; with no
+    /// OOR they match `Static` (no rebalances). With a single sustained OOR plateau they often both
+    /// rebalance **once** — metrics can look identical after rounding even though post-rebalance
+    /// geometries differ (symmetric % band vs edge-preserving shift).
+    #[test]
+    fn oor_recenter_matches_retouch_shift_when_price_never_leaves_initial_band() {
+        let mut steps = Vec::new();
+        for i in 0..12u64 {
+            let mut s = step(dec!(100), dec!(1));
+            s.start_timestamp = i * 3600;
+            s.step_volume_usd = Decimal::ZERO;
+            steps.push(s);
+        }
+        let cap = dec!(10_000);
+        let tx = dec!(1);
+        let w = 0.10;
+        let (_, _, _, s_oor) = run_single(
+            &steps,
+            Price::new(dec!(100)),
+            100.0,
+            w,
+            StratConfig::OorRecenter,
+            cap,
+            tx,
+            dec!(0.0),
+            None,
+            9,
+            6,
+            None,
+            None,
+        );
+        let (_, _, _, s_ret) = run_single(
+            &steps,
+            Price::new(dec!(100)),
+            100.0,
+            w,
+            StratConfig::RetouchShift {
+                retouch_offset_pct: 0.0,
+            },
+            cap,
+            tx,
+            dec!(0.0),
+            None,
+            9,
+            6,
+            None,
+            None,
+        );
+        assert_eq!(s_oor.rebalance_count, 0);
+        assert_eq!(s_ret.rebalance_count, 0);
+        assert!((s_oor.final_value - s_ret.final_value).abs() < dec!(0.0001));
+    }
+
+    /// After the first OOR fix, `OorRecenter` can fire again on the **next** step if the price path
+    /// immediately leaves the freshly centered band. `RetouchShift` arms only after an in-range
+    /// step, so a monotonic climb typically produces **fewer** retouches than oor recenters.
+    #[test]
+    fn oor_recenter_rebalances_more_often_than_retouch_on_monotonic_climb_after_oor() {
+        let mut steps = Vec::new();
+        for i in 0..3u64 {
+            let mut s = step(dec!(100), dec!(1));
+            s.start_timestamp = i;
+            s.step_volume_usd = Decimal::ZERO;
+            steps.push(s);
+        }
+        let climb = [
+            dec!(111),
+            dec!(120),
+            dec!(130),
+            dec!(141),
+            dec!(153),
+            dec!(166),
+            dec!(180),
+            dec!(195),
+        ];
+        for (j, px) in climb.iter().enumerate() {
+            let mut s = step(*px, dec!(1));
+            s.start_timestamp = 10 + j as u64;
+            s.step_volume_usd = Decimal::ZERO;
+            steps.push(s);
+        }
+        let cap = dec!(10_000);
+        let tx = dec!(5);
+        let w = 0.10;
+        let (_, _, _, s_oor) = run_single(
+            &steps,
+            Price::new(dec!(100)),
+            100.0,
+            w,
+            StratConfig::OorRecenter,
+            cap,
+            tx,
+            dec!(0.0),
+            None,
+            9,
+            6,
+            None,
+            None,
+        );
+        let (_, _, _, s_ret) = run_single(
+            &steps,
+            Price::new(dec!(100)),
+            100.0,
+            w,
+            StratConfig::RetouchShift {
+                retouch_offset_pct: 0.0,
+            },
+            cap,
+            tx,
+            dec!(0.0),
+            None,
+            9,
+            6,
+            None,
+            None,
+        );
+        assert!(
+            s_oor.rebalance_count > s_ret.rebalance_count,
+            "expected more oor recenters than retouches on monotonic climb; oor={} retouch={}",
+            s_oor.rebalance_count,
+            s_ret.rebalance_count
+        );
     }
 }

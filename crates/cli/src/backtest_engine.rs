@@ -63,9 +63,15 @@ pub enum StratConfig {
     Static,
     /// Rebalance only when the price exits the current range.
     OorRecenter,
-    Threshold(f64),
-    /// Steps between rebalances (label uses `h` suffix historically; value is **step count**).
+    Threshold {
+        threshold_pct: f64,
+        min_rebalance_interval_hours: u64,
+        rebalance_on_range_exit_immediately: bool,
+    },
+    /// Rebalance every N hours based on wall-clock timestamps (default periodic semantics).
     Periodic(u64),
+    /// Legacy: rebalance every N simulation steps.
+    PeriodicSteps(u64),
     /// IL-like guard (vs HODL, ex-fees): rebalance on OOR or when |IL-like| crosses threshold.
     IlLimit {
         max_il_pct: f64,
@@ -73,7 +79,8 @@ pub enum StratConfig {
         grace_steps: u64,
     },
     /// Shift only the exiting edge (keep width in A/B), one retouch per OOR episode.
-    RetouchShift,
+    /// `retouch_offset_pct` shifts the full new band relative to OOR price (0.001 = +0.1%).
+    RetouchShift { retouch_offset_pct: f64 },
     /// Bollinger: last `window` closes (A/B), bands `SMA ± k·σ`; rebalance every `rebalance_steps` steps.
     Bollinger {
         window: u32,
@@ -97,13 +104,20 @@ fn calculate_retouch_range_ab(
     current_lower_ab: Decimal,
     current_upper_ab: Decimal,
     current_price_ab: Decimal,
+    retouch_offset_pct: f64,
 ) -> (Decimal, Decimal) {
-    if current_price_ab > current_upper_ab {
+    let (lower, upper) = if current_price_ab > current_upper_ab {
         let overflow = current_price_ab - current_upper_ab;
         (current_lower_ab + overflow, current_price_ab)
     } else {
         let overflow = current_lower_ab - current_price_ab;
         (current_price_ab, current_upper_ab - overflow)
+    };
+    let shift = Decimal::from_f64(1.0 + retouch_offset_pct).unwrap_or(Decimal::ONE);
+    if shift <= Decimal::ZERO {
+        (lower, upper)
+    } else {
+        (lower * shift, upper * shift)
     }
 }
 
@@ -285,7 +299,7 @@ fn index_swaps_by_step<'a>(
 /// (key = step index, same convention as `snapshot_price_path` / `fee_growth` deltas). LP share is still applied
 /// via [`FeeShareModel`]. When both are absent, fees default to `step_volume_usd * fee_rate`.
 #[allow(clippy::too_many_arguments)]
-pub fn run_single(
+fn run_single_internal(
     step_data: &[StepData],
     entry_price: Price,
     center: f64,
@@ -299,6 +313,7 @@ pub fn run_single(
     token_b_decimals: u32,
     swaps: Option<&[SwapEvent]>,
     snapshot_pool_fees_usd: Option<&BTreeMap<usize, Decimal>>,
+    static_manual_bounds_usd: Option<(f64, f64)>,
 ) -> (f64, f64, String, TrackerSummary) {
     let _ = entry_price; // kept for API compatibility; amount-based sim derives entry from step_data[0]
     // Amount-based accounting:
@@ -330,8 +345,29 @@ pub fn run_single(
 
     let half = width_pct / 2.0;
     let center_ab = first.price_ab.value.to_f64().unwrap_or(1.0);
-    let lower_ab = Decimal::from_f64(center_ab * (1.0 - half)).unwrap();
-    let upper_ab = Decimal::from_f64(center_ab * (1.0 + half)).unwrap();
+    let (lower_ab, upper_ab) = if let (StratConfig::Static, Some((lo_usd, hi_usd))) =
+        (strat, static_manual_bounds_usd)
+    {
+        let lo_ab = Decimal::from_f64(lo_usd)
+            .unwrap_or(Decimal::ZERO)
+            / first.quote_usd.max(Decimal::from_f64(1e-12).unwrap_or(Decimal::ONE));
+        let hi_ab = Decimal::from_f64(hi_usd)
+            .unwrap_or(Decimal::ZERO)
+            / first.quote_usd.max(Decimal::from_f64(1e-12).unwrap_or(Decimal::ONE));
+        if lo_ab > Decimal::ZERO && hi_ab > lo_ab {
+            (lo_ab, hi_ab)
+        } else {
+            (
+                Decimal::from_f64(center_ab * (1.0 - half)).unwrap(),
+                Decimal::from_f64(center_ab * (1.0 + half)).unwrap(),
+            )
+        }
+    } else {
+        (
+            Decimal::from_f64(center_ab * (1.0 - half)).unwrap(),
+            Decimal::from_f64(center_ab * (1.0 + half)).unwrap(),
+        )
+    };
 
     // For reporting only, return bounds in USD using entry quote USD.
     let entry_quote_usd = first.quote_usd;
@@ -368,8 +404,28 @@ pub fn run_single(
     let strat_name = match strat {
         StratConfig::Static => "static".to_string(),
         StratConfig::OorRecenter => "oor_recenter".to_string(),
-        StratConfig::Threshold(p) => format!("threshold_{:.0}%", p * 100.0),
+        StratConfig::Threshold {
+            threshold_pct,
+            min_rebalance_interval_hours,
+            rebalance_on_range_exit_immediately,
+        } => {
+            if min_rebalance_interval_hours > 0 || !rebalance_on_range_exit_immediately {
+                format!(
+                    "threshold_{:.0}%_min{}h_oor{}",
+                    threshold_pct * 100.0,
+                    min_rebalance_interval_hours,
+                    if rebalance_on_range_exit_immediately {
+                        "immediate"
+                    } else {
+                        "delayed"
+                    }
+                )
+            } else {
+                format!("threshold_{:.0}%", threshold_pct * 100.0)
+            }
+        }
         StratConfig::Periodic(h) => format!("periodic_{}h", h),
+        StratConfig::PeriodicSteps(s) => format!("periodic_steps_{}", s),
         StratConfig::IlLimit {
             max_il_pct,
             close_il_pct,
@@ -387,7 +443,13 @@ pub fn run_single(
                 format!("il_limit_{:.0}%_grace_{}", max_label, grace_steps)
             }
         }
-        StratConfig::RetouchShift => "retouch_shift".to_string(),
+        StratConfig::RetouchShift { retouch_offset_pct } => {
+            if retouch_offset_pct.abs() < f64::EPSILON {
+                "retouch_shift".to_string()
+            } else {
+                format!("retouch_shift_off{:.4}pct", retouch_offset_pct * 100.0)
+            }
+        }
         StratConfig::Bollinger {
             window,
             k,
@@ -554,20 +616,33 @@ pub fn run_single(
         let should_rebalance = match strat {
             StratConfig::Static => false,
             StratConfig::OorRecenter => !in_range,
-            StratConfig::Threshold(th) => {
+            StratConfig::Threshold {
+                threshold_pct,
+                min_rebalance_interval_hours,
+                rebalance_on_range_exit_immediately,
+            } => {
                 if !in_range {
-                    true
+                    if !rebalance_on_range_exit_immediately {
+                        secs_since_rebalance >= min_rebalance_interval_hours.saturating_mul(3600)
+                    } else {
+                        true
+                    }
                 } else {
                     let mid = (current_lower_ab + current_upper_ab) / Decimal::from(2u32);
                     if mid.is_zero() {
                         false
                     } else {
                         let change = ((price_ab - mid) / mid).abs();
-                        change >= Decimal::from_f64(th).unwrap_or(Decimal::ZERO)
+                        change >= Decimal::from_f64(threshold_pct).unwrap_or(Decimal::ZERO)
                     }
                 }
             }
-            StratConfig::Periodic(interval) => steps_since_rebalance >= interval,
+            StratConfig::Periodic(interval_hours) => {
+                secs_since_rebalance >= interval_hours.saturating_mul(3600)
+            }
+            StratConfig::PeriodicSteps(interval_steps) => {
+                steps_since_rebalance >= interval_steps
+            }
             StratConfig::IlLimit {
                 max_il_pct,
                 close_il_pct,
@@ -585,7 +660,7 @@ pub fn run_single(
                     il_like_now_pct.abs() >= max_il || il_like_now_pct.abs() >= close_il
                 }
             }
-            StratConfig::RetouchShift => !in_range && retouch_armed,
+            StratConfig::RetouchShift { .. } => !in_range && retouch_armed,
             StratConfig::Bollinger {
                 window,
                 rebalance_steps,
@@ -611,8 +686,13 @@ pub fn run_single(
             // Re-deploy current position value minus tx cost; fees are NOT compounded here.
             let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
             let (new_lower_ab, new_upper_ab) = match strat {
-                StratConfig::RetouchShift => {
-                    calculate_retouch_range_ab(current_lower_ab, current_upper_ab, price_ab)
+                StratConfig::RetouchShift { retouch_offset_pct } => {
+                    calculate_retouch_range_ab(
+                        current_lower_ab,
+                        current_upper_ab,
+                        price_ab,
+                        retouch_offset_pct,
+                    )
                 }
                 StratConfig::Bollinger { window, k, .. } => {
                     let w = window as usize;
@@ -714,7 +794,7 @@ pub fn run_single(
             };
             current_lower_ab = new_lower_ab;
             current_upper_ab = new_upper_ab;
-            if let StratConfig::RetouchShift = strat {
+            if let StratConfig::RetouchShift { .. } = strat {
                 retouch_armed = false;
             }
 
@@ -803,6 +883,40 @@ pub fn run_single(
     (lower, upper, strat_name, summary)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn run_single(
+    step_data: &[StepData],
+    entry_price: Price,
+    center: f64,
+    width_pct: f64,
+    strat: StratConfig,
+    capital_dec: Decimal,
+    tx_cost_dec: Decimal,
+    fee_rate: Decimal,
+    pool_active_liquidity: Option<u128>,
+    token_a_decimals: u32,
+    token_b_decimals: u32,
+    swaps: Option<&[SwapEvent]>,
+    snapshot_pool_fees_usd: Option<&BTreeMap<usize, Decimal>>,
+) -> (f64, f64, String, TrackerSummary) {
+    run_single_internal(
+        step_data,
+        entry_price,
+        center,
+        width_pct,
+        strat,
+        capital_dec,
+        tx_cost_dec,
+        fee_rate,
+        pool_active_liquidity,
+        token_a_decimals,
+        token_b_decimals,
+        swaps,
+        snapshot_pool_fees_usd,
+        None,
+    )
+}
+
 /// Run grid of (width_pct, strategy) in parallel. Returns (width_pct, lower, upper, strat_name, summary).
 /// If `swaps` is provided, fees are computed from Dune swap data per step.
 /// If `snapshot_pool_fees_usd` is provided (and swaps are not), pool fees per step follow the snapshot index.
@@ -822,6 +936,41 @@ pub fn run_grid(
     swaps: Option<&[SwapEvent]>,
     snapshot_pool_fees_usd: Option<BTreeMap<usize, Decimal>>,
 ) -> Vec<(f64, f64, f64, String, TrackerSummary)> {
+    run_grid_with_static_bounds(
+        step_data,
+        entry_price,
+        center,
+        width_pcts,
+        strategies,
+        capital_dec,
+        tx_cost_dec,
+        fee_rate,
+        pool_active_liquidity,
+        token_a_decimals,
+        token_b_decimals,
+        swaps,
+        snapshot_pool_fees_usd,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_grid_with_static_bounds(
+    step_data: &[StepData],
+    entry_price: Price,
+    center: f64,
+    width_pcts: &[f64],
+    strategies: &[StratConfig],
+    capital_dec: Decimal,
+    tx_cost_dec: Decimal,
+    fee_rate: Decimal,
+    pool_active_liquidity: Option<u128>,
+    token_a_decimals: u32,
+    token_b_decimals: u32,
+    swaps: Option<&[SwapEvent]>,
+    snapshot_pool_fees_usd: Option<BTreeMap<usize, Decimal>>,
+    static_manual_bounds_usd: Option<(f64, f64)>,
+) -> Vec<(f64, f64, f64, String, TrackerSummary)> {
     let step_data = Arc::new(step_data.to_vec());
     let swaps_arc: Option<Arc<Vec<SwapEvent>>> = swaps.map(|s| Arc::new(s.to_vec()));
     let snap_arc: Option<Arc<BTreeMap<usize, Decimal>>> = snapshot_pool_fees_usd.map(Arc::new);
@@ -833,7 +982,7 @@ pub fn run_grid(
         .map(|(wp, strat)| {
             let swaps_ref = swaps_arc.as_deref();
             let snap_ref = snap_arc.as_deref();
-            let (lower, upper, strat_name, summary) = run_single(
+            let (lower, upper, strat_name, summary) = run_single_internal(
                 step_data.as_ref(),
                 entry_price,
                 center,
@@ -847,6 +996,7 @@ pub fn run_grid(
                 token_b_decimals,
                 swaps_ref.map(|v| &**v),
                 snap_ref,
+                static_manual_bounds_usd,
             );
             (*wp, lower, upper, strat_name, summary)
         })
@@ -861,15 +1011,28 @@ pub fn parse_strategy_label(name: &str) -> Option<StratConfig> {
         return Some(StratConfig::Static);
     }
     if let Some(rest) = name.strip_prefix("threshold_") {
-        let pct_str = rest.trim_end_matches('%').trim();
+        let pct_token = rest.split('_').next().unwrap_or(rest);
+        let pct_str = pct_token.trim_end_matches('%').trim();
         let pct = pct_str.parse::<f64>().ok()?;
-        return Some(StratConfig::Threshold(pct / 100.0));
+        return Some(StratConfig::Threshold {
+            threshold_pct: pct / 100.0,
+            min_rebalance_interval_hours: 0,
+            rebalance_on_range_exit_immediately: true,
+        });
     }
     if name == "oor_recenter" {
         return Some(StratConfig::OorRecenter);
     }
     if name == "retouch_shift" {
-        return Some(StratConfig::RetouchShift);
+        return Some(StratConfig::RetouchShift {
+            retouch_offset_pct: 0.0,
+        });
+    }
+    if let Some(rest) = name.strip_prefix("retouch_shift_off") {
+        let pct = rest.trim_end_matches("pct").trim().parse::<f64>().ok()?;
+        return Some(StratConfig::RetouchShift {
+            retouch_offset_pct: pct / 100.0,
+        });
     }
     if let Some(rest) = name.strip_prefix("il_limit_") {
         let mut max_il_pct: Option<f64> = None;
@@ -898,6 +1061,10 @@ pub fn parse_strategy_label(name: &str) -> Option<StratConfig> {
             close_il_pct,
             grace_steps: grace_steps.unwrap_or(0),
         });
+    }
+    if let Some(rest) = name.strip_prefix("periodic_steps_") {
+        let steps = rest.trim().parse::<u64>().ok()?;
+        return Some(StratConfig::PeriodicSteps(steps));
     }
     if let Some(rest) = name.strip_prefix("periodic_") {
         let num_str = rest.trim_end_matches('h').trim();

@@ -2528,11 +2528,12 @@ async fn node_metrics(
         Decimal::ZERO
     };
 
-    // Realized cashflow for this PDA: sum fee_payer_token_deltas (pool legs) × current mint USD prices.
+    // Realized cashflow for this PDA: sum non-principal fee_payer_token_deltas (pool legs)
+    // × current mint USD prices. Open/close principal legs are excluded.
     let mut mint_deltas: BTreeMap<String, Decimal> = BTreeMap::new();
     let rows = sqlx::query(
         r#"
-        SELECT fee_payer_token_deltas
+        SELECT fee_payer_token_deltas, event
         FROM position_stream_ledger_rows
         WHERE position_pubkey = $1 AND fee_payer_token_deltas IS NOT NULL
         "#,
@@ -2543,6 +2544,10 @@ async fn node_metrics(
     .map_err(|e| ApiError::internal(format!("stream lineage: token deltas query: {e}")))?;
 
     for r in rows {
+        let event: Option<String> = r.try_get("event").ok();
+        if is_lifecycle_open_event(event.as_deref()) || is_lifecycle_close_event(event.as_deref()) {
+            continue;
+        }
         let v: Option<serde_json::Value> = r.try_get("fee_payer_token_deltas").ok();
         let Some(serde_json::Value::Object(map)) = v else {
             continue;
@@ -2832,7 +2837,7 @@ async fn node_metrics(
         net_pnl_pct,
         note: Some(
             format!(
-                "Best-effort per-PDA. tx_fee_lamports = sum of network fees for this PDA; fees_collected_usd = bot_collect_fees legs × USD (mint map + fee_payer_token_*_delta_ui columns when present); tx fees use SOL/USD ({sol_src}). cashflow uses fee_payer_token_deltas × current mint USD prices when baseline mints are known.{}{}",
+                "Best-effort per-PDA. tx_fee_lamports = sum of network fees for this PDA; fees_collected_usd = bot_collect_fees legs × USD (mint map + fee_payer_token_*_delta_ui columns when present); tx fees use SOL/USD ({sol_src}). cashflow uses non-principal fee_payer_token_deltas (excluding open/close legs) × current mint USD prices when baseline mints are known.{}{}",
                 baseline_note
                     .as_deref()
                     .map(|n| format!(" {n}."))
@@ -3600,6 +3605,11 @@ fn apply_session_continuity_from_lifecycle_rows(
         let old = nodes[i - 1].position_address.clone();
         let newp = nodes[i].position_address.clone();
         if !links.contains(&(old, newp)) {
+            continue;
+        }
+        // Preserve baseline computed directly from the open row (e.g. `open_amount_raw` / caps path).
+        // Session continuity should only fill missing baseline, not overwrite explicit open valuation.
+        if !nodes[i].baseline_value_usd.is_zero() {
             continue;
         }
         let prev_end = nodes[i - 1].current_value_usd;
@@ -4559,6 +4569,57 @@ mod tests {
         ];
         apply_session_continuity_from_lifecycle_rows(&rows, &mut nodes);
         assert_eq!(nodes[1].baseline_value_usd, Decimal::new(180, 2));
+    }
+
+    #[test]
+    fn continuity_from_session_does_not_override_existing_baseline() {
+        let ts = chrono::Utc::now();
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(ts),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("pool".to_string()),
+                position_pubkey: Some("old".to_string()),
+                fee_payer_pubkey: Some("payer".to_string()),
+                rebalance_session_id: Some("sid-1".to_string()),
+                tx_fee_lamports: None,
+                fee_payer_token_deltas: None,
+                fee_payer_token_a_delta_ui: None,
+                fee_payer_token_b_delta_ui: None,
+                lp_collected_token_a_raw: None,
+                lp_collected_token_b_raw: None,
+                details: None,
+                source: None,
+            },
+            LifecycleRow {
+                ts_utc: Some(ts),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("pool".to_string()),
+                position_pubkey: Some("new".to_string()),
+                fee_payer_pubkey: Some("payer".to_string()),
+                rebalance_session_id: Some("sid-1".to_string()),
+                tx_fee_lamports: None,
+                fee_payer_token_deltas: None,
+                fee_payer_token_a_delta_ui: None,
+                fee_payer_token_b_delta_ui: None,
+                lp_collected_token_a_raw: None,
+                lp_collected_token_b_raw: None,
+                details: None,
+                source: None,
+            },
+        ];
+
+        let mut nodes = vec![
+            mk_node("old", Decimal::new(200, 2), Decimal::new(180, 2)),
+            // Simulates explicit baseline derived from open row (even if tiny/dust).
+            mk_node("new", Decimal::new(1, 6), Decimal::new(175, 2)),
+        ];
+        apply_session_continuity_from_lifecycle_rows(&rows, &mut nodes);
+        assert_eq!(nodes[1].baseline_value_usd, Decimal::new(1, 6));
+        assert!(nodes[1]
+            .note
+            .as_deref()
+            .is_none_or(|n| !n.contains("baseline_from_rotation_session")));
     }
 
     #[test]

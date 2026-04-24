@@ -28,6 +28,235 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260424-05 — Wallet page showed SOL immediately but SPL tokens appeared only after manual refresh
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-24  
+fixed_in: local  
+keywords: wallet, spl-tokens, rpc-timeout, refresh, retry, ux, web
+
+- **Symptom:** Po wejściu na Wallet widać SOL, ale lista tokenów SPL bywa pusta; tokeny pojawiają się dopiero po ręcznym odświeżeniu strony.
+- **Root cause:** API endpoint `/wallets/balances` zwraca sukces z pustą listą tokenów, gdy call `getTokenAccountsByOwner` chwilowo nie przejdzie (SOL jest zwracany niezależnie). UI traktował taki stan jako finalny i nie ponawiał automatycznie.
+- **Fix:** Added bounded auto-retry in Wallet UI when owner is set, request succeeded, and token list is empty (up to 4 retries, delayed), plus explicit retry status message.
+- **Guards/tests:** `npx tsc --noEmit` (web); manual verify: first empty token response triggers automatic retries without page refresh.
+- **Paths:** `web/src/pages/Wallet.tsx`
+
+---
+
+### BUG-20260424-04 — Static manual lower/upper was treated as width proxy, not absolute bounds
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-24  
+fixed_in: local  
+keywords: backtests, static, manual-range, lower-upper, absolute-bounds, api, cli
+
+- **Symptom:** User set `static_manual_lower=85` and `static_manual_upper=90` for SOL/USDC, but result rows still showed different static ranges (e.g. ~83-88, ~85-90) across windows.
+- **Root cause:** API converted manual bounds into a derived `% width` and pinned `min/max-range-pct`, so engine still anchored ranges around each window entry price instead of using absolute bounds.
+- **Fix:** Added dedicated CLI args `--static-manual-lower` / `--static-manual-upper`, passed through API only for valid single-pool manual runs, and wired backtest engine to apply these as absolute initial bounds for `StratConfig::Static` only.
+- **Guards/tests:** `cargo check -p clmm-lp-cli -p clmm-lp-api`; rerun FULL backtest with one pool and manual static range should keep static bounds fixed to entered levels.
+- **Paths:** `crates/api/src/handlers/backtests.rs`, `crates/cli/src/main.rs`, `crates/cli/src/backtest_engine.rs`
+
+---
+
+### BUG-20260424-03 — Auto-Tune loop marked completed FULL jobs as failed (`done` vs `succeeded/partial`)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-24  
+fixed_in: local  
+keywords: auto-tune, backtests, full-run, status, succeeded, partial, done, api
+
+- **Symptom:** `Status: running | note: Full optimize cycle failed` appeared even when FULL jobs were completing and returning results.
+- **Root cause:** Auto-Tune polling logic expected terminal success status `"done"`, but `start_backtest_full` writes `"succeeded"` or `"partial"`. This caused success/partial cycles to be treated as failures.
+- **Fix:** Updated Auto-Tune success branch to accept `"succeeded"` and `"partial"` as completed cycles; it now stores latest winner when results exist and sets note to either completed or completed (partial).
+- **Guards/tests:** `cargo check -p clmm-lp-api`; manual verification via `/backtests/auto-tune/status` note progression after FULL cycle.
+- **Paths:** `crates/api/src/handlers/backtests.rs`
+
+---
+
+### BUG-20260424-02 — Backtests FULL failed with `unexpected argument 'true'` for threshold OOR flag
+
+status: partially fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-24  
+fixed_in: local  
+keywords: backtests, full-run, threshold, cli, clap, bool-flag, unexpected-argument
+
+- **Symptom:** FULL runs ended as `partial` with CLI parse error: `unexpected argument 'true' found` for `--threshold-rebalance-on-range-exit-immediately`.
+- **Symptom (follow-up):** Error persisted in runtime when API still resolved an older `clmm-lp-cli` binary that exposed switch-only syntax for this flag.
+- **Root cause:** API passed the threshold OOR toggle as `--threshold-rebalance-on-range-exit-immediately true/false`, while older CLI variants parsed it as a pure boolean switch (set-true flag) and rejected explicit value tokens.
+- **Fix:** 
+  - CLI parser changed to `ArgAction::Set` for `threshold_rebalance_on_range_exit_immediately` (accepts explicit `true/false`).
+  - API now probes `backtest-optimize --help` and auto-selects argument style:
+    - value style (`... true/false`) when supported,
+    - switch style (flag only for `true`) for older binaries.
+  - For older binaries and explicit `false`, API skips the flag and logs warning (falls back to CLI default).
+- **Guards/tests:** `cargo check -p clmm-lp-cli -p clmm-lp-api`; verify `backtest-optimize --help` and rerun FULL job with threshold toggle.
+- **Paths:** `crates/cli/src/main.rs`, `crates/api/src/handlers/backtests.rs`
+
+---
+
+### BUG-20260424-01 — Backtests: static manual lower/upper looked unusable (inputs disabled by default)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-24  
+fixed_in: local  
+keywords: backtests, static, manual-range, lower-upper, ux, disabled-input, multi-pool
+
+- **Symptom:** Użytkownik nie mógł wpisać wartości do pól `static_manual_lower` / `static_manual_upper` na stronie Backtests.
+- **Root cause:** Inputy były fizycznie zablokowane (`disabled`) dopóki nie była wybrana dokładnie 1 para, a domyślnie zaznaczonych jest wiele par.
+- **Fix:** Inputy są teraz zawsze edytowalne; przy wielu parach wartości manual range pozostają wpisywalne, ale UI jasno komunikuje, że nie zostaną użyte i obowiązuje `static_deviation_pct`.
+- **Guards/tests:** `npx tsc --noEmit` (web), weryfikacja UX: wpisanie `lower/upper` przy multi-pool nie blokuje edycji i pokazuje komunikat.
+- **Paths:** `web/src/pages/Backtests.tsx`
+
+---
+
+### BUG-20260423-02 — Backtests FULL: `oor_recenter` vs `retouch_shift` looked like identical strategies
+
+status: fixed  
+severity: low  
+reported_by: user  
+first_seen: 2026-04-23  
+fixed_in: local  
+keywords: backtests, full-run, oor_recenter, retouch_shift, run_single, strategy-help, ui
+
+- **Symptom:** W rankingu FULL `oor_recenter` i `retouch_shift` potrafily pokazywac te same (lub bardzo zblizone) metryki.
+- **Root cause:** W `crates/cli/src/backtest_engine.rs` obie strategie sa **idle**, dopoki cena nie wyjdzie z pasma — przy calym oknie **in-range** zachowuja sie jak static (0 rebalansow). Przy **jednym** epizodzie OOR na plateau (stala cena poza starym pasmem) czesto wystarcza **jeden** rebalance dla kazdej, wiec koszty/score moga sie zrownac po zaokragleniu; pelna roznica ujawnia sie przy **monotonicznym** uciekaniu ceny po OOR: `OorRecenter` moze rebalance'owac na kolejnych krokach, `RetouchShift` rzadziej (bronia `retouch_armed` + geometria krawedzi).
+- **Fix:** Rozszerzono opisy w `STRATEGY_HELP` (Backtests) o semantyke symulacji; dodano testy regresyjne `oor_recenter_matches_retouch_shift_when_price_never_leaves_initial_band` oraz `oor_recenter_rebalances_more_often_than_retouch_on_monotonic_climb_after_oor` w `crates/cli/src/engine/tests.rs`.
+- **Guards/tests:** `cargo test -p clmm-lp-cli oor_recenter_`.
+- **Paths:** `web/src/pages/Backtests.tsx`, `crates/cli/src/engine/tests.rs`
+
+### BUG-20260423-01 — Backtests FULL: HTTP 422 when grid CSV sent floats into u64 JSON fields
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-23  
+fixed_in: local  
+keywords: backtests, full-run, 422, unprocessable, periodic_grid_steps, bollinger_window_grid, last_candle_seconds_grid, serde, web
+
+- **Symptom:** Klikniecie `Uruchom FULL porownanie` na stronie Backtests zwracalo `HTTP 422` (body requestu odrzucone).
+- **Root cause:** `BacktestFullRequest` w API uzywa `Vec<u64>` dla m.in. `periodic_grid_steps`, `bollinger_window_grid`, `last_candle_*_grid`; UI parsowal wszystkie siatki jako `number[]` i serializowal ulamki (np. `0.5` w periodic), co lamalo deserializacje Axum/Serde.
+- **Fix:** W `Backtests.tsx` rozdzielono parser CSV: ulamki tylko dla `threshold_grid_pct` i `bollinger_k_grid`; calkowite dla pozostalych gridow (niecalkowite tokeny pomijane). Domyslne wartosci formularza dopasowano do oczekiwanego zestawu (periodic jako calkowite kroki).
+- **Guards/tests:** `npx tsc --noEmit` w `web/`.
+- **Paths:** `web/src/pages/Backtests.tsx`
+
+### BUG-20260422-03 — Rebalance open/recovery could reuse dust sizing and open near-zero positions
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-22  
+fixed_in: local  
+keywords: rebalance, recover-open, dust, open-target-usd, close-amounts, lifecycle-ledger
+
+- **Symptom:** Rotation chain could jump from normal values (e.g. ~$2.4) to `start/end ~$0.000` and then continue rebalancing on dust PDAs.
+- **Symptom (session evidence):** In the same lineage/session, close rows carried non-zero value, but subsequent `bot_open_position` was sized as near-zero.
+- **Symptom (follow-up):** In `Position history`, node could still show `start/open ~4 USD` while the same PDA `current_value` was near zero, because continuity rewrote `baseline_value_usd` from previous node end.
+- **Root cause:** Open sizing in rebalance used pre-close calculated `amount_*_before_calc` (which can be stale/tiny in edge flows) instead of authoritative close amounts. Recovery path `recover_open_after_incomplete` hardcoded `amount_a_before_raw=1` and `amount_b_before_raw=1`, forcing `prev_end_value_usd` and `target_usd` toward dust.
+- **Root cause (follow-up):** Session continuity in lineage (`close(old)->open(new)` by `rebalance_session_id`) always overwrote node baseline with `prev_end`, even when node baseline was already computed from open-row data (`open_amount_raw` / caps path).
+- **Fix:** Standard rebalance open now passes `close_amount_a_raw`/`close_amount_b_raw` from `read_close_amounts_best_effort` into `open_new_range_with_wallet_mix`. Recovery open now loads latest matching close amounts from lifecycle close rows (`details.close_amount_*_raw`) by `position_pubkey` and optional `rebalance_session_id`, falling back to legacy `1,1` only when no row is found. In lineage continuity, baseline from session is now applied only when node baseline is missing (`0`), so explicit open-derived baseline is preserved.
+- **Guards/tests:** Added unit test `close_amounts_from_lifecycle_row_parses_matching_close` and `continuity_from_session_does_not_override_existing_baseline`; verified with `cargo check -p clmm-lp-execution` and `cargo check -p clmm-lp-api`. (`cargo test -p clmm-lp-api ...` currently blocked by unrelated pre-existing `DecisionConfig.periodic_interval_hours` test compile error in `devnet_e2e_tests`.)
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+---
+
+### BUG-20260422-02 — Position lineage cashflow included open/close principal; rebalance preflight spammed zero collect rows
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-22  
+fixed_in: local  
+keywords: position-lineage, cashflow, net-pnl, fee_payer_token_deltas, open-close-principal, collect_fees, reopen-preflight
+
+- **Symptom:** In `Position history (rotations)`, per-node `cashflow`/`net PnL` could look inflated/unintuitive (e.g. large positive cashflow despite small `start->end` NAV delta), because principal `open/close` token legs were mixed into cashflow.
+- **Symptom:** `Logs / rebalances` showed repeated sessions with `bot_collect_fees` where `A raw: 0, B raw: 0`, followed by many `bot_reopen_widen_ticks`/`bot_reopen_preflight_failed` diagnostic rows.
+- **Root cause:** Per-node DB lineage path aggregated `fee_payer_token_deltas` for cashflow without filtering lifecycle `open/close` events. Separately, rebalance flow executed `collect_fees_first` before reopen-feasibility guardrail; when preflight failed, close/open was skipped but zero-fee collect tx was already emitted.
+- **Fix:** Lineage cashflow now excludes principal legs by filtering out lifecycle open/close rows in DB path (`non-principal` cashflow only). Rebalance flow no longer performs preflight-time `collect_fees_first`; collection is kept on close paths.
+- **Guards/tests:** `cargo check -p clmm-lp-execution -p clmm-lp-api`; unit regression in decision engine to ensure strategy loop does not emit standalone `CollectFees`.
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/decision.rs`
+
+---
+
+### BUG-20260422-01 — Rebalance session could emit two `bot_open_position` rows; second PDA stayed orphaned
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-22  
+fixed_in: local  
+keywords: rebalance, duplicate-open, rebalance-session-id, strategy-link, orphan-position, logs
+
+- **Symptom:** A single `rebalance_session_id` could contain two `bot_open_position` rows (e.g. `7FW...` and `85A...`), while strategy link/heal followed only one path (`old -> new`), leaving the second position orphaned from strategy management.
+- **Root cause:** Open/link flow assumes one successful open per session (`new_position: Option<Pubkey>` + one reopen hook call). There was no explicit guardrail to block duplicate open execution for an already-opened session id.
+- **Fix:** Added open guard in rebalance executor: before open, block when lifecycle already has `bot_open_position` for session id, or when session is already inflight/completed in-process; emit diagnostic `bot_open_guard_blocked`. Added session helper in lifecycle ledger reader for `session_has_bot_open_position`.
+- **Fix (observability/UI):** Added tick-range context to close rows (`old_tick_*`, `planned_new_tick_*`) and previous-range context to open rows (`prev_tick_*`, `new_tick_*` in details), then rendered side-by-side graphical range panels in Logs session view.
+- **Guards/tests:** `cargo check -p clmm-lp-execution`; `npx tsc --noEmit` (in `web/`).
+- **Paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/pages/Logs.tsx`
+
+---
+
+### BUG-20260421-04 — Backtests TOP3 per family showed duplicate strategy labels with different ranges
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-21  
+fixed_in: local  
+keywords: backtests, top3, strategy-family, duplicates, range, bollinger, ui
+
+- **Symptom:** In `Strategie spelniajace target`, a family section (e.g. `bollinger`) could show the same strategy label multiple times (e.g. `bollinger_w10_k1_r24`) with slightly different ranges.
+- **Root cause:** Family-level TOP3 selection sorted all variants and sliced first 3 rows, but did not deduplicate by `strategy` label before slicing.
+- **Fix:** Added deduplication in `qualifyingTop3`: after sorting family rows by selected metric, keep only the best row per `strategy` label, then take TOP3.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/pages/Backtests.tsx`
+
+---
+
+### BUG-20260421-03 — Backtests FULL failed on stale CLI missing optimize-grid flags
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-21  
+fixed_in: local  
+keywords: backtests, full-run, backtest-optimize, threshold-grid-pct, stale-cli, api, feature-probe
+
+- **Symptom:** Web Backtests FULL run failed for all pools/windows with `exit Some(2): unexpected argument '--threshold-grid-pct' found`.
+- **Root cause:** API always passed optimize-grid override flags (`--threshold-grid-pct`, etc.) whenever request fields were present, but capability probing guarded only `--include-strategy-families`. When API resolved an older `clmm-lp-cli` binary, Clap rejected unknown grid flags.
+- **Fix:** Added `backtest-optimize --help` probe for requested grid flags before matrix execution; API now fails fast with explicit rebuild/`CLMM_LP_CLI_PATH` guidance when any requested grid flag is unsupported.
+- **Guards/tests:** `cargo check -p clmm-lp-api`.
+- **Paths:** `crates/api/src/handlers/backtests.rs`
+
+---
+
+### BUG-20260421-02 — Position Agent tab looked inactive (quick actions were non-clickable, fallback was opaque)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-21  
+fixed_in: local  
+keywords: position-agent, quick-actions, ui, llm-fallback, chat, position-detail
+
+- **Symptom:** In `PositionDetail -> Position Agent`, quick actions (`scan_now`, `compare_7d_ranges`, etc.) were visible but did not do anything, so tab looked “dead”.
+- **Symptom:** Sending prompts often returned generic fallback text with no clear indication that LLM provider was disabled/fallback mode.
+- **Root cause:** UI rendered `quick_actions` as passive labels (`span`) without click handlers. Chat send path used `/agent/message` (message-only response), which dropped provider metadata (`used_fallback`), so users could not tell if real LLM was used.
+- **Fix:** Quick actions are now clickable buttons wired to real actions (`scan_now` -> scan endpoint; comparison/cross-pair actions -> send prefilled prompt). Chat send in `Position Agent` now uses `/agent/llm-reply` and surfaces reply source (`fallback/provider:model`) in UI info message.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
+
+---
+
 ### BUG-20260421-01 — Backtests FULL: duplicate strategy labels hid different ranges; global metrics were unclear
 
 status: fixed  

@@ -121,53 +121,81 @@ pub fn default_strategies(
     il_max_pct: f64,
     il_close_pct: Option<f64>,
     il_grace_steps: u64,
+    threshold_grid: Option<&[f64]>,
+    threshold_min_rebalance_interval_hours: u64,
+    threshold_rebalance_on_range_exit_immediately: bool,
+    retouch_offset_pct: f64,
+    periodic_grid: Option<&[u64]>,
+    bollinger_windows: Option<&[u64]>,
+    bollinger_k: Option<&[f64]>,
+    bollinger_rebalance_steps: Option<&[u64]>,
+    last_candle_steps: Option<&[u64]>,
+    last_candle_rebalance_steps: Option<&[u64]>,
+    last_candle_seconds: Option<&[u64]>,
+    last_candle_rebalance_seconds: Option<&[u64]>,
 ) -> Vec<StratConfig> {
     if static_only {
         vec![StratConfig::Static]
     } else {
-        let mut v = vec![
-            StratConfig::Static,
-            StratConfig::OorRecenter,
-            StratConfig::Threshold(0.02),
-            StratConfig::Threshold(0.03),
-            StratConfig::Threshold(0.05),
-            StratConfig::Threshold(0.07),
-            StratConfig::Threshold(0.10),
-            StratConfig::Threshold(0.15),
-            // `Periodic(n)` is **steps** between rebalances (same timebase as candle/step index).
-            StratConfig::Periodic(12),
-            StratConfig::Periodic(24),
-            StratConfig::Periodic(48),
-            StratConfig::Periodic(72),
-            StratConfig::IlLimit {
-                max_il_pct: il_max_pct / 100.0,
-                close_il_pct: il_close_pct.map(|v| v / 100.0),
-                grace_steps: il_grace_steps,
-            },
-            StratConfig::RetouchShift,
-        ];
+        let threshold_grid = threshold_grid.unwrap_or(&[2.0, 3.0, 5.0, 7.0, 10.0, 15.0]);
+        // Despite historical flag name `--periodic-grid-steps`, values represent wall-clock hours
+        // for `StratConfig::Periodic` (bot-like semantics).
+        let periodic_grid = periodic_grid.unwrap_or(&[12, 24, 48, 72]);
+        let mut v = vec![StratConfig::Static, StratConfig::OorRecenter];
+        for t in threshold_grid {
+            if *t > 0.0 {
+                v.push(StratConfig::Threshold {
+                    threshold_pct: *t / 100.0,
+                    min_rebalance_interval_hours: threshold_min_rebalance_interval_hours,
+                    rebalance_on_range_exit_immediately:
+                        threshold_rebalance_on_range_exit_immediately,
+                });
+            }
+        }
+        for p in periodic_grid {
+            if *p > 0 {
+                v.push(StratConfig::Periodic(*p));
+            }
+        }
+        v.push(StratConfig::IlLimit {
+            max_il_pct: il_max_pct / 100.0,
+            close_il_pct: il_close_pct.map(|v| v / 100.0),
+            grace_steps: il_grace_steps,
+        });
+        v.push(StratConfig::RetouchShift { retouch_offset_pct });
         if indicator_strategies {
+            let bollinger_windows = bollinger_windows.unwrap_or(&[20]);
+            let bollinger_k = bollinger_k.unwrap_or(&[1.5_f64, 2.0, 2.5]);
+            let bollinger_rebalance_steps = bollinger_rebalance_steps.unwrap_or(&[24, 48]);
             // Three σ-width presets (`k` in `SMA ± k·σ`): narrower (1.5σ), classic (2σ), wider (2.5σ).
             // Each paired with two rebalance cadences (`rebalance_steps`; same timebase as the path).
-            for k in [1.5_f64, 2.0, 2.5] {
-                v.push(StratConfig::Bollinger {
-                    window: 20,
-                    k,
-                    rebalance_steps: 24,
-                });
-                v.push(StratConfig::Bollinger {
-                    window: 20,
-                    k,
-                    rebalance_steps: 48,
-                });
+            for window in bollinger_windows {
+                for k in bollinger_k {
+                    for rebalance_steps in bollinger_rebalance_steps {
+                        if *window > 0 && *k > 0.0 && *rebalance_steps > 0 {
+                            v.push(StratConfig::Bollinger {
+                                window: *window as u32,
+                                k: *k,
+                                rebalance_steps: *rebalance_steps,
+                            });
+                        }
+                    }
+                }
             }
             if snapshot_mode {
                 // Snapshot mode has irregular step spacing; prefer wall-clock buckets.
                 // Candles: 15m, 30m, 45m, 1h. Rebalance: 15m, 30m, 45m, 1h, 4h, 12h.
-                const CANDLES: &[u64] = &[15 * 60, 30 * 60, 45 * 60, 60 * 60];
-                const REBALS: &[u64] = &[15 * 60, 30 * 60, 45 * 60, 60 * 60, 4 * 3600, 12 * 3600];
-                for &c in CANDLES {
-                    for &r in REBALS {
+                let candles = last_candle_seconds.unwrap_or(&[15 * 60, 30 * 60, 45 * 60, 60 * 60]);
+                let rebals = last_candle_rebalance_seconds.unwrap_or(&[
+                    15 * 60,
+                    30 * 60,
+                    45 * 60,
+                    60 * 60,
+                    4 * 3600,
+                    12 * 3600,
+                ]);
+                for &c in candles {
+                    for &r in rebals {
                         v.push(StratConfig::LastCandleTime {
                             candle_seconds: c,
                             rebalance_seconds: r,
@@ -176,11 +204,24 @@ pub fn default_strategies(
                 }
             } else {
                 // Step-based last-candle (regular candle path).
-                for &(candle_steps, rebalance_steps) in LAST_CANDLE_OPTIMIZE_GRID {
-                    v.push(StratConfig::LastCandle {
-                        candle_steps,
-                        rebalance_steps,
-                    });
+                if let (Some(candles), Some(rebals)) = (last_candle_steps, last_candle_rebalance_steps) {
+                    for &candle_steps in candles {
+                        for &rebalance_steps in rebals {
+                            if candle_steps > 0 && rebalance_steps > 0 {
+                                v.push(StratConfig::LastCandle {
+                                    candle_steps,
+                                    rebalance_steps,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    for &(candle_steps, rebalance_steps) in LAST_CANDLE_OPTIMIZE_GRID {
+                        v.push(StratConfig::LastCandle {
+                            candle_steps,
+                            rebalance_steps,
+                        });
+                    }
                 }
             }
         }
@@ -192,10 +233,10 @@ fn strategy_family_name(s: &StratConfig) -> &'static str {
     match s {
         StratConfig::Static => "static",
         StratConfig::OorRecenter => "oor_recenter",
-        StratConfig::Threshold(_) => "threshold",
-        StratConfig::Periodic(_) => "periodic",
+        StratConfig::Threshold { .. } => "threshold",
+        StratConfig::Periodic(_) | StratConfig::PeriodicSteps(_) => "periodic",
         StratConfig::IlLimit { .. } => "il_limit",
-        StratConfig::RetouchShift => "retouch_shift",
+        StratConfig::RetouchShift { .. } => "retouch_shift",
         StratConfig::Bollinger { .. } => "bollinger",
         StratConfig::LastCandle { .. } | StratConfig::LastCandleTime { .. } => "last_candle",
     }
@@ -258,10 +299,31 @@ mod tests {
 
     #[test]
     fn default_grid_includes_documented_non_indicator_strategies() {
-        let v = default_strategies(false, false, true, 5.0, Some(12.0), 3);
+        let v = default_strategies(
+            false,
+            false,
+            true,
+            5.0,
+            Some(12.0),
+            3,
+            None,
+            0,
+            true,
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(v.contains(&StratConfig::Static));
         assert!(v.contains(&StratConfig::OorRecenter));
-        assert!(v.contains(&StratConfig::RetouchShift));
+        assert!(v.contains(&StratConfig::RetouchShift {
+            retouch_offset_pct: 0.0,
+        }));
         assert!(v.contains(&StratConfig::IlLimit {
             max_il_pct: 0.05,
             close_il_pct: Some(0.12),
@@ -271,12 +333,33 @@ mod tests {
 
     #[test]
     fn filter_strategies_by_family_keeps_requested_only() {
-        let v = default_strategies(false, true, true, 5.0, Some(12.0), 3);
+        let v = default_strategies(
+            false,
+            true,
+            true,
+            5.0,
+            Some(12.0),
+            3,
+            None,
+            0,
+            true,
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let include = vec!["static".to_string(), "il_limit".to_string()];
         let filtered = filter_strategies_by_families(v, Some(&include));
         assert!(filtered.contains(&StratConfig::Static));
         assert!(filtered.iter().any(|s| matches!(s, StratConfig::IlLimit { .. })));
-        assert!(!filtered.iter().any(|s| matches!(s, StratConfig::Threshold(_))));
+        assert!(!filtered
+            .iter()
+            .any(|s| matches!(s, StratConfig::Threshold { .. })));
         assert!(!filtered.iter().any(|s| matches!(s, StratConfig::Bollinger { .. })));
     }
 }

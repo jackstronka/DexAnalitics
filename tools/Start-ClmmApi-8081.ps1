@@ -67,9 +67,16 @@ if ($env:CLMM_SCRIPT_RUNNER_PORT -and $env:CLMM_SCRIPT_RUNNER_PORT -match '^\d+$
   $env:SCRIPT_RUNNER_URL = "http://127.0.0.1:$($env:CLMM_SCRIPT_RUNNER_PORT)"
 }
 
+# If caller didn't set an explicit CLI path, prefer fresh debug CLI when available.
+$debugCli = Join-Path $RepoRoot "target\debug\clmm-lp-cli.exe"
+if ((-not $env:CLMM_LP_CLI_PATH -or $env:CLMM_LP_CLI_PATH.Trim().Length -eq 0) -and (Test-Path -LiteralPath $debugCli)) {
+  $env:CLMM_LP_CLI_PATH = $debugCli
+}
+
 Write-Host "[Start-ClmmApi-8081] Starting API on :8081 (does not touch :8080)..." -ForegroundColor Cyan
 Write-Host "[Start-ClmmApi-8081] Cargo target dir: $env:CLMM_API_TARGET_DIR" -ForegroundColor DarkGray
 Write-Host "[Start-ClmmApi-8081] DRY_RUN=$env:DRY_RUN" -ForegroundColor DarkGray
+Write-Host "[Start-ClmmApi-8081] CLMM_LP_CLI_PATH=$env:CLMM_LP_CLI_PATH" -ForegroundColor DarkGray
 Write-Host "[Start-ClmmApi-8081] TEMP/TMP: $env:TEMP" -ForegroundColor DarkGray
 $signerSummary = $signerVars | ForEach-Object {
   $v = Get-Item -Path "Env:$_" -ErrorAction SilentlyContinue
@@ -95,7 +102,7 @@ Start-Process -FilePath "pwsh" `
     "-ExecutionPolicy",
     "Bypass",
     "-Command",
-    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; `$env:DRY_RUN='$($env:DRY_RUN)'; `$env:CLMM_API_TARGET_DIR='$($env:CLMM_API_TARGET_DIR)'; `$env:NPM_CONFIG_CACHE='$($env:NPM_CONFIG_CACHE)'; `$env:TEMP='$($env:TEMP)'; `$env:TMP='$($env:TMP)'; `$env:KEYPAIR_PATH='$($env:KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR_PATH='$($env:SOLANA_KEYPAIR_PATH)'; `$env:WALLET_KEYPAIR_PATH='$($env:WALLET_KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR='$($env:SOLANA_KEYPAIR)'; `$env:WALLET_KEYPAIR_BASE58='$($env:WALLET_KEYPAIR_BASE58)'; `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS='$($env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS)'; `$env:CLMM_IL_LEDGER_PATH='$($env:CLMM_IL_LEDGER_PATH)'; `$env:CLMM_PENDING_OPEN_RECOVERY_PATH='$($env:CLMM_PENDING_OPEN_RECOVERY_PATH)'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] cargo target dir: ' + `$env:CLMM_API_TARGET_DIR) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] DRY_RUN=' + `$env:DRY_RUN) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] TEMP/TMP=' + `$env:TEMP) -ForegroundColor DarkGray; if (`$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS -and `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_STRANDED_RECONCILE_INTERVAL_SECS=' + `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS) -ForegroundColor DarkGray }; if (`$env:CLMM_IL_LEDGER_PATH -and `$env:CLMM_IL_LEDGER_PATH.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_IL_LEDGER_PATH=set') -ForegroundColor DarkGray }; cargo run -q -p clmm-lp-api --bin clmm-lp-api --target-dir `$env:CLMM_API_TARGET_DIR 2>&1 | Tee-Object -FilePath '$logPath' }"
+    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; `$env:DRY_RUN='$($env:DRY_RUN)'; `$env:CLMM_API_TARGET_DIR='$($env:CLMM_API_TARGET_DIR)'; `$env:CLMM_LP_CLI_PATH='$($env:CLMM_LP_CLI_PATH)'; `$env:NPM_CONFIG_CACHE='$($env:NPM_CONFIG_CACHE)'; `$env:TEMP='$($env:TEMP)'; `$env:TMP='$($env:TMP)'; `$env:KEYPAIR_PATH='$($env:KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR_PATH='$($env:SOLANA_KEYPAIR_PATH)'; `$env:WALLET_KEYPAIR_PATH='$($env:WALLET_KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR='$($env:SOLANA_KEYPAIR)'; `$env:WALLET_KEYPAIR_BASE58='$($env:WALLET_KEYPAIR_BASE58)'; `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS='$($env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS)'; `$env:CLMM_IL_LEDGER_PATH='$($env:CLMM_IL_LEDGER_PATH)'; `$env:CLMM_PENDING_OPEN_RECOVERY_PATH='$($env:CLMM_PENDING_OPEN_RECOVERY_PATH)'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] cargo target dir: ' + `$env:CLMM_API_TARGET_DIR) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] CLMM_LP_CLI_PATH=' + `$env:CLMM_LP_CLI_PATH) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] DRY_RUN=' + `$env:DRY_RUN) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] TEMP/TMP=' + `$env:TEMP) -ForegroundColor DarkGray; if (`$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS -and `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_STRANDED_RECONCILE_INTERVAL_SECS=' + `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS) -ForegroundColor DarkGray }; if (`$env:CLMM_IL_LEDGER_PATH -and `$env:CLMM_IL_LEDGER_PATH.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_IL_LEDGER_PATH=set') -ForegroundColor DarkGray }; cargo run -q -p clmm-lp-api --bin clmm-lp-api --target-dir `$env:CLMM_API_TARGET_DIR 2>&1 | Tee-Object -FilePath '$logPath' }"
   ) `
   -WorkingDirectory $RepoRoot `
   -WindowStyle Normal

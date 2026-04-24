@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
 import {
+  getPositionAgentChatUi,
   getOrcaPositionsByOwner,
   getPoolState,
   getPositionDiagnostics,
@@ -53,14 +54,25 @@ function strategyParamsSummary(s: Strategy) {
   if (typeof p.rebalance_threshold_pct === 'number' && p.rebalance_threshold_pct > 0) {
     bits.push(`thr ${p.rebalance_threshold_pct}%`)
   }
-  if (typeof p.min_rebalance_interval_hours === 'number' && p.min_rebalance_interval_hours > 0) {
-    bits.push(`every ${p.min_rebalance_interval_hours}h`)
+  if (
+    typeof p.min_rebalance_interval_minutes === 'number' &&
+    p.min_rebalance_interval_minutes > 0
+  ) {
+    bits.push(`every ${p.min_rebalance_interval_minutes}m`)
+  } else if (
+    typeof p.min_rebalance_interval_hours === 'number' &&
+    p.min_rebalance_interval_hours > 0
+  ) {
+    bits.push(`every ${p.min_rebalance_interval_hours * 60}m`)
   }
   if (typeof p.range_width_pct === 'number' && p.range_width_pct > 0) {
     bits.push(`width ${p.range_width_pct}%`)
   }
   if (typeof p.max_il_pct === 'number' && p.max_il_pct > 0) {
     bits.push(`max IL ${p.max_il_pct}%`)
+  }
+  if (typeof p.retouch_offset_pct === 'number' && p.retouch_offset_pct !== 0) {
+    bits.push(`retouch off ${p.retouch_offset_pct}%`)
   }
   if (p.periodic_requires_out_of_range === true) {
     bits.push('only OOR')
@@ -158,6 +170,14 @@ export default function Positions() {
       refetchOnMount: 'always' as const,
       refetchOnWindowFocus: true,
       refetchInterval: 15_000,
+      retry: 0,
+    })),
+  })
+  const positionAgentUiQueries = useQueries({
+    queries: positions.map((position) => ({
+      queryKey: ['position-agent-ui', position.address],
+      queryFn: () => getPositionAgentChatUi(position.address),
+      staleTime: 15_000,
       retry: 0,
     })),
   })
@@ -269,6 +289,7 @@ export default function Positions() {
                   <tr className="border-b text-left text-sm text-muted-foreground">
                     <th className="pb-3 font-medium">Position</th>
                     <th className="pb-3 font-medium">Strategy</th>
+                    <th className="pb-3 font-medium">Agent</th>
                     <th className="pb-3 font-medium">Range (in / out)</th>
                     <th className="pb-3 font-medium text-right">Value</th>
                     <th className="pb-3 font-medium text-right">PnL</th>
@@ -324,6 +345,36 @@ export default function Positions() {
                                   <div className="text-muted-foreground">{strategyParamsSummary(s)}</div>
                                 </div>
                               ))}
+                            </div>
+                          )
+                        })()}
+                      </td>
+                      <td className="py-4">
+                        {(() => {
+                          const agentQ = positionAgentUiQueries[idx]
+                          if (agentQ?.isLoading || agentQ?.isFetching) {
+                            return <span className="text-xs text-muted-foreground">Checking…</span>
+                          }
+                          const session = agentQ?.data?.session
+                          if (!session) {
+                            return (
+                              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground">
+                                inactive
+                              </span>
+                            )
+                          }
+                          return (
+                            <div className="space-y-1">
+                              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-500">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                active
+                              </span>
+                              <div className="text-[10px] text-muted-foreground">
+                                next:{' '}
+                                {session.next_scan_ts_utc
+                                  ? new Date(session.next_scan_ts_utc).toLocaleTimeString()
+                                  : '—'}
+                              </div>
                             </div>
                           )
                         })()}

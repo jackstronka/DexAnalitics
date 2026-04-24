@@ -65,9 +65,9 @@ fn optimize_winner_from_strat(
     let strategy_kind = match strat {
         StratConfig::Static => "static",
         StratConfig::OorRecenter => "oor_recenter",
-        StratConfig::RetouchShift => "retouch_shift",
-        StratConfig::Periodic(_) => "periodic",
-        StratConfig::Threshold(_) => "threshold",
+        StratConfig::RetouchShift { .. } => "retouch_shift",
+        StratConfig::Periodic(_) | StratConfig::PeriodicSteps(_) => "periodic",
+        StratConfig::Threshold { .. } => "threshold",
         StratConfig::IlLimit { .. } => "il_limit",
         StratConfig::Bollinger { .. } => "bollinger",
         StratConfig::LastCandle { .. } | StratConfig::LastCandleTime { .. } => "last_candle",
@@ -82,7 +82,8 @@ fn optimize_winner_from_strat(
 
     match strat {
         StratConfig::Periodic(h) => periodic_interval_hours = Some(h),
-        StratConfig::Threshold(p) => threshold_ratio = Some(p),
+        StratConfig::PeriodicSteps(_) => {}
+        StratConfig::Threshold { threshold_pct, .. } => threshold_ratio = Some(threshold_pct),
         StratConfig::IlLimit {
             max_il_pct,
             close_il_pct,
@@ -94,7 +95,7 @@ fn optimize_winner_from_strat(
         }
         StratConfig::Static
         | StratConfig::OorRecenter
-        | StratConfig::RetouchShift
+        | StratConfig::RetouchShift { .. }
         | StratConfig::Bollinger { .. }
         | StratConfig::LastCandle { .. }
         | StratConfig::LastCandleTime { .. } => {}

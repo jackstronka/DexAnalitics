@@ -39,6 +39,8 @@ pub struct PositionEvalSnapshot {
     pub auto_execute: bool,
     /// `None` when unknown (no lifecycle summary) — avoid showing `u64::MAX` in UIs.
     pub hours_since_rebalance: Option<u64>,
+    /// `None` when unknown (no lifecycle summary).
+    pub minutes_since_rebalance: Option<u64>,
 }
 
 /// Configuration for strategy execution.
@@ -885,9 +887,9 @@ impl StrategyExecutor {
                 fee_growth_global_b: 0,
             });
 
-        // Calculate hours since last rebalance from lifecycle
-        let hours_since_rebalance = self
-            .calculate_hours_since_rebalance(&position.address)
+        // Calculate minutes since last rebalance from lifecycle.
+        let minutes_since_rebalance = self
+            .calculate_minutes_since_rebalance(&position.address)
             .await;
 
         let retouch_armed =
@@ -902,7 +904,10 @@ impl StrategyExecutor {
                 None
             };
         let cfg = self.decision_engine.config();
-        let last_candle_ticks = if cfg.strategy_mode == StrategyMode::LastCandle {
+        let last_candle_ticks = if matches!(
+            cfg.strategy_mode,
+            StrategyMode::LastCandle | StrategyMode::LastCandlePeriodic
+        ) {
             self.record_price_and_compute_last_closed_candle_ticks(
                 &position.address,
                 &pool,
@@ -916,7 +921,7 @@ impl StrategyExecutor {
         let context = DecisionContext {
             position: position.clone(),
             pool: pool.clone(),
-            hours_since_rebalance,
+            minutes_since_rebalance,
             retouch_armed,
             last_candle_ticks,
         };
@@ -931,10 +936,15 @@ impl StrategyExecutor {
                 decision: decision.description(),
                 requires_transaction: decision.requires_transaction(),
                 auto_execute: self.config.auto_execute,
-                hours_since_rebalance: if hours_since_rebalance == u64::MAX {
+                hours_since_rebalance: if minutes_since_rebalance == u64::MAX {
                     None
                 } else {
-                    Some(hours_since_rebalance)
+                    Some(minutes_since_rebalance / 60)
+                },
+                minutes_since_rebalance: if minutes_since_rebalance == u64::MAX {
+                    None
+                } else {
+                    Some(minutes_since_rebalance)
                 },
             };
             let mut m = self.last_eval.write().await;
@@ -957,22 +967,25 @@ impl StrategyExecutor {
         Ok(())
     }
 
-    /// Calculates hours since last rebalance.
-    async fn calculate_hours_since_rebalance(&self, position: &solana_sdk::pubkey::Pubkey) -> u64 {
+    /// Calculates minutes since last rebalance.
+    async fn calculate_minutes_since_rebalance(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+    ) -> u64 {
         let events = self.lifecycle.get_events(position).await;
 
         // Find the last rebalance event
         for event in events.iter().rev() {
             if event.event_type == crate::lifecycle::LifecycleEventType::Rebalanced {
                 let duration = chrono::Utc::now() - event.timestamp;
-                return duration.num_hours().max(0) as u64;
+                return duration.num_minutes().max(0) as u64;
             }
         }
 
         // If no rebalance, use position open time
         if let Some(summary) = self.lifecycle.get_summary(position).await {
             let duration = chrono::Utc::now() - summary.opened_at;
-            return duration.num_hours().max(0) as u64;
+            return duration.num_minutes().max(0) as u64;
         }
 
         // Default to a large value to allow rebalancing
@@ -1064,6 +1077,7 @@ impl StrategyExecutor {
                     StrategyMode::Periodic => RebalanceReason::Periodic,
                     StrategyMode::OorRecenter => RebalanceReason::RangeExit,
                     StrategyMode::LastCandle => RebalanceReason::RangeExit,
+                    StrategyMode::LastCandlePeriodic => RebalanceReason::Periodic,
                     StrategyMode::Threshold => {
                         if !position.in_range {
                             RebalanceReason::RangeExit

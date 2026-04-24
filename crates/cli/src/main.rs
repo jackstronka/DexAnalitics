@@ -9,7 +9,7 @@ mod snapshots;
 mod swap_sync;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use clmm_lp_data::prelude::*;
 use clmm_lp_domain::prelude::*;
 use clmm_lp_optimization::prelude::*;
@@ -504,6 +504,9 @@ enum Commands {
         /// Disable hybrid RetouchShift repeat (legacy: one retouch per OOR episode until back in range).
         #[arg(long, default_value_t = false)]
         retouch_repeat_off: bool,
+        /// RetouchShift: shift full retouched band by this percent vs OOR price-touch band (e.g. 0.1 = +0.1%).
+        #[arg(long, default_value_t = 0.0)]
+        retouch_offset_pct: f64,
 
         /// Include Bollinger Bands + last-candle anchor strategies in the optimize grid (6 BB + 14 last-candle presets; more rows).
         #[arg(long, default_value_t = false)]
@@ -511,6 +514,45 @@ enum Commands {
         /// Comma-separated strategy families to include in grid generation (e.g. `static,threshold,il_limit`).
         #[arg(long, value_delimiter = ',')]
         include_strategy_families: Option<Vec<String>>,
+        /// Threshold grid in percent, e.g. `2,3,5,7,10,15`.
+        #[arg(long, value_delimiter = ',')]
+        threshold_grid_pct: Option<Vec<f64>>,
+        /// Threshold mode: minimum spacing between OOR-driven rebalances (hours).
+        #[arg(long, default_value_t = 0)]
+        threshold_min_rebalance_interval_hours: u64,
+        /// Threshold mode: if true, OOR triggers rebalance immediately (bot parity default).
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        threshold_rebalance_on_range_exit_immediately: bool,
+        /// Periodic grid in hours (legacy flag name kept), e.g. `12,24,48,72`.
+        #[arg(long, value_delimiter = ',')]
+        periodic_grid_steps: Option<Vec<u64>>,
+        /// Static strategy only: absolute lower range bound (price units, e.g. 85).
+        #[arg(long)]
+        static_manual_lower: Option<f64>,
+        /// Static strategy only: absolute upper range bound (price units, e.g. 90).
+        #[arg(long)]
+        static_manual_upper: Option<f64>,
+        /// Bollinger window grid, e.g. `20,30`.
+        #[arg(long, value_delimiter = ',')]
+        bollinger_window_grid: Option<Vec<u64>>,
+        /// Bollinger k grid, e.g. `1.5,2.0,2.5`.
+        #[arg(long, value_delimiter = ',')]
+        bollinger_k_grid: Option<Vec<f64>>,
+        /// Bollinger rebalance steps grid, e.g. `24,48`.
+        #[arg(long, value_delimiter = ',')]
+        bollinger_rebalance_steps_grid: Option<Vec<u64>>,
+        /// Last-candle step grid (non-snapshot mode), e.g. `1,2,3,4`.
+        #[arg(long, value_delimiter = ',')]
+        last_candle_steps_grid: Option<Vec<u64>>,
+        /// Last-candle rebalance step grid (non-snapshot mode), e.g. `4,16,48`.
+        #[arg(long, value_delimiter = ',')]
+        last_candle_rebalance_steps_grid: Option<Vec<u64>>,
+        /// Last-candle candle seconds grid (snapshot mode), e.g. `900,1800,3600`.
+        #[arg(long, value_delimiter = ',')]
+        last_candle_seconds_grid: Option<Vec<u64>>,
+        /// Last-candle rebalance seconds grid (snapshot mode), e.g. `900,1800,3600,14400`.
+        #[arg(long, value_delimiter = ',')]
+        last_candle_rebalance_seconds_grid: Option<Vec<u64>>,
 
         /// Write machine-readable grid winner JSON for bots / API (`clmm-lp-execution::optimize_profile`).
         #[arg(long, value_name = "PATH")]
@@ -2781,8 +2823,22 @@ async fn main() -> Result<()> {
             retouch_repeat_rearm_secs,
             retouch_repeat_extra_move_pct,
             retouch_repeat_off,
+            retouch_offset_pct,
             indicator_strategies,
             include_strategy_families,
+            threshold_grid_pct,
+            threshold_min_rebalance_interval_hours,
+            threshold_rebalance_on_range_exit_immediately,
+            periodic_grid_steps,
+            static_manual_lower,
+            static_manual_upper,
+            bollinger_window_grid,
+            bollinger_k_grid,
+            bollinger_rebalance_steps_grid,
+            last_candle_steps_grid,
+            last_candle_rebalance_steps_grid,
+            last_candle_seconds_grid,
+            last_candle_rebalance_seconds_grid,
             optimize_result_json,
             optimize_result_json_copy_dir,
         } => {
@@ -3331,7 +3387,9 @@ async fn main() -> Result<()> {
             let swaps_ref: Option<&[clmm_lp_data::swaps::SwapEvent]> = swaps.as_deref();
             let require_decode_ok = matches!(*fee_swap_decode_status, FeeSwapDecodeStatusArg::Ok);
 
-            use backtest_engine::{StratConfig, build_step_data, fee_realism, run_grid};
+            use backtest_engine::{
+                StratConfig, build_step_data, fee_realism, run_grid_with_static_bounds,
+            };
 
             let series_len = if snapshots_only {
                 snapshot_step_data_full
@@ -3354,6 +3412,18 @@ async fn main() -> Result<()> {
                     *il_max_pct,
                     *il_close_pct,
                     *il_grace_steps,
+                    threshold_grid_pct.as_deref(),
+                    *threshold_min_rebalance_interval_hours,
+                    *threshold_rebalance_on_range_exit_immediately,
+                    *retouch_offset_pct / 100.0,
+                    periodic_grid_steps.as_deref(),
+                    bollinger_window_grid.as_deref(),
+                    bollinger_k_grid.as_deref(),
+                    bollinger_rebalance_steps_grid.as_deref(),
+                    last_candle_steps_grid.as_deref(),
+                    last_candle_rebalance_steps_grid.as_deref(),
+                    last_candle_seconds_grid.as_deref(),
+                    last_candle_rebalance_seconds_grid.as_deref(),
                 ),
                 include_strategy_families.as_deref(),
             );
@@ -3363,6 +3433,26 @@ async fn main() -> Result<()> {
                     include_strategy_families
                 );
             }
+            let static_manual_bounds_usd: Option<(f64, f64)> =
+                match (static_manual_lower, static_manual_upper) {
+                    (Some(lo), Some(hi)) => {
+                        if !lo.is_finite()
+                            || !hi.is_finite()
+                            || *lo <= 0.0
+                            || *hi <= 0.0
+                            || *lo >= *hi
+                        {
+                            anyhow::bail!(
+                                "--static-manual-lower/--static-manual-upper must be finite, >0 and lower<upper"
+                            );
+                        }
+                        Some((*lo, *hi))
+                    }
+                    (None, None) => None,
+                    _ => anyhow::bail!(
+                        "Provide both --static-manual-lower and --static-manual-upper together"
+                    ),
+                };
 
             let min_frac = (*min_range_pct / 100.0).clamp(0.001, 1.0);
             let max_frac = (*max_range_pct / 100.0).clamp(min_frac + 0.001, 2.0);
@@ -3580,7 +3670,7 @@ async fn main() -> Result<()> {
                         None
                     };
                 let (fv, fe100) = fee_realism(&step_data, fee_rate);
-                let rows = run_grid(
+                let rows = run_grid_with_static_bounds(
                     &step_data,
                     entry_price,
                     center,
@@ -3594,6 +3684,7 @@ async fn main() -> Result<()> {
                     token_b_decimals as u32,
                     swaps_ref,
                     snapshot_fees_for_grid,
+                    static_manual_bounds_usd,
                 );
                 let mut r: Vec<_> = rows
                     .into_iter()
@@ -3746,7 +3837,7 @@ async fn main() -> Result<()> {
                         } else {
                             None
                         };
-                    let rows = run_grid(
+                    let rows = run_grid_with_static_bounds(
                         &step_data,
                         entry_price,
                         center,
@@ -3760,6 +3851,7 @@ async fn main() -> Result<()> {
                         token_b_decimals as u32,
                         swaps_ref,
                         window_snapshot_fees,
+                        static_manual_bounds_usd,
                     );
                     for (wp_frac, lower, upper, strat_name, summary) in rows {
                         let key = (format!("{:.6}", wp_frac), strat_name.clone());

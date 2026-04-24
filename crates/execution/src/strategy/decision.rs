@@ -22,6 +22,8 @@ pub enum StrategyMode {
     RetouchShift,
     /// Rebalance on range-exit using low/high from the last closed candle.
     LastCandle,
+    /// Rebalance on a time interval using the last closed candle band (or width fallback).
+    LastCandlePeriodic,
     /// IL-based close/rebalance (legacy / future).
     IlLimit,
 }
@@ -35,21 +37,23 @@ pub struct DecisionConfig {
     pub il_rebalance_threshold: Decimal,
     /// IL threshold for closing (as percentage).
     pub il_close_threshold: Decimal,
-    /// Minimum time between rebalances in hours.
-    pub min_rebalance_interval_hours: u64,
-    /// For `Periodic`: rebalance every N hours.
-    pub periodic_interval_hours: u64,
+    /// Minimum time between rebalances in minutes.
+    pub min_rebalance_interval_minutes: u64,
+    /// For `Periodic`: rebalance every N minutes.
+    pub periodic_interval_minutes: u64,
     /// For `Periodic`: if true, periodic rebalance triggers only when the position is out of range.
     /// This avoids an automatic close+open while in-range just because the timer elapsed.
     pub periodic_requires_out_of_range: bool,
     /// If true, exiting the range may trigger a rebalance immediately (subject to strategy mode),
-    /// instead of waiting for `min_rebalance_interval_hours` / `periodic_interval_hours`.
+    /// instead of waiting for `min_rebalance_interval_minutes` / `periodic_interval_minutes`.
     ///
     /// Default is false: range exit is *observed*, but the rebalance happens only on the schedule.
     pub rebalance_on_range_exit_immediately: bool,
     /// For `Threshold`: deviation from range midpoint that triggers rebalance.
     /// Expressed as a ratio (e.g. 0.05 = 5%).
     pub threshold_pct: Decimal,
+    /// For `RetouchShift`: shift full retouched band by this ratio (0.001 = +0.1%).
+    pub retouch_offset_pct: Decimal,
     /// Range width for new positions (as percentage).
     pub range_width_pct: Decimal,
     /// Candle size in seconds for `LastCandle` mode.
@@ -66,13 +70,14 @@ impl Default for DecisionConfig {
             strategy_mode: StrategyMode::IlLimit,
             il_rebalance_threshold: Decimal::new(5, 2), // 5%
             il_close_threshold: Decimal::new(15, 2),    // 15%
-            min_rebalance_interval_hours: 24,
-            periodic_interval_hours: 24,
+            min_rebalance_interval_minutes: 24 * 60,
+            periodic_interval_minutes: 24 * 60,
             // Backward-compatible defaults: old behavior was "rebalance immediately on range exit"
             // and `Periodic` was strictly timer-based regardless of in-range status.
             periodic_requires_out_of_range: false,
             rebalance_on_range_exit_immediately: true,
             threshold_pct: Decimal::new(5, 3),    // 0.5% by default
+            retouch_offset_pct: Decimal::ZERO,
             range_width_pct: Decimal::new(10, 2), // 10%
             last_candle_seconds: 3600,
             auto_collect_fees: true,
@@ -88,8 +93,8 @@ pub struct DecisionContext {
     pub position: MonitoredPosition,
     /// Current pool state.
     pub pool: WhirlpoolState,
-    /// Hours since last rebalance.
-    pub hours_since_rebalance: u64,
+    /// Minutes since last rebalance.
+    pub minutes_since_rebalance: u64,
     /// For `RetouchShift`: whether we are allowed to retouch given the current out-of-range episode.
     pub retouch_armed: Option<bool>,
     /// Optional tick band derived from last closed candle low/high.
@@ -132,7 +137,7 @@ impl DecisionEngine {
             StrategyMode::StaticRange => Decision::Hold,
 
             StrategyMode::Periodic => {
-                if context.hours_since_rebalance >= cfg.periodic_interval_hours
+                if context.minutes_since_rebalance >= cfg.periodic_interval_minutes
                     && (!cfg.periodic_requires_out_of_range || !position.in_range)
                 {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
@@ -152,11 +157,11 @@ impl DecisionEngine {
             StrategyMode::OorRecenter => {
                 if !position.in_range {
                     if !cfg.rebalance_on_range_exit_immediately
-                        && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                        && context.minutes_since_rebalance < cfg.min_rebalance_interval_minutes
                     {
                         debug!(
-                            hours_since_rebalance = context.hours_since_rebalance,
-                            min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                            minutes_since_rebalance = context.minutes_since_rebalance,
+                            min_rebalance_interval_minutes = cfg.min_rebalance_interval_minutes,
                             "OorRecenter: out of range but waiting for rebalance interval"
                         );
                         return Decision::Hold;
@@ -178,11 +183,11 @@ impl DecisionEngine {
             StrategyMode::Threshold => {
                 if !position.in_range {
                     if !cfg.rebalance_on_range_exit_immediately
-                        && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                        && context.minutes_since_rebalance < cfg.min_rebalance_interval_minutes
                     {
                         debug!(
-                            hours_since_rebalance = context.hours_since_rebalance,
-                            min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                            minutes_since_rebalance = context.minutes_since_rebalance,
+                            min_rebalance_interval_minutes = cfg.min_rebalance_interval_minutes,
                             "Threshold: out of range but waiting for rebalance interval"
                         );
                         return Decision::Hold;
@@ -235,11 +240,11 @@ impl DecisionEngine {
                     return Decision::Hold;
                 }
                 if !cfg.rebalance_on_range_exit_immediately
-                    && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                    && context.minutes_since_rebalance < cfg.min_rebalance_interval_minutes
                 {
                     debug!(
-                        hours_since_rebalance = context.hours_since_rebalance,
-                        min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                        minutes_since_rebalance = context.minutes_since_rebalance,
+                        min_rebalance_interval_minutes = cfg.min_rebalance_interval_minutes,
                         "RetouchShift: out of range but waiting for rebalance interval"
                     );
                     return Decision::Hold;
@@ -259,11 +264,11 @@ impl DecisionEngine {
             StrategyMode::LastCandle => {
                 if !position.in_range {
                     if !cfg.rebalance_on_range_exit_immediately
-                        && context.hours_since_rebalance < cfg.min_rebalance_interval_hours
+                        && context.minutes_since_rebalance < cfg.min_rebalance_interval_minutes
                     {
                         debug!(
-                            hours_since_rebalance = context.hours_since_rebalance,
-                            min_rebalance_interval_hours = cfg.min_rebalance_interval_hours,
+                            minutes_since_rebalance = context.minutes_since_rebalance,
+                            min_rebalance_interval_minutes = cfg.min_rebalance_interval_minutes,
                             "LastCandle: out of range but waiting for rebalance interval"
                         );
                         return Decision::Hold;
@@ -284,6 +289,24 @@ impl DecisionEngine {
                 }
                 Decision::Hold
             }
+            StrategyMode::LastCandlePeriodic => {
+                if context.minutes_since_rebalance >= cfg.min_rebalance_interval_minutes {
+                    let (new_lower, new_upper) = context
+                        .last_candle_ticks
+                        .unwrap_or_else(|| self.calculate_new_range(pool));
+                    debug!(
+                        new_lower = new_lower,
+                        new_upper = new_upper,
+                        has_last_candle_ticks = context.last_candle_ticks.is_some(),
+                        "LastCandlePeriodic: interval elapsed"
+                    );
+                    return Decision::Rebalance {
+                        new_tick_lower: new_lower,
+                        new_tick_upper: new_upper,
+                    };
+                }
+                Decision::Hold
+            }
 
             StrategyMode::IlLimit => {
                 // Out-of-range recenter **before** IL-close: after an OOR move, `il_pct` often spikes
@@ -291,7 +314,7 @@ impl DecisionEngine {
                 // instead of `Rebalance` (close + open new range).
                 if !position.in_range
                     && (cfg.rebalance_on_range_exit_immediately
-                        || context.hours_since_rebalance >= cfg.min_rebalance_interval_hours)
+                        || context.minutes_since_rebalance >= cfg.min_rebalance_interval_minutes)
                 {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
@@ -319,7 +342,7 @@ impl DecisionEngine {
 
                 // In-range (or OOR but rebalance cooldown not met): IL-based rebalance
                 if position.pnl.il_pct.abs() > cfg.il_rebalance_threshold
-                    && context.hours_since_rebalance >= cfg.min_rebalance_interval_hours
+                    && context.minutes_since_rebalance >= cfg.min_rebalance_interval_minutes
                 {
                     let (new_lower, new_upper) = self.calculate_new_range(pool);
                     debug!(
@@ -337,20 +360,8 @@ impl DecisionEngine {
         };
 
         match strategy_decision {
-            Decision::Hold => {
-                // Fee collection is always executed as part of the close flow (close_pre),
-                // so auto-collect during normal strategy operation is optional and can create noise
-                // (e.g. tiny fees shortly after open). Keep it restricted to StaticRange semantics.
-                if cfg.strategy_mode == StrategyMode::StaticRange
-                    && cfg.auto_collect_fees
-                    && position.pnl.fees_usd > cfg.min_fees_to_collect
-                {
-                    debug!("Fees exceed threshold, recommending collection");
-                    Decision::CollectFees
-                } else {
-                    Decision::Hold
-                }
-            }
+            // Policy: fee collection should happen on close/rebalance flows, not as a standalone loop action.
+            Decision::Hold => Decision::Hold,
             d => d,
         }
     }
@@ -384,6 +395,13 @@ impl DecisionEngine {
             // current_price < lower_price
             let overflow = lower_price - current_price;
             (current_price, upper_price - overflow)
+        };
+        let cfg = self.config.read().expect("decision config lock");
+        let shift = Decimal::ONE + cfg.retouch_offset_pct;
+        let (new_lower_price, new_upper_price) = if shift > Decimal::ZERO {
+            (new_lower_price * shift, new_upper_price * shift)
+        } else {
+            (new_lower_price, new_upper_price)
         };
 
         let mut new_lower_tick =
@@ -475,7 +493,7 @@ mod tests {
         DecisionContext {
             position,
             pool,
-            hours_since_rebalance: 48,
+            minutes_since_rebalance: 48 * 60,
             retouch_armed: None,
             last_candle_ticks: None,
         }
@@ -521,7 +539,7 @@ mod tests {
     fn test_oor_rebalance_before_il_close_when_cooldown_ok() {
         let engine = DecisionEngine::default();
         let mut context = create_test_context(false, Decimal::new(20, 2)); // OOR + 20% IL
-        context.hours_since_rebalance = 48;
+        context.minutes_since_rebalance = 48 * 60;
 
         let decision = engine.decide(&context);
         assert!(
@@ -567,14 +585,14 @@ mod tests {
     fn test_oor_recenter_waits_for_interval_by_default() {
         let cfg = DecisionConfig {
             strategy_mode: StrategyMode::OorRecenter,
-            min_rebalance_interval_hours: 1,
+            min_rebalance_interval_minutes: 60,
             rebalance_on_range_exit_immediately: false,
             ..DecisionConfig::default()
         };
         let engine = DecisionEngine::new(cfg);
 
         let mut context = create_test_context(false, Decimal::ZERO);
-        context.hours_since_rebalance = 0;
+        context.minutes_since_rebalance = 0;
 
         let decision = engine.decide(&context);
         assert!(
@@ -617,5 +635,60 @@ mod tests {
 
         let decision = engine.decide(&context);
         assert!(matches!(decision, Decision::Rebalance { .. }));
+    }
+
+    #[test]
+    fn test_last_candle_periodic_rebalances_on_interval_in_range() {
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandlePeriodic,
+            min_rebalance_interval_minutes: 60,
+            ..DecisionConfig::default()
+        };
+        let engine = DecisionEngine::new(cfg);
+        let mut context = create_test_context(true, Decimal::ZERO);
+        context.minutes_since_rebalance = 60;
+        context.last_candle_ticks = Some((-256, 256));
+
+        let decision = engine.decide(&context);
+        match decision {
+            Decision::Rebalance {
+                new_tick_lower,
+                new_tick_upper,
+            } => {
+                assert_eq!(new_tick_lower, -256);
+                assert_eq!(new_tick_upper, 256);
+            }
+            other => panic!("expected Rebalance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_last_candle_periodic_holds_before_interval() {
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandlePeriodic,
+            min_rebalance_interval_minutes: 120,
+            ..DecisionConfig::default()
+        };
+        let engine = DecisionEngine::new(cfg);
+        let mut context = create_test_context(false, Decimal::ZERO);
+        context.minutes_since_rebalance = 60;
+
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Hold));
+    }
+
+    #[test]
+    fn test_static_range_does_not_emit_collect_fees_decision() {
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::StaticRange,
+            auto_collect_fees: true,
+            min_fees_to_collect: Decimal::ONE,
+            ..DecisionConfig::default()
+        };
+        let engine = DecisionEngine::new(cfg);
+        let mut context = create_test_context(true, Decimal::ZERO);
+        context.position.pnl.fees_usd = Decimal::from(100u32);
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Hold));
     }
 }
