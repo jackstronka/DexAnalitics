@@ -59,6 +59,8 @@ pub struct AppState {
     pub event_bus: Arc<dyn EventBus>,
     /// Best-effort throttling for DB ingest of JSONL ledgers (avoid re-reading files too often).
     pub ledger_ingest_last_at: Arc<RwLock<Option<Instant>>>,
+    /// Optional active signer wallet id selected via API (`/wallets/active-signer`).
+    pub active_signer_wallet_id: Arc<RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -145,6 +147,7 @@ impl AppState {
             phantom_nonces: Arc::new(RwLock::new(HashMap::new())),
             event_bus,
             ledger_ingest_last_at: Arc::new(RwLock::new(None)),
+            active_signer_wallet_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -247,6 +250,10 @@ pub struct ApiConfig {
     pub script_runner_token: Option<String>,
     /// Directory with wallet keypair JSON files on the API host (used by `GET /wallets`).
     pub wallets_dir: Option<String>,
+    /// Primary wallet directory on API host (preferred over `wallets_dir` when set).
+    pub wallets_dir_primary: Option<String>,
+    /// Secondary wallet directory on API host for redundancy.
+    pub wallets_dir_secondary: Option<String>,
     /// Base (EVM) JSON-RPC URL for read-only calls (`BASE_RPC_URL`). Optional: Slipstream endpoints return 503 if unset.
     pub base_rpc_url: Option<String>,
 }
@@ -270,6 +277,8 @@ impl Default for ApiConfig {
             script_runner_url: None,
             script_runner_token: None,
             wallets_dir: None,
+            wallets_dir_primary: None,
+            wallets_dir_secondary: None,
             base_rpc_url: None,
         }
     }

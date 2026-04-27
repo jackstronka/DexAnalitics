@@ -45,6 +45,7 @@ sqlx = { workspace = true }
 solana-sdk = { workspace = true }
 solana-program = { workspace = true }
 solana-client = { workspace = true }
+solana-system-interface = { workspace = true, features = ["bincode"] }
 borsh = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }

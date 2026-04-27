@@ -759,6 +759,60 @@ async fn scripts_list_endpoint_is_reachable() {
 }
 
 #[tokio::test]
+async fn wallet_management_endpoints_are_reachable() {
+    let state = test_state();
+    let router = test_router(state);
+    assert_eq!(
+        request(router.clone(), Method::GET, "/api/v1/wallets", None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::GET,
+            "/api/v1/wallets/active-signer",
+            None
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::POST,
+            "/api/v1/wallets/active-signer",
+            Some(serde_json::json!({ "wallet_id": "" })),
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            router.clone(),
+            Method::POST,
+            "/api/v1/wallets/create",
+            Some(serde_json::json!({ "wallet_id": "bad id" })),
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            router,
+            Method::POST,
+            "/api/v1/wallets/transfer",
+            Some(serde_json::json!({
+                "from_wallet_id": "missing",
+                "to_pubkey": "bad",
+                "lamports": 0
+            })),
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn bot_activity_il_ledger_endpoint_is_reachable() {
     let state = test_state();
     let router = test_router(state);

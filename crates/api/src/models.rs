@@ -2436,14 +2436,88 @@ pub struct WalletEntry {
     pub filename: String,
     /// Solana pubkey (base58).
     pub pubkey: String,
+    /// Wallet file exists in primary storage.
+    #[serde(default)]
+    pub present_in_primary: bool,
+    /// Wallet file exists in secondary storage.
+    #[serde(default)]
+    pub present_in_secondary: bool,
+    /// Replication health across wallet stores.
+    #[serde(default)]
+    pub replication_status: WalletReplicationStatus,
+    /// SHA-256 fingerprint of wallet file bytes (hex, best-effort).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletReplicationStatus {
+    #[default]
+    Healthy,
+    Degraded,
+    Conflict,
 }
 
 /// `GET /wallets` — list wallets from a directory on the API host.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletsListResponse {
-    /// Directory scanned on the API host.
-    pub wallets_dir: String,
+    /// Primary wallets directory scanned on API host.
+    pub wallets_dir_primary: String,
+    /// Secondary wallets directory scanned on API host (optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallets_dir_secondary: Option<String>,
     pub wallets: Vec<WalletEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateWalletRequest {
+    /// Optional wallet id (filename stem). When omitted, generated from timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_id: Option<String>,
+    /// Overwrite existing wallet file if present.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateWalletResponse {
+    pub wallet: WalletEntry,
+    pub primary_written: bool,
+    pub secondary_written: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetActiveSignerRequest {
+    pub wallet_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ActiveSignerResponse {
+    pub wallet_id: Option<String>,
+    pub pubkey: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletTransferRequest {
+    /// Wallet id from local wallets storage (`/wallets`).
+    pub from_wallet_id: String,
+    /// Recipient pubkey.
+    pub to_pubkey: String,
+    /// Amount in lamports.
+    pub lamports: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletTransferResponse {
+    pub from_wallet_id: String,
+    pub from_pubkey: String,
+    pub to_pubkey: String,
+    pub lamports: u64,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

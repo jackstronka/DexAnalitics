@@ -86,6 +86,8 @@ fn load_config_from_env() -> ServerConfig {
         script_runner_url: env::var("SCRIPT_RUNNER_URL").ok(),
         script_runner_token: env::var("SCRIPT_RUNNER_TOKEN").ok(),
         wallets_dir: env::var("CLMM_WALLETS_DIR").ok(),
+        wallets_dir_primary: env::var("CLMM_WALLETS_DIR_PRIMARY").ok(),
+        wallets_dir_secondary: env::var("CLMM_WALLETS_DIR_SECONDARY").ok(),
         base_rpc_url: env::var("BASE_RPC_URL").ok().and_then(|s| {
             let t = s.trim();
             if t.is_empty() {
