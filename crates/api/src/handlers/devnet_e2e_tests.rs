@@ -306,7 +306,7 @@ async fn devnet_strategy_driven_rebalance_smoke() {
 
     let cfg = DecisionConfig {
         strategy_mode: StrategyMode::Periodic,
-        periodic_interval_hours: 0, // always eligible
+        periodic_interval_minutes: 0, // always eligible
         ..DecisionConfig::default()
     };
     exec.set_decision_config(cfg);
