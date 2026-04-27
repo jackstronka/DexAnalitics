@@ -1,3 +1,20 @@
+## 2026-04-27 — Docker workflow upgraded for Node 24-compatible actions
+
+keywords: github-actions, docker, ci, node24, build-push, metadata-action, setup-buildx, login-action
+
+- **What:** Updated Docker GitHub Actions to current major versions: `docker/setup-buildx-action@v4`, `docker/login-action@v4`, `docker/metadata-action@v6`, `docker/build-push-action@v7`.
+- **Behavior:** `Docker Build & Push` no longer relies on deprecated Node 20 action runtimes and is aligned with upcoming GitHub-hosted runner defaults (Node 24).
+- **paths:** `.github/workflows/docker.yml`
+
+## 2026-04-27 — Wallet multi-store redundancy + active signer + SOL transfer (MVP)
+
+keywords: wallets, redundancy, primary-secondary, active-signer, transfer-sol, api, web
+
+- **What:** Added dual-directory wallet storage model (`primary` + optional `secondary`) with replication status in `/wallets`, plus new wallet management endpoints for create, active signer select, and native SOL transfer.
+- **Behavior:** Wallet UI now shows storage locations and replication health (`healthy/degraded/conflict`), supports wallet creation, signer switching, and SOL transfer submission from selected local wallet id.
+- **Signer routing:** API wallet-dependent operations now prefer the selected active signer (when set) and fall back to existing env-based signer resolution.
+- **paths:** `crates/api/src/state.rs`, `crates/api/src/main.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/api/src/services/position_executor.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `crates/api/Cargo.toml`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`
+
 ## 2026-04-27 — Versioning reset to new feature stage (`0.2.0-alpha.1`)
 
 keywords: versioning, semver, release, web, api, cli, workspace, openapi
