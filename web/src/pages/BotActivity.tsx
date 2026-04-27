@@ -11,6 +11,7 @@ import {
   type BotActivityJsonlResponse,
   type BotRegistryJsonlResponse,
 } from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
 
 const LIFECYCLE_LEDGER_KEYS = [
   'ts_utc',
@@ -95,6 +96,7 @@ function LedgerTable({
 }
 
 export default function BotActivity() {
+  const { locale } = useI18n()
   const qc = useQueryClient()
   const [filter, setFilter] = useState('')
   const [limit, setLimit] = useState(200)
@@ -118,9 +120,18 @@ export default function BotActivity() {
     mutationFn: () => postSlackActivitySummary(40),
     onSuccess: (res) => {
       if (!res.webhook_configured || !res.ok) {
-        window.alert(res.error ?? 'Slack: nie wysłano (sprawdź SLACK_WEBHOOK_URL i logi API).')
+        window.alert(
+          res.error ??
+            (locale === 'pl'
+              ? 'Slack: nie wysłano (sprawdź SLACK_WEBHOOK_URL i logi API).'
+              : 'Slack: not sent (check SLACK_WEBHOOK_URL and API logs).'),
+        )
       } else {
-        window.alert(`Wysłano digest (${res.rows_included} wierszy) na Slack.`)
+        window.alert(
+          locale === 'pl'
+            ? `Wysłano digest (${res.rows_included} wierszy) na Slack.`
+            : `Digest sent to Slack (${res.rows_included} rows).`,
+        )
       }
       void qc.invalidateQueries({ queryKey: ['bot-activity-ledger'] })
       void qc.invalidateQueries({ queryKey: ['bot-activity-il-ledger'] })
@@ -134,9 +145,11 @@ export default function BotActivity() {
         <div className="flex items-center gap-3">
           <History className="h-8 w-8 text-primary" />
           <div>
-            <h1 className="text-3xl font-bold">Bot activity</h1>
+            <h1 className="text-3xl font-bold">{locale === 'pl' ? 'Aktywność bota' : 'Bot activity'}</h1>
             <p className="text-sm text-muted-foreground">
-              Historia z plików JSONL: koszty tx (lifecycle), opcjonalnie IL / zdarzenia <code className="text-xs">rebalance</code>, rejestr pozycji — jak timeline bota.
+              {locale === 'pl'
+                ? <>Historia z plików JSONL: koszty tx (lifecycle), opcjonalnie IL / zdarzenia <code className="text-xs">rebalance</code>, rejestr pozycji — jak timeline bota.</>
+                : <>History from JSONL files: tx costs (lifecycle), optional IL / <code className="text-xs">rebalance</code> events, and position registry — bot timeline style.</>}
             </p>
           </div>
         </div>
@@ -151,7 +164,7 @@ export default function BotActivity() {
             }}
           >
             <RefreshCw className="h-4 w-4 mr-2" />
-            Odśwież
+            {locale === 'pl' ? 'Odśwież' : 'Refresh'}
           </Button>
           <Button
             size="sm"
@@ -159,27 +172,31 @@ export default function BotActivity() {
             disabled={slackM.isPending}
           >
             <Send className="h-4 w-4 mr-2" />
-            Wyślij skrót na Slack
+            {locale === 'pl' ? 'Wyślij skrót na Slack' : 'Send summary to Slack'}
           </Button>
         </div>
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Filtr</CardTitle>
+          <CardTitle className="text-base">{locale === 'pl' ? 'Filtr' : 'Filter'}</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1 space-y-1">
-            <label className="text-xs text-muted-foreground">Substring w JSON (np. fragment PDA pozycji)</label>
+            <label className="text-xs text-muted-foreground">
+              {locale === 'pl'
+                ? 'Substring w JSON (np. fragment PDA pozycji)'
+                : 'Substring in JSON (e.g. part of position PDA)'}
+            </label>
             <input
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="opcjonalnie"
+              placeholder={locale === 'pl' ? 'opcjonalnie' : 'optional'}
             />
           </div>
           <div className="w-full sm:w-32 space-y-1">
-            <label className="text-xs text-muted-foreground">Limit wierszy</label>
+            <label className="text-xs text-muted-foreground">{locale === 'pl' ? 'Limit wierszy' : 'Row limit'}</label>
             <input
               type="number"
               min={1}
@@ -194,13 +211,13 @@ export default function BotActivity() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Lifecycle ledger</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'Lifecycle ledger' : 'Lifecycle ledger'}</CardTitle>
           <p className="text-sm text-muted-foreground">
-            {ledgerQ.data?.path ?? '…'} — dopasowanych wierszy: {ledgerQ.data?.total_matching_lines ?? '—'}, zwrócono: {ledgerQ.data?.rows_returned ?? '—'}
+            {ledgerQ.data?.path ?? '…'} — {locale === 'pl' ? 'dopasowanych wierszy' : 'matching rows'}: {ledgerQ.data?.total_matching_lines ?? '—'}, {locale === 'pl' ? 'zwrócono' : 'returned'}: {ledgerQ.data?.rows_returned ?? '—'}
           </p>
         </CardHeader>
         <CardContent>
-          {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
+          {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</p>}
           {ledgerQ.isError && (
             <p className="text-sm text-destructive">{(ledgerQ.error as Error).message}</p>
           )}
@@ -210,15 +227,15 @@ export default function BotActivity() {
 
       <Card>
         <CardHeader>
-          <CardTitle>IL / rebalance ledger</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'IL / rebalance ledger' : 'IL / rebalance ledger'}</CardTitle>
           <p className="text-sm text-muted-foreground">
-            {ilLedgerQ.data?.path ?? '…'} — dopasowanych: {ilLedgerQ.data?.total_matching_lines ?? '—'}, zwrócono:{' '}
-            {ilLedgerQ.data?.rows_returned ?? '—'}. Ustaw na hoście API to samo co bot:{' '}
+            {ilLedgerQ.data?.path ?? '…'} — {locale === 'pl' ? 'dopasowanych' : 'matching'}: {ilLedgerQ.data?.total_matching_lines ?? '—'}, {locale === 'pl' ? 'zwrócono' : 'returned'}:{' '}
+            {ilLedgerQ.data?.rows_returned ?? '—'}. {locale === 'pl' ? 'Ustaw na hoście API to samo co bot' : 'Set the same on API host as bot'}:{' '}
             <code className="text-xs">CLMM_IL_LEDGER_PATH</code> (= <code className="text-xs">--il-ledger-path</code>).
           </p>
         </CardHeader>
         <CardContent>
-          {ilLedgerQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
+          {ilLedgerQ.isLoading && <p className="text-sm text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</p>}
           {ilLedgerQ.isError && (
             <p className="text-sm text-destructive">{(ilLedgerQ.error as Error).message}</p>
           )}
@@ -228,13 +245,13 @@ export default function BotActivity() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Position registry</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'Rejestr pozycji' : 'Position registry'}</CardTitle>
           <p className="text-sm text-muted-foreground">
-            {registryQ.data?.path ?? '…'} — dopasowanych: {registryQ.data?.total_matching_lines ?? '—'}
+            {registryQ.data?.path ?? '…'} — {locale === 'pl' ? 'dopasowanych' : 'matching'}: {registryQ.data?.total_matching_lines ?? '—'}
           </p>
         </CardHeader>
         <CardContent>
-          {registryQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
+          {registryQ.isLoading && <p className="text-sm text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</p>}
           {registryQ.isError && (
             <p className="text-sm text-destructive">{(registryQ.error as Error).message}</p>
           )}

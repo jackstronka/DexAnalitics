@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import { useI18n } from '@/lib/i18n'
 import {
   STRATEGY_COPY,
   TOOLTIPS,
@@ -40,6 +41,8 @@ function readOptionalNumber(raw: string): number | '' {
 }
 
 export default function StrategyEdit() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -150,7 +153,7 @@ export default function StrategyEdit() {
     },
     onError: (err: Error) => {
       toast({
-        title: 'Could not save strategy',
+        title: L('Nie udało się zapisać strategii', 'Could not save strategy'),
         description: err.message,
         variant: 'destructive',
       })
@@ -164,25 +167,25 @@ export default function StrategyEdit() {
     }
     if (!name.trim()) {
       toast({
-        title: 'Name required',
-        description: 'Enter a strategy name before saving.',
+        title: L('Nazwa wymagana', 'Name required'),
+        description: L('Podaj nazwę strategii przed zapisem.', 'Enter a strategy name before saving.'),
         variant: 'destructive',
       })
       return
     }
     if (!isRangeWidthSatisfied(strategyType, rangeWidthPct)) {
       toast({
-        title: 'Range width required',
-        description: 'Set Range Width % (greater than 0, at most 100) for this strategy type.',
+        title: L('Szerokość zakresu wymagana', 'Range width required'),
+        description: L('Ustaw Range Width % (większe od 0, maks. 100) dla tego typu strategii.', 'Set Range Width % (greater than 0, at most 100) for this strategy type.'),
         variant: 'destructive',
       })
       return
     }
     if (strategyType === 'periodic' && minRebalanceIntervalMinutes === 0) {
       toast({
-        title: 'Invalid interval for Periodic',
+        title: L('Nieprawidłowy interwał dla Periodic', 'Invalid interval for Periodic'),
         description:
-          'For Periodic strategy, interval must be at least 1 minute or left empty.',
+          L('Dla strategii Periodic interwał musi mieć co najmniej 1 minutę lub być pusty.', 'For Periodic strategy, interval must be at least 1 minute or left empty.'),
         variant: 'destructive',
       })
       return
@@ -225,9 +228,9 @@ export default function StrategyEdit() {
 
   const minIntervalLabel = useMemo(() => {
     if (strategyType === 'periodic') {
-      return 'Rebalance co N minut'
+      return L('Rebalance co N minut', 'Rebalance every N minutes')
     }
-    return 'Min. rebalance spacing (min)'
+    return L('Min. odstęp rebalance (min)', 'Min. rebalance spacing (min)')
   }, [strategyType])
 
   const rebalanceThresholdTooltip = useMemo(() => {
@@ -247,11 +250,11 @@ export default function StrategyEdit() {
   const inputDisabled = 'disabled:cursor-not-allowed disabled:opacity-60'
 
   if (isLoading || !id) {
-    return <div className="text-center py-8 text-muted-foreground">Loading...</div>
+    return <div className="text-center py-8 text-muted-foreground">{L('Ładowanie...', 'Loading...')}</div>
   }
 
   if (isError || !strategy) {
-    return <div className="text-center py-8">Strategy not found</div>
+    return <div className="text-center py-8">{L('Nie znaleziono strategii', 'Strategy not found')}</div>
   }
 
   return (
@@ -263,17 +266,17 @@ export default function StrategyEdit() {
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
-          <h1 className="text-3xl font-bold">Edit Strategy</h1>
+          <h1 className="text-3xl font-bold">{L('Edytuj strategię', 'Edit Strategy')}</h1>
         </div>
 
         <Card>
           <CardHeader>
-            <CardTitle>Configuration</CardTitle>
+            <CardTitle>{L('Konfiguracja', 'Configuration')}</CardTitle>
           </CardHeader>
           <CardContent>
             <form className="space-y-4" onSubmit={handleSubmit} noValidate>
               <div>
-                <FieldLabel htmlFor="edit-strategy-name" label="Name" tooltip={TOOLTIPS.name} />
+                <FieldLabel htmlFor="edit-strategy-name" label={L('Nazwa', 'Name')} tooltip={TOOLTIPS.name} />
                 <input
                   id="edit-strategy-name"
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -284,17 +287,17 @@ export default function StrategyEdit() {
               </div>
 
               <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
-                Pool is chosen when you{' '}
+                {L('Pula jest wybierana podczas', 'Pool is chosen when you')}{' '}
                 <Link to="/positions/new" className="text-primary underline underline-offset-2">
-                  open a position
+                  {L('otwierania pozycji', 'open a position')}
                 </Link>
-                ; linked position PDAs are kept on save.
+                {L('; podpięte PDA pozycji są zachowane przy zapisie.', '; linked position PDAs are kept on save.')}
               </p>
 
               <div>
                 <FieldLabel
                   htmlFor="edit-strategy-type"
-                  label="Strategy Type"
+                  label={L('Typ strategii', 'Strategy Type')}
                   tooltip={TOOLTIPS.strategyType}
                 />
                 <select
@@ -303,14 +306,14 @@ export default function StrategyEdit() {
                   value={strategyType}
                   onChange={(e) => setStrategyType(e.target.value as StrategyType)}
                 >
-                  <option value="static_range">Static</option>
-                  <option value="periodic">Periodic</option>
+                  <option value="static_range">{L('Statyczna', 'Static')}</option>
+                  <option value="periodic">{L('Okresowa', 'Periodic')}</option>
                   <option value="threshold">Threshold</option>
                   <option value="il_limit">IL Limit</option>
-                  <option value="oor_recenter">OOR recenter</option>
-                  <option value="retouch_shift">Retouch shift</option>
-                  <option value="last_candle">Last candle</option>
-                  <option value="last_candle_periodic">Last candle (periodic)</option>
+                  <option value="oor_recenter">{L('OOR recenter', 'OOR recenter')}</option>
+                  <option value="retouch_shift">{L('Retouch shift', 'Retouch shift')}</option>
+                  <option value="last_candle">{L('Last candle', 'Last candle')}</option>
+                  <option value="last_candle_periodic">{L('Last candle (periodic)', 'Last candle (periodic)')}</option>
                 </select>
               </div>
 
@@ -326,9 +329,7 @@ export default function StrategyEdit() {
                 <div>
                   <FieldLabel
                     htmlFor="edit-range-width"
-                    label={
-                      enabled.rangeWidth ? 'Range Width % (required)' : 'Range Width % (n/a for this type)'
-                    }
+                    label={enabled.rangeWidth ? L('Range Width % (wymagane)', 'Range Width % (required)') : L('Range Width % (n/d dla typu)', 'Range Width % (n/a for this type)')}
                     tooltip={TOOLTIPS.rangeWidth}
                   />
                   <input
@@ -345,11 +346,11 @@ export default function StrategyEdit() {
                     )}
                     value={rangeWidthPct}
                     onChange={(e) => setRangeWidthPct(readOptionalNumber(e.target.value))}
-                    placeholder={enabled.rangeWidth ? 'e.g. 1.0' : '—'}
+                    placeholder={enabled.rangeWidth ? L('np. 1.0', 'e.g. 1.0') : '—'}
                   />
                 </div>
                 <div>
-                  <FieldLabel htmlFor="edit-max-il" label="Max IL % (optional)" tooltip={TOOLTIPS.maxIl} />
+                  <FieldLabel htmlFor="edit-max-il" label={L('Max IL % (opcjonalnie)', 'Max IL % (optional)')} tooltip={TOOLTIPS.maxIl} />
                   <input
                     id="edit-max-il"
                     type="number"
@@ -361,7 +362,7 @@ export default function StrategyEdit() {
                     )}
                     value={maxIlPct}
                     onChange={(e) => setMaxIlPct(readOptionalNumber(e.target.value))}
-                    placeholder="e.g. 2.0"
+                    placeholder={L('np. 2.0', 'e.g. 2.0')}
                   />
                 </div>
               </div>
@@ -371,7 +372,7 @@ export default function StrategyEdit() {
                   <div>
                     <FieldLabel
                       htmlFor="edit-retouch-offset-pct"
-                      label="Retouch offset % (optional)"
+                      label={L('Retouch offset % (opcjonalnie)', 'Retouch offset % (optional)')}
                       tooltip={TOOLTIPS.retouchOffsetPct}
                     />
                     <input
@@ -381,7 +382,7 @@ export default function StrategyEdit() {
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={retouchOffsetPct}
                       onChange={(e) => setRetouchOffsetPct(readOptionalNumber(e.target.value))}
-                      placeholder="e.g. 0.1 or -0.1"
+                      placeholder={L('np. 0.1 lub -0.1', 'e.g. 0.1 or -0.1')}
                     />
                   </div>
                 ) : null}
@@ -389,7 +390,7 @@ export default function StrategyEdit() {
                   <div>
                     <FieldLabel
                       htmlFor="edit-candle-minutes"
-                      label="Candle interval (min, optional)"
+                      label={L('Interwał świecy (min, opcjonalnie)', 'Candle interval (min, optional)')}
                       tooltip={TOOLTIPS.candleSeconds}
                     />
                     <input
@@ -400,9 +401,9 @@ export default function StrategyEdit() {
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={candleMinutes}
                       onChange={(e) => setCandleMinutes(readOptionalNumber(e.target.value))}
-                      placeholder="e.g. 60"
+                      placeholder={L('np. 60', 'e.g. 60')}
                     />
-                    <p className="mt-1 text-xs text-muted-foreground">Examples: 15, 30, 60.</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{L('Przykłady: 15, 30, 60.', 'Examples: 15, 30, 60.')}</p>
                   </div>
                 ) : null}
                 <div>
@@ -410,8 +411,8 @@ export default function StrategyEdit() {
                     htmlFor="edit-rebalance-threshold"
                     label={
                       strategyType === 'il_limit'
-                        ? 'IL rebalance threshold % (optional)'
-                        : 'Rebalance threshold % (optional)'
+                        ? L('Próg IL rebalance % (opcjonalnie)', 'IL rebalance threshold % (optional)')
+                        : L('Próg rebalance % (opcjonalnie)', 'Rebalance threshold % (optional)')
                     }
                     tooltip={rebalanceThresholdTooltip}
                   />
@@ -426,13 +427,13 @@ export default function StrategyEdit() {
                     )}
                     value={rebalanceThresholdPct}
                     onChange={(e) => setRebalanceThresholdPct(readOptionalNumber(e.target.value))}
-                    placeholder="e.g. 5.0"
+                    placeholder={L('np. 5.0', 'e.g. 5.0')}
                   />
                 </div>
                 <div>
                   <FieldLabel
                     htmlFor="edit-min-interval"
-                    label={`${minIntervalLabel} (optional)`}
+                    label={`${minIntervalLabel} (${L('opcjonalnie', 'optional')})`}
                     tooltip={minIntervalTooltip}
                   />
                   <input
@@ -449,9 +450,9 @@ export default function StrategyEdit() {
                     onChange={(e) =>
                       setMinRebalanceIntervalMinutes(readOptionalNumber(e.target.value))
                     }
-                    placeholder="e.g. 60"
+                    placeholder={L('np. 60', 'e.g. 60')}
                   />
-                  <p className="mt-1 text-xs text-muted-foreground">Examples: 15 = 15m, 60 = 1h, 240 = 4h.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{L('Przykłady: 15 = 15m, 60 = 1h, 240 = 4h.', 'Examples: 15 = 15m, 60 = 1h, 240 = 4h.')}</p>
                 </div>
               </div>
 
@@ -465,7 +466,7 @@ export default function StrategyEdit() {
                       onChange={(e) => setDryRun(e.target.checked)}
                       className="rounded border-input"
                     />
-                    <FieldLabel htmlFor="edit-dry-run" label="Dry run" tooltip={TOOLTIPS.dryRun} />
+                    <FieldLabel htmlFor="edit-dry-run" label={L('Dry run', 'Dry run')} tooltip={TOOLTIPS.dryRun} />
                   </div>
                   <div className="flex items-center gap-2">
                     <input
@@ -477,21 +478,23 @@ export default function StrategyEdit() {
                     />
                     <FieldLabel
                       htmlFor="edit-auto-exec"
-                      label="Auto-execute"
+                      label={L('Auto-execute', 'Auto-execute')}
                       tooltip={TOOLTIPS.autoExecute}
                     />
                   </div>
                 </div>
                 {dryRun && autoExecute && (
                   <p className="text-xs text-muted-foreground pl-6 sm:pl-0">
-                    Dry run is on — rebalance steps are simulated only; turn off Dry run for real
-                    on-chain transactions (requires API wallet).
+                    {L(
+                      'Dry run jest włączony — kroki rebalance są tylko symulowane; wyłącz Dry run dla realnych transakcji on-chain (wymaga walleta API).',
+                      'Dry run is on — rebalance steps are simulated only; turn off Dry run for real on-chain transactions (requires API wallet).',
+                    )}
                   </p>
                 )}
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
-                <p className="text-sm font-medium text-foreground">Startup</p>
+                <p className="text-sm font-medium text-foreground">{L('Start', 'Startup')}</p>
                 <div className="flex items-start gap-2">
                   <input
                     id="edit-auto-start"
@@ -503,18 +506,20 @@ export default function StrategyEdit() {
                   <div className="flex-1">
                     <FieldLabel
                       htmlFor="edit-auto-start"
-                      label="Auto-start on API boot"
+                      label={L('Auto-start przy starcie API', 'Auto-start on API boot')}
                       tooltip={TOOLTIPS.autoStart}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Server: autostart is <strong>on</strong> if <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> is unset. Set it to <code className="text-[11px]">0</code> or <code className="text-[11px]">false</code> to disable boot autostart globally.
+                      {locale === 'pl'
+                        ? <>Serwer: autostart jest <strong>włączony</strong>, jeśli <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> nie jest ustawione. Ustaw <code className="text-[11px]">0</code> lub <code className="text-[11px]">false</code>, aby globalnie wyłączyć autostart przy starcie.</>
+                        : <>Server: autostart is <strong>on</strong> if <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> is unset. Set it to <code className="text-[11px]">0</code> or <code className="text-[11px]">false</code> to disable boot autostart globally.</>}
                     </p>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
-                <p className="text-sm font-medium text-foreground">Semantyka rebalance</p>
+                <p className="text-sm font-medium text-foreground">{L('Semantyka rebalance', 'Rebalance semantics')}</p>
                 <div className="grid gap-3 md:grid-cols-2">
                   {strategyType !== 'periodic' && strategyType !== 'last_candle_periodic' && (
                     <div className="flex items-start gap-2">
@@ -528,7 +533,7 @@ export default function StrategyEdit() {
                       <div className="flex-1">
                         <FieldLabel
                           htmlFor="edit-rebalance-on-exit"
-                          label="Rebalance immediately on range-exit (OOR)"
+                          label={L('Rebalance natychmiast po wyjściu z zakresu (OOR)', 'Rebalance immediately on range-exit (OOR)')}
                           tooltip={TOOLTIPS.rebalanceOnRangeExitImmediately}
                         />
                       </div>
@@ -557,18 +562,18 @@ export default function StrategyEdit() {
 
               {mutation.isError && (
                 <p className="text-sm text-destructive" role="alert">
-                  {(mutation.error as Error)?.message ?? 'Save failed.'}
+                  {(mutation.error as Error)?.message ?? L('Zapis nieudany.', 'Save failed.')}
                 </p>
               )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <Link to={`/strategies/${id}`}>
                   <Button variant="outline" type="button">
-                    Cancel
+                    {L('Anuluj', 'Cancel')}
                   </Button>
                 </Link>
                 <Button type="submit" disabled={mutation.isPending}>
-                  {mutation.isPending ? 'Saving...' : 'Save changes'}
+                  {mutation.isPending ? L('Zapisywanie...', 'Saving...') : L('Zapisz zmiany', 'Save changes')}
                 </Button>
               </div>
             </form>

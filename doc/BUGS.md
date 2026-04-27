@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260427-05 — Mixed PL/EN labels and tiny helper text reduced UI readability
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-27  
+fixed_in: local  
+keywords: web, i18n, mixed-labels, readability, font-size, dashboard, settings, strategies, position-detail
+
+- **Symptom:** UI still showed mixed Polish/English labels on multiple screens (`Dashboard`, `Closed positions`, `Strategies`, `Create Strategy`, `Settings`, `PositionDetail`) and many helper/diagnostic lines were too small to read comfortably.
+- **Root cause:** Previous i18n migration covered selected flows only; several pages still had hardcoded literals. Additionally, the app used many `text-xs` / `text-[10px]` / `text-[11px]` utilities in dense diagnostic cards.
+- **Fix:** Added bilingual labels on key screens and normalized remaining hardcoded strings in `PositionDetail`; added global readability uplift for smallest text utilities in `web/src/index.css`.
+- **Guards/tests:** `npx tsc --noEmit` (web) + lint pass on touched frontend files.
+- **Paths:** `web/src/index.css`, `web/src/pages/Dashboard.tsx`, `web/src/pages/ClosedPositions.tsx`, `web/src/pages/Strategies.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/Settings.tsx`, `web/src/pages/PositionDetail.tsx`, `doc/ENGINEERING_NOTES.md`
+
+---
+
 ### BUG-20260427-04 — Wallet balances endpoint omitted Token-2022 accounts
 
 status: partially fixed  

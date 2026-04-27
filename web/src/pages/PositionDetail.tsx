@@ -52,6 +52,7 @@ import {
 } from '@/lib/utils'
 import { tickToPriceRatio, uiPriceFromRawPriceRatio } from '@/lib/whirlpoolTicks'
 import { getMetricsMode } from '@/lib/metricsMode'
+import { useI18n } from '@/lib/i18n'
 
 /** Wrapped SOL mint — network fees are in native SOL (lamports). */
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -330,6 +331,22 @@ function rangeAdjustmentBadge(reason: string | null): { text: string; className:
   }
 }
 
+function localizeLineageNote(note: string, locale: 'pl' | 'en'): string {
+  if (!note?.trim()) return note
+  let out = note
+  if (locale === 'pl') {
+    out = out.replace(
+      'Best-effort. LP mark vs HODL uses first→last position in rotation lineage; IL/HODL: baseline basket (open amounts at chain start) × current mint USD prices when pool mints are known (stable+dexpaprika). tx fees in USD use SOL/USD (dexpaprika). realized_cashflow uses lifecycle fee_payer_token_deltas × mint USD prices (stable+dexpaprika). cost/cashflow scope=chain positions fallback.',
+      'Best-effort. LP mark vs HODL używa pierwszej→ostatniej pozycji w rotacyjnym lineage; IL/HODL: koszyk bazowy (kwoty open na starcie łańcucha) × bieżące ceny USD mintów, gdy minty puli są znane (stable+dexpaprika). Opłaty tx w USD używają SOL/USD (dexpaprika). realized_cashflow używa lifecycle fee_payer_token_deltas × ceny USD mintów (stable+dexpaprika). Zakres koszt/cashflow = fallback pozycji łańcucha.',
+    )
+    out = out.replace(
+      'Lineage chain is best-effort and assumes a mostly linear old→new rotation path (common for strategies). If edges are missing, the chain may be incomplete. Cross-PDA stream stitching was suppressed for this mint (operator open: CLI `position_open` / `source:cli` / API `open_origin=operator_api`, unanchored bot open, or non-rotation lifecycle); the history table lists this position only.',
+      'Łańcuch lineage jest best-effort i zakłada głównie liniową rotację old→new (typową dla strategii). Jeśli brakuje krawędzi, łańcuch może być niepełny. Stitching streamu cross-PDA został wyłączony dla tego minta (operator open: CLI `position_open` / `source:cli` / API `open_origin=operator_api`, niezakotwiczony bot open lub lifecycle bez rotacji); tabela historii pokazuje tylko tę pozycję.',
+    )
+  }
+  return out
+}
+
 function estimateNowUsdcFromPosition(position: {
   range_usdc_quote?: string | null
   token_a_label?: string | null
@@ -438,14 +455,15 @@ function friendlyActionErrorMessage(actionLabel: string, raw: string): string {
     return `${actionLabel} failed: ${msg}`
   }
   return [
-    `Nie udało się wykonać akcji (${actionLabel}): zbyt ciasny slippage/min-out.`,
-    'Rynek przesunął się między budową instrukcji a wysłaniem transakcji.',
-    'Spróbuj ponownie; jeśli błąd wraca, zwiększ tymczasowo slippage na API (np. WHIRLPOOL_CLOSE_SLIPPAGE_BPS dla close).',
-    `Szczegóły: ${msg}`,
+    `Action failed (${actionLabel}): slippage/min-out too tight.`,
+    'Market moved between instruction build and transaction send.',
+    'Retry; if error persists, temporarily increase API slippage (e.g. WHIRLPOOL_CLOSE_SLIPPAGE_BPS for close).',
+    `Details: ${msg}`,
   ].join(' ')
 }
 
 export default function PositionDetail() {
+  const { t, locale } = useI18n()
   const { address } = useParams<{ address: string }>()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -733,13 +751,13 @@ export default function PositionDetail() {
     mutationFn: (strategy_id: string | null) => linkPositionStrategy(address!, { strategy_id }),
     onSuccess: (data) => {
       setActionError(null)
-      setActionInfo(data?.message ?? 'Strategy link updated.')
+      setActionInfo(data?.message ?? (locale === 'pl' ? 'Podpięcie strategii zaktualizowane.' : 'Strategy link updated.'))
       void queryClient.invalidateQueries({ queryKey: ['strategies'] })
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setActionInfo(null)
-      setActionError(`Strategy link failed: ${msg}`)
+      setActionError(`${locale === 'pl' ? 'Błąd podpięcia strategii' : 'Strategy link failed'}: ${msg}`)
     },
   })
 
@@ -772,7 +790,7 @@ export default function PositionDetail() {
     mutationFn: () => closePosition(address!),
     onSuccess: (data) => {
       setActionError(null)
-      setActionInfo(data?.message ?? 'Close requested.')
+      setActionInfo(data?.message ?? (locale === 'pl' ? 'Wysłano żądanie zamknięcia.' : 'Close requested.'))
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
@@ -793,7 +811,7 @@ export default function PositionDetail() {
     mutationFn: () => collectFees(address!),
     onSuccess: (data) => {
       setActionError(null)
-      setActionInfo(data?.message ?? 'Collect requested.')
+      setActionInfo(data?.message ?? (locale === 'pl' ? 'Wysłano żądanie collect.' : 'Collect requested.'))
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['position-stream-lineage', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
@@ -821,7 +839,7 @@ export default function PositionDetail() {
     },
     onSuccess: () => {
       setActionError(null)
-      setActionInfo('Rebalance requested.')
+      setActionInfo(locale === 'pl' ? 'Wysłano żądanie rebalance.' : 'Rebalance requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
@@ -844,7 +862,7 @@ export default function PositionDetail() {
     },
     onSuccess: () => {
       setActionError(null)
-      setActionInfo('Decrease requested.')
+      setActionInfo(locale === 'pl' ? 'Wysłano żądanie decrease.' : 'Decrease requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
@@ -854,7 +872,7 @@ export default function PositionDetail() {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg === 'Cancelled') return
       setActionInfo(null)
-      setActionError(`Decrease liquidity failed: ${msg}`)
+      setActionError(`${locale === 'pl' ? 'Błąd zmniejszenia płynności' : 'Decrease liquidity failed'}: ${msg}`)
     },
   })
 
@@ -886,7 +904,7 @@ export default function PositionDetail() {
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setActionInfo(null)
-      setActionError(`Agent start failed: ${msg}`)
+      setActionError(`${locale === 'pl' ? 'Błąd startu agenta' : 'Agent start failed'}: ${msg}`)
     },
   })
 
@@ -898,7 +916,7 @@ export default function PositionDetail() {
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setActionInfo(null)
-      setActionError(`Agent scan failed: ${msg}`)
+      setActionError(`${locale === 'pl' ? 'Błąd skanu agenta' : 'Agent scan failed'}: ${msg}`)
     },
   })
 
@@ -909,13 +927,13 @@ export default function PositionDetail() {
       const src = resp.meta.used_fallback
         ? `fallback (${resp.meta.provider})`
         : `${resp.meta.provider}${resp.meta.model ? `:${resp.meta.model}` : ''}`
-      setActionInfo(`Agent reply source: ${src}`)
+      setActionInfo(`${locale === 'pl' ? 'Źródło odpowiedzi agenta' : 'Agent reply source'}: ${src}`)
       void queryClient.invalidateQueries({ queryKey: ['position-agent-ui', address] })
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       setActionInfo(null)
-      setActionError(`Agent message failed: ${msg}`)
+      setActionError(`${locale === 'pl' ? 'Błąd wiadomości agenta' : 'Agent message failed'}: ${msg}`)
     },
   })
 
@@ -942,7 +960,7 @@ export default function PositionDetail() {
   })
 
   if (isLoading) {
-    return <div className="text-center py-8">Loading...</div>
+    return <div className="text-center py-8">{locale === 'pl' ? 'Ładowanie...' : 'Loading...'}</div>
   }
 
   if (isError) {
@@ -955,7 +973,9 @@ export default function PositionDetail() {
       /\b(404|NOT_FOUND|Not found:|account not found|On-chain position account not found)\b/i.test(msg)
     return (
       <div className="text-center py-8 space-y-3 max-w-lg mx-auto px-4">
-        <p className="text-destructive font-medium">Nie udało się pobrać pozycji z API</p>
+        <p className="text-destructive font-medium">
+          {locale === 'pl' ? 'Nie udało się pobrać pozycji z API' : 'Failed to load position from API'}
+        </p>
         <p className="text-sm text-muted-foreground break-words font-mono">{msg}</p>
         {looksLikeRpcOrUpstream ? (
           <p className="text-xs text-muted-foreground text-left">
@@ -979,7 +999,7 @@ export default function PositionDetail() {
         </p>
         <Link to="/positions">
           <Button variant="outline" size="sm">
-            Wróć do listy
+            {locale === 'pl' ? 'Wróć do listy' : 'Back to list'}
           </Button>
         </Link>
       </div>
@@ -987,7 +1007,7 @@ export default function PositionDetail() {
   }
 
   if (!position) {
-    return <div className="text-center py-8">Position not found</div>
+    return <div className="text-center py-8">{locale === 'pl' ? 'Pozycja nie znaleziona' : 'Position not found'}</div>
   }
 
   const rangeUsdcLine = formatUsdcPriceRange(
@@ -1012,9 +1032,9 @@ export default function PositionDetail() {
           </Button>
         </Link>
         <div className="min-w-0 space-y-1 flex-1">
-          <h1 className="text-3xl font-bold">Position Details</h1>
+          <h1 className="text-3xl font-bold">{t('positionDetail.title')}</h1>
           <div className="text-xs text-muted-foreground">
-            Tryb metryk:{' '}
+            {locale === 'pl' ? 'Tryb metryk:' : 'Metrics mode:'}{' '}
             <span className="font-medium text-foreground">
               {isSettlementMode ? 'Settlement v1' : 'Live stream'}
             </span>
@@ -1046,19 +1066,19 @@ export default function PositionDetail() {
             value="overview"
             className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
-            Overview
+            {locale === 'pl' ? 'Przegląd' : 'Overview'}
           </Tabs.Trigger>
           <Tabs.Trigger
             value="ledger"
             className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
-            Logs / rebalances
+            {locale === 'pl' ? 'Logi / rebalanse' : 'Logs / rebalances'}
           </Tabs.Trigger>
           <Tabs.Trigger
             value="agent"
             className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
-            Position Agent
+            {locale === 'pl' ? 'Agent pozycji' : 'Position Agent'}
           </Tabs.Trigger>
         </Tabs.List>
 
@@ -1066,28 +1086,30 @@ export default function PositionDetail() {
           {(lastRebalanceIncomplete || lastRebalanceSession) && (
             <Card>
               <CardHeader>
-                <CardTitle>Last rebalance diagnostics</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Diagnostyka ostatniego rebalance' : 'Last rebalance diagnostics'}</CardTitle>
               </CardHeader>
               <CardContent className="text-sm space-y-2">
                 {lastRebalanceIncomplete ? (
                   <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2">
                     <div className="font-medium text-destructive">
-                      Rebalance incomplete — old position closed, new one not opened
+                      {locale === 'pl'
+                        ? 'Rebalance niepełny — stara pozycja zamknięta, nowa nieotwarta'
+                        : 'Rebalance incomplete — old position closed, new one not opened'}
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
                       {typeof lastRebalanceIncomplete.ts_utc === 'string' ? lastRebalanceIncomplete.ts_utc : '—'}
                       {typeof lastRebalanceIncomplete.rebalance_session_id === 'string'
-                        ? ` · session ${lastRebalanceIncomplete.rebalance_session_id}`
+                        ? ` · ${locale === 'pl' ? 'sesja' : 'session'} ${lastRebalanceIncomplete.rebalance_session_id}`
                         : ''}
                     </div>
                     {typeof lastRebalanceIncomplete.error === 'string' && lastRebalanceIncomplete.error.trim() ? (
                       <div className="text-xs mt-2 break-words">
-                        <span className="font-medium">error:</span> {lastRebalanceIncomplete.error}
+                        <span className="font-medium">{locale === 'pl' ? 'błąd:' : 'error:'}</span> {lastRebalanceIncomplete.error}
                       </div>
                     ) : null}
                     {typeof lastRebalanceIncomplete.hint === 'string' && lastRebalanceIncomplete.hint.trim() ? (
                       <div className="text-xs mt-1 break-words">
-                        <span className="font-medium">hint:</span> {lastRebalanceIncomplete.hint}
+                        <span className="font-medium">{locale === 'pl' ? 'wskazówka:' : 'hint:'}</span> {lastRebalanceIncomplete.hint}
                       </div>
                     ) : null}
                   </div>
@@ -1095,27 +1117,33 @@ export default function PositionDetail() {
 
                 {!lastRebalanceIncomplete && lastRebalanceSession ? (
                   <div className="rounded-md border border-border bg-muted/10 px-3 py-2">
-                    <div className="font-medium">Latest tx session (from lifecycle ledger)</div>
+                    <div className="font-medium">{locale === 'pl' ? 'Najnowsza sesja tx (z lifecycle ledger)' : 'Latest tx session (from lifecycle ledger)'}</div>
                     <div className="text-xs text-muted-foreground mt-1">
                       session:{' '}
                       <span className="font-mono">
                         {lastRebalanceSession.session === '_no_session'
-                          ? '(no rebalance_session_id)'
+                          ? locale === 'pl'
+                            ? '(brak rebalance_session_id)'
+                            : '(no rebalance_session_id)'
                           : String(lastRebalanceSession.session)}
                       </span>
                       {lastRebalanceSession.hasClose && !lastRebalanceSession.hasOpen
-                        ? ' · close without open (likely incomplete)'
+                        ? locale === 'pl'
+                          ? ' · close bez open (prawdopodobnie niepełne)'
+                          : ' · close without open (likely incomplete)'
                         : ''}
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
-                      Open the <strong>Logs / rebalances</strong> tab to see raw rows.
+                      {locale === 'pl' ? 'Otwórz zakładkę ' : 'Open the '}<strong>Logs / rebalances</strong>{locale === 'pl' ? ', aby zobaczyć surowe wiersze.' : ' tab to see raw rows.'}
                     </div>
                   </div>
                 ) : null}
 
                 {(!ledgerAnyPresent || !ilAnyPresent) && (
                   <div className="text-xs text-yellow-500">
-                    Bot logs are file-backed on the API host. If IL ledger is missing, set{' '}
+                    {locale === 'pl'
+                      ? 'Logi bota są plikowe po stronie hosta API. Jeśli brakuje IL ledger, ustaw '
+                      : 'Bot logs are file-backed on the API host. If IL ledger is missing, set '}{' '}
                     <code className="text-[11px]">CLMM_IL_LEDGER_PATH</code> (or run CLI with{' '}
                     <code className="text-[11px]">--il-ledger-path</code>) and restart API.
                   </div>
@@ -1127,11 +1155,11 @@ export default function PositionDetail() {
           <div className="grid gap-6 md:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>Position Info</CardTitle>
+                <CardTitle>{t('positionDetail.info')}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-start border-b border-border/50 pb-3">
-                  <span className="text-muted-foreground shrink-0">Token pair</span>
+                    <span className="text-muted-foreground shrink-0">{locale === 'pl' ? 'Para tokenów' : 'Token pair'}</span>
                   <div className="text-right max-w-md">
                     <PoolPairLabels
                       labelA={position.token_a_label}
@@ -1144,17 +1172,17 @@ export default function PositionDetail() {
                   </div>
                 </div>
                 <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground">Whirlpool</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'Whirlpool' : 'Whirlpool'}</span>
                   <span className="font-mono text-xs text-right break-all max-w-[16rem]" title={position.pool_address}>
                     {shortenAddress(position.pool_address, 6)}
                   </span>
                 </div>
                 <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
-                  <span className="text-muted-foreground shrink-0 pt-0.5">Strategy</span>
+                  <span className="text-muted-foreground shrink-0 pt-0.5">{locale === 'pl' ? 'Strategia' : 'Strategy'}</span>
                   <div className="flex flex-col items-stretch sm:items-end gap-3 w-full sm:max-w-md">
                     <div className="text-right sm:text-right w-full">
                       {linkedStrategies.length === 0 ? (
-                        <span className="text-muted-foreground text-sm">None linked</span>
+                        <span className="text-muted-foreground text-sm">{locale === 'pl' ? 'Brak podpięcia' : 'None linked'}</span>
                       ) : (
                         <ul className="space-y-1">
                           {linkedStrategies.map((s) => (
@@ -1173,12 +1201,14 @@ export default function PositionDetail() {
                     </div>
                     <div className="flex flex-col gap-2 w-full border-t border-border/60 pt-3">
                       <p className="text-xs text-muted-foreground text-left sm:text-right">
-                        Link, switch, or remove strategy for this position (updates{' '}
+                        {locale === 'pl'
+                          ? 'Podepnij, przełącz lub usuń strategię dla tej pozycji (aktualizuje '
+                          : 'Link, switch, or remove strategy for this position (updates '}
                         <code className="text-[10px]">parameters.position_addresses</code>).
                       </p>
                       {linkedStrategies.length === 0 && suggestQ.data?.reason ? (
                         <p className="text-[11px] text-muted-foreground text-left sm:text-right">
-                          Suggestion: {suggestQ.data.reason}
+                          {locale === 'pl' ? 'Sugestia' : 'Suggestion'}: {suggestQ.data.reason}
                         </p>
                       ) : null}
                       <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 items-stretch sm:items-center">
@@ -1188,7 +1218,7 @@ export default function PositionDetail() {
                           onChange={(e) => setStrategyPick(e.target.value)}
                           disabled={linkStrategyMutation.isPending || allStrategies.length === 0}
                         >
-                          <option value="">— None (unlink) —</option>
+                          <option value="">{locale === 'pl' ? '— Brak (odłącz) —' : '— None (unlink) —'}</option>
                           {allStrategies.map((s) => (
                             <option key={s.id} value={s.id}>
                               {s.name} ({s.strategy_type.replace(/_/g, ' ')})
@@ -1203,7 +1233,13 @@ export default function PositionDetail() {
                             linkStrategyMutation.mutate(strategyPick.trim() ? strategyPick.trim() : null)
                           }
                         >
-                          {linkStrategyMutation.isPending ? 'Saving…' : 'Apply'}
+                          {linkStrategyMutation.isPending
+                            ? locale === 'pl'
+                              ? 'Zapisywanie…'
+                              : 'Saving…'
+                            : locale === 'pl'
+                              ? 'Zastosuj'
+                              : 'Apply'}
                         </Button>
                         <Button
                           type="button"
@@ -1215,19 +1251,21 @@ export default function PositionDetail() {
                             linkStrategyMutation.mutate(null)
                           }}
                         >
-                          Remove link
+                          {locale === 'pl' ? 'Usuń podpięcie' : 'Remove link'}
                         </Button>
                       </div>
                       {allStrategies.length === 0 && (
                         <p className="text-xs text-amber-600 text-left sm:text-right">
-                          No strategies yet — create one under Strategies first.
+                          {locale === 'pl'
+                            ? 'Brak strategii — najpierw utwórz strategię w sekcji Strategie.'
+                            : 'No strategies yet — create one under Strategies first.'}
                         </p>
                       )}
                     </div>
                   </div>
                 </div>
                 <div className="flex justify-between gap-4">
-                  <span className="text-muted-foreground shrink-0">Range</span>
+                  <span className="text-muted-foreground shrink-0">{locale === 'pl' ? 'Zakres' : 'Range'}</span>
                   <span className="text-right min-w-[14rem]">
                     {rangeUsdcLine ? (
                       <>
@@ -1261,18 +1299,18 @@ export default function PositionDetail() {
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Liquidity</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'Płynność' : 'Liquidity'}</span>
                   <span>{position.liquidity}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">In Range</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'W zakresie' : 'In Range'}</span>
                   <span className={position.in_range ? 'text-green-500' : 'text-yellow-500'}>
                     {position.in_range ? 'Yes' : 'No'}
                   </span>
                 </div>
                 {position.created_at && (
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Created</span>
+                    <span className="text-muted-foreground">{locale === 'pl' ? 'Utworzona' : 'Created'}</span>
                     <span>{formatDate(position.created_at)}</span>
                   </div>
                 )}
@@ -1281,20 +1319,20 @@ export default function PositionDetail() {
 
             <Card>
               <CardHeader>
-                <CardTitle>Diagnostics</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Diagnostyka' : 'Diagnostics'}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">In monitor</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'W monitorze' : 'In monitor'}</span>
                   <span>{diag?.in_monitor ? 'Yes' : 'No'}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Monitor in range</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'Monitor in range' : 'Monitor in range'}</span>
                   <span>{diag?.monitor_in_range === undefined ? '—' : diag?.monitor_in_range ? 'Yes' : 'No'}</span>
                 </div>
 
                 <div className="border-t border-border/60 pt-3 space-y-2">
-                  <div className="text-muted-foreground text-xs">Linked strategies</div>
+                  <div className="text-muted-foreground text-xs">{locale === 'pl' ? 'Podpięte strategie' : 'Linked strategies'}</div>
                   {diag?.linked_strategies?.length ? (
                     <ul className="space-y-2">
                       {diag.linked_strategies.map((s) => (
@@ -1307,8 +1345,9 @@ export default function PositionDetail() {
                               <span className="text-xs text-muted-foreground">({s.strategy_type})</span>
                             </div>
                             <div className="text-xs text-muted-foreground">
-                              running: {s.running ? 'yes' : 'no'} · auto_execute: {s.auto_execute ? 'yes' : 'no'} · dry_run:{' '}
-                              {s.dry_run ? 'yes' : 'no'}
+                              {locale === 'pl' ? 'działa' : 'running'}: {s.running ? (locale === 'pl' ? 'tak' : 'yes') : (locale === 'pl' ? 'nie' : 'no')} · auto_execute:{' '}
+                              {s.auto_execute ? (locale === 'pl' ? 'tak' : 'yes') : (locale === 'pl' ? 'nie' : 'no')} · dry_run:{' '}
+                              {s.dry_run ? (locale === 'pl' ? 'tak' : 'yes') : (locale === 'pl' ? 'nie' : 'no')}
                             </div>
                           </div>
                           <div className="text-xs text-muted-foreground mt-1">
@@ -1331,14 +1370,16 @@ export default function PositionDetail() {
                             </div>
                           ) : (
                             <div className="mt-2 text-xs text-muted-foreground">
-                              No executor evaluation snapshot yet (strategy not running, or no tick cycle since page load).
+                              {locale === 'pl'
+                                ? 'Brak snapshotu ewaluacji executora (strategia nie działa albo brak cyklu tick od załadowania strony).'
+                                : 'No executor evaluation snapshot yet (strategy not running, or no tick cycle since page load).'}
                             </div>
                           )}
                         </li>
                       ))}
                     </ul>
                   ) : (
-                    <div className="text-muted-foreground">No linked strategies.</div>
+                    <div className="text-muted-foreground">{locale === 'pl' ? 'Brak podpiętych strategii.' : 'No linked strategies.'}</div>
                   )}
                 </div>
               </CardContent>
@@ -1346,25 +1387,30 @@ export default function PositionDetail() {
 
             <Card>
               <CardHeader>
-                <CardTitle>Performance</CardTitle>
+                <CardTitle>{t('positionDetail.performance')}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Live value (this position, now)</span>
+                  <span className="text-muted-foreground">
+                    {locale === 'pl' ? 'Wartość live (ta pozycja, teraz)' : 'Live value (this position, now)'}
+                  </span>
                   <span className="font-bold">{formatUsdFixed(position.value_usd, 3)}</span>
                 </div>
                 {position.valuation_source === 'fallback_monitor' ? (
                   <p className="text-[11px] text-amber-600 leading-snug">
-                    Value source: fallback monitor cache (live on-chain valuation unavailable in this refresh).
+                    {locale === 'pl'
+                      ? 'Źródło wartości: fallback cache monitora (live wycena on-chain niedostępna w tym odświeżeniu).'
+                      : 'Value source: fallback monitor cache (live on-chain valuation unavailable in this refresh).'}
                   </p>
                 ) : (
                   <p className="text-[11px] text-muted-foreground leading-snug">
-                    Source: fresh valuation from <code className="text-[10px]">GET /positions/{'{address}'}</code> for this
-                    single PDA.
+                    {locale === 'pl'
+                      ? <>Źródło: świeża wycena z <code className="text-[10px]">GET /positions/{'{address}'}</code> dla tej pojedynczej PDA.</>
+                      : <>Source: fresh valuation from <code className="text-[10px]">GET /positions/{'{address}'}</code> for this single PDA.</>}
                   </p>
                 )}
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Net PnL</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'Net PnL' : 'Net PnL'}</span>
                   <span
                     className={
                       parseFloat(position.pnl.net_pnl_pct) >= 0 ? 'text-green-500' : 'text-red-500'
@@ -1375,35 +1421,43 @@ export default function PositionDetail() {
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Uncollected fees (USD)</span>
+                  <span className="text-muted-foreground">
+                    {locale === 'pl' ? 'Niezebrane fee (USD)' : 'Uncollected fees (USD)'}
+                  </span>
                   <span className="text-green-500">
                     {formatUsdUncollectedFees(position.pnl.fees_earned_usd)}
                   </span>
                 </div>
                 <p className="text-[11px] text-muted-foreground leading-snug">
-                  On-chain <code className="text-[10px]">fee_owed</code> raw:{' '}
+                  {locale === 'pl' ? 'On-chain ' : 'On-chain '}<code className="text-[10px]">fee_owed</code>{' '}
+                  {locale === 'pl' ? 'raw:' : 'raw:'}{' '}
                   {position.token_a_label ? `${position.token_a_label} (A)` : 'token A'}{' '}
                   <span className="font-mono tabular-nums">{position.pnl.fees_earned_a}</span> ·{' '}
                   {position.token_b_label ? `${position.token_b_label} (B)` : 'token B'}{' '}
-                  <span className="font-mono tabular-nums">{position.pnl.fees_earned_b}</span> (smallest
-                  units). If both are 0, nothing has accrued in the position account yet. If non-zero but
-                  USD stays $0, the price service did not return a USD rate for a pool mint.
+                  <span className="font-mono tabular-nums">{position.pnl.fees_earned_b}</span>{' '}
+                  {locale === 'pl'
+                    ? '(najmniejsze jednostki). Jeśli oba pola to 0, na koncie pozycji jeszcze nic się nie naliczyło. Jeśli są niezerowe, ale USD zostaje $0, serwis cen nie zwrócił kursu USD dla któregoś minta.'
+                    : '(smallest units). If both are 0, nothing has accrued in the position account yet. If non-zero but USD stays $0, the price service did not return a USD rate for a pool mint.'}
                 </p>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Impermanent Loss</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'Impermanent Loss' : 'Impermanent Loss'}</span>
                   <span className="text-yellow-500">{formatPercentFixed(position.pnl.il_pct, 3)}</span>
                 </div>
                 {(streamTotals || streamPerf || streamLineage) ? (
                   <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
                     <div className="text-xs text-muted-foreground">
-                      Stream history summary (across rotated PDAs, not single-PDA live value)
+                      {locale === 'pl'
+                        ? 'Podsumowanie historii streamu (przez rotowane PDA, nie wartość live pojedynczej PDA)'
+                        : 'Stream history summary (across rotated PDAs, not single-PDA live value)'}
                     </div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Known PDAs</span>
+                      <span className="text-muted-foreground">{locale === 'pl' ? 'Znane PDA' : 'Known PDAs'}</span>
                       <span className="font-mono tabular-nums">{streamKnownPdas}</span>
                     </div>
                     <div className="flex justify-between text-sm gap-4">
-                      <span className="text-muted-foreground shrink-0">Tx fees (network)</span>
+                      <span className="text-muted-foreground shrink-0">
+                        {locale === 'pl' ? 'Opłaty tx (sieć)' : 'Tx fees (network)'}
+                      </span>
                       <div className="text-right font-mono tabular-nums text-xs leading-tight">
                         {(() => {
                           const lam =
@@ -1431,17 +1485,19 @@ export default function PositionDetail() {
                     {streamTotals ? (
                       <div className="border-t border-border/60 pt-2 space-y-1">
                         <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">History baseline → latest chain mark</span>
+                          <span className="text-muted-foreground">
+                            {locale === 'pl' ? 'Baseline historii → ostatni mark łańcucha' : 'History baseline → latest chain mark'}
+                          </span>
                           <span className="font-mono tabular-nums">
                             {usdOrDash(streamTotals.baseline_value_usd)} → {usdOrDash(streamTotals.current_value_usd)}
                           </span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">Realized cashflow</span>
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Zrealizowany cashflow' : 'Realized cashflow'}</span>
                           <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.realized_cashflow_usd, 3)}</span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">Stream Net PnL</span>
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Stream Net PnL' : 'Stream Net PnL'}</span>
                           <span
                             className={
                               parseFloat(streamTotals.net_pnl_pct) >= 0
@@ -1453,24 +1509,29 @@ export default function PositionDetail() {
                           </span>
                         </div>
                         {streamTotals.note ? (
-                          <div className="text-[11px] text-muted-foreground leading-snug">{streamTotals.note}</div>
+                          <div className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamTotals.note, locale)}</div>
                         ) : null}
                       </div>
                     ) : null}
                     {streamLineage?.note ? (
-                      <div className="text-[11px] text-muted-foreground leading-snug">{streamLineage.note}</div>
+                      <div className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamLineage.note, locale)}</div>
                     ) : null}
                     {!streamTotals && streamPerf?.note ? (
-                      <div className="text-[11px] text-muted-foreground leading-snug">{streamPerf.note}</div>
+                      <div className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamPerf.note, locale)}</div>
                     ) : null}
                   </div>
                 ) : null}
                 <p className="text-xs text-muted-foreground border-t border-border/60 pt-3 leading-relaxed">
-                  <span className="font-medium text-foreground/90">Why zeros?</span> Net PnL and IL% come from
-                  the API process monitor (entry baseline vs current mark). Uncollected fees (USD) are an
-                  estimate: on-chain <code className="text-[10px]">fees_owed</code> × token USD prices;
-                  sub-cent amounts use 6 decimal places so they are not rounded to $0.000. Values refresh
-                  from RPC on each position load. Compare the raw line above with Orca if in doubt.
+                  <span className="font-medium text-foreground/90">
+                    {locale === 'pl' ? 'Dlaczego zera?' : 'Why zeros?'}
+                  </span>{' '}
+                  {locale === 'pl'
+                    ? 'Net PnL i IL% pochodzą z monitora procesu API (baseline wejścia vs bieżący mark). Niezebrane fee (USD) to estymacja: on-chain '
+                    : 'Net PnL and IL% come from the API process monitor (entry baseline vs current mark). Uncollected fees (USD) are an estimate: on-chain '}
+                  <code className="text-[10px]">fees_owed</code>
+                  {locale === 'pl'
+                    ? ' × ceny USD tokenów; kwoty poniżej centa używają 6 miejsc po przecinku, żeby nie zaokrąglać do $0.000. Wartości odświeżają się z RPC przy każdym odczycie pozycji. W razie wątpliwości porównaj surową linię powyżej z Orca.'
+                    : ' × token USD prices; sub-cent amounts use 6 decimal places so they are not rounded to $0.000. Values refresh from RPC on each position load. Compare the raw line above with Orca if in doubt.'}
                 </p>
               </CardContent>
             </Card>
@@ -1479,13 +1540,13 @@ export default function PositionDetail() {
           {linkedStrategies.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle>Strategy automation (this position)</CardTitle>
+                <CardTitle>{t('positionDetail.automation')}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  This position is linked to {linkedStrategies.length === 1 ? 'a strategy' : 'strategies'}.
-                  Turn automation off to stop this executor from acting on this PDA only (other linked
-                  positions are unchanged).
+                  {locale === 'pl'
+                    ? `Ta pozycja jest podpięta do ${linkedStrategies.length === 1 ? 'jednej strategii' : 'strategii'}. Wyłącz automatyzację, aby zatrzymać działanie executora tylko na tej PDA (inne podpięte pozycje pozostaną bez zmian).`
+                    : `This position is linked to ${linkedStrategies.length === 1 ? 'a strategy' : 'strategies'}. Turn automation off to stop this executor from acting on this PDA only (other linked positions are unchanged).`}
                 </p>
                 <ul className="space-y-3">
                   {linkedStrategies.map((s) => (
@@ -1501,11 +1562,11 @@ export default function PositionDetail() {
                           {s.name}
                         </Link>
                         <div className="text-xs text-muted-foreground">
-                          Strategy {s.running ? 'running' : 'stopped'} · this position:{' '}
+                          {locale === 'pl' ? 'Strategia' : 'Strategy'} {s.running ? (locale === 'pl' ? 'działa' : 'running') : (locale === 'pl' ? 'zatrzymana' : 'stopped')} · {locale === 'pl' ? 'ta pozycja' : 'this position'}:{' '}
                           {isAutomationOnForPosition(s) ? (
-                            <span className="text-foreground">automation on</span>
+                            <span className="text-foreground">{locale === 'pl' ? 'automatyzacja włączona' : 'automation on'}</span>
                           ) : (
-                            <span className="text-amber-600">automation paused</span>
+                            <span className="text-amber-600">{locale === 'pl' ? 'automatyzacja wstrzymana' : 'automation paused'}</span>
                           )}
                         </div>
                       </div>
@@ -1522,8 +1583,12 @@ export default function PositionDetail() {
                         }
                       >
                         {isAutomationOnForPosition(s)
-                          ? 'Pause automation for this position'
-                          : 'Resume automation for this position'}
+                          ? locale === 'pl'
+                            ? 'Wstrzymaj automatyzację dla tej pozycji'
+                            : 'Pause automation for this position'
+                          : locale === 'pl'
+                            ? 'Wznów automatyzację dla tej pozycji'
+                            : 'Resume automation for this position'}
                       </Button>
                     </li>
                   ))}
@@ -1534,7 +1599,7 @@ export default function PositionDetail() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Actions</CardTitle>
+              <CardTitle>{locale === 'pl' ? 'Akcje' : 'Actions'}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               {actionError ? (
@@ -1550,7 +1615,13 @@ export default function PositionDetail() {
               <div className="flex flex-wrap gap-4">
               <Button onClick={() => collectMutation.mutate()} disabled={collectMutation.isPending}>
                 <DollarSign className="h-4 w-4 mr-2" />
-                {collectMutation.isPending ? 'Collecting...' : 'Collect Fees'}
+                {collectMutation.isPending
+                  ? locale === 'pl'
+                    ? 'Collectowanie...'
+                    : 'Collecting...'
+                  : locale === 'pl'
+                    ? 'Collect Fees'
+                    : 'Collect Fees'}
               </Button>
               <Button
                 variant="outline"
@@ -1558,21 +1629,35 @@ export default function PositionDetail() {
                 disabled={rebalanceMutation.isPending}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                {rebalanceMutation.isPending ? 'Rebalancing...' : 'Rebalance'}
+                {rebalanceMutation.isPending
+                  ? locale === 'pl'
+                    ? 'Rebalansowanie...'
+                    : 'Rebalancing...'
+                  : locale === 'pl'
+                    ? 'Rebalance'
+                    : 'Rebalance'}
               </Button>
               <Button
                 variant="outline"
                 onClick={() => decreaseMutation.mutate()}
                 disabled={decreaseMutation.isPending}
               >
-                {decreaseMutation.isPending ? 'Decreasing...' : 'Decrease liquidity'}
+                {decreaseMutation.isPending
+                  ? locale === 'pl'
+                    ? 'Zmniejszanie...'
+                    : 'Decreasing...'
+                  : locale === 'pl'
+                    ? 'Zmniejsz płynność'
+                    : 'Decrease liquidity'}
               </Button>
               <Button
                 variant="destructive"
                 onClick={() => {
                   if (
                     !window.confirm(
-                      'Zamknąć tę pozycję? Operacji nie cofniesz z poziomu tego panelu (on-chain tx).',
+                      locale === 'pl'
+                        ? 'Zamknąć tę pozycję? Operacji nie cofniesz z poziomu tego panelu (on-chain tx).'
+                        : 'Close this position? This on-chain transaction cannot be undone from this panel.',
                     )
                   ) {
                     return
@@ -1582,7 +1667,13 @@ export default function PositionDetail() {
                 disabled={closeMutation.isPending}
               >
                 <X className="h-4 w-4 mr-2" />
-                {closeMutation.isPending ? 'Closing...' : 'Close Position'}
+                {closeMutation.isPending
+                  ? locale === 'pl'
+                    ? 'Zamykanie...'
+                    : 'Closing...'
+                  : locale === 'pl'
+                    ? 'Zamknij pozycję'
+                    : 'Close Position'}
               </Button>
               </div>
             </CardContent>
@@ -1591,11 +1682,11 @@ export default function PositionDetail() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between gap-4">
               <div>
-                <CardTitle>Backtest (from open position)</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Backtest (z otwartej pozycji)' : 'Backtest (from open position)'}</CardTitle>
                 <p className="text-sm text-muted-foreground font-normal">
-                  Uruchamia <code className="text-[11px]">clmm-lp-cli backtest</code> dla aktualnie otwartej pozycji
-                  (start z registry_open). Jeśli baseline dla tego PDA jest dostępny, API użyje go jako{' '}
-                  <code className="text-[11px]">capital</code>.
+                  {locale === 'pl'
+                    ? <>Uruchamia <code className="text-[11px]">clmm-lp-cli backtest</code> dla aktualnie otwartej pozycji (start z registry_open). Jeśli baseline dla tego PDA jest dostępny, API użyje go jako <code className="text-[11px]">capital</code>.</>
+                    : <>Runs <code className="text-[11px]">clmm-lp-cli backtest</code> for the currently open position (start from registry_open). If baseline for this PDA is available, API uses it as <code className="text-[11px]">capital</code>.</>}
                 </p>
               </div>
               <Button
@@ -1603,13 +1694,13 @@ export default function PositionDetail() {
                 onClick={() => runBacktestM.mutate()}
                 disabled={runBacktestM.isPending || !address}
               >
-                Run backtest
+                {locale === 'pl' ? 'Uruchom backtest' : 'Run backtest'}
               </Button>
             </CardHeader>
             <CardContent className="space-y-3">
               {runBacktestM.isError && (runBacktestM.error as Error)?.message !== 'Cancelled' ? (
                 <div className="text-sm text-destructive">
-                  {(runBacktestM.error as Error)?.message ?? 'Backtest failed'}
+                  {(runBacktestM.error as Error)?.message ?? (locale === 'pl' ? 'Backtest nieudany' : 'Backtest failed')}
                 </div>
               ) : null}
               {backtestJobId ? (
@@ -1618,7 +1709,9 @@ export default function PositionDetail() {
                   {backtestJobQ.data ? `(${backtestJobQ.data.status})` : ''}
                 </div>
               ) : (
-                <div className="text-sm text-muted-foreground">No job yet.</div>
+                    <div className="text-sm text-muted-foreground">
+                      {locale === 'pl' ? 'Brak joba.' : 'No job yet.'}
+                    </div>
               )}
               {backtestJobQ.data?.stderr ? (
                 <pre className="text-xs whitespace-pre-wrap bg-muted p-3 rounded-md overflow-auto max-h-64">
@@ -1638,14 +1731,16 @@ export default function PositionDetail() {
           {lineageQ.isPending ? (
             <Card>
               <CardHeader>
-                <CardTitle>Position history (rotations)</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
               </CardHeader>
-              <CardContent className="text-sm text-muted-foreground">Loading lineage…</CardContent>
+              <CardContent className="text-sm text-muted-foreground">
+                {locale === 'pl' ? 'Ładowanie lineage…' : 'Loading lineage…'}
+              </CardContent>
             </Card>
           ) : lineageQ.isError ? (
             <Card>
               <CardHeader>
-                <CardTitle>Position history (rotations)</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
               </CardHeader>
               <CardContent className="text-sm text-destructive">
                 {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
@@ -1654,14 +1749,16 @@ export default function PositionDetail() {
           ) : streamLineage ? (
             <Card>
               <CardHeader>
-                <CardTitle>Position history (rotations)</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-muted-foreground">
-                  Best-effort chain reconstructed from IL edges (old → new). Each row is a distinct PDA created by rebalance/strategy rotation.
+                  {locale === 'pl'
+                    ? 'Łańcuch best-effort odtworzony z IL edges (old → new). Każdy wiersz to osobna PDA utworzona przez rebalance/rotację strategii.'
+                    : 'Best-effort chain reconstructed from IL edges (old → new). Each row is a distinct PDA created by rebalance/strategy rotation.'}
                 </p>
                 {streamLineage.note ? (
-                  <p className="text-[11px] text-muted-foreground leading-snug">{streamLineage.note}</p>
+                  <p className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamLineage.note, locale)}</p>
                 ) : null}
                 <p className="text-[11px] text-muted-foreground leading-snug">
                   <span className="font-medium">LP zebrane:</span> przy <code className="text-[10px]">collect_fees</code> Orca
@@ -1682,7 +1779,9 @@ export default function PositionDetail() {
                           checked={invertRangeQuote}
                           onChange={(e) => setInvertRangeQuote(e.target.checked)}
                         />
-                        Pokazuj zakres jako A per 1 B (zamiast B per 1 A)
+                        {locale === 'pl'
+                          ? 'Pokazuj zakres jako A per 1 B (zamiast B per 1 A)'
+                          : 'Show range as A per 1 B (instead of B per 1 A)'}
                       </label>
                     </div>
                     <div className="overflow-x-auto rounded-md border">
@@ -1690,19 +1789,19 @@ export default function PositionDetail() {
                       <thead className="bg-muted/50">
                         <tr>
                           <th className="px-2 py-1 text-left">#</th>
-                          <th className="px-2 py-1 text-left">position</th>
-                          <th className="px-2 py-1 text-left">opened</th>
-                          <th className="px-2 py-1 text-left">closed / last</th>
-                          <th className="px-2 py-1 text-left">range @ open</th>
-                          <th className="px-2 py-1 text-left">close price</th>
-                          <th className="px-2 py-1 text-left">start value</th>
-                          <th className="px-2 py-1 text-left">end value</th>
-                          <th className="px-2 py-1 text-left">current value</th>
-                          <th className="px-2 py-1 text-left">principal Δ</th>
-                          <th className="px-2 py-1 text-left">Sieć (tx)</th>
-                          <th className="px-2 py-1 text-left">LP zebrane</th>
-                          <th className="px-2 py-1 text-left">cashflow</th>
-                          <th className="px-2 py-1 text-left">net PnL</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'pozycja' : 'position'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'otwarta' : 'opened'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'zamknięta / ostatnia' : 'closed / last'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'zakres @ open' : 'range @ open'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'cena zamknięcia' : 'close price'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość start' : 'start value'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość end' : 'end value'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość current' : 'current value'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'kapitał Δ' : 'principal Δ'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'Sieć (tx)' : 'Network (tx)'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'LP zebrane' : 'LP collected'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'cashflow' : 'cashflow'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'net PnL' : 'net PnL'}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1821,7 +1920,9 @@ export default function PositionDetail() {
                                     ) : null}
                                     {collects > 0 && usdNum === 0 && !hasTokenVals ? (
                                       <div className="text-muted-foreground mt-1 leading-tight text-[10px]">
-                                        Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.
+                                        {locale === 'pl'
+                                          ? 'Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.'
+                                          : 'Missing USD total in API (mint pricing / scale); see lifecycle ledger for details.'}
                                       </div>
                                     ) : null}
                                     {n.collect_zero_diagnostics ? (
@@ -1829,11 +1930,11 @@ export default function PositionDetail() {
                                         className="text-muted-foreground mt-1 leading-tight text-[10px]"
                                         title={n.collect_zero_diagnostics.methodology_note}
                                       >
-                                        dlaczego 0: in-range~{n.collect_zero_diagnostics.in_range_time_share_pct_est ?? '—'}%
+                                        {locale === 'pl' ? 'dlaczego 0' : 'why 0'}: in-range~{n.collect_zero_diagnostics.in_range_time_share_pct_est ?? '—'}%
                                         {' · '}
-                                        swapy~{n.collect_zero_diagnostics.swap_events_in_window_est}
+                                        {locale === 'pl' ? 'swapy' : 'swaps'}~{n.collect_zero_diagnostics.swap_events_in_window_est}
                                         {' · '}
-                                        udział~{n.collect_zero_diagnostics.position_share_pct_est ?? '—'}%
+                                        {locale === 'pl' ? 'udział' : 'share'}~{n.collect_zero_diagnostics.position_share_pct_est ?? '—'}%
                                       </div>
                                     ) : null}
                                   </>
@@ -1866,7 +1967,11 @@ export default function PositionDetail() {
                   </div>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No lineage rows yet (missing IL edges / DB snapshots).</p>
+                  <p className="text-sm text-muted-foreground">
+                    {locale === 'pl'
+                      ? 'Brak wierszy lineage (brak IL edges / snapshotów DB).'
+                      : 'No lineage rows yet (missing IL edges / DB snapshots).'}
+                  </p>
                 )}
 
                 {streamLineage.totals ? (
@@ -1877,14 +1982,24 @@ export default function PositionDetail() {
                         size="sm"
                         onClick={() => setShowOnlyNonZeroBreakdown((v) => !v)}
                       >
-                        {showOnlyNonZeroBreakdown ? 'Pokaż wszystkie pozycje' : 'Pokaż tylko niezerowe'}
+                        {showOnlyNonZeroBreakdown
+                          ? locale === 'pl'
+                            ? 'Pokaż wszystkie pozycje'
+                            : 'Show all positions'
+                          : locale === 'pl'
+                            ? 'Pokaż tylko niezerowe'
+                            : 'Show non-zero only'}
                       </Button>
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
                       <div className="text-xs font-medium text-foreground">
                         {isSettlementMode
-                          ? 'Settlement v1 — wynik ekonomiczny łańcucha (net PnL)'
-                          : 'Wynik ekonomiczny łańcucha (net PnL)'}
+                          ? locale === 'pl'
+                            ? 'Settlement v1 — wynik ekonomiczny łańcucha (net PnL)'
+                            : 'Settlement v1 — chain economic result (net PnL)'
+                          : locale === 'pl'
+                            ? 'Wynik ekonomiczny łańcucha (net PnL)'
+                            : 'Chain economic result (net PnL)'}
                       </div>
                       <div
                         className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${totalsSourceBadge.className}`}
@@ -1892,7 +2007,9 @@ export default function PositionDetail() {
                         {totalsSourceBadge.label}
                       </div>
                       <p className="text-[10px] text-muted-foreground leading-snug">
-                        End NAV + cashflow z ledgera − baseline − opłaty sieci SOL (USD). To inna metryka niż IL vs HODL.
+                        {locale === 'pl'
+                          ? 'End NAV + cashflow z ledgera − baseline − opłaty sieci SOL (USD). To inna metryka niż IL vs HODL.'
+                          : 'End NAV + ledger cashflow − baseline − SOL network fees (USD). This metric is different from IL vs HODL.'}
                       </p>
                       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
@@ -1979,11 +2096,17 @@ export default function PositionDetail() {
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
                       <div className="text-xs font-medium text-foreground">
                         {isSettlementMode
-                          ? 'Settlement v1 — IL vs koszyk początkowy (benchmark)'
-                          : 'IL vs koszyk początkowy (benchmark)'}
+                          ? locale === 'pl'
+                            ? 'Settlement v1 — IL vs koszyk początkowy (benchmark)'
+                            : 'Settlement v1 — IL vs initial basket (benchmark)'
+                          : locale === 'pl'
+                            ? 'IL vs koszyk początkowy (benchmark)'
+                            : 'IL vs initial basket (benchmark)'}
                       </div>
                       <p className="text-[10px] text-muted-foreground leading-snug">
-                        Wartość LP vs hipotetyczny HODL tokenów depozytu na starcie łańcucha, przy bieżących cenach mintów (USD).
+                        {locale === 'pl'
+                          ? 'Wartość LP vs hipotetyczny HODL tokenów depozytu na starcie łańcucha, przy bieżących cenach mintów (USD).'
+                          : 'LP value vs hypothetical HODL of initial deposit tokens, using current mint USD prices.'}
                       </p>
                       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
@@ -2001,9 +2124,13 @@ export default function PositionDetail() {
                       </div>
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                      <div className="text-xs font-medium text-foreground">Rozbicie LP zebrane (per PDA)</div>
+                      <div className="text-xs font-medium text-foreground">
+                        {locale === 'pl' ? 'Rozbicie LP zebrane (per PDA)' : 'LP collected breakdown (per PDA)'}
+                      </div>
                       <div className="text-[10px] text-muted-foreground leading-snug">
-                        Składowe budujące łączną wartość `LP zebrane` dla całego łańcucha.
+                        {locale === 'pl'
+                          ? 'Składowe budujące łączną wartość `LP zebrane` dla całego łańcucha.'
+                          : 'Components building total `LP collected` value for the whole chain.'}
                       </div>
                       <div className="space-y-1 text-xs text-muted-foreground">
                         {streamLineage.nodes.map((n) => {
@@ -2051,7 +2178,7 @@ export default function PositionDetail() {
                       </div>
                     </div>
                     {streamLineage.totals.note ? (
-                      <div className="text-[11px] text-muted-foreground leading-snug">{streamLineage.totals.note}</div>
+                      <div className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamLineage.totals.note, locale)}</div>
                     ) : null}
                   </div>
                 ) : null}
@@ -2060,26 +2187,29 @@ export default function PositionDetail() {
           ) : (
             <Card>
               <CardHeader>
-                <CardTitle>Position history (rotations)</CardTitle>
+                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
               </CardHeader>
-              <CardContent className="text-sm text-muted-foreground">No lineage response.</CardContent>
+              <CardContent className="text-sm text-muted-foreground">
+                {locale === 'pl' ? 'Brak odpowiedzi lineage.' : 'No lineage response.'}
+              </CardContent>
             </Card>
           )}
 
           <Card>
             <CardHeader>
-              <CardTitle>Lifecycle ledger (filtered)</CardTitle>
+              <CardTitle>{locale === 'pl' ? 'Lifecycle ledger (filtrowany)' : 'Lifecycle ledger (filtered)'}</CardTitle>
             </CardHeader>
             <CardContent className="text-sm text-muted-foreground space-y-2">
               <p>
-                Rows from <code className="text-xs">/bot-activity/ledger</code> filtered to <strong>this</strong>{' '}
-                position PDA (sesje poniżej). Oś <strong>Lifecycle timeline</strong> scala też wszystkie PDA z{' '}
-                <code className="text-xs">stream-lineage</code> oraz IL ledger. Fee (USD) uses SOL/USD from{' '}
-                <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).
+                {locale === 'pl'
+                  ? <>Wiersze z <code className="text-xs">/bot-activity/ledger</code> przefiltrowane do <strong>tej</strong> PDA pozycji (sesje poniżej). Oś <strong>Lifecycle timeline</strong> scala też wszystkie PDA ze <code className="text-xs">stream-lineage</code> oraz IL ledger. Fee (USD) używa SOL/USD z <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).</>
+                  : <>Rows from <code className="text-xs">/bot-activity/ledger</code> filtered to <strong>this</strong> position PDA (sessions below). <strong>Lifecycle timeline</strong> also merges PDAs from <code className="text-xs">stream-lineage</code> and IL ledger. Fee (USD) uses SOL/USD from <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).</>}
               </p>
               {!ledgerAnyPresent && (
                 <p className="text-yellow-500">
-                  Lifecycle ledger file missing on API host ({ledgerData?.path ?? '—'}).
+                  {locale === 'pl'
+                    ? `Brak pliku lifecycle ledger na hoście API (${ledgerData?.path ?? '—'}).`
+                    : `Lifecycle ledger file missing on API host (${ledgerData?.path ?? '—'}).`}
                 </p>
               )}
             </CardContent>
@@ -2099,18 +2229,19 @@ export default function PositionDetail() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">IL ledger (rebalance events)</CardTitle>
+              <CardTitle className="text-base">{locale === 'pl' ? 'IL ledger (zdarzenia rebalance)' : 'IL ledger (rebalance events)'}</CardTitle>
             </CardHeader>
             <CardContent className="text-sm text-muted-foreground space-y-2">
               <p>
-                From <code className="text-xs">/bot-activity/il-ledger</code> — rows where JSON contains this address
-                (new <code className="text-xs">position</code> or <code className="text-xs">old_position</code>). Requires{' '}
-                <code className="text-xs">CLMM_IL_LEDGER_PATH</code> on the API host (same file as{' '}
-                <code className="text-xs">orca-bot-run --il-ledger-path</code>).
+                {locale === 'pl'
+                  ? <>Z <code className="text-xs">/bot-activity/il-ledger</code> — wiersze, gdzie JSON zawiera ten adres (new <code className="text-xs">position</code> lub <code className="text-xs">old_position</code>). Wymaga <code className="text-xs">CLMM_IL_LEDGER_PATH</code> na hoście API (ten sam plik co <code className="text-xs">orca-bot-run --il-ledger-path</code>).</>
+                  : <>From <code className="text-xs">/bot-activity/il-ledger</code> — rows where JSON contains this address (new <code className="text-xs">position</code> or <code className="text-xs">old_position</code>). Requires <code className="text-xs">CLMM_IL_LEDGER_PATH</code> on the API host (same file as <code className="text-xs">orca-bot-run --il-ledger-path</code>).</>}
               </p>
               {!ilAnyPresent && (
                 <p className="text-yellow-500">
-                  IL ledger not configured or file missing ({ilLedgerData?.path ?? '—'}).
+                  {locale === 'pl'
+                    ? `IL ledger nie jest skonfigurowany lub brakuje pliku (${ilLedgerData?.path ?? '—'}).`
+                    : `IL ledger not configured or file missing (${ilLedgerData?.path ?? '—'}).`}
                 </p>
               )}
               {ilAnyPresent && ilRows.length > 0 && (
@@ -2149,7 +2280,7 @@ export default function PositionDetail() {
                 </div>
               )}
               {ilAnyPresent && ilRows.length === 0 && (
-                <p className="text-muted-foreground">No IL rows for this address yet.</p>
+                <p className="text-muted-foreground">{locale === 'pl' ? 'Brak wierszy IL dla tego adresu.' : 'No IL rows for this address yet.'}</p>
               )}
             </CardContent>
           </Card>
@@ -2192,7 +2323,9 @@ export default function PositionDetail() {
           ))}
 
           {ledgerRows.length === 0 && ledgerAnyPresent && (
-            <p className="text-muted-foreground text-sm">No matching lines yet for this address.</p>
+            <p className="text-muted-foreground text-sm">
+              {locale === 'pl' ? 'Brak pasujących linii dla tego adresu.' : 'No matching lines yet for this address.'}
+            </p>
           )}
         </Tabs.Content>
 

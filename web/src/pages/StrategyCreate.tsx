@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/hooks/use-toast'
+import { useI18n } from '@/lib/i18n'
 import {
   STRATEGY_COPY,
   TOOLTIPS,
@@ -30,6 +31,8 @@ function readOptionalNumber(raw: string): number | '' {
 }
 
 export default function StrategyCreate() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { toast } = useToast()
@@ -183,17 +186,17 @@ export default function StrategyCreate() {
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
-          <h1 className="text-3xl font-bold">Create Strategy</h1>
+          <h1 className="text-3xl font-bold">{L('Utwórz strategię', 'Create Strategy')}</h1>
         </div>
 
         <Card>
           <CardHeader>
-            <CardTitle>Configuration</CardTitle>
+            <CardTitle>{L('Konfiguracja', 'Configuration')}</CardTitle>
           </CardHeader>
           <CardContent>
             <form className="space-y-4" onSubmit={handleSubmit} noValidate>
               <div>
-                <FieldLabel htmlFor="strategy-name" label="Name" tooltip={TOOLTIPS.name} />
+                <FieldLabel htmlFor="strategy-name" label={L('Nazwa', 'Name')} tooltip={TOOLTIPS.name} />
                 <input
                   id="strategy-name"
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -220,18 +223,17 @@ export default function StrategyCreate() {
               </div>
 
               <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
-                <span className="text-foreground font-medium">No pool needed here</span> — pool is
-                chosen when you{' '}
+                <span className="text-foreground font-medium">{L('Tu nie trzeba wybierać puli', 'No pool needed here')}</span> — {L('pula jest wybierana podczas', 'pool is chosen when you')}{' '}
                 <Link to="/positions/new" className="text-primary underline underline-offset-2">
-                  open a position
+                  {L('otwierania pozycji', 'open a position')}
                 </Link>
-                ; there you attach this strategy to that position.
+                {L('; tam podpinasz tę strategię do pozycji.', '; there you attach this strategy to that position.')}
               </p>
 
               <div>
                 <FieldLabel
                   htmlFor="strategy-type"
-                  label="Strategy Type"
+                  label={L('Typ strategii', 'Strategy Type')}
                   tooltip={TOOLTIPS.strategyType}
                 />
                 <select
@@ -264,7 +266,9 @@ export default function StrategyCreate() {
                   <FieldLabel
                     htmlFor="range-width"
                     label={
-                      enabled.rangeWidth ? 'Range Width % (required)' : 'Range Width % (n/a for this type)'
+                      enabled.rangeWidth
+                        ? L('Szerokość zakresu % (wymagane)', 'Range Width % (required)')
+                        : L('Szerokość zakresu % (n/d dla tego typu)', 'Range Width % (n/a for this type)')
                     }
                     tooltip={TOOLTIPS.rangeWidth}
                   />
@@ -282,13 +286,13 @@ export default function StrategyCreate() {
                     )}
                     value={rangeWidthPct}
                     onChange={(e) => setRangeWidthPct(readOptionalNumber(e.target.value))}
-                    placeholder={enabled.rangeWidth ? 'e.g. 1.0 for ~±0.5% price band' : '—'}
+                    placeholder={enabled.rangeWidth ? L('np. 1.0 dla pasma ~±0.5%', 'e.g. 1.0 for ~±0.5% price band') : '—'}
                   />
                 </div>
                 <div>
                   <FieldLabel
                     htmlFor="max-il"
-                    label="Max IL % (optional)"
+                    label={L('Max IL % (opcjonalnie)', 'Max IL % (optional)')}
                     tooltip={TOOLTIPS.maxIl}
                   />
                   <input
@@ -302,7 +306,7 @@ export default function StrategyCreate() {
                     )}
                     value={maxIlPct}
                     onChange={(e) => setMaxIlPct(readOptionalNumber(e.target.value))}
-                    placeholder="e.g. 2.0"
+                    placeholder={L('np. 2.0', 'e.g. 2.0')}
                   />
                 </div>
               </div>
@@ -312,7 +316,7 @@ export default function StrategyCreate() {
                   <div>
                     <FieldLabel
                       htmlFor="retouch-offset-pct"
-                      label="Retouch offset % (optional)"
+                      label={L('Retouch offset % (opcjonalnie)', 'Retouch offset % (optional)')}
                       tooltip={TOOLTIPS.retouchOffsetPct}
                     />
                     <input
@@ -322,7 +326,7 @@ export default function StrategyCreate() {
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={retouchOffsetPct}
                       onChange={(e) => setRetouchOffsetPct(readOptionalNumber(e.target.value))}
-                      placeholder="e.g. 0.1 or -0.1"
+                      placeholder={L('np. 0.1 lub -0.1', 'e.g. 0.1 or -0.1')}
                     />
                   </div>
                 ) : null}
@@ -330,7 +334,7 @@ export default function StrategyCreate() {
                   <div>
                     <FieldLabel
                       htmlFor="candle-minutes"
-                      label="Candle interval (min, optional)"
+                      label={L('Interwał świecy (min, opcjonalnie)', 'Candle interval (min, optional)')}
                       tooltip={TOOLTIPS.candleSeconds}
                     />
                     <input
@@ -341,9 +345,9 @@ export default function StrategyCreate() {
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={candleMinutes}
                       onChange={(e) => setCandleMinutes(readOptionalNumber(e.target.value))}
-                      placeholder="e.g. 60"
+                      placeholder={L('np. 60', 'e.g. 60')}
                     />
-                    <p className="mt-1 text-xs text-muted-foreground">Examples: 15, 30, 60.</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{L('Przykłady: 15, 30, 60.', 'Examples: 15, 30, 60.')}</p>
                   </div>
                 ) : null}
                 <div>
@@ -351,8 +355,8 @@ export default function StrategyCreate() {
                     htmlFor="rebalance-threshold"
                     label={
                       strategyType === 'il_limit'
-                        ? 'IL rebalance threshold % (optional)'
-                        : 'Rebalance threshold % (optional)'
+                        ? L('Próg IL rebalance % (opcjonalnie)', 'IL rebalance threshold % (optional)')
+                        : L('Próg rebalance % (opcjonalnie)', 'Rebalance threshold % (optional)')
                     }
                     tooltip={rebalanceThresholdTooltip}
                   />
@@ -367,13 +371,13 @@ export default function StrategyCreate() {
                     )}
                     value={rebalanceThresholdPct}
                     onChange={(e) => setRebalanceThresholdPct(readOptionalNumber(e.target.value))}
-                    placeholder="e.g. 5.0"
+                    placeholder={L('np. 5.0', 'e.g. 5.0')}
                   />
                 </div>
                 <div>
                   <FieldLabel
                     htmlFor="min-interval"
-                    label={`${minIntervalLabel} (optional)`}
+                    label={`${minIntervalLabel} (${L('opcjonalnie', 'optional')})`}
                     tooltip={minIntervalTooltip}
                   />
                   <input
@@ -390,14 +394,14 @@ export default function StrategyCreate() {
                     onChange={(e) =>
                       setMinRebalanceIntervalMinutes(readOptionalNumber(e.target.value))
                     }
-                    placeholder="e.g. 60"
+                    placeholder={L('np. 60', 'e.g. 60')}
                   />
-                  <p className="mt-1 text-xs text-muted-foreground">Examples: 15 = 15m, 60 = 1h, 240 = 4h.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{L('Przykłady: 15 = 15m, 60 = 1h, 240 = 4h.', 'Examples: 15 = 15m, 60 = 1h, 240 = 4h.')}</p>
                 </div>
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
-                <p className="text-sm font-medium text-foreground">Semantyka rebalance</p>
+                <p className="text-sm font-medium text-foreground">{L('Semantyka rebalance', 'Rebalance semantics')}</p>
                 <div className="grid gap-3 md:grid-cols-2">
                   {strategyType !== 'periodic' && strategyType !== 'last_candle_periodic' && (
                     <div className="flex items-start gap-2">
@@ -411,11 +415,11 @@ export default function StrategyCreate() {
                       <div className="flex-1">
                         <FieldLabel
                           htmlFor="create-rebalance-on-exit"
-                          label="Rebalance immediately on range-exit (OOR)"
+                          label={L('Rebalance natychmiast po wyjściu z zakresu (OOR)', 'Rebalance immediately on range-exit (OOR)')}
                           tooltip={TOOLTIPS.rebalanceOnRangeExitImmediately}
                         />
                         <p className="text-xs text-muted-foreground">
-                          Default: on (old behavior).
+                          {L('Domyślnie: on (stare zachowanie).', 'Default: on (old behavior).')}
                         </p>
                       </div>
                     </div>
@@ -437,7 +441,7 @@ export default function StrategyCreate() {
                         tooltip={TOOLTIPS.periodicRequiresOor}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Enabled only for Periodic strategy type.
+                        {L('Działa tylko dla strategii Periodic.', 'Enabled only for Periodic strategy type.')}
                       </p>
                     </div>
                   </div>
@@ -445,7 +449,7 @@ export default function StrategyCreate() {
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
-                <p className="text-sm font-medium text-foreground">Startup</p>
+                <p className="text-sm font-medium text-foreground">{L('Start', 'Startup')}</p>
                 <div className="flex items-start gap-2">
                   <input
                     id="create-auto-start"
@@ -457,11 +461,13 @@ export default function StrategyCreate() {
                   <div className="flex-1">
                     <FieldLabel
                       htmlFor="create-auto-start"
-                      label="Auto-start on API boot"
+                      label={L('Auto-start przy starcie API', 'Auto-start on API boot')}
                       tooltip={TOOLTIPS.autoStart}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Server: autostart is <strong>on</strong> if <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> is unset. Set it to <code className="text-[11px]">0</code> or <code className="text-[11px]">false</code> to disable boot autostart globally.
+                      {locale === 'pl'
+                        ? <>Serwer: autostart jest <strong>włączony</strong>, jeśli <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> nie jest ustawione. Ustaw <code className="text-[11px]">0</code> lub <code className="text-[11px]">false</code>, aby globalnie wyłączyć autostart przy starcie.</>
+                        : <>Server: autostart is <strong>on</strong> if <code className="text-[11px]">CLMM_STRATEGY_AUTOSTART_ON_BOOT</code> is unset. Set it to <code className="text-[11px]">0</code> or <code className="text-[11px]">false</code> to disable boot autostart globally.</>}
                     </p>
                   </div>
                 </div>
@@ -469,18 +475,18 @@ export default function StrategyCreate() {
 
               {mutation.isError && (
                 <p className="text-sm text-destructive" role="alert">
-                  {(mutation.error as Error)?.message ?? 'Request failed.'}
+                  {(mutation.error as Error)?.message ?? L('Żądanie nieudane.', 'Request failed.')}
                 </p>
               )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <Link to="/strategies">
                   <Button variant="outline" type="button">
-                    Cancel
+                    {L('Anuluj', 'Cancel')}
                   </Button>
                 </Link>
                 <Button type="submit" disabled={mutation.isPending}>
-                  {mutation.isPending ? 'Creating...' : 'Create Strategy'}
+                  {mutation.isPending ? L('Tworzenie...', 'Creating...') : L('Utwórz strategię', 'Create Strategy')}
                 </Button>
               </div>
             </form>

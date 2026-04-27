@@ -13,8 +13,10 @@ import { Button } from '@/components/ui/button'
 import ApiDataHint from '@/components/ApiDataHint'
 import { getPortfolioAnalytics, getPositions, getHealth } from '@/lib/api'
 import { formatUSD, formatPercent, formatUsdcPriceRange } from '@/lib/utils'
+import { useI18n } from '@/lib/i18n'
 
 export default function Dashboard() {
+  const { locale } = useI18n()
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
     queryKey: ['portfolio-analytics'],
     queryFn: getPortfolioAnalytics,
@@ -39,11 +41,11 @@ export default function Dashboard() {
       <ApiDataHint />
 
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Dashboard</h1>
+        <h1 className="text-3xl font-bold">{locale === 'pl' ? 'Dashboard' : 'Dashboard'}</h1>
         <div className="flex items-center gap-2">
           <div className={`h-2 w-2 rounded-full ${health?.status === 'healthy' ? 'bg-green-500' : 'bg-yellow-500'}`} />
           <span className="text-sm text-muted-foreground">
-            {health?.status || 'Checking...'}
+            {health?.status || (locale === 'pl' ? 'Sprawdzanie...' : 'Checking...')}
           </span>
         </div>
       </div>
@@ -52,7 +54,7 @@ export default function Dashboard() {
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Value</CardTitle>
+            <CardTitle className="text-sm font-medium">{locale === 'pl' ? 'Wartość całkowita' : 'Total Value'}</CardTitle>
             <DollarSign className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
@@ -60,14 +62,14 @@ export default function Dashboard() {
               {analyticsLoading ? '...' : formatUSD(analytics?.total_value_usd || '0')}
             </div>
             <p className="text-xs text-muted-foreground">
-              {analytics?.active_positions || 0} active positions
+              {analytics?.active_positions || 0} {locale === 'pl' ? 'aktywnych pozycji' : 'active positions'}
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total PnL</CardTitle>
+            <CardTitle className="text-sm font-medium">{locale === 'pl' ? 'Łączny PnL' : 'Total PnL'}</CardTitle>
             {parseFloat(analytics?.total_pnl_pct || '0') >= 0 ? (
               <TrendingUp className="h-4 w-4 text-green-500" />
             ) : (
@@ -88,7 +90,7 @@ export default function Dashboard() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Fees Earned</CardTitle>
+            <CardTitle className="text-sm font-medium">{locale === 'pl' ? 'Zarobione fee' : 'Fees Earned'}</CardTitle>
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
@@ -96,14 +98,14 @@ export default function Dashboard() {
               {analyticsLoading ? '...' : formatUSD(analytics?.total_fees_usd || '0')}
             </div>
             <p className="text-xs text-muted-foreground">
-              Lifetime earnings
+              {locale === 'pl' ? 'Zysk łączny' : 'Lifetime earnings'}
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">IL (avg %)</CardTitle>
+            <CardTitle className="text-sm font-medium">{locale === 'pl' ? 'IL (śr. %)' : 'IL (avg %)'}</CardTitle>
             <AlertTriangle className="h-4 w-4 text-yellow-500" />
           </CardHeader>
           <CardContent>
@@ -111,7 +113,7 @@ export default function Dashboard() {
               {analyticsLoading ? '...' : formatPercent(analytics?.total_il_pct || '0')}
             </div>
             <p className="text-xs text-muted-foreground">
-              Across monitored positions
+              {locale === 'pl' ? 'W monitorowanych pozycjach' : 'Across monitored positions'}
             </p>
           </CardContent>
         </Card>
@@ -119,33 +121,35 @@ export default function Dashboard() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Portfolio over time</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'Portfel w czasie' : 'Portfolio over time'}</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          Historical time series is not wired to a dedicated endpoint yet. Use{' '}
+          {locale === 'pl'
+            ? 'Historyczny szereg czasowy nie ma jeszcze dedykowanego endpointu. Użyj '
+            : 'Historical time series is not wired to a dedicated endpoint yet. Use '}
           <Link to="/wallet" className="text-primary underline">
-            Wallet
+            {locale === 'pl' ? 'Portfel' : 'Wallet'}
           </Link>{' '}
-          for current totals and open positions.
+          {locale === 'pl' ? 'dla bieżących sum i otwartych pozycji.' : 'for current totals and open positions.'}
         </CardContent>
       </Card>
 
       {/* Active Positions */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Active Positions</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'Aktywne pozycje' : 'Active Positions'}</CardTitle>
           <Link to="/positions">
             <Button variant="ghost" size="sm">
-              View All <ArrowRight className="ml-2 h-4 w-4" />
+              {locale === 'pl' ? 'Zobacz wszystkie' : 'View All'} <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </Link>
         </CardHeader>
         <CardContent>
           {positionsLoading ? (
-            <div className="text-center py-8 text-muted-foreground">Loading...</div>
+            <div className="text-center py-8 text-muted-foreground">{locale === 'pl' ? 'Ładowanie...' : 'Loading...'}</div>
           ) : activePositions.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
-              No active positions
+              {locale === 'pl' ? 'Brak aktywnych pozycji' : 'No active positions'}
             </div>
           ) : (
             <div className="space-y-4">

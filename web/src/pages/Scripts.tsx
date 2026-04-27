@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { getScripts, runScript, type ScriptRunRecord } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useToast } from '@/hooks/use-toast'
+import { useI18n } from '@/lib/i18n'
 
 function copyText(text: string) {
   void navigator.clipboard.writeText(text)
@@ -38,6 +39,8 @@ function isBotScript(id: string): boolean {
 }
 
 export default function Scripts() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const { toast } = useToast()
   const qc = useQueryClient()
   const [runLog, setRunLog] = useState<{ scriptId: string; run: ScriptRunRecord } | null>(null)
@@ -52,14 +55,14 @@ export default function Scripts() {
     mutationFn: (id: string) => runScript(id, 'web'),
     onMutate: (id) => {
       setRunningIds((prev) => ({ ...prev, [id]: true }))
-      toast({ title: 'Uruchamianie skryptu…', description: id })
+      toast({ title: L('Uruchamianie skryptu…', 'Starting script…'), description: id })
     },
     onSuccess: () => {
-      toast({ title: 'Skrypt zakończony', description: 'Run zapisany w data/script_runs.jsonl.' })
+      toast({ title: L('Skrypt zakończony', 'Script finished'), description: L('Run zapisany w data/script_runs.jsonl.', 'Run saved in data/script_runs.jsonl.') })
       void qc.invalidateQueries({ queryKey: ['scripts'] })
     },
     onError: (e: Error) => {
-      toast({ title: 'Run nieudany', description: e.message, variant: 'destructive' })
+      toast({ title: L('Run nieudany', 'Run failed'), description: e.message, variant: 'destructive' })
     },
     onSettled: (_data, _err, id) => {
       setRunningIds((prev) => {
@@ -71,8 +74,8 @@ export default function Scripts() {
   })
 
   const runnerHint = data?.runner_configured
-    ? 'Runner jest skonfigurowany na API (URL + token).'
-    : 'Ustaw SCRIPT_RUNNER_URL i SCRIPT_RUNNER_TOKEN w root .env i uruchom tools/Start-ClmmScriptRunner.ps1.'
+    ? L('Runner jest skonfigurowany na API (URL + token).', 'Runner is configured on API side (URL + token).')
+    : L('Ustaw SCRIPT_RUNNER_URL i SCRIPT_RUNNER_TOKEN w root .env i uruchom tools/Start-ClmmScriptRunner.ps1.', 'Set SCRIPT_RUNNER_URL and SCRIPT_RUNNER_TOKEN in root .env and run tools/Start-ClmmScriptRunner.ps1.')
 
   const allScripts = data?.scripts ?? []
   const priorityDataQuality = allScripts.filter((s) => isDataQualityScript(s.id))
@@ -85,12 +88,12 @@ export default function Scripts() {
           <thead>
             <tr className="border-b text-left text-muted-foreground">
               <th className="py-2 pr-4">Script</th>
-              <th className="py-2 pr-4">Summary</th>
-              <th className="py-2 pr-4">Last run</th>
-              <th className="py-2 pr-4">Status</th>
-              <th className="py-2 pr-4">Error</th>
-              <th className="py-2 pr-2">Logi</th>
-              <th className="py-2">Actions</th>
+              <th className="py-2 pr-4">{L('Opis', 'Summary')}</th>
+              <th className="py-2 pr-4">{L('Ostatni run', 'Last run')}</th>
+              <th className="py-2 pr-4">{L('Status', 'Status')}</th>
+              <th className="py-2 pr-4">{L('Błąd', 'Error')}</th>
+              <th className="py-2 pr-2">{L('Logi', 'Logs')}</th>
+              <th className="py-2">{L('Akcje', 'Actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -125,11 +128,11 @@ export default function Scripts() {
                   <td className="py-2 pr-4 align-top whitespace-nowrap">{lr ? formatDate(lr.ts_utc) : '—'}</td>
                   <td className="py-2 pr-4 align-top">
                     {lr ? (
-                      <span className={lr.ok ? 'text-green-500' : 'text-red-500'}>{lr.ok ? 'OK' : 'Error'}</span>
+                      <span className={lr.ok ? 'text-green-500' : 'text-red-500'}>{lr.ok ? 'OK' : L('Błąd', 'Error')}</span>
                     ) : (
                       '—'
                     )}
-                    {isRunning && <span className="ml-2 text-xs text-muted-foreground">Running…</span>}
+                    {isRunning && <span className="ml-2 text-xs text-muted-foreground">{L('Uruchamianie…', 'Running…')}</span>}
                   </td>
                   <td className="py-2 pr-4 align-top max-w-xs truncate" title={lr?.error_excerpt ?? ''}>
                     {lr?.error_excerpt ?? '—'}
@@ -159,11 +162,11 @@ export default function Scripts() {
                         size="sm"
                         onClick={() => {
                           copyText(cmd)
-                          toast({ title: 'Copied', description: cmd })
+                          toast({ title: L('Skopiowano', 'Copied'), description: cmd })
                         }}
                       >
                         <Copy className="h-3 w-3 mr-1" />
-                        Copy
+                        {L('Kopiuj', 'Copy')}
                       </Button>
                       {s.runnable && (
                         <Button
@@ -180,7 +183,7 @@ export default function Scripts() {
                           }
                         >
                           <Play className="h-3 w-3 mr-1" />
-                          {isRunning ? 'Running…' : 'Run'}
+                          {isRunning ? L('Uruchamianie…', 'Running…') : 'Run'}
                         </Button>
                       )}
                     </div>
@@ -203,7 +206,7 @@ export default function Scripts() {
       </p>
 
       <div>
-        <h1 className="text-3xl font-bold">Skrypty</h1>
+        <h1 className="text-3xl font-bold">{L('Skrypty', 'Scripts')}</h1>
         <p className="text-muted-foreground text-sm mt-1">
           Skrypty operatorskie z <code className="text-xs">tools/scripts-manifest.json</code>. {runnerHint}
         </p>
@@ -231,13 +234,13 @@ export default function Scripts() {
           >
             <div className="flex items-center justify-between border-b px-4 py-3">
               <h2 id="run-log-title" className="font-semibold text-sm">
-                Ostatni run: <span className="font-mono">{runLog.scriptId}</span>
+                {L('Ostatni run', 'Last run')}: <span className="font-mono">{runLog.scriptId}</span>
               </h2>
               <button
                 type="button"
                 className="rounded-md p-1.5 hover:bg-muted"
                 onClick={() => setRunLog(null)}
-                aria-label="Zamknij"
+                aria-label={L('Zamknij', 'Close')}
               >
                 <X className="h-4 w-4" />
               </button>
@@ -267,7 +270,7 @@ export default function Scripts() {
               {!runLog.run.error_excerpt &&
                 !runLog.run.stderr_excerpt &&
                 !runLog.run.stdout_excerpt && (
-                  <p className="text-muted-foreground">Brak excerptów w rekordzie (zob. plik runów na hoście API).</p>
+                  <p className="text-muted-foreground">{L('Brak excerptów w rekordzie (zob. plik runów na hoście API).', 'No excerpts in record (see runs file on API host).')}</p>
                 )}
             </div>
           </div>
@@ -277,7 +280,7 @@ export default function Scripts() {
       {data?.manifest_missing && (
         <Card className="border-yellow-600/50">
           <CardHeader>
-            <CardTitle className="text-yellow-500">Brak tools/scripts-manifest.json</CardTitle>
+            <CardTitle className="text-yellow-500">{L('Brak tools/scripts-manifest.json', 'Missing tools/scripts-manifest.json')}</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
             API pokazuje skrypty wyłącznie ze skanu <code className="text-xs">tools/*.ps1</code>. Utwórz manifest w repo,
@@ -296,11 +299,11 @@ export default function Scripts() {
 
       <Card className="border-primary/30">
         <CardHeader>
-          <CardTitle>Priorytet: poprawność i jakość danych</CardTitle>
+          <CardTitle>{L('Priorytet: poprawność i jakość danych', 'Priority: data correctness and quality')}</CardTitle>
         </CardHeader>
         <CardContent>
           {(priorityDataQuality ?? []).length === 0 ? (
-            <div className="text-muted-foreground text-sm">Brak pasujących skryptów w manifeście.</div>
+            <div className="text-muted-foreground text-sm">{L('Brak pasujących skryptów w manifeście.', 'No matching scripts in manifest.')}</div>
           ) : (
             renderTable(priorityDataQuality)
           )}
@@ -309,11 +312,11 @@ export default function Scripts() {
 
       <Card className="border-primary/30">
         <CardHeader>
-          <CardTitle>Priorytet: obsługa bota</CardTitle>
+          <CardTitle>{L('Priorytet: obsługa bota', 'Priority: bot operations')}</CardTitle>
         </CardHeader>
         <CardContent>
           {(priorityBot ?? []).length === 0 ? (
-            <div className="text-muted-foreground text-sm">Brak pasujących skryptów w manifeście.</div>
+            <div className="text-muted-foreground text-sm">{L('Brak pasujących skryptów w manifeście.', 'No matching scripts in manifest.')}</div>
           ) : (
             renderTable(priorityBot)
           )}
@@ -324,15 +327,15 @@ export default function Scripts() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Terminal className="h-5 w-5" />
-            Katalog
+            {L('Katalog', 'Catalog')}
           </CardTitle>
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <div className="text-muted-foreground">Loading…</div>
+            <div className="text-muted-foreground">{L('Ładowanie…', 'Loading…')}</div>
           ) : (data?.scripts ?? []).length === 0 ? (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm space-y-2">
-              <p className="font-medium text-foreground">Brak skryptów w odpowiedzi API</p>
+              <p className="font-medium text-foreground">{L('Brak skryptów w odpowiedzi API', 'No scripts in API response')}</p>
               <p className="text-muted-foreground text-xs leading-relaxed">
                 Backend szuka <code className="text-[11px]">tools/scripts-manifest.json</code> i{' '}
                 <code className="text-[11px]">tools/*.ps1</code> względem <strong>korzenia repozytorium</strong>. Jeśli

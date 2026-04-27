@@ -15,6 +15,7 @@ import {
   type PendingOpenRecoveryResponse,
   type StrandedRebalancesResponse,
 } from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
 
 function rowCell(v: unknown): string {
   if (v === null || v === undefined) return '—'
@@ -487,6 +488,8 @@ const IL_KEYS = ['timestamp', 'event', 'old_position', 'position', 'pool', 'reas
 const REGISTRY_KEYS = ['ts_utc', 'event', 'position', 'pool', 'owner', 'signature']
 
 export default function Logs() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const qc = useQueryClient()
   const [filter, setFilter] = useState('')
   const [limit, setLimit] = useState(300)
@@ -565,9 +568,9 @@ export default function Logs() {
         <div className="flex items-center gap-3">
           <ScrollText className="h-8 w-8 text-primary" />
           <div>
-            <h1 className="text-3xl font-bold">Logs</h1>
+            <h1 className="text-3xl font-bold">{L('Logi', 'Logs')}</h1>
             <p className="text-sm text-muted-foreground">
-              Najnowsze zdarzenia bota niezależnie od tego, czy pozycja nadal istnieje. Szukaj{' '}
+              {L('Najnowsze zdarzenia bota niezależnie od tego, czy pozycja nadal istnieje. Szukaj ', 'Latest bot events regardless of whether position still exists. Look for ')}
               <code className="text-xs">rebalance_incomplete</code>.
             </p>
           </div>
@@ -584,17 +587,17 @@ export default function Logs() {
           }}
         >
           <RefreshCw className="h-4 w-4 mr-2" />
-          Odśwież
+          {L('Odśwież', 'Refresh')}
         </Button>
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Filtr (substring w JSON)</CardTitle>
+          <CardTitle className="text-base">{L('Filtr (substring w JSON)', 'Filter (substring in JSON)')}</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1 space-y-1">
-            <label className="text-xs text-muted-foreground">np. fragment PDA, pool, signature, session id</label>
+            <label className="text-xs text-muted-foreground">{L('np. fragment PDA, pool, signature, session id', 'e.g. part of PDA, pool, signature, session id')}</label>
             <input
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={filter}
@@ -602,11 +605,11 @@ export default function Logs() {
                 setLedgerOffset(0)
                 setFilter(e.target.value)
               }}
-              placeholder="opcjonalnie"
+              placeholder={L('opcjonalnie', 'optional')}
             />
           </div>
           <div className="w-full sm:w-32 space-y-1">
-            <label className="text-xs text-muted-foreground">Limit</label>
+            <label className="text-xs text-muted-foreground">{L('Limit', 'Limit')}</label>
             <input
               type="number"
               min={1}
@@ -624,7 +627,7 @@ export default function Logs() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Urwane pozycje (watchdog)</CardTitle>
+          <CardTitle>{L('Urwane pozycje (watchdog)', 'Stranded positions (watchdog)')}</CardTitle>
           <p className="text-sm text-muted-foreground">
             Sesje z <code className="text-xs">bot_close_position</code> bez odpowiadającego{' '}
             <code className="text-xs">bot_open_position</code>. Ta sekcja ma osobny widok do recovery. Okresowy reconcile w{' '}
@@ -654,12 +657,12 @@ export default function Logs() {
                 }
               }}
             >
-              {reconciling ? 'Reconciling…' : 'Run watchdog reconcile'}
+              {reconciling ? L('Reconciling…', 'Reconciling…') : L('Uruchom reconcile watchdoga', 'Run watchdog reconcile')}
             </Button>
             {reconcileMsg && <span className="text-xs text-emerald-700 dark:text-emerald-400">{reconcileMsg}</span>}
             {reconcileErr && <span className="text-xs text-destructive">{reconcileErr}</span>}
           </div>
-          {strandedQ.isLoading && <p className="text-muted-foreground">Ładowanie…</p>}
+          {strandedQ.isLoading && <p className="text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
           {strandedQ.isError && <p className="text-destructive">{(strandedQ.error as Error).message}</p>}
           {strandedQ.data && <StrandedRebalancesBox data={strandedQ.data} onFilterSession={(sid) => {
             setLedgerOffset(0)
@@ -670,7 +673,7 @@ export default function Logs() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Last rebalance incomplete</CardTitle>
+          <CardTitle>{L('Ostatni rebalance incomplete', 'Last rebalance incomplete')}</CardTitle>
           <p className="text-sm text-muted-foreground">
             Źródło: <code className="text-xs">/bot-activity/il-ledger</code> (wymaga{' '}
             <code className="text-xs">CLMM_IL_LEDGER_PATH</code>).
@@ -684,31 +687,31 @@ export default function Logs() {
           ) : lastIncomplete ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs space-y-1">
               <div>
-                <span className="font-medium">timestamp:</span> {String(lastIncomplete.timestamp ?? '—')}
+                <span className="font-medium">{L('timestamp', 'timestamp')}:</span> {String(lastIncomplete.timestamp ?? '—')}
               </div>
               <div className="break-words">
-                <span className="font-medium">error:</span> {String(lastIncomplete.error ?? '—')}
+                <span className="font-medium">{L('błąd', 'error')}:</span> {String(lastIncomplete.error ?? '—')}
               </div>
               <div className="break-words">
-                <span className="font-medium">hint:</span> {String(lastIncomplete.hint ?? '—')}
+                <span className="font-medium">{L('wskazówka', 'hint')}:</span> {String(lastIncomplete.hint ?? '—')}
               </div>
               <div className="break-words">
-                <span className="font-medium">old → new:</span> {String(lastIncomplete.old_position ?? '—')} →{' '}
+                <span className="font-medium">{L('old → new', 'old → new')}:</span> {String(lastIncomplete.old_position ?? '—')} →{' '}
                 {String(lastIncomplete.position ?? '—')}
               </div>
               <div>
-                <span className="font-medium">session:</span> {String(lastIncomplete.rebalance_session_id ?? '—')}
+                <span className="font-medium">{L('sesja', 'session')}:</span> {String(lastIncomplete.rebalance_session_id ?? '—')}
               </div>
             </div>
           ) : (
-            <p className="text-muted-foreground">Brak `rebalance_incomplete` w ostatnich wierszach (albo za niski limit).</p>
+            <p className="text-muted-foreground">{L('Brak `rebalance_incomplete` w ostatnich wierszach (albo za niski limit).', 'No `rebalance_incomplete` rows in recent lines (or limit too low).')}</p>
           )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Pending open recovery</CardTitle>
+          <CardTitle>{L('Pending open recovery', 'Pending open recovery')}</CardTitle>
           <p className="text-sm text-muted-foreground">
             Źródło: <code className="text-xs">CLMM_PENDING_OPEN_RECOVERY_PATH</code> (domyślnie{' '}
             <code className="text-xs">data/pending-open-recovery.json</code>).
@@ -716,7 +719,7 @@ export default function Logs() {
         </CardHeader>
         <CardContent className="text-sm">
           {pendingQ.isLoading ? (
-            <p className="text-muted-foreground">Ładowanie…</p>
+            <p className="text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>
           ) : pendingQ.isError ? (
             <p className="text-destructive">{(pendingQ.error as Error).message}</p>
           ) : pendingQ.data ? (
@@ -727,7 +730,7 @@ export default function Logs() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Lifecycle ledger</CardTitle>
+          <CardTitle>{L('Lifecycle ledger', 'Lifecycle ledger')}</CardTitle>
           <p className="text-sm text-muted-foreground">
             {ledgerQ.data?.path ?? '…'} — dopasowanych: {ledgerQ.data?.total_matching_lines ?? '—'}, zwrócono:{' '}
             {ledgerQ.data?.rows_returned ?? '—'}. To jest <span className="font-medium">dziennik wykonania</span>{' '}
@@ -758,7 +761,7 @@ export default function Logs() {
                 disabled={ledgerOffset <= 0}
                 onClick={() => setLedgerOffset((x) => Math.max(0, x - Math.max(1, limit)))}
               >
-                Nowsze
+                {L('Nowsze', 'Newer')}
               </Button>
               <Button
                 type="button"
@@ -772,7 +775,7 @@ export default function Logs() {
                 }
                 onClick={() => setLedgerOffset((x) => x + Math.max(1, limit))}
               >
-                Starsze
+                {L('Starsze', 'Older')}
               </Button>
               <Button
                 type="button"
@@ -781,13 +784,13 @@ export default function Logs() {
                 disabled={ledgerOffset === 0}
                 onClick={() => setLedgerOffset(0)}
               >
-                Najnowsze
+                {L('Najnowsze', 'Latest')}
               </Button>
             </div>
           </div>
           {closeWithoutOpen.length > 0 && (
             <div className="mb-3 rounded-md border border-amber-500/35 bg-amber-500/5 px-3 py-2 text-sm">
-              <div className="font-medium">Sessions with close but no open (recent)</div>
+              <div className="font-medium">{L('Sesje z close bez open (ostatnie)', 'Sessions with close but no open (recent)')}</div>
               <div className="text-xs text-muted-foreground mt-1">
                 Kliknij, żeby wypełnić filtr <code className="text-[11px]">rebalance_session_id</code>.
               </div>
@@ -810,7 +813,7 @@ export default function Logs() {
               </div>
             </div>
           )}
-          {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
+          {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
           {ledgerQ.isError && <p className="text-sm text-destructive">{(ledgerQ.error as Error).message}</p>}
           {ledgerDisplayData && (
             <div className="space-y-3">
@@ -821,7 +824,7 @@ export default function Logs() {
                   variant={lifecycleView === 'sessions' ? 'default' : 'outline'}
                   onClick={() => setLifecycleView('sessions')}
                 >
-                  Widok sesji (czytelny)
+                  {L('Widok sesji (czytelny)', 'Session view (readable)')}
                 </Button>
                 <Button
                   type="button"
@@ -829,7 +832,7 @@ export default function Logs() {
                   variant={lifecycleView === 'table' ? 'default' : 'outline'}
                   onClick={() => setLifecycleView('table')}
                 >
-                  Tabela surowa
+                  {L('Tabela surowa', 'Raw table')}
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
@@ -854,13 +857,13 @@ export default function Logs() {
 
       <Card>
         <CardHeader>
-          <CardTitle>IL / rebalance ledger</CardTitle>
+          <CardTitle>{L('IL / rebalance ledger', 'IL / rebalance ledger')}</CardTitle>
           <p className="text-sm text-muted-foreground">
             {ilQ.data?.path ?? '…'} — dopasowanych: {ilQ.data?.total_matching_lines ?? '—'}, zwrócono: {ilQ.data?.rows_returned ?? '—'}
           </p>
         </CardHeader>
         <CardContent>
-          {ilQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
+          {ilQ.isLoading && <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
           {ilQ.isError && <p className="text-sm text-destructive">{(ilQ.error as Error).message}</p>}
           {ilQ.data && <JsonlTable data={ilQ.data} columnKeys={IL_KEYS} />}
         </CardContent>
@@ -868,13 +871,13 @@ export default function Logs() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Position registry</CardTitle>
+          <CardTitle>{L('Rejestr pozycji', 'Position registry')}</CardTitle>
           <p className="text-sm text-muted-foreground">
             {registryQ.data?.path ?? '…'} — dopasowanych: {registryQ.data?.total_matching_lines ?? '—'}
           </p>
         </CardHeader>
         <CardContent>
-          {registryQ.isLoading && <p className="text-sm text-muted-foreground">Ładowanie…</p>}
+          {registryQ.isLoading && <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
           {registryQ.isError && <p className="text-sm text-destructive">{(registryQ.error as Error).message}</p>}
           {registryQ.data && <JsonlTable data={registryQ.data} columnKeys={REGISTRY_KEYS} />}
         </CardContent>

@@ -26,6 +26,7 @@ import {
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { getMetricsMode } from '@/lib/metricsMode'
+import { useI18n } from '@/lib/i18n'
 
 function usdOrDash(v: string | number, digits = 3): string {
   const n = typeof v === 'string' ? parseFloat(v) : v
@@ -43,6 +44,8 @@ function valuationQualityLabel(q?: string | null): string | null {
 }
 
 export default function ClosedPositionDetail() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const { address } = useParams<{ address: string }>()
   const pos = (address ?? '').trim()
   const metricsMode = getMetricsMode()
@@ -166,13 +169,13 @@ export default function ClosedPositionDetail() {
           <Link to="/positions/closed">
             <Button variant="outline" size="sm">
               <ArrowLeft className="h-4 w-4 mr-2" />
-              Back
+              {L('Wstecz', 'Back')}
             </Button>
           </Link>
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold truncate">Closed position</h1>
+            <h1 className="text-2xl font-bold truncate">{L('Zamknięta pozycja', 'Closed position')}</h1>
             <div className="text-xs text-muted-foreground">
-              Tryb metryk:{' '}
+              {L('Tryb metryk', 'Metrics mode')}:{' '}
               <span className="font-medium text-foreground">
                 {isSettlementMode ? 'Settlement v1' : 'Live stream'}
               </span>
@@ -202,14 +205,14 @@ export default function ClosedPositionDetail() {
           disabled={lifecycleQ.isPending}
         >
           <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
+          {L('Odśwież', 'Refresh')}
         </Button>
       </div>
 
       {lifecycleQ.isError ? (
         <Card>
           <CardHeader>
-            <CardTitle>Error</CardTitle>
+            <CardTitle>{L('Błąd', 'Error')}</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
             {lifecycleQ.error instanceof Error ? lifecycleQ.error.message : String(lifecycleQ.error)}
@@ -220,7 +223,7 @@ export default function ClosedPositionDetail() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="border-border/80">
           <CardHeader>
-            <CardTitle className="text-base">Koszty i prowizje — ten adres</CardTitle>
+            <CardTitle className="text-base">{L('Koszty i prowizje — ten adres', 'Costs and fees — this address')}</CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Tylko PDA tej strony. <span className="text-foreground/90">Sieć</span> = opłaty Solany za każdą transakcję
               (open, collect, close…). <span className="text-foreground/90">LP zebrane</span> = prowizje puli z evenciów{' '}
@@ -231,7 +234,7 @@ export default function ClosedPositionDetail() {
             {entryNode ? (
               <>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="text-xs text-muted-foreground uppercase tracking-wide">Koszt sieci (tx)</div>
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Koszt sieci (tx)', 'Network cost (tx)')}</div>
                   <div className="font-mono text-lg mt-0.5">
                     {(entryNode.tx_fee_lamports ?? 0).toLocaleString()} lamports
                     <span className="text-muted-foreground"> · </span>
@@ -239,7 +242,7 @@ export default function ClosedPositionDetail() {
                   </div>
                 </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="text-xs text-muted-foreground uppercase tracking-wide">Prowizje LP zebrane</div>
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Prowizje LP zebrane', 'LP fees collected')}</div>
                   <div className="font-mono text-lg mt-0.5">
                     {formatUsdCollectedOrDash(entryNode.fees_collected_usd, entryNode.collect_events)}
                     <span className="text-muted-foreground text-sm font-sans">
@@ -316,7 +319,7 @@ export default function ClosedPositionDetail() {
 
         <Card className="border-border/80">
           <CardHeader>
-            <CardTitle className="text-base">Koszty i prowizje — cały łańcuch</CardTitle>
+            <CardTitle className="text-base">{L('Koszty i prowizje — cały łańcuch', 'Costs and fees — full chain')}</CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Suma po wszystkich PDA w rotacji (ten sam łańcuch co w tabeli poniżej).
             </p>
@@ -330,11 +333,11 @@ export default function ClosedPositionDetail() {
                     size="sm"
                     onClick={() => setShowOnlyNonZeroBreakdown((v) => !v)}
                   >
-                    {showOnlyNonZeroBreakdown ? 'Pokaż wszystkie pozycje' : 'Pokaż tylko niezerowe'}
+                    {showOnlyNonZeroBreakdown ? L('Pokaż wszystkie pozycje', 'Show all positions') : L('Pokaż tylko niezerowe', 'Show non-zero only')}
                   </Button>
                 </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="text-xs text-muted-foreground uppercase tracking-wide">Koszt sieci (tx) — suma</div>
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Koszt sieci (tx) — suma', 'Network cost (tx) — total')}</div>
                   <div className="font-mono text-lg mt-0.5">
                     {chainCost.tx_fee_lamports_total.toLocaleString()} lamports
                     <span className="text-muted-foreground"> · </span>
@@ -356,7 +359,7 @@ export default function ClosedPositionDetail() {
                   ) : null}
                 </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="text-xs text-muted-foreground uppercase tracking-wide">Prowizje LP zebrane — suma</div>
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Prowizje LP zebrane — suma', 'LP fees collected — total')}</div>
                   <div className="font-mono text-lg mt-0.5">
                     {formatUsdCollectedOrDash(chainCost.fees_collected_usd_total, chainCost.collect_events_total)}
                     <span className="text-muted-foreground text-sm font-sans">
@@ -468,7 +471,7 @@ export default function ClosedPositionDetail() {
               </>
             ) : (
               <p className="text-muted-foreground text-sm">
-                {lineageQ.isPending ? 'Ładowanie…' : 'Brak podsumowania łańcucha.'}
+                {lineageQ.isPending ? L('Ładowanie…', 'Loading…') : L('Brak podsumowania łańcucha.', 'No chain summary.')}
               </p>
             )}
           </CardContent>
@@ -479,8 +482,8 @@ export default function ClosedPositionDetail() {
         <CardHeader>
           <CardTitle>
             {isSettlementMode
-              ? 'Settlement v1 — dwie definicje (nie mylić)'
-              : 'Stream — dwie definicje (nie mylić)'}
+              ? L('Settlement v1 — dwie definicje (nie mylić)', 'Settlement v1 — two definitions (do not mix)')
+              : L('Stream — dwie definicje (nie mylić)', 'Stream — two definitions (do not mix)')}
           </CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
             Wynik ekonomiczny vs benchmark IL/HODL — osobno od karty „koszty sieci vs LP fee” powyżej.
@@ -559,14 +562,14 @@ export default function ClosedPositionDetail() {
       {lineageQ.isPending ? (
         <Card>
           <CardHeader>
-            <CardTitle>Position history (rotations)</CardTitle>
+            <CardTitle>{L('Historia pozycji (rotacje)', 'Position history (rotations)')}</CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">Loading lineage…</CardContent>
+          <CardContent className="text-sm text-muted-foreground">{L('Ładowanie lineage…', 'Loading lineage…')}</CardContent>
         </Card>
       ) : streamLineage ? (
         <Card>
           <CardHeader>
-            <CardTitle>Position history (rotations)</CardTitle>
+            <CardTitle>{L('Historia pozycji (rotacje)', 'Position history (rotations)')}</CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Łańcuch PDA (stara → nowa) z API <code className="text-[11px]">/positions/…/stream-lineage</code>. CLI
               zapisuje <code className="text-[11px]">position_open</code> / <code className="text-[11px]">position_close</code>, bot —{' '}
@@ -739,7 +742,7 @@ export default function ClosedPositionDetail() {
       ) : (
         <Card>
           <CardHeader>
-            <CardTitle>Position history (rotations)</CardTitle>
+            <CardTitle>{L('Historia pozycji (rotacje)', 'Position history (rotations)')}</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
             {lineageQ.isError ? (
@@ -762,7 +765,7 @@ export default function ClosedPositionDetail() {
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground space-y-2">
           {cfgQ.isPending ? (
-            <div>Loading...</div>
+            <div>{L('Ładowanie...', 'Loading...')}</div>
           ) : cfgQ.isError ? (
             <div>{cfgQ.error instanceof Error ? cfgQ.error.message : String(cfgQ.error)}</div>
           ) : (
@@ -801,9 +804,9 @@ export default function ClosedPositionDetail() {
         </CardHeader>
         <CardContent className="space-y-4">
           {lifecycleQ.isPending ? (
-            <div className="text-center py-8 text-muted-foreground">Loading...</div>
+            <div className="text-center py-8 text-muted-foreground">{L('Ładowanie...', 'Loading...')}</div>
           ) : !data || data.session_summaries.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">No lifecycle sessions found.</div>
+            <div className="text-center py-8 text-muted-foreground">{L('Brak sesji lifecycle.', 'No lifecycle sessions found.')}</div>
           ) : (
             data.session_summaries.map((s) => (
               <div key={s.session_id} className="border rounded-lg p-4 space-y-2">
@@ -863,7 +866,7 @@ export default function ClosedPositionDetail() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">
           <div>
-            <CardTitle>Backtest (from closed position)</CardTitle>
+            <CardTitle>{L('Backtest (z zamkniętej pozycji)', 'Backtest (from closed position)')}</CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Uruchamia <code className="text-[11px]">clmm-lp-cli backtest</code> jako subprocess na hoście API (best-effort).
               Gdy stream-lineage ma <span className="text-foreground/90">baseline USD</span> dla tego PDA, jest wysyłany jako{' '}
@@ -878,13 +881,13 @@ export default function ClosedPositionDetail() {
             onClick={() => runBacktestM.mutate()}
             disabled={runBacktestM.isPending || pos.length === 0}
           >
-            Run backtest
+            {L('Uruchom backtest', 'Run backtest')}
           </Button>
         </CardHeader>
         <CardContent className="space-y-3">
           {runBacktestM.isError && (runBacktestM.error as Error)?.message !== 'Cancelled' ? (
             <div className="text-sm text-destructive">
-              {(runBacktestM.error as Error)?.message ?? 'Backtest failed'}
+              {(runBacktestM.error as Error)?.message ?? L('Backtest nieudany', 'Backtest failed')}
             </div>
           ) : null}
           {backtestJobId ? (
@@ -892,7 +895,7 @@ export default function ClosedPositionDetail() {
               Job: <span className="font-mono">{backtestJobId}</span> {jobQ.data ? `(${jobQ.data.status})` : ''}
             </div>
           ) : (
-            <div className="text-sm text-muted-foreground">No job yet.</div>
+            <div className="text-sm text-muted-foreground">{L('Brak joba.', 'No job yet.')}</div>
           )}
           {jobQ.data?.stderr ? (
             <pre className="text-xs whitespace-pre-wrap bg-muted p-3 rounded-md overflow-auto max-h-64">
@@ -909,7 +912,7 @@ export default function ClosedPositionDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Stream context</CardTitle>
+          <CardTitle>{L('Kontekst streamu', 'Stream context')}</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground space-y-1">
           <div>

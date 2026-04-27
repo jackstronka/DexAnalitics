@@ -10,8 +10,10 @@ import {
   startStrategy,
   stopStrategy,
 } from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
 
 export default function Strategies() {
+  const { locale } = useI18n()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { data, isLoading, refetch } = useQuery({
@@ -43,19 +45,21 @@ export default function Strategies() {
   return (
     <div className="space-y-6">
       <p className="text-xs text-muted-foreground">
-        Lista strategii pochodzi z API — utwórz wpis lub zobacz pełne wyjaśnienie źródeł danych na stronie Dashboard.
+        {locale === 'pl'
+          ? 'Lista strategii pochodzi z API — utwórz wpis lub zobacz pełne wyjaśnienie źródeł danych na stronie Dashboard.'
+          : 'Strategy list comes from API — create an entry or see full data-source explanation on the Dashboard page.'}
       </p>
 
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Strategies</h1>
+        <h1 className="text-3xl font-bold">{locale === 'pl' ? 'Strategie' : 'Strategies'}</h1>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             <RefreshCw className="h-4 w-4 mr-2" />
-            Refresh
+            {locale === 'pl' ? 'Odśwież' : 'Refresh'}
           </Button>
           <Button size="sm" onClick={() => navigate('/strategies/new')}>
             <Plus className="h-4 w-4 mr-2" />
-            Create Strategy
+            {locale === 'pl' ? 'Utwórz strategię' : 'Create Strategy'}
           </Button>
         </div>
       </div>
@@ -63,15 +67,19 @@ export default function Strategies() {
         Auto-Tune winner:{' '}
         {autoTuneQ.data?.latest_winner
           ? `${autoTuneQ.data.latest_winner.strategy} (${autoTuneQ.data.latest_winner.pool_label}, ${autoTuneQ.data.latest_winner.window_hours}h)`
-          : 'brak (uruchom Auto-Tune w Backtests)'}
+          : locale === 'pl'
+            ? 'brak (uruchom Auto-Tune w Backtests)'
+            : 'none (run Auto-Tune in Backtests)'}
       </div>
 
       {isLoading ? (
-        <div className="text-center py-8 text-muted-foreground">Loading...</div>
+        <div className="text-center py-8 text-muted-foreground">{locale === 'pl' ? 'Ładowanie...' : 'Loading...'}</div>
       ) : strategies.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
-            No strategies found. Create your first strategy to automate your LP positions.
+            {locale === 'pl'
+              ? 'Nie znaleziono strategii. Utwórz pierwszą strategię, aby automatyzować pozycje LP.'
+              : 'No strategies found. Create your first strategy to automate your LP positions.'}
           </CardContent>
         </Card>
       ) : (
@@ -85,21 +93,27 @@ export default function Strategies() {
                     ? 'bg-green-500/10 text-green-500' 
                     : 'bg-muted text-muted-foreground'
                 }`}>
-                  {strategy.running ? 'Running' : 'Stopped'}
+                  {strategy.running
+                    ? locale === 'pl'
+                      ? 'Działa'
+                      : 'Running'
+                    : locale === 'pl'
+                      ? 'Zatrzymana'
+                      : 'Stopped'}
                 </span>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="text-sm text-muted-foreground">
-                  {strategy.description || 'No description'}
+                  {strategy.description || (locale === 'pl' ? 'Brak opisu' : 'No description')}
                 </div>
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="text-muted-foreground">Type:</span>
+                  <span className="text-muted-foreground">{locale === 'pl' ? 'Typ:' : 'Type:'}</span>
                   <span className="capitalize">{strategy.strategy_type.replace('_', ' ')}</span>
                 </div>
                 {strategy.parameters?.auto_start ? (
                   <div className="text-xs">
                     <span className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-muted-foreground">
-                      auto-start on boot
+                      {locale === 'pl' ? 'auto-start przy starcie' : 'auto-start on boot'}
                     </span>
                   </div>
                 ) : null}
@@ -111,17 +125,17 @@ export default function Strategies() {
                     disabled={!autoTuneQ.data?.latest_winner || applyAutoTuneMutation.isPending}
                     onClick={() => applyAutoTuneMutation.mutate(strategy.id)}
                   >
-                    Apply Auto-Tune
+                    {locale === 'pl' ? 'Zastosuj Auto-Tune' : 'Apply Auto-Tune'}
                   </Button>
                   <Link to={`/strategies/${strategy.id}/edit`} className="flex-1">
                     <Button variant="secondary" size="sm" className="w-full">
                       <Pencil className="h-4 w-4 mr-2" />
-                      Edit
+                      {locale === 'pl' ? 'Edytuj' : 'Edit'}
                     </Button>
                   </Link>
                   <Link to={`/strategies/${strategy.id}`} className="flex-1">
                     <Button variant="outline" size="sm" className="w-full">
-                      View Details
+                      {locale === 'pl' ? 'Zobacz szczegóły' : 'View Details'}
                     </Button>
                   </Link>
                   {strategy.running ? (

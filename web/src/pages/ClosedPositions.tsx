@@ -6,11 +6,13 @@ import { Button } from '@/components/ui/button'
 import { closedPositionsListQueryOptions } from '@/lib/api'
 import { shortenAddress, formatDate } from '@/lib/utils'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
+import { useI18n } from '@/lib/i18n'
 
 const CLOSED_PAGE_LIMIT = 100
 const CLOSED_PAGE_OFFSET = 0
 
 export default function ClosedPositions() {
+  const { locale } = useI18n()
   // Staged load: registry-only first (no RPC), then enrich pair labels in the background.
   const fastQ = useQuery(closedPositionsListQueryOptions(CLOSED_PAGE_LIMIT, CLOSED_PAGE_OFFSET, false))
   const fullQ = useQuery({
@@ -31,7 +33,7 @@ export default function ClosedPositions() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Closed positions</h1>
+        <h1 className="text-3xl font-bold">{locale === 'pl' ? 'Zamknięte pozycje' : 'Closed positions'}</h1>
         <Button
           variant="outline"
           size="sm"
@@ -41,13 +43,13 @@ export default function ClosedPositions() {
           }}
         >
           <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
+          {locale === 'pl' ? 'Odśwież' : 'Refresh'}
         </Button>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>History (registry)</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'Historia (rejestr)' : 'History (registry)'}</CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
             Źródło: append-only <code className="text-[11px]">registry.jsonl</code>. Ta lista działa nawet bez DB.
           </p>
@@ -65,25 +67,25 @@ export default function ClosedPositions() {
         </CardHeader>
         <CardContent>
           {showInitialLoad ? (
-            <div className="text-center py-8 text-muted-foreground">Loading...</div>
+            <div className="text-center py-8 text-muted-foreground">{locale === 'pl' ? 'Ładowanie...' : 'Loading...'}</div>
           ) : loadError ? (
             <div className="text-center py-8 text-muted-foreground">
-              {(loadError instanceof Error ? loadError.message : String(loadError)) ?? 'Failed.'}
+              {(loadError instanceof Error ? loadError.message : String(loadError)) ?? (locale === 'pl' ? 'Błąd.' : 'Failed.')}
             </div>
           ) : items.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">No closed positions found.</div>
+            <div className="text-center py-8 text-muted-foreground">{locale === 'pl' ? 'Brak zamkniętych pozycji.' : 'No closed positions found.'}</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b text-left text-sm text-muted-foreground">
-                    <th className="pb-3 font-medium">Position</th>
-                    <th className="pb-3 font-medium">Pair</th>
-                    <th className="pb-3 font-medium">Owner</th>
-                    <th className="pb-3 font-medium">Close kind</th>
-                    <th className="pb-3 font-medium">Opened</th>
-                    <th className="pb-3 font-medium">Closed</th>
-                    <th className="pb-3 font-medium">Session</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Pozycja' : 'Position'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Para' : 'Pair'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Właściciel' : 'Owner'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Rodzaj zamknięcia' : 'Close kind'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Otwarcie' : 'Opened'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Zamknięcie' : 'Closed'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Sesja' : 'Session'}</th>
                   </tr>
                 </thead>
                 <tbody>

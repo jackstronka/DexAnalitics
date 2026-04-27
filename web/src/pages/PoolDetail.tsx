@@ -5,8 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { getPool, getPoolState, getOrcaToken } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
+import { useI18n } from '@/lib/i18n'
 
 export default function PoolDetail() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const { address } = useParams<{ address: string }>()
 
   const {
@@ -47,7 +50,7 @@ export default function PoolDetail() {
   if (!address) {
     return (
       <div className="text-center py-8 text-foreground">
-        Brak adresu puli w URL.
+        {L('Brak adresu puli w URL.', 'Missing pool address in URL.')}
       </div>
     )
   }
@@ -55,7 +58,7 @@ export default function PoolDetail() {
   if (poolLoading) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        Ładowanie puli…
+        {L('Ładowanie puli…', 'Loading pool…')}
       </div>
     )
   }
@@ -66,16 +69,19 @@ export default function PoolDetail() {
         <Link to="/pools">
           <Button variant="ghost" size="sm" className="gap-2">
             <ArrowLeft className="h-4 w-4" />
-            Wróć do listy
+            {L('Wróć do listy', 'Back to list')}
           </Button>
         </Link>
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
-          <p className="font-medium text-destructive">Nie udało się wczytać puli</p>
+          <p className="font-medium text-destructive">{L('Nie udało się wczytać puli', 'Failed to load pool')}</p>
           <p className="text-muted-foreground text-xs mt-1 font-mono break-all">
-            {(poolErr as Error)?.message ?? 'Unknown error'}
+            {(poolErr as Error)?.message ?? L('Nieznany błąd', 'Unknown error')}
           </p>
           <p className="text-muted-foreground text-xs mt-2">
-            Sprawdź, czy API działa i czy ten adres istnieje w backendzie (Orca REST / proxy).
+            {L(
+              'Sprawdź, czy API działa i czy ten adres istnieje w backendzie (Orca REST / proxy).',
+              'Check whether API is running and this address exists in backend (Orca REST / proxy).',
+            )}
           </p>
         </div>
       </div>
@@ -85,11 +91,11 @@ export default function PoolDetail() {
   if (!pool) {
     return (
       <div className="text-center py-8 text-foreground">
-        <p className="font-medium">Nie znaleziono puli</p>
+        <p className="font-medium">{L('Nie znaleziono puli', 'Pool not found')}</p>
         <p className="text-sm text-muted-foreground mt-1 font-mono break-all">{address}</p>
         <Link to="/pools" className="inline-block mt-4">
           <Button variant="outline" size="sm">
-            Wróć do Pools
+            {L('Wróć do pul', 'Back to pools')}
           </Button>
         </Link>
       </div>
@@ -117,40 +123,40 @@ export default function PoolDetail() {
     <div className="space-y-6 text-foreground">
       <div className="flex flex-wrap items-center gap-4">
         <Link to="/pools">
-          <Button variant="ghost" size="icon" aria-label="Wróć">
+          <Button variant="ghost" size="icon" aria-label={L('Wróć', 'Back')}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
         </Link>
         <h1 className="text-3xl font-bold">
           {symA}/{symB}
         </h1>
-        <span className="text-muted-foreground">{feePct.toFixed(2)}% fee</span>
+        <span className="text-muted-foreground">{feePct.toFixed(2)}% {L('fee', 'fee')}</span>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         <Card>
           <CardHeader>
-            <CardTitle>Pool Info</CardTitle>
+            <CardTitle>{L('Informacje o puli', 'Pool Info')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">Address</span>
+              <span className="text-muted-foreground">{L('Adres', 'Address')}</span>
               <span className="font-mono text-sm text-right break-all">{shortenAddress(poolAddr, 8)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Protocol</span>
+              <span className="text-muted-foreground">{L('Protokół', 'Protocol')}</span>
               <span className="capitalize">{pool.protocol ?? '—'}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Tick Spacing</span>
+              <span className="text-muted-foreground">{L('Tick spacing', 'Tick Spacing')}</span>
               <span>{pool.tick_spacing ?? '—'}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Current tick</span>
+              <span className="text-muted-foreground">{L('Bieżący tick', 'Current tick')}</span>
               <span>{pool.current_tick}</span>
             </div>
             <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">Price</span>
+              <span className="text-muted-foreground">{L('Cena', 'Price')}</span>
               <span className="font-mono text-sm text-right break-all">{pool.price}</span>
             </div>
           </CardContent>
@@ -158,7 +164,7 @@ export default function PoolDetail() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Metrics</CardTitle>
+            <CardTitle>{L('Metryki', 'Metrics')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex justify-between">
@@ -166,11 +172,11 @@ export default function PoolDetail() {
               <span className="font-bold">{formatUSD(tvl)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">24h Volume</span>
+              <span className="text-muted-foreground">{L('Wolumen 24h', '24h Volume')}</span>
               <span>{formatUSD(vol)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">APY (est.)</span>
+              <span className="text-muted-foreground">{L('APY (est.)', 'APY (est.)')}</span>
               <span className="text-green-500">{formatPercent(apy)}</span>
             </div>
           </CardContent>
@@ -179,35 +185,35 @@ export default function PoolDetail() {
         {state && !stateError && (
           <Card>
             <CardHeader>
-              <CardTitle>Current State</CardTitle>
+            <CardTitle>{L('Bieżący stan', 'Current State')}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Current Tick</span>
+                <span className="text-muted-foreground">{L('Bieżący tick', 'Current Tick')}</span>
                 <span>{state.current_tick}</span>
               </div>
               <div className="flex justify-between gap-2">
-                <span className="text-muted-foreground">Sqrt price (X64)</span>
+                <span className="text-muted-foreground">{L('Sqrt price (X64)', 'Sqrt price (X64)')}</span>
                 <span className="font-mono text-xs break-all text-right">{state.sqrt_price}</span>
               </div>
               <div className="flex justify-between gap-2">
-                <span className="text-muted-foreground">Price</span>
+                <span className="text-muted-foreground">{L('Cena', 'Price')}</span>
                 <span className="font-mono text-sm break-all text-right">{state.price}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Liquidity</span>
+                <span className="text-muted-foreground">{L('Płynność', 'Liquidity')}</span>
                 <span className="font-mono text-sm break-all">{state.liquidity}</span>
               </div>
               <div className="flex justify-between gap-2">
-                <span className="text-muted-foreground">Fee growth A</span>
+                <span className="text-muted-foreground">{L('Przyrost fee A', 'Fee growth A')}</span>
                 <span className="font-mono text-xs break-all text-right">{state.fee_growth_global_a}</span>
               </div>
               <div className="flex justify-between gap-2">
-                <span className="text-muted-foreground">Fee growth B</span>
+                <span className="text-muted-foreground">{L('Przyrost fee B', 'Fee growth B')}</span>
                 <span className="font-mono text-xs break-all text-right">{state.fee_growth_global_b}</span>
               </div>
               <div className="flex justify-between gap-2">
-                <span className="text-muted-foreground">Updated</span>
+                <span className="text-muted-foreground">{L('Zaktualizowano', 'Updated')}</span>
                 <span className="text-sm text-right">{stateTimeLabel}</span>
               </div>
             </CardContent>
@@ -217,7 +223,7 @@ export default function PoolDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Tokens</CardTitle>
+          <CardTitle>{L('Tokeny', 'Tokens')}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 md:grid-cols-2">

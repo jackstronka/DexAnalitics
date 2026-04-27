@@ -28,6 +28,7 @@ import {
   formatUsdUncollectedFees,
 } from '@/lib/utils'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
+import { useI18n } from '@/lib/i18n'
 import { getMetricsMode } from '@/lib/metricsMode'
 
 function rangeCellClass(inRange: boolean | undefined) {
@@ -40,9 +41,9 @@ function rangeCellClass(inRange: boolean | undefined) {
   return 'text-muted-foreground border-l-2 border-border pl-2'
 }
 
-function rangeStatusLabel(inRange: boolean | undefined) {
-  if (inRange === true) return 'In range'
-  if (inRange === false) return 'Out of range'
+function rangeStatusLabel(inRange: boolean | undefined, locale: 'pl' | 'en') {
+  if (inRange === true) return locale === 'pl' ? 'W zakresie' : 'In range'
+  if (inRange === false) return locale === 'pl' ? 'Poza zakresem' : 'Out of range'
   return '—'
 }
 
@@ -50,7 +51,7 @@ function strategyTypeLabel(v: Strategy['strategy_type']) {
   return v.replace(/_/g, ' ')
 }
 
-function strategyParamsSummary(s: Strategy) {
+function strategyParamsSummary(s: Strategy, locale: 'pl' | 'en') {
   const p = s.parameters ?? {}
   const bits: string[] = []
   if (typeof p.rebalance_threshold_pct === 'number' && p.rebalance_threshold_pct > 0) {
@@ -60,12 +61,12 @@ function strategyParamsSummary(s: Strategy) {
     typeof p.min_rebalance_interval_minutes === 'number' &&
     p.min_rebalance_interval_minutes > 0
   ) {
-    bits.push(`every ${p.min_rebalance_interval_minutes}m`)
+    bits.push(locale === 'pl' ? `co ${p.min_rebalance_interval_minutes}m` : `every ${p.min_rebalance_interval_minutes}m`)
   } else if (
     typeof p.min_rebalance_interval_hours === 'number' &&
     p.min_rebalance_interval_hours > 0
   ) {
-    bits.push(`every ${p.min_rebalance_interval_hours * 60}m`)
+    bits.push(locale === 'pl' ? `co ${p.min_rebalance_interval_hours * 60}m` : `every ${p.min_rebalance_interval_hours * 60}m`)
   }
   if (typeof p.range_width_pct === 'number' && p.range_width_pct > 0) {
     bits.push(`width ${p.range_width_pct}%`)
@@ -77,12 +78,12 @@ function strategyParamsSummary(s: Strategy) {
     bits.push(`retouch off ${p.retouch_offset_pct}%`)
   }
   if (p.periodic_requires_out_of_range === true) {
-    bits.push('only OOR')
+    bits.push(locale === 'pl' ? 'tylko OOR' : 'only OOR')
   }
   if (p.rebalance_on_range_exit_immediately === true) {
-    bits.push('instant on range-exit')
+    bits.push(locale === 'pl' ? 'natychmiast po wyjściu z zakresu' : 'instant on range-exit')
   }
-  return bits.length ? bits.join(' · ') : 'no explicit toggles'
+  return bits.length ? bits.join(' · ') : locale === 'pl' ? 'brak jawnych przełączników' : 'no explicit toggles'
 }
 
 function parseNum(v: unknown): number | null {
@@ -109,15 +110,18 @@ function estimateNowUsdcFromPosition(p: Position): number | null {
   return null
 }
 
-function normalizePendingReopenReason(v?: string | null) {
-  if (!v) return 'Waiting for reopen cycle.'
+function normalizePendingReopenReason(v: string | null | undefined, locale: 'pl' | 'en') {
+  if (!v) return locale === 'pl' ? 'Oczekiwanie na cykl reopen.' : 'Waiting for reopen cycle.'
   if (v.toLowerCase().includes('already queued for pending-open recovery')) {
-    return 'Queued for auto-reopen (waiting for next recovery cycle).'
+    return locale === 'pl'
+      ? 'W kolejce do auto-reopen (oczekiwanie na kolejny cykl recovery).'
+      : 'Queued for auto-reopen (waiting for next recovery cycle).'
   }
   return v
 }
 
 export default function Positions() {
+  const { t, locale } = useI18n()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const metricsMode = getMetricsMode()
@@ -255,34 +259,42 @@ export default function Positions() {
       <ApiDataHint />
 
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Positions</h1>
+        <h1 className="text-3xl font-bold">{t('positions.title')}</h1>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             <RefreshCw className="h-4 w-4 mr-2" />
-            Refresh
+            {t('positions.refresh')}
           </Button>
           <Button size="sm" onClick={() => navigate('/positions/new')}>
             <Plus className="h-4 w-4 mr-2" />
-            Open Position
+            {t('positions.openPosition')}
           </Button>
         </div>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Monitored positions (API)</CardTitle>
+          <CardTitle>{t('positions.monitoredTitle')}</CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
-            Z monitora w pamięci procesu — szczegóły i PnL tylko dla tych adresów.
+            {locale === 'pl'
+              ? 'Z monitora w pamięci procesu — szczegóły i PnL tylko dla tych adresów.'
+              : 'From in-process monitor — details and PnL only for these addresses.'}
           </p>
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <div className="text-center py-8 text-muted-foreground">Loading...</div>
+            <div className="text-center py-8 text-muted-foreground">{t('positions.loading')}</div>
           ) : positions.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground space-y-2 max-w-xl mx-auto">
-              <p>Brak pozycji w monitorze API — to nie jest lista wszystkich NFT Orca na portfelu.</p>
+              <p>
+                {locale === 'pl'
+                  ? 'Brak pozycji w monitorze API — to nie jest lista wszystkich NFT Orca na portfelu.'
+                  : 'No positions in API monitor — this is not a full list of Orca NFTs for the wallet.'}
+              </p>
               <p className="text-xs">
-                Uruchom strategię z adresami pozycji, dodaj pozycję do monitora, albo sprawdź on-chain:{' '}
+                {locale === 'pl'
+                  ? 'Uruchom strategię z adresami pozycji, dodaj pozycję do monitora, albo sprawdź on-chain:'
+                  : 'Start a strategy with position addresses, add position to monitor, or check on-chain:'}{' '}
                 <code className="text-[11px]">orca-positions-list</code> (CLI).
               </p>
             </div>
@@ -291,14 +303,14 @@ export default function Positions() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b text-left text-sm text-muted-foreground">
-                    <th className="pb-3 font-medium">Position</th>
-                    <th className="pb-3 font-medium">Strategy</th>
-                    <th className="pb-3 font-medium">Agent</th>
-                    <th className="pb-3 font-medium">Range (in / out)</th>
-                    <th className="pb-3 font-medium text-right">Value</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Pozycja' : 'Position'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Strategia' : 'Strategy'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Agent' : 'Agent'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Zakres (in / out)' : 'Range (in / out)'}</th>
+                    <th className="pb-3 font-medium text-right">{locale === 'pl' ? 'Wartość' : 'Value'}</th>
                     <th className="pb-3 font-medium text-right">PnL</th>
-                    <th className="pb-3 font-medium text-right">Fees (uncollected)</th>
-                    <th className="pb-3 font-medium text-center">Status</th>
+                    <th className="pb-3 font-medium text-right">{locale === 'pl' ? 'Fee (niezebrane)' : 'Fees (uncollected)'}</th>
+                    <th className="pb-3 font-medium text-center">{locale === 'pl' ? 'Status' : 'Status'}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -329,10 +341,10 @@ export default function Positions() {
                             positionDiagnosticsQueries[idx]?.isLoading ||
                             positionDiagnosticsQueries[idx]?.isFetching
                           if (diagnosticsPending) {
-                            return <span className="text-xs text-muted-foreground">Checking…</span>
+                            return <span className="text-xs text-muted-foreground">{t('positions.checking')}</span>
                           }
                           if (!backendLinked.length) {
-                            return <span className="text-xs text-muted-foreground">Not linked</span>
+                            return <span className="text-xs text-muted-foreground">{t('positions.notLinked')}</span>
                           }
                           return (
                             <div className="space-y-1.5">
@@ -347,9 +359,11 @@ export default function Positions() {
                                     </span>
                                   </div>
                                   {strategy ? (
-                                    <div className="text-muted-foreground">{strategyParamsSummary(strategy)}</div>
+                                    <div className="text-muted-foreground">{strategyParamsSummary(strategy, locale)}</div>
                                   ) : (
-                                    <div className="text-muted-foreground">linked (details from diagnostics)</div>
+                                    <div className="text-muted-foreground">
+                                      {locale === 'pl' ? 'podpięta (szczegóły z diagnostics)' : 'linked (details from diagnostics)'}
+                                    </div>
                                   )}
                                 </div>
                                 )
@@ -362,13 +376,13 @@ export default function Positions() {
                         {(() => {
                           const agentQ = positionAgentUiQueries[idx]
                           if (agentQ?.isLoading || agentQ?.isFetching) {
-                            return <span className="text-xs text-muted-foreground">Checking…</span>
+                            return <span className="text-xs text-muted-foreground">{locale === 'pl' ? 'Sprawdzanie…' : 'Checking…'}</span>
                           }
                           const session = agentQ?.data?.session
                           if (!session) {
                             return (
                               <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                                inactive
+                                {locale === 'pl' ? 'nieaktywna' : 'inactive'}
                               </span>
                             )
                           }
@@ -376,10 +390,10 @@ export default function Positions() {
                             <div className="space-y-1">
                               <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-500">
                                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                                active
+                                {locale === 'pl' ? 'aktywna' : 'active'}
                               </span>
                               <div className="text-[10px] text-muted-foreground">
-                                next:{' '}
+                                {locale === 'pl' ? 'następny:' : 'next:'}{' '}
                                 {session.next_scan_ts_utc
                                   ? new Date(session.next_scan_ts_utc).toLocaleTimeString()
                                   : '—'}
@@ -424,14 +438,14 @@ export default function Positions() {
                                       position.in_range ? 'bg-emerald-500' : 'bg-red-500'
                                     }`}
                                     style={{ left: `${markerPct}%` }}
-                                    aria-label="Current price inside position range"
+                                    aria-label={locale === 'pl' ? 'Bieżąca cena względem zakresu pozycji' : 'Current price inside position range'}
                                   />
                                 </div>
                               </div>
                             )
                           })()}
                           <span className="text-[11px] text-muted-foreground">
-                            {rangeStatusLabel(position.in_range)}
+                            {rangeStatusLabel(position.in_range, locale)}
                           </span>
                         </div>
                       </td>
@@ -454,7 +468,9 @@ export default function Positions() {
                             return (
                               <div className="space-y-0.5">
                                 <div>{formatPercentFixed(streamPct, 3)}</div>
-                                <div className="text-[10px] text-muted-foreground">source: stream</div>
+                                <div className="text-[10px] text-muted-foreground">
+                                  {locale === 'pl' ? 'źródło: stream' : 'source: stream'}
+                                </div>
                               </div>
                             )
                           }
@@ -462,7 +478,9 @@ export default function Positions() {
                           return (
                             <div className="space-y-0.5">
                               <div>{formatPercentFixed(fallbackPct ?? 0, 3)}</div>
-                              <div className="text-[10px] text-muted-foreground">source: monitor cache</div>
+                              <div className="text-[10px] text-muted-foreground">
+                                {locale === 'pl' ? 'źródło: cache monitora' : 'source: monitor cache'}
+                              </div>
                             </div>
                           )
                         })()}
@@ -471,12 +489,12 @@ export default function Positions() {
                         <div className="space-y-0.5">
                           <div>{formatUsdUncollectedFees(position.pnl.fees_earned_usd)}</div>
                           <div className="text-[10px] text-muted-foreground">
-                            source:{' '}
+                            {locale === 'pl' ? 'źródło:' : 'source:'}{' '}
                             {position.valuation_source === 'live_valuation'
-                              ? 'live valuation'
+                              ? (locale === 'pl' ? 'wycena live' : 'live valuation')
                               : position.valuation_source === 'fallback_monitor'
-                                ? 'fallback monitor'
-                                : 'unknown'}
+                                ? (locale === 'pl' ? 'fallback monitor' : 'fallback monitor')
+                                : (locale === 'pl' ? 'nieznane' : 'unknown')}
                           </div>
                           {position.uncollected_fees ? (
                             <div className="text-[10px] text-muted-foreground font-mono">
@@ -521,33 +539,34 @@ export default function Positions() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Closed by bot, waiting for reopen</CardTitle>
+          <CardTitle>{t('positions.pendingTitle')}</CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
-            Sesje rebalance, gdzie bot zamknął starą pozycję, ale nowa nie została jeszcze otwarta.
-            Po udanym reopen wpis znika z tej sekcji.
+            {locale === 'pl'
+              ? 'Sesje rebalance, gdzie bot zamknął starą pozycję, ale nowa nie została jeszcze otwarta. Po udanym reopen wpis znika z tej sekcji.'
+              : 'Rebalance sessions where bot closed old position but new one is not opened yet. Entry disappears after successful reopen.'}
           </p>
         </CardHeader>
         <CardContent>
           {strandedQ.isLoading ? (
-            <div className="text-center py-6 text-muted-foreground">Loading stranded rebalances...</div>
+            <div className="text-center py-6 text-muted-foreground">{t('positions.loading')}</div>
           ) : strandedQ.error ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               {(strandedQ.error as Error).message}
             </div>
           ) : pendingReopenItems.length === 0 ? (
-            <div className="text-muted-foreground text-sm">Brak oczekujących close-&gt;open.</div>
+            <div className="text-muted-foreground text-sm">{t('positions.pendingEmpty')}</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b text-left text-sm text-muted-foreground">
-                    <th className="pb-3 font-medium">Closed position</th>
-                    <th className="pb-3 font-medium">Pool</th>
-                    <th className="pb-3 font-medium">Closed at</th>
-                    <th className="pb-3 font-medium">Intended range</th>
-                    <th className="pb-3 font-medium">Reason</th>
-                    <th className="pb-3 font-medium">Session</th>
-                    <th className="pb-3 font-medium text-right">Action</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Zamknięta pozycja' : 'Closed position'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Pula' : 'Pool'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Zamknięta o' : 'Closed at'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Docelowy zakres' : 'Intended range'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Powód' : 'Reason'}</th>
+                    <th className="pb-3 font-medium">{locale === 'pl' ? 'Sesja' : 'Session'}</th>
+                    <th className="pb-3 font-medium text-right">{locale === 'pl' ? 'Akcja' : 'Action'}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -576,7 +595,7 @@ export default function Positions() {
                           : '—'}
                       </td>
                       <td className="py-3 text-sm text-muted-foreground">
-                        {normalizePendingReopenReason(it.reason ?? it.note)}
+                        {normalizePendingReopenReason(it.reason ?? it.note, locale)}
                       </td>
                       <td className="py-3 text-xs font-mono text-muted-foreground">
                         {shortenAddress(it.rebalance_session_id)}
@@ -590,7 +609,7 @@ export default function Positions() {
                           disabled={dismissStrandedM.isPending}
                           onClick={() => dismissStrandedM.mutate(it.rebalance_session_id)}
                         >
-                          {dismissStrandedM.isPending ? 'Removing...' : 'Remove'}
+                          {dismissStrandedM.isPending ? t('positions.removing') : t('positions.remove')}
                         </Button>
                       </td>
                     </tr>
@@ -604,10 +623,19 @@ export default function Positions() {
 
       <Card>
         <CardHeader>
-          <CardTitle>On-chain Orca positions (RPC)</CardTitle>
+          <CardTitle>{t('positions.onchainTitle')}</CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
-            Skan NFT Whirlpool dla portfela — to samo co <code className="text-[11px]">orca-positions-list</code>. Wymaga
-            działającego RPC w API; nie używa monitora strategii.
+            {locale === 'pl' ? (
+              <>
+                Skan NFT Whirlpool dla portfela — to samo co <code className="text-[11px]">orca-positions-list</code>. Wymaga
+                działającego RPC w API; nie używa monitora strategii.
+              </>
+            ) : (
+              <>
+                Whirlpool NFT scan for wallet — same as <code className="text-[11px]">orca-positions-list</code>. Requires
+                working API RPC; does not use strategy monitor.
+              </>
+            )}
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -626,7 +654,7 @@ export default function Positions() {
               variant="secondary"
               onClick={() => setAppliedOwner(ownerInput.trim())}
             >
-              Load on-chain
+              {t('positions.loadOnchain')}
             </Button>
             <Button
               type="button"
@@ -635,11 +663,13 @@ export default function Positions() {
               disabled={!appliedOwner.trim()}
             >
               <RefreshCw className="h-4 w-4 mr-2" />
-              Refresh
+              {t('positions.refresh')}
             </Button>
           </div>
           {chainQ.isLoading ? (
-            <div className="text-center py-6 text-muted-foreground">Loading RPC…</div>
+            <div className="text-center py-6 text-muted-foreground">
+              {locale === 'pl' ? 'Ładowanie RPC…' : 'Loading RPC…'}
+            </div>
           ) : chainQ.error ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               {(chainQ.error as Error).message}
@@ -649,11 +679,13 @@ export default function Positions() {
           ) : (
             <>
               <p className="text-xs text-muted-foreground">
-                RPC: <code className="break-all">{chainQ.data?.rpc_url ?? '—'}</code> — znaleziono:{' '}
+                RPC: <code className="break-all">{chainQ.data?.rpc_url ?? '—'}</code> — {locale === 'pl' ? 'znaleziono' : 'found'}:{' '}
                 <strong>{chainQ.data?.total ?? 0}</strong>
               </p>
               {(chainQ.data?.entries?.length ?? 0) === 0 ? (
-                <div className="text-muted-foreground text-sm py-4">Brak pozycji Whirlpool dla tego ownera.</div>
+                <div className="text-muted-foreground text-sm py-4">
+                  {locale === 'pl' ? 'Brak pozycji Whirlpool dla tego ownera.' : 'No Whirlpool positions for this owner.'}
+                </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full">
@@ -716,7 +748,7 @@ export default function Positions() {
                                   `${row.tick_lower} → ${row.tick_upper}`}
                               </span>
                               <span className="text-[11px] text-muted-foreground">
-                                {rangeStatusLabel(row.in_range)}
+                                {rangeStatusLabel(row.in_range, locale)}
                               </span>
                             </div>
                           </td>

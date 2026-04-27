@@ -13,6 +13,7 @@ import {
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { useI18n } from '@/lib/i18n'
 
 const WINDOWS = [24, 48, 72, 96]
 const POOLS = [
@@ -372,6 +373,8 @@ function strategyFamily(strategy: string): string {
 }
 
 export default function Backtests() {
+  const { t, locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const [selectedWindows, setSelectedWindows] = useState<number[]>([...WINDOWS])
   const [selectedPools, setSelectedPools] = useState<string[]>(POOLS.map((p) => p.id))
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>([])
@@ -641,14 +644,14 @@ export default function Backtests() {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Backtests</CardTitle>
+          <CardTitle>{t('backtests.title')}</CardTitle>
           <CardDescription>
-            FULL porownanie strategii i parametrow dla okien 24/48/72/96h.
+            {t('backtests.subtitle')}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="space-y-2">
-            <div className="text-base font-medium">Okna czasowe (h)</div>
+            <div className="text-base font-medium">{t('backtests.timeWindows')}</div>
             <div className="flex flex-wrap gap-4">
               {WINDOWS.map((h) => (
                 <label key={h} className="flex items-center gap-2 text-sm">
@@ -666,7 +669,7 @@ export default function Backtests() {
           </div>
 
           <div className="space-y-2">
-            <div className="text-base font-medium">Pary</div>
+            <div className="text-base font-medium">{t('backtests.pairs')}</div>
             <div className="grid gap-2 md:grid-cols-2">
               {POOLS.map((p) => (
                 <label key={p.id} className="flex items-center gap-2 text-sm">
@@ -684,7 +687,7 @@ export default function Backtests() {
           </div>
 
           <div className="space-y-2">
-            <div className="text-base font-medium">Strategie (rodziny + parametry)</div>
+            <div className="text-base font-medium">{t('backtests.strategies')}</div>
             <div className="grid gap-2 md:grid-cols-2">
               {strategies.map((s) => (
                 <label key={s.id} className="flex items-start gap-2 text-sm">
@@ -698,24 +701,24 @@ export default function Backtests() {
                   <div>
                     <div className="font-medium">{s.label}</div>
                     <div className="text-muted-foreground">
-                      parametry: {s.parameters.join(', ')}
+                      {L('parametry', 'parameters')}: {s.parameters.join(', ')}
                     </div>
                     {STRATEGY_HELP[s.id] && (
                       <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
                         <div>
-                          <span className="font-medium text-foreground">Co robi:</span>{' '}
+                          <span className="font-medium text-foreground">{L('Co robi:', 'What it does:')}</span>{' '}
                           {STRATEGY_HELP[s.id].what}
                         </div>
                         <div>
-                          <span className="font-medium text-foreground">Trigger:</span>{' '}
+                          <span className="font-medium text-foreground">{L('Trigger:', 'Trigger:')}</span>{' '}
                           {STRATEGY_HELP[s.id].trigger}
                         </div>
                         <div>
-                          <span className="font-medium text-foreground">Kiedy uzywac:</span>{' '}
+                          <span className="font-medium text-foreground">{L('Kiedy używać:', 'When to use:')}</span>{' '}
                           {STRATEGY_HELP[s.id].whenToUse}
                         </div>
                         <div>
-                          <span className="font-medium text-foreground">Ryzyko:</span>{' '}
+                          <span className="font-medium text-foreground">{L('Ryzyko:', 'Risk:')}</span>{' '}
                           {STRATEGY_HELP[s.id].risk}
                         </div>
                       </div>
@@ -725,7 +728,7 @@ export default function Backtests() {
               ))}
             </div>
             <div className="mt-2 rounded border p-3 text-xs">
-              <div className="mb-1 font-semibold">Jak czytac parametry</div>
+              <div className="mb-1 font-semibold">{L('Jak czytać parametry', 'How to read parameters')}</div>
               <div className="grid gap-1 md:grid-cols-2">
                 {PARAM_GLOSSARY.map((g) => (
                   <div key={g.key}>
@@ -738,7 +741,7 @@ export default function Backtests() {
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div className="space-y-2">
-              <div className="text-sm font-medium">Objective</div>
+              <div className="text-sm font-medium">{L('Objective', 'Objective')}</div>
               <select
                 className="w-full rounded border bg-background px-3 py-2 text-sm"
                 value={objective}
@@ -754,12 +757,12 @@ export default function Backtests() {
                 {selectedObjective.description}
               </div>
               <div className="text-xs text-muted-foreground">
-                Przyklad uzycia: {selectedObjective.useCase}
+                {L('Przykład użycia', 'Example use case')}: {selectedObjective.useCase}
               </div>
             </div>
             {selectedPoolsIncludeMeteora && (
               <div className="space-y-2">
-                <div className="text-sm font-medium">LP share (Meteora, opcjonalnie)</div>
+                <div className="text-sm font-medium">{L('LP share (Meteora, opcjonalnie)', 'LP share (Meteora, optional)')}</div>
                 <input
                   className="w-full rounded border bg-background px-3 py-2 text-sm"
                   value={lpShare}
@@ -768,7 +771,7 @@ export default function Backtests() {
               </div>
             )}
             <div className="space-y-2">
-              <div className="text-sm font-medium">Kwota symulacji (USD)</div>
+              <div className="text-sm font-medium">{L('Kwota symulacji (USD)', 'Simulation amount (USD)')}</div>
               <input
                 className="w-full rounded border bg-background px-3 py-2 text-sm"
                 value={capitalUsd}
@@ -776,15 +779,15 @@ export default function Backtests() {
               />
             </div>
             <div className="space-y-2">
-              <div className="text-sm font-medium">Cel vs HODL (USD)</div>
+              <div className="text-sm font-medium">{L('Cel vs HODL (USD)', 'Target vs HODL (USD)')}</div>
               <input
                 className="w-full rounded border bg-background px-3 py-2 text-sm"
                 value={targetVsHodlUsd}
                 onChange={(e) => setTargetVsHodlUsd(e.target.value)}
-                  placeholder="np. 50 (zostaw puste = bez filtra)"
+                  placeholder={L('np. 50 (zostaw puste = bez filtra)', 'e.g. 50 (leave empty = no filter)')}
               />
               <div className="text-xs text-muted-foreground">
-                Pokazujemy tylko strategie spelniajace warunek: vs_hodl &gt;= target.
+                {L('Pokazujemy tylko strategie spelniajace warunek: vs_hodl >= target.', 'Only strategies meeting condition are shown: vs_hodl >= target.')}
               </div>
             </div>
             <div className="space-y-1 pt-8">
@@ -794,19 +797,19 @@ export default function Backtests() {
                   checked={includeIndicators}
                   onChange={(e) => setIncludeIndicators(e.target.checked)}
                 />
-                Dodaj strategie wskaznikowe (Bollinger + Last Candle)
+                {L('Dodaj strategie wskaznikowe (Bollinger + Last Candle)', 'Include indicator strategies (Bollinger + Last Candle)')}
               </label>
               <div className="text-xs text-muted-foreground">
-                Dodaje do siatki optimize: Bollinger (6 presetow: k = 1.5/2.0/2.5 x rebalance
-                co 24/48 krokow) oraz Last Candle (14 presetow roznych okien swiecy i
-                czestotliwosci rebalansu). To zwieksza liczbe testowanych konfiguracji i czas
-                liczenia.
+                {L(
+                  'Dodaje do siatki optimize: Bollinger (6 presetów: k = 1.5/2.0/2.5 x rebalance co 24/48 kroków) oraz Last Candle (14 presetów różnych okien świecy i częstotliwości rebalansu). To zwiększa liczbę testowanych konfiguracji i czas liczenia.',
+                  'Adds to optimize grid: Bollinger (6 presets: k = 1.5/2.0/2.5 x rebalance every 24/48 steps) and Last Candle (14 presets with different candle windows and rebalance frequency). This increases the number of tested configurations and runtime.',
+                )}
               </div>
             </div>
           </div>
 
           <div className="rounded border p-3 text-xs space-y-3">
-            <div className="text-sm font-semibold">Konfiguracja parametrow strategii (grid)</div>
+              <div className="text-sm font-semibold">{L('Konfiguracja parametrow strategii (grid)', 'Strategy parameter configuration (grid)')}</div>
             <div className="flex flex-wrap gap-2">
               {GRID_PRESETS.map((preset) => (
                 <button
@@ -814,7 +817,7 @@ export default function Backtests() {
                   type="button"
                   className="rounded border px-2 py-1 text-xs hover:bg-accent"
                   onClick={() => applyPreset(preset)}
-                  title={`Ustaw preset ${preset.name}`}
+                  title={L(`Ustaw preset ${preset.name}`, `Apply preset ${preset.name}`)}
                 >
                   {preset.name}
                 </button>
@@ -827,27 +830,35 @@ export default function Backtests() {
                 </div>
                 <div className="font-medium">static_deviation_pct</div>
                 <div className="text-muted-foreground">
-                  Opcjonalny staly zakres dla `static`: X oznacza `entry * (1±X%)` (np. 10).
-                  Gdy ustawione, siatka width jest spinana do jednego wariantu. Uzywane dla wielu par.
+                  {L(
+                    'Opcjonalny stały zakres dla `static`: X oznacza `entry * (1±X%)` (np. 10). Gdy ustawione, siatka width jest spinana do jednego wariantu. Używane dla wielu par.',
+                    'Optional fixed range for `static`: X means `entry * (1±X%)` (e.g. 10). When set, width grid is pinned to one variant. Used for many pairs.',
+                  )}
                 </div>
                 <input
                   className="mt-1 w-full rounded border bg-background px-2 py-1"
                   value={staticDeviationPct}
                   onChange={(e) => setStaticDeviationPct(e.target.value)}
-                  placeholder="np. 10"
+                  placeholder={L('np. 10', 'e.g. 10')}
                   disabled={staticManualReady}
                 />
                 <div className="mt-2 font-medium">
                   static_manual_lower / static_manual_upper
                   <span
                     className="ml-1 cursor-help text-muted-foreground"
-                    title="Manualny zakres static działa tylko przy jednej wybranej parze. Gdy podasz poprawny lower/upper, ma priorytet nad static_deviation_pct."
+                  title={L(
+                    'Manualny zakres static działa tylko przy jednej wybranej parze. Gdy podasz poprawny lower/upper, ma priorytet nad static_deviation_pct.',
+                    'Manual static range works only with one selected pair. When valid lower/upper is provided, it takes priority over static_deviation_pct.',
+                  )}
                   >
                     ⓘ
                   </span>
                 </div>
                 <div className="text-muted-foreground">
-                  Reczny zakres ceny dla `static` (dwa inputy). Jest uzyty tylko gdy wybrana jest jedna para.
+                  {L(
+                    'Ręczny zakres ceny dla `static` (dwa inputy). Jest użyty tylko gdy wybrana jest jedna para.',
+                    'Manual price range for `static` (two inputs). It is used only when one pair is selected.',
+                  )}
                 </div>
                 <div className="mt-1 grid grid-cols-2 gap-2">
                   <input
@@ -865,7 +876,10 @@ export default function Backtests() {
                 </div>
                 {!singlePoolSelected && (staticManualLower.trim() !== '' || staticManualUpper.trim() !== '') && (
                   <div className="mt-1 text-muted-foreground">
-                    Wybrano wiele par: reczny `lower/upper` nie bedzie uzyty. Dla tego runu dziala `static_deviation_pct`.
+                    {L(
+                      'Wybrano wiele par: ręczny `lower/upper` nie będzie użyty. Dla tego runu działa `static_deviation_pct`.',
+                      'Multiple pairs selected: manual `lower/upper` is ignored. `static_deviation_pct` is used for this run.',
+                    )}
                   </div>
                 )}
               </div>
@@ -875,14 +889,16 @@ export default function Backtests() {
                 </div>
                 <div className="font-medium">oor_recenter_deviation_pct</div>
                 <div className="text-muted-foreground">
-                  Osobny staly zakres dla `oor_recenter`: X oznacza `entry * (1±X%)`.
-                  Uzyj przy porownaniu `static` vs `oor_recenter` na tej samej szerokosci.
+                  {L(
+                    'Osobny stały zakres dla `oor_recenter`: X oznacza `entry * (1±X%)`. Użyj przy porównaniu `static` vs `oor_recenter` na tej samej szerokości.',
+                    'Separate fixed range for `oor_recenter`: X means `entry * (1±X%)`. Use when comparing `static` vs `oor_recenter` at the same width.',
+                  )}
                 </div>
                 <input
                   className="mt-1 w-full rounded border bg-background px-2 py-1"
                   value={oorRecenterDeviationPct}
                   onChange={(e) => setOorRecenterDeviationPct(e.target.value)}
-                  placeholder="np. 10"
+                  placeholder={L('np. 10', 'e.g. 10')}
                 />
               </div>
               <div className="md:col-span-2">
@@ -895,7 +911,9 @@ export default function Backtests() {
                   Threshold
                 </div>
                 <div className="font-medium">threshold_grid_pct</div>
-                <div className="text-muted-foreground">Progi (%) dla strategii threshold; nizsze = czestsze triggerowanie.</div>
+                <div className="text-muted-foreground">
+                  {L('Progi (%) dla strategii threshold; nizsze = czestsze triggerowanie.', 'Threshold (%) for threshold strategy; lower values trigger more often.')}
+                </div>
                 <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={thresholdGridPct} onChange={(e) => setThresholdGridPct(e.target.value)} />
                 <div className="mt-2 font-medium">threshold_min_rebalance_interval_hours</div>
                 <div className="text-muted-foreground">
@@ -927,7 +945,10 @@ export default function Backtests() {
                   retouch_offset_pct
                   <span
                     className="ml-1 cursor-help text-muted-foreground"
-                    title="Offset procentowy wzgledem ceny OOR (w % ceny, nie w jednostkach absolutnych). 0 = nowy zakres dotyka ceny; +0.1 przesuwa zakres o +0.1% (w prawo), -0.1 o -0.1% (w lewo)."
+                    title={L(
+                      'Offset procentowy wzgledem ceny OOR (w % ceny, nie w jednostkach absolutnych). 0 = nowy zakres dotyka ceny; +0.1 przesuwa zakres o +0.1% (w prawo), -0.1 o -0.1% (w lewo).',
+                      'Percent offset relative to OOR price (% of price, not absolute units). 0 = range edge touches price; +0.1 shifts range by +0.1% (right), -0.1 by -0.1% (left).',
+                    )}
                   >
                     ⓘ
                   </span>
@@ -942,7 +963,10 @@ export default function Backtests() {
                   value={retouchOffsetPct}
                   onChange={(e) => setRetouchOffsetPct(e.target.value)}
                   placeholder="np. 0.1 lub -0.1"
-                  title="Przyklad: zakres startowy 98-100, cena OOR=101, width bez zmian; offset 0 => zakres dotyka 101. Offset +0.1 => caly zakres przesuniety o +0.1% ceny."
+                  title={L(
+                    'Przyklad: zakres startowy 98-100, cena OOR=101, width bez zmian; offset 0 => zakres dotyka 101. Offset +0.1 => caly zakres przesuniety o +0.1% ceny.',
+                    'Example: starting range 98-100, OOR price=101, unchanged width; offset 0 => range touches 101. Offset +0.1 => whole range shifted by +0.1% of price.',
+                  )}
                 />
               </div>
               <div>
@@ -1024,18 +1048,18 @@ export default function Backtests() {
               })
             }}
           >
-            {fullRunMut.isPending ? 'Uruchamiam...' : 'Uruchom FULL porownanie'}
+            {fullRunMut.isPending ? L('Uruchamiam...', 'Starting...') : L('Uruchom FULL porownanie', 'Run FULL comparison')}
           </Button>
 
           <div className="rounded border p-3 space-y-2">
-            <div className="text-sm font-semibold">Auto-Tune (background)</div>
+            <div className="text-sm font-semibold">{L('Auto-Tune (background)', 'Auto-Tune (background)')}</div>
             <div className="text-xs text-muted-foreground">
               Cyklicznie odpala FULL optimize i aktualizuje najlepszego winnera. Mozesz potem
               zastosowac winnera w sekcji Strategies.
             </div>
             <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
-                <div className="text-xs font-medium">Interval (min)</div>
+                <div className="text-xs font-medium">{L('Interwał (min)', 'Interval (min)')}</div>
                 <input
                   className="w-28 rounded border bg-background px-2 py-1 text-sm"
                   value={autoTuneIntervalMinutes}
@@ -1087,23 +1111,23 @@ export default function Backtests() {
                   })
                 }
               >
-                Start Auto-Tune
+                {L('Start Auto-Tune', 'Start Auto-Tune')}
               </Button>
               <Button
                 variant="outline"
                 disabled={stopAutoTuneMut.isPending}
                 onClick={() => stopAutoTuneMut.mutate()}
               >
-                Stop Auto-Tune
+                {L('Stop Auto-Tune', 'Stop Auto-Tune')}
               </Button>
             </div>
             <div className="text-xs text-muted-foreground">
-              Status: {autoTuneStatusQ.data?.running ? 'running' : 'stopped'} | note:{' '}
+              {L('Status', 'Status')}: {autoTuneStatusQ.data?.running ? L('running', 'running') : L('stopped', 'stopped')} | {L('notatka', 'note')}:{' '}
               {autoTuneStatusQ.data?.note ?? '—'}
             </div>
             {autoTuneStatusQ.data?.latest_winner && (
               <div className="text-xs">
-                Latest winner: <span className="font-mono">{autoTuneStatusQ.data.latest_winner.strategy}</span>{' '}
+                {L('Najnowszy winner', 'Latest winner')}: <span className="font-mono">{autoTuneStatusQ.data.latest_winner.strategy}</span>{' '}
                 ({fmt(autoTuneStatusQ.data.latest_winner.score, 3)} score,{' '}
                 {autoTuneStatusQ.data.latest_winner.pool_label},{' '}
                 {autoTuneStatusQ.data.latest_winner.window_hours}h; PnL{' '}
@@ -1122,7 +1146,7 @@ export default function Backtests() {
 
           {jobId && (
             <div className="text-sm text-muted-foreground">
-              Job: <span className="font-mono">{jobId}</span> | status:{' '}
+              Job: <span className="font-mono">{jobId}</span> | {L('status', 'status')}:{' '}
               <span className="font-medium">{jobQ.data?.status ?? 'running'}</span>
             </div>
           )}
@@ -1137,16 +1161,17 @@ export default function Backtests() {
       {qualifyingTop3.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Strategie spelniajace target</CardTitle>
+            <CardTitle>{t('backtests.qualifying')}</CardTitle>
             <CardDescription>
-              Szybki przeglad: TOP 3 warianty z kazdej rodziny strategii dla kazdej pary i okna. Wynik finansowy
-              (PnL, vs HODL) w kolorze: zieleń = na plusie, czerwień = na minusie; kwoty w USD z separatorem
-              tysięcy.
+              {L(
+                'Szybki przeglad: TOP 3 warianty z kazdej rodziny strategii dla kazdej pary i okna. Wynik finansowy (PnL, vs HODL) w kolorze: zieleń = na plusie, czerwień = na minusie; kwoty w USD z separatorem tysięcy.',
+                'Quick overview: TOP 3 variants from each strategy family for each pair and window. Financial outcome (PnL, vs HODL) is color-coded: green = positive, red = negative; USD amounts include thousands separators.',
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">Sortuj TOP wg:</span>
+              <span className="font-medium">{L('Sortuj TOP wg:', 'Sort TOP by:')}</span>
               <select
                 className="rounded border bg-background px-2 py-1"
                 value={topSortBy}
@@ -1171,7 +1196,7 @@ export default function Backtests() {
                   </div>
                   {g.families.length === 0 ? (
                     <div className="text-sm text-muted-foreground">
-                      Brak strategii spelniajacych warunek.
+                      {L('Brak strategii spelniajacych warunek.', 'No strategies satisfy the condition.')}
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -1329,9 +1354,9 @@ export default function Backtests() {
       {liquidityRegime.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Rezim plynnosci (orientacyjnie)</CardTitle>
+            <CardTitle>{t('backtests.liquidityRegime')}</CardTitle>
             <CardDescription>
-              Kontekst wolumenu z biezacego API Orca dla pooli użytych w rankingu.
+              {L('Kontekst wolumenu z biezacego API Orca dla pooli użytych w rankingu.', 'Volume context from current Orca API for pools used in ranking.')}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -1341,7 +1366,7 @@ export default function Backtests() {
                   <tr className="border-b text-left">
                     <th className="p-2">Pair / okno</th>
                     <th className="p-2" title="Przyblizony wolumen dla okna (v24h * okno/24).">
-                      Approx volume (okno)
+                      {L('Szac. wolumen (okno)', 'Approx volume (window)')}
                     </th>
                     <th
                       className="p-2"
@@ -1349,7 +1374,7 @@ export default function Backtests() {
                     >
                       1h/24h intensity
                     </th>
-                    <th className="p-2">Rezim</th>
+                    <th className="p-2">{L('Reżim', 'Regime')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1373,9 +1398,9 @@ export default function Backtests() {
       {windowStats.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Target per okno</CardTitle>
+            <CardTitle>{t('backtests.targetPerWindow')}</CardTitle>
             <CardDescription>
-              Szybki podglad: ile strategii przechodzi target i jaka jest mediana vs HODL.
+              {L('Szybki podglad: ile strategii przechodzi target i jaka jest mediana vs HODL.', 'Quick view: how many strategies pass target and median vs HODL.')}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -1386,10 +1411,10 @@ export default function Backtests() {
                   <div key={s.windowHours} className="rounded border p-3">
                     <div className="text-sm font-medium">{s.windowHours}h</div>
                     <div className="mt-1 text-sm text-muted-foreground">
-                      target pass: {s.qualifiedCount}/{s.totalCount}
+                      {L('target pass', 'target pass')}: {s.qualifiedCount}/{s.totalCount}
                     </div>
                     <div className="mt-1 text-sm">
-                      mediana vs HODL: {fmt(s.medianVsHodl)} USD
+                      {L('mediana vs HODL', 'median vs HODL')}: {fmt(s.medianVsHodl)} USD
                     </div>
                     <div className="mt-2 h-2 w-full overflow-hidden rounded bg-muted">
                       <div
@@ -1409,15 +1434,15 @@ export default function Backtests() {
       {globalTop.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Globalny ranking TOP (caly run)</CardTitle>
+            <CardTitle>{t('backtests.globalTop')}</CardTitle>
             <CardDescription>
-              Agregacja przez wszystkie pary i okna czasowe.
+              {L('Agregacja przez wszystkie pary i okna czasowe.', 'Aggregation across all pairs and time windows.')}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="mb-3 space-y-1 text-xs text-muted-foreground">
               <div>
-                Wystapienia = liczba wariantow (strategia + inny range) policzonych w calym runie.
+                {L('Wystapienia = liczba wariantow (strategia + inny range) policzonych w calym runie.', 'Appearances = number of variants (strategy + different range) computed in full run.')}
               </div>
               <div>
                 Kapitał startowy (do średniego end / Avg PnL%): {fmt(lastRunCapitalUsd)} USD
@@ -1428,7 +1453,7 @@ export default function Backtests() {
                 <thead>
                   <tr className="border-b text-left">
                     <th className="p-2">#</th>
-                    <th className="p-2">Strategy</th>
+                    <th className="p-2">{L('Strategia', 'Strategy')}</th>
                     <th
                       className="p-2"
                       title="Ile wariantow tej strategii pojawilo sie lacznie (pool x okno x range)."
@@ -1505,8 +1530,8 @@ export default function Backtests() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b text-left">
-                    <th className="p-2">Rank</th>
-                    <th className="p-2">Strategy</th>
+                    <th className="p-2">{L('Miejsce', 'Rank')}</th>
+                    <th className="p-2">{L('Strategia', 'Strategy')}</th>
                     <th className="p-2" title="Zakres ceny (USD), dla ktorego liczono ten wariant.">
                       Range (USD)
                     </th>

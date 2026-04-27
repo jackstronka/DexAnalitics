@@ -31,6 +31,7 @@ import {
 } from '@/lib/whirlpoolTicks'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import { formatUSD, shortenAddress } from '@/lib/utils'
+import { useI18n } from '@/lib/i18n'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -222,6 +223,8 @@ function formatBalanceLine(
 }
 
 export default function PositionCreate() {
+  const { locale } = useI18n()
+  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -1161,23 +1164,23 @@ export default function PositionCreate() {
             <ArrowLeft className="h-4 w-4" />
           </Button>
         </Link>
-        <h1 className="text-3xl font-bold">Open Position</h1>
+        <h1 className="text-3xl font-bold">{L('Otwórz pozycję', 'Open Position')}</h1>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Position Configuration</CardTitle>
+          <CardTitle>{L('Konfiguracja pozycji', 'Position Configuration')}</CardTitle>
         </CardHeader>
         <CardContent>
           <form className="space-y-4" onSubmit={handleSubmit}>
             <div>
-              <label className="block text-sm font-medium mb-1">Pool (curated)</label>
+              <label className="block text-sm font-medium mb-1">{L('Pula (curated)', 'Pool (curated)')}</label>
               <select
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={poolAddress}
                 onChange={(e) => setPoolAddress(e.target.value)}
               >
-                <option value="">Wybierz parę…</option>
+                <option value="">{L('Wybierz parę…', 'Select pair…')}</option>
                 {curatedPools.map((p) => (
                   <option key={p.address} value={p.address}>
                     {p.label}
@@ -1185,17 +1188,17 @@ export default function PositionCreate() {
                 ))}
               </select>
               <div className="mt-2">
-                <label className="block text-xs text-muted-foreground mb-1">Pool Address</label>
+                <label className="block text-xs text-muted-foreground mb-1">{L('Adres puli', 'Pool Address')}</label>
                 <input
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                   value={poolAddress}
                   onChange={(e) => setPoolAddress(e.target.value)}
-                  placeholder="Whirlpool pool address"
+                  placeholder={L('Adres puli Whirlpool', 'Whirlpool pool address')}
                   required
                 />
               </div>
               {poolQ.isLoading ? (
-                <div className="text-xs text-muted-foreground mt-2">Ładuję metadane puli…</div>
+                <div className="text-xs text-muted-foreground mt-2">{L('Ładuję metadane puli…', 'Loading pool metadata…')}</div>
               ) : poolQ.error ? (
                 <div className="text-xs text-destructive mt-2">
                   {(poolQ.error as Error).message}
@@ -1211,7 +1214,7 @@ export default function PositionCreate() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1">Strategy (optional)</label>
+              <label className="block text-sm font-medium mb-1">{L('Strategia (opcjonalnie)', 'Strategy (optional)')}</label>
               <select
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={strategyId}
@@ -1220,8 +1223,8 @@ export default function PositionCreate() {
               >
                 <option value="">
                   {strategyOptions.length === 0
-                    ? 'No strategies yet — create one under Strategies'
-                    : 'None (manual only)'}
+                    ? L('Brak strategii — utwórz ją najpierw w Strategiach', 'No strategies yet — create one under Strategies')
+                    : L('Brak (tylko manual)', 'None (manual only)')}
                 </option>
                 {strategyOptions.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -1254,14 +1257,14 @@ export default function PositionCreate() {
                   size="sm"
                   onClick={() => setShowAdvancedTicks((v) => !v)}
                 >
-                  {showAdvancedTicks ? 'Ukryj ticki' : 'Pokaż ticki (advanced)'}
+                  {showAdvancedTicks ? L('Ukryj ticki', 'Hide ticks') : L('Pokaż ticki (advanced)', 'Show ticks (advanced)')}
                 </Button>
               </div>
 
               {showAdvancedTicks ? (
                 <div className="grid gap-4 md:grid-cols-2 mt-3">
                   <div>
-                    <label className="block text-sm font-medium mb-1">Tick Lower</label>
+                    <label className="block text-sm font-medium mb-1">{L('Tick dolny', 'Tick Lower')}</label>
                     <input
                       type="number"
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -1275,7 +1278,7 @@ export default function PositionCreate() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Tick Upper</label>
+                    <label className="block text-sm font-medium mb-1">{L('Tick górny', 'Tick Upper')}</label>
                     <input
                       type="number"
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -1299,7 +1302,7 @@ export default function PositionCreate() {
                 </p>
                 <div className="grid gap-3 md:grid-cols-2">
                   <div>
-                    <label className="block text-xs text-muted-foreground mb-1">Cena dolna (granica zakresu)</label>
+                    <label className="block text-xs text-muted-foreground mb-1">{L('Cena dolna (granica zakresu)', 'Lower price (range boundary)')}</label>
                     <input
                       type="text"
                       inputMode="decimal"
@@ -1323,7 +1326,7 @@ export default function PositionCreate() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-muted-foreground mb-1">Cena górna (granica zakresu)</label>
+                    <label className="block text-xs text-muted-foreground mb-1">{L('Cena górna (granica zakresu)', 'Upper price (range boundary)')}</label>
                     <input
                       type="text"
                       inputMode="decimal"
@@ -1430,7 +1433,7 @@ export default function PositionCreate() {
 
             <div className="rounded-md border border-border p-3 space-y-3">
               <div className="flex flex-wrap gap-3 items-center">
-                <span className="text-sm font-medium">Kwota</span>
+                <span className="text-sm font-medium">{L('Kwota', 'Amount')}</span>
                 <label className="text-sm flex items-center gap-2">
                   <input
                     type="radio"
@@ -1439,7 +1442,7 @@ export default function PositionCreate() {
                     checked={mode === 'tokens'}
                     onChange={() => setMode('tokens')}
                   />
-                  Token A/B (ręcznie)
+                  {L('Token A/B (ręcznie)', 'Token A/B (manual)')}
                 </label>
                 <label className="text-sm flex items-center gap-2">
                   <input
@@ -1449,7 +1452,7 @@ export default function PositionCreate() {
                     checked={mode === 'budget'}
                     onChange={() => setMode('budget')}
                   />
-                  Wspólna kwota USD do rozdziału
+                  {L('Wspólna kwota USD do rozdziału', 'Shared USD amount to allocate')}
                 </label>
               </div>
 
@@ -1457,7 +1460,7 @@ export default function PositionCreate() {
                 <div className="space-y-3">
                   <div>
                     <label className="block text-sm font-medium mb-1">
-                      Docelowa wartość pozycji (USD, w zakresie)
+                      {L('Docelowa wartość pozycji (USD, w zakresie)', 'Target position value (USD, in-range)')}
                     </label>
                     <input
                       type="number"
@@ -1471,7 +1474,7 @@ export default function PositionCreate() {
                         setBudgetLegSyncError(null)
                         setTotalUsd(e.target.value === '' ? '' : Number(e.target.value))
                       }}
-                      placeholder="np. 3"
+                      placeholder={L('np. 3', 'e.g. 3')}
                     />
                     {budgetTickRangeInPrice === false ? (
                       <div className="text-xs text-amber-600/90 mt-1 space-y-1">
@@ -1500,7 +1503,7 @@ export default function PositionCreate() {
                             }}
                             disabled={currentTick == null || poolQ.data?.tick_spacing == null}
                           >
-                            Ustaw ticki wokół ceny
+                            {L('Ustaw ticki wokół ceny', 'Set ticks around current price')}
                           </Button>
                           {currentTick != null ? (
                             <span className="text-[11px] text-muted-foreground font-mono tabular-nums">
@@ -1511,7 +1514,7 @@ export default function PositionCreate() {
                       </div>
                     ) : null}
                     {budgetQuoteQ.isFetching ? (
-                      <div className="text-xs text-muted-foreground mt-1">Liczę kwoty A/B z krzywej puli…</div>
+                      <div className="text-xs text-muted-foreground mt-1">{L('Liczę kwoty A/B z krzywej puli…', 'Calculating A/B amounts from pool curve…')}</div>
                     ) : null}
                     {budgetQuoteQ.isError ? (
                       <div className="text-xs text-destructive mt-1">
@@ -1530,7 +1533,7 @@ export default function PositionCreate() {
                         {!budgetQuoteQ.data.in_range ? (
                           <div className="text-amber-600/90">
                             Cena puli nie leży w [tick lower, tick upper) — quote może być nieważny; poszerz zakres lub
-                            przełącz na Token A/B.
+                            {L('przełącz na Token A/B.', 'switch to Token A/B.')}
                           </div>
                         ) : null}
                       </div>
@@ -1916,7 +1919,7 @@ export default function PositionCreate() {
 
             {openStepError ? (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                <div className="font-medium">Open failed</div>
+                <div className="font-medium">{L('Otwarcie nieudane', 'Open failed')}</div>
                 <div className="break-words">
                   {openStepError.length > 220 ? `${openStepError.slice(0, 220)}…` : openStepError}
                 </div>
@@ -1951,7 +1954,7 @@ export default function PositionCreate() {
             <div className="flex justify-end gap-2 pt-2">
               <Link to="/positions">
                 <Button variant="outline" type="button">
-                  Cancel
+                  {L('Anuluj', 'Cancel')}
                 </Button>
               </Link>
               {swapBeforeOpen && swapBeforeOpenPlan && !swapSignature ? (
@@ -1973,7 +1976,7 @@ export default function PositionCreate() {
                       !swapSignature)
                   }
                 >
-                  {mutation.isPending ? 'Opening...' : 'Open Position'}
+                  {mutation.isPending ? L('Otwieranie...', 'Opening...') : L('Otwórz pozycję', 'Open Position')}
                 </Button>
               )}
             </div>

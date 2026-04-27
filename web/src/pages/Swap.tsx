@@ -17,6 +17,7 @@ import {
   swapBeforeOpen,
 } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
+import { useI18n } from '@/lib/i18n'
 import { shortenAddress } from '@/lib/utils'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
@@ -51,6 +52,7 @@ function formatUi(n: number, maxFrac = 6): string {
 }
 
 export default function Swap() {
+  const { t, locale } = useI18n()
   const devPk = getDevWalletPubkey()
   const queryClient = useQueryClient()
 
@@ -336,7 +338,7 @@ export default function Swap() {
               <ArrowLeftRight className="h-4 w-4" />
             </Button>
           </Link>
-          <h1 className="text-3xl font-bold truncate">Swap</h1>
+          <h1 className="text-3xl font-bold truncate">{t('swap.title')}</h1>
         </div>
         <div />
       </div>
@@ -344,7 +346,7 @@ export default function Swap() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center justify-between gap-3">
-            <span>Swap</span>
+                <span>{t('swap.title')}</span>
             <div className="flex items-center gap-2">
               <Button
                 type="button"
@@ -368,17 +370,17 @@ export default function Swap() {
         <CardContent className="space-y-4">
           <div className="text-xs text-muted-foreground">
             {provider === 'orca'
-              ? 'Tryb Orca: wykonuje swap ExactIn w wybranej puli Whirlpool przez backend (ten sam mechanizm co „swap-before-open”).'
-              : 'Jupiter deep-link ma prefill mintów i kwoty (ExactIn).'}
+              ? t('swap.orcaDescription')
+              : t('swap.jupiterDescription')}
           </div>
 
           {provider === 'orca' ? (
             <div className="rounded-lg border border-border bg-muted/10 p-3 space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm font-medium">Pool</div>
+                <div className="text-sm font-medium">{locale === 'pl' ? 'Pula' : 'Pool'}</div>
                 {swapCostQ.data ? (
                   <div className="text-xs text-muted-foreground">
-                    Est. network fee ~{(swapCostQ.data.estimated_network_fee_lamports / 1e9).toFixed(6)} SOL
+                    {locale === 'pl' ? 'Szac. opłata sieciowa' : 'Est. network fee'} ~{(swapCostQ.data.estimated_network_fee_lamports / 1e9).toFixed(6)} SOL
                   </div>
                 ) : null}
               </div>
@@ -393,27 +395,31 @@ export default function Swap() {
                       {p.label}
                     </option>
                   ))}
-                  <option value={poolAddress}>Custom…</option>
+                  <option value={poolAddress}>{locale === 'pl' ? 'Własna…' : 'Custom…'}</option>
                 </select>
                 <input
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                   value={poolAddress}
                   onChange={(e) => setPoolAddress(e.target.value)}
-                  placeholder="Whirlpool pool address"
+                  placeholder={locale === 'pl' ? 'Adres puli Whirlpool' : 'Whirlpool pool address'}
                 />
               </div>
               {poolQ.isLoading ? (
-                <div className="text-[11px] text-muted-foreground">Loading pool meta…</div>
+                <div className="text-[11px] text-muted-foreground">{locale === 'pl' ? 'Ładowanie metadanych puli…' : 'Loading pool meta…'}</div>
               ) : poolQ.data ? (
                 <div className="text-[11px] text-muted-foreground">
-                  Pair: {tokenLabel(poolQ.data.token_mint_a)} / {tokenLabel(poolQ.data.token_mint_b)} · tick_spacing{' '}
+                  {locale === 'pl' ? 'Para' : 'Pair'}: {tokenLabel(poolQ.data.token_mint_a)} / {tokenLabel(poolQ.data.token_mint_b)} · tick_spacing{' '}
                   {poolQ.data.tick_spacing}
                 </div>
               ) : poolQ.isError ? (
-                <div className="text-[11px] text-destructive">Pool meta error: {(poolQ.error as Error).message}</div>
+                <div className="text-[11px] text-destructive">
+                  {locale === 'pl' ? 'Błąd metadanych puli' : 'Pool meta error'}: {(poolQ.error as Error).message}
+                </div>
               ) : null}
               <div className="text-[11px] text-muted-foreground">
-                Uwaga: backend swap wymaga skonfigurowanego walleta API (`KEYPAIR_PATH`) i SOL na opłaty/rent.
+                {locale === 'pl'
+                  ? 'Uwaga: backend swap wymaga skonfigurowanego walleta API (`KEYPAIR_PATH`) i SOL na opłaty/rent.'
+                  : 'Note: backend swap requires configured API wallet (`KEYPAIR_PATH`) and SOL for fees/rent.'}
               </div>
             </div>
           ) : null}
@@ -421,27 +427,27 @@ export default function Swap() {
           {provider === 'orca' ? (
             <div className="rounded-lg border border-border bg-muted/10 p-3 space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm font-medium">API signer wallet</div>
+                <div className="text-sm font-medium">{locale === 'pl' ? 'Portfel podpisujący API' : 'API signer wallet'}</div>
                 <div className="text-xs text-muted-foreground text-right">
-                  min for swap: {(apiSignerQ.data?.min_swap_lamports ?? 0) / 1e9} SOL · open/rent:{' '}
+                  {locale === 'pl' ? 'min dla swap' : 'min for swap'}: {(apiSignerQ.data?.min_swap_lamports ?? 0) / 1e9} SOL · {locale === 'pl' ? 'open/rent' : 'open/rent'}:{' '}
                   {(apiSignerQ.data?.min_open_lamports ?? 0) / 1e9} SOL
                 </div>
               </div>
               {apiSignerQ.isLoading ? (
-                <div className="text-xs text-muted-foreground">Loading…</div>
+                <div className="text-xs text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</div>
               ) : apiSignerQ.data ? (
                 <div className="space-y-1 text-xs">
                   <div className="text-muted-foreground">
-                    configured:{' '}
+                    {locale === 'pl' ? 'skonfigurowany' : 'configured'}:{' '}
                     <span className={apiSignerQ.data.configured ? 'text-foreground' : 'text-destructive'}>
-                      {apiSignerQ.data.configured ? 'yes' : 'no'}
+                      {apiSignerQ.data.configured ? (locale === 'pl' ? 'tak' : 'yes') : (locale === 'pl' ? 'nie' : 'no')}
                     </span>
                   </div>
                   {apiSignerQ.data.pubkey ? (
                     <div className="text-muted-foreground">
                       pubkey: <span className="font-mono">{shortenAddress(apiSignerQ.data.pubkey, 6)}</span>{' '}
                       <button className="underline underline-offset-2" type="button" onClick={() => copyText(apiSignerQ.data.pubkey!)}>
-                        copy
+                        {locale === 'pl' ? 'kopiuj' : 'copy'}
                       </button>
                     </div>
                   ) : null}
@@ -457,7 +463,7 @@ export default function Swap() {
                   apiSignerQ.data.lamports != null &&
                   apiSignerQ.data.lamports < apiSignerQ.data.min_swap_lamports ? (
                     <div className="text-destructive">
-                      Too little SOL for swap fees. Top up this wallet.
+                      {locale === 'pl' ? 'Za mało SOL na opłaty swap. Doładuj ten portfel.' : 'Too little SOL for swap fees. Top up this wallet.'}
                     </div>
                   ) : null}
                 </div>
@@ -470,9 +476,9 @@ export default function Swap() {
           {provider === 'orca' ? (
             <div className="rounded-lg border border-border bg-muted/10 p-3 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm font-medium">Convert WSOL &lt;-&gt; SOL</div>
+                <div className="text-sm font-medium">{locale === 'pl' ? 'Konwertuj WSOL <-> SOL' : 'Convert WSOL <-> SOL'}</div>
                 <div className="text-xs text-muted-foreground">
-                  Konwersja techniczna 1:1 (bez swapu rynkowego).
+                  {locale === 'pl' ? 'Konwersja techniczna 1:1 (bez swapu rynkowego).' : 'Technical 1:1 conversion (no market swap).'}
                 </div>
               </div>
               <div className="grid gap-2 md:grid-cols-[auto_auto_1fr_auto] items-end">
@@ -498,7 +504,7 @@ export default function Swap() {
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   value={convertAmountUi}
                   onChange={(e) => setConvertAmountUi(e.target.value === '' ? '' : Number(e.target.value))}
-                  placeholder="Amount (SOL)"
+                  placeholder={locale === 'pl' ? 'Kwota (SOL)' : 'Amount (SOL)'}
                 />
                 <Button
                   type="button"
@@ -506,11 +512,11 @@ export default function Swap() {
                   size="sm"
                   onClick={() => setConvertAmountUi(Number(convertSourceBalanceUi.toFixed(9)))}
                 >
-                  Max
+                  {locale === 'pl' ? 'Maks' : 'Max'}
                 </Button>
               </div>
               <div className="text-xs text-muted-foreground">
-                Source balance:{' '}
+                {locale === 'pl' ? 'Saldo źródłowe' : 'Source balance'}:{' '}
                 <span className="font-mono tabular-nums">{formatUi(convertSourceBalanceUi, 9)}</span>{' '}
                 {convertDirection === 'wsol_to_native' ? 'WSOL' : 'SOL'}
               </div>
@@ -527,11 +533,13 @@ export default function Swap() {
                     })
                   }}
                 >
-                  {convertMutation.isPending ? 'Converting…' : 'Convert now'}
+                  {convertMutation.isPending ? (locale === 'pl' ? 'Konwersja…' : 'Converting…') : (locale === 'pl' ? 'Konwertuj teraz' : 'Convert now')}
                 </Button>
                 {convertDirection === 'wsol_to_native' ? (
                   <span className="text-[11px] text-muted-foreground">
-                    Safe mode: aktualnie WSOL-&gt;SOL wspiera pełny unwrap (użyj Max).
+                    {locale === 'pl'
+                      ? 'Tryb bezpieczny: aktualnie WSOL->SOL wspiera pełny unwrap (użyj Maks).'
+                      : 'Safe mode: WSOL->SOL currently supports full unwrap (use Max).'}
                   </span>
                 ) : null}
               </div>
@@ -539,13 +547,13 @@ export default function Swap() {
                 <div className="rounded-lg border border-border bg-background/60 p-2 text-xs space-y-1">
                   {convertSig ? (
                     <div>
-                      <span className="font-medium">Convert submitted:</span>{' '}
+                      <span className="font-medium">{locale === 'pl' ? 'Konwersja wysłana:' : 'Convert submitted:'}</span>{' '}
                       <span className="font-mono break-all">{convertSig}</span>
                     </div>
                   ) : null}
                   {convertErr ? (
                     <div className="text-destructive break-words">
-                      <span className="font-medium">Convert failed:</span> {convertErr}
+                      <span className="font-medium">{locale === 'pl' ? 'Błąd konwersji:' : 'Convert failed:'}</span> {convertErr}
                     </div>
                   ) : null}
                 </div>
@@ -556,9 +564,9 @@ export default function Swap() {
           <div className="grid gap-3 md:grid-cols-[1fr_auto_1fr] items-stretch">
             <div className="rounded-lg border border-border bg-muted/10 p-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-xs text-muted-foreground">You pay</div>
+                <div className="text-xs text-muted-foreground">{locale === 'pl' ? 'Płacisz' : 'You pay'}</div>
                 <div className="text-xs text-muted-foreground">
-                  Balance:{' '}
+                  {locale === 'pl' ? 'Saldo' : 'Balance'}:{' '}
                   <button
                     type="button"
                     className="font-mono tabular-nums underline underline-offset-2 hover:opacity-90"
@@ -623,7 +631,7 @@ export default function Swap() {
                     size="sm"
                     onClick={() => setAmountMode('input')}
                   >
-                    Amount
+                    {locale === 'pl' ? 'Kwota' : 'Amount'}
                   </Button>
                   <Button
                     type="button"
@@ -631,7 +639,7 @@ export default function Swap() {
                     size="sm"
                     onClick={() => setAmountMode('usd')}
                   >
-                    Target USD
+                    {locale === 'pl' ? 'Cel USD' : 'Target USD'}
                   </Button>
                 </div>
 
@@ -643,12 +651,14 @@ export default function Swap() {
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={amountUsd}
                       onChange={(e) => setAmountUsd(e.target.value === '' ? '' : Number(e.target.value))}
-                      placeholder="np. 10"
+                      placeholder={locale === 'pl' ? 'np. 10' : 'e.g. 10'}
                     />
                     <div className="text-[11px] text-muted-foreground">
                       {inputPriceUsd > 0
-                        ? `Input price: ~$${inputPriceUsd.toFixed(4)} → input amount auto`
-                        : 'Brak ceny USD dla input token (Jupiter price) — nie da się przeliczyć target USD.'}
+                        ? `${locale === 'pl' ? 'Cena input' : 'Input price'}: ~$${inputPriceUsd.toFixed(4)} -> ${locale === 'pl' ? 'kwota input auto' : 'input amount auto'}`
+                        : (locale === 'pl'
+                          ? 'Brak ceny USD dla tokena wejściowego (Jupiter) — nie da się przeliczyć target USD.'
+                          : 'Missing USD price for input token (Jupiter) — cannot calculate target USD.')}
                     </div>
                   </div>
                 ) : (
@@ -666,10 +676,10 @@ export default function Swap() {
                     />
                     <div className="flex flex-wrap gap-2">
                       <Button type="button" variant="secondary" size="sm" onClick={onClickHalf}>
-                        Half
+                        {locale === 'pl' ? 'Połowa' : 'Half'}
                       </Button>
                       <Button type="button" variant="secondary" size="sm" onClick={onClickMax}>
-                        Max
+                        {locale === 'pl' ? 'Maks' : 'Max'}
                       </Button>
                       <Button
                         type="button"
@@ -678,13 +688,13 @@ export default function Swap() {
                         onClick={() => copyText(String(inputBalanceUi))}
                       >
                         <Copy className="h-4 w-4 mr-2" />
-                        Copy bal
+                        {locale === 'pl' ? 'Kopiuj saldo' : 'Copy balance'}
                       </Button>
                     </div>
 
                     <div className="grid gap-1.5">
                       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                        <span>Use % of balance</span>
+                        <span>{locale === 'pl' ? 'Użyj % salda' : 'Use % of balance'}</span>
                         <span className="font-mono tabular-nums">{percent}%</span>
                       </div>
                       <input
@@ -708,7 +718,7 @@ export default function Swap() {
                           </Button>
                         ))}
                         <Button type="button" variant="ghost" size="sm" onClick={() => setPercent(0)}>
-                          Reset
+                          {locale === 'pl' ? 'Resetuj' : 'Reset'}
                         </Button>
                       </div>
                     </div>
@@ -755,8 +765,8 @@ export default function Swap() {
 
             <div className="rounded-lg border border-border bg-muted/10 p-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-xs text-muted-foreground">You receive</div>
-                <div className="text-xs text-muted-foreground">Output token</div>
+                <div className="text-xs text-muted-foreground">{locale === 'pl' ? 'Otrzymujesz' : 'You receive'}</div>
+                <div className="text-xs text-muted-foreground">{locale === 'pl' ? 'Token wyjściowy' : 'Output token'}</div>
               </div>
 
               <div className="flex items-center justify-between gap-2">
@@ -804,7 +814,7 @@ export default function Swap() {
               <div className="text-xs text-muted-foreground">
                 Mint: <span className="font-mono">{shortenAddress(outputMint, 6)}</span>{' '}
                 <button type="button" className="underline underline-offset-2" onClick={() => copyText(outputMint)}>
-                  copy
+                  {locale === 'pl' ? 'kopiuj' : 'copy'}
                 </button>
               </div>
             </div>
@@ -812,10 +822,10 @@ export default function Swap() {
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
             <div className="text-xs text-muted-foreground">
-              Input mint:{' '}
+              {locale === 'pl' ? 'Mint wejściowy' : 'Input mint'}:{' '}
               <span className="font-mono">{shortenAddress(inputMint, 6)}</span>{' '}
               <button type="button" className="underline underline-offset-2" onClick={() => copyText(inputMint)}>
-                copy
+                {locale === 'pl' ? 'kopiuj' : 'copy'}
               </button>
             </div>
 
@@ -829,7 +839,7 @@ export default function Swap() {
                     onClick={() => copyText(`inputMint=${inputMint}\noutputMint=${outputMint}\namountUi=${amountUi === '' ? '' : String(amountUi)}`)}
                   >
                     <Copy className="h-4 w-4 mr-2" />
-                    Copy params
+                    {locale === 'pl' ? 'Kopiuj parametry' : 'Copy params'}
                   </Button>
                 </>
               ) : null}
@@ -857,7 +867,7 @@ export default function Swap() {
                     })
                   }}
                 >
-                  {swapMutation.isPending ? 'Swapping…' : 'Swap now (Orca pool)'}
+                  {swapMutation.isPending ? t('swap.swapping') : t('swap.swapNow')}
                 </Button>
               ) : (
                 <a
@@ -868,7 +878,7 @@ export default function Swap() {
                     canOpen ? 'bg-primary text-primary-foreground hover:opacity-90' : 'bg-muted text-muted-foreground pointer-events-none'
                   }`}
                 >
-                  Open in Jupiter <ExternalLink className="h-4 w-4" />
+                  {locale === 'pl' ? 'Otwórz w Jupiter' : 'Open in Jupiter'} <ExternalLink className="h-4 w-4" />
                 </a>
               )}
             </div>
@@ -878,13 +888,13 @@ export default function Swap() {
             <div className="rounded-lg border border-border bg-muted/10 p-3 text-xs space-y-1">
               {swapSig ? (
                 <div>
-                  <span className="font-medium">Swap submitted:</span>{' '}
+                      <span className="font-medium">{locale === 'pl' ? 'Swap wysłany:' : 'Swap submitted:'}</span>{' '}
                   <span className="font-mono break-all">{swapSig}</span>
                 </div>
               ) : null}
               {swapErr ? (
                 <div className="text-destructive break-words">
-                  <span className="font-medium">Swap failed:</span> {swapErr}
+                  <span className="font-medium">{locale === 'pl' ? 'Błąd swap:' : 'Swap failed:'}</span> {swapErr}
                 </div>
               ) : null}
             </div>
