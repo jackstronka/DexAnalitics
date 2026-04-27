@@ -35,8 +35,8 @@ use crate::models::{
     StrategyPositionExecutorRequest, StrategyResponse, SubmitSignedTxRequest,
     SetActiveSignerRequest, SubmitSignedTxResponse, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
     SwapCostEstimateResponse, SwapInPoolBeforeOpen, UncollectedFeesInfo, WalletBalancesResponse,
-    WalletEntry, WalletReplicationStatus, WalletTokenBalance, WalletTransferRequest,
-    WalletTransferResponse, WalletsListResponse,
+    WalletEntry, WalletReconcileItem, WalletReconcileResponse, WalletReplicationStatus,
+    WalletTokenBalance, WalletTransferRequest, WalletTransferResponse, WalletsListResponse,
 };
 use utoipa::OpenApi;
 
@@ -184,6 +184,7 @@ use utoipa::OpenApi;
         handlers::set_active_signer,
         handlers::convert_sol,
         handlers::transfer_sol_between_wallets,
+        handlers::reconcile_wallet_stores,
         // Prices
         handlers::get_jupiter_prices,
         handlers::get_aerodrome_slipstream_pool_slot0,
@@ -311,6 +312,8 @@ use utoipa::OpenApi;
             ActiveSignerResponse,
             WalletTransferRequest,
             WalletTransferResponse,
+            WalletReconcileItem,
+            WalletReconcileResponse,
             ApiSignerWalletResponse,
             ConvertSolDirection,
             ConvertSolRequest,

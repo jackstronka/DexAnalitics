@@ -6,6 +6,23 @@ keywords: github-actions, docker, ci, node24, build-push, metadata-action, setup
 - **Behavior:** `Docker Build & Push` no longer relies on deprecated Node 20 action runtimes and is aligned with upcoming GitHub-hosted runner defaults (Node 24).
 - **paths:** `.github/workflows/docker.yml`
 
+## 2026-04-27 — Wallet transfer source allowlist + manual runbook
+
+keywords: wallets, transfer, source-allowlist, runbook, operations
+
+- **What:** Added optional source wallet-id allowlist guard for `POST /wallets/transfer` via `CLMM_WALLET_TRANSFER_SOURCE_ALLOWLIST` (CSV of wallet ids), preserving opt-in behavior when env is unset.
+- **Ops docs:** Added manual operator runbook for multi-wallet flow and conflict/degraded handling without additional UI automation.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `.env.example`, `doc/MULTI_WALLET_MANUAL_RUNBOOK.md`
+
+## 2026-04-27 — Wallet reconcile endpoint + transfer allowlist/dust guards
+
+keywords: wallets, reconcile, redundancy, transfer, allowlist, dust-guard, api
+
+- **What:** Added `POST /wallets/reconcile` to repair missing wallet replicas between primary/secondary stores (`degraded` only), while leaving `conflict` rows unchanged for manual resolution.
+- **Transfer safety:** `POST /wallets/transfer` now enforces minimum transfer amount (`CLMM_WALLET_TRANSFER_MIN_LAMPORTS`, default 0.001 SOL), optional max transfer (`CLMM_WALLET_TRANSFER_MAX_LAMPORTS`), and recipient allowlist (wallet-store pubkeys + optional `CLMM_WALLET_TRANSFER_ALLOWLIST` CSV).
+- **Why:** Keep dual-store wallet redundancy operational without silent divergence and reduce accidental/low-signal (dust) or unauthorized transfer targets.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `crates/api/src/openapi.rs`, `crates/api/src/routes.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `.env.example`
+
 ## 2026-04-27 — Wallet multi-store redundancy + active signer + SOL transfer (MVP)
 
 keywords: wallets, redundancy, primary-secondary, active-signer, transfer-sol, api, web

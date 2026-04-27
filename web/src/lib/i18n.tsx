@@ -27,6 +27,17 @@ const pl: Dictionary = {
   'wallet.subtitle':
     'Dwie warstwy danych: (1) on-chain saldo dla wybranego portfela (read-only RPC), (2) agregaty USD z /analytics/portfolio (monitor pozycji) — mogą być 0, jeśli monitor nie ma pozycji.',
   'wallet.walletsTitle': 'Portfele (pliki keypair na hoście API)',
+  'wallet.walletsHint':
+    'Lista portfeli pochodzi z plików keypair na hoście API (jeden plik JSON = jeden wpis). Saldo i Orca na dole dotyczą wybranego przyciskiem portfela — nie musi to być ten sam co przy transferze.',
+  'wallet.noWalletsHint':
+    'Brak portfeli w skonfigurowanym katalogu na hoście API. Dodaj pliki *.json albo utwórz portfel poniżej i zrestartuj API jeśli trzeba.',
+  'wallet.transferFrom': 'Z portfela',
+  'wallet.transferTo': 'Do portfela / odbiorcy',
+  'wallet.transferToCustom': 'Inny adres (wklej poniżej)',
+  'wallet.recipientPubkey': 'Adres odbiorcy (pubkey)',
+  'wallet.lamportsLabel': 'Lamports',
+  'wallet.lamportsTooltip':
+    '1 SOL = 1 000 000 000 lamportów — najmniejsza jednostka natywnego SOL na Solanie.',
   'wallet.currentWallet': 'Aktualny portfel',
   'wallet.copy': 'Kopiuj',
   'wallet.onChainTitle': 'Saldo on-chain (read-only)',
@@ -98,6 +109,17 @@ const en: Dictionary = {
   'wallet.subtitle':
     'Two data layers: (1) on-chain balance for selected wallet (read-only RPC), (2) USD aggregates from /analytics/portfolio (position monitor) — may be 0 if monitor has no positions.',
   'wallet.walletsTitle': 'Wallets (keypair files on API host)',
+  'wallet.walletsHint':
+    'Wallet list comes from keypair files on the API host (one JSON file = one row). Balance/Orca below follow the wallet selected via buttons — it may differ from transfer source.',
+  'wallet.noWalletsHint':
+    'No wallets in the configured directory on the API host. Add *.json files or create a wallet below and restart the API if needed.',
+  'wallet.transferFrom': 'From wallet',
+  'wallet.transferTo': 'To wallet / recipient',
+  'wallet.transferToCustom': 'Other address (paste below)',
+  'wallet.recipientPubkey': 'Recipient pubkey',
+  'wallet.lamportsLabel': 'Lamports',
+  'wallet.lamportsTooltip':
+    '1 SOL = 1,000,000,000 lamports — the smallest unit of native SOL on Solana.',
   'wallet.currentWallet': 'Current wallet',
   'wallet.copy': 'Copy',
   'wallet.onChainTitle': 'On-chain balance (read-only)',

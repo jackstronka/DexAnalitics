@@ -2521,6 +2521,26 @@ pub struct WalletTransferResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletReconcileItem {
+    pub wallet_id: String,
+    pub status: WalletReplicationStatus,
+    pub repaired: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletReconcileResponse {
+    pub primary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<String>,
+    pub scanned: usize,
+    pub repaired: usize,
+    pub conflicts: usize,
+    pub items: Vec<WalletReconcileItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletTokenBalance {
     pub mint: String,
     /// UI amount as string (from jsonParsed RPC).

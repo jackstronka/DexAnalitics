@@ -5,7 +5,8 @@ use crate::models::{
     ActiveSignerResponse, ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateWalletRequest, CreateWalletResponse, SetActiveSignerRequest,
     WalletBalancesResponse, WalletEntry, WalletReplicationStatus, WalletTokenBalance,
-    WalletTransferRequest, WalletTransferResponse, WalletsListResponse,
+    WalletReconcileItem, WalletReconcileResponse, WalletTransferRequest, WalletTransferResponse,
+    WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::state::AppState;
@@ -215,6 +216,33 @@ fn load_signer_wallet_for_api(
     load_wallet_from_env()
 }
 
+fn wallet_entries_from_stores(stores: &WalletStores) -> Vec<WalletEntry> {
+    let mut merged: BTreeMap<String, WalletReplicaPair> = BTreeMap::new();
+    scan_wallet_dir(&stores.primary, &mut merged, true);
+    if let Some(sec) = &stores.secondary {
+        scan_wallet_dir(sec, &mut merged, false);
+    }
+    let mut wallets: Vec<WalletEntry> = merged
+        .into_iter()
+        .filter_map(|(id, (primary, secondary))| create_wallet_entry(id, primary, secondary))
+        .collect();
+    wallets.sort_by(|a, b| a.id.cmp(&b.id));
+    wallets
+}
+
+fn parse_env_allowlist_csv(var: &str) -> HashSet<String> {
+    std::env::var(var)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default()
+}
+
 /// List wallet keypair files from the API host (directory).
 #[utoipa::path(
     get,
@@ -227,16 +255,7 @@ fn load_signer_wallet_for_api(
 )]
 pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<WalletsListResponse>> {
     let stores = resolve_wallet_stores(&state);
-    let mut merged: BTreeMap<String, WalletReplicaPair> = BTreeMap::new();
-    scan_wallet_dir(&stores.primary, &mut merged, true);
-    if let Some(sec) = &stores.secondary {
-        scan_wallet_dir(sec, &mut merged, false);
-    }
-    let mut wallets: Vec<WalletEntry> = merged
-        .into_iter()
-        .filter_map(|(id, (primary, secondary))| create_wallet_entry(id, primary, secondary))
-        .collect();
-    wallets.sort_by(|a, b| a.id.cmp(&b.id));
+    let wallets = wallet_entries_from_stores(&stores);
     Ok(Json(WalletsListResponse {
         wallets_dir_primary: stores.primary.to_string_lossy().to_string(),
         wallets_dir_secondary: stores
@@ -244,6 +263,76 @@ pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<Walle
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
         wallets,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/wallets/reconcile",
+    tag = "Wallets",
+    responses((status = 200, description = "Wallet stores reconciled", body = WalletReconcileResponse))
+)]
+pub async fn reconcile_wallet_stores(
+    State(state): State<AppState>,
+) -> ApiResult<Json<WalletReconcileResponse>> {
+    let stores = resolve_wallet_stores(&state);
+    let wallets = wallet_entries_from_stores(&stores);
+    let mut items = Vec::new();
+    let mut repaired = 0usize;
+    let mut conflicts = 0usize;
+
+    for w in wallets {
+        let primary_path = wallet_file_path(&stores.primary, &w.id);
+        let secondary_path = stores
+            .secondary
+            .as_ref()
+            .map(|dir| wallet_file_path(dir, &w.id));
+        let mut item = WalletReconcileItem {
+            wallet_id: w.id.clone(),
+            status: w.replication_status,
+            repaired: false,
+            note: None,
+        };
+        match w.replication_status {
+            WalletReplicationStatus::Healthy => {}
+            WalletReplicationStatus::Conflict => {
+                conflicts += 1;
+                item.note = Some("conflict detected; manual resolution required".to_string());
+            }
+            WalletReplicationStatus::Degraded => {
+                if let Some(sec_path) = secondary_path {
+                    let res = if !w.present_in_primary && w.present_in_secondary {
+                        fs::copy(&sec_path, &primary_path)
+                    } else if w.present_in_primary && !w.present_in_secondary {
+                        fs::copy(&primary_path, &sec_path)
+                    } else {
+                        Err(std::io::Error::other("unknown degraded state"))
+                    };
+                    match res {
+                        Ok(_) => {
+                            item.repaired = true;
+                            repaired += 1;
+                            item.note = Some("repaired missing replica".to_string());
+                        }
+                        Err(e) => {
+                            item.note = Some(format!("repair failed: {e}"));
+                        }
+                    }
+                } else {
+                    item.note = Some("secondary store is not configured".to_string());
+                }
+            }
+        }
+        items.push(item);
+    }
+
+    Ok(Json(WalletReconcileResponse {
+        primary: stores.primary.to_string_lossy().to_string(),
+        secondary: stores.secondary.map(|p| p.to_string_lossy().to_string()),
+        scanned: items.len(),
+        repaired,
+        conflicts,
+        items,
     }))
 }
 
@@ -411,10 +500,46 @@ pub async fn transfer_sol_between_wallets(
     if req.lamports == 0 {
         return Err(ApiError::bad_request("lamports must be > 0"));
     }
+    let min_lamports = std::env::var("CLMM_WALLET_TRANSFER_MIN_LAMPORTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1_000_000);
+    if req.lamports < min_lamports {
+        return Err(ApiError::bad_request(format!(
+            "lamports must be >= {min_lamports} (dust guard)"
+        )));
+    }
+    let max_lamports = std::env::var("CLMM_WALLET_TRANSFER_MAX_LAMPORTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    if let Some(max_lamports) = max_lamports
+        && req.lamports > max_lamports
+    {
+        return Err(ApiError::bad_request(format!(
+            "lamports exceeds configured max ({max_lamports})"
+        )));
+    }
     let to_pubkey =
         Pubkey::from_str(req.to_pubkey.trim()).map_err(|_| ApiError::bad_request("invalid to_pubkey"))?;
     let stores = resolve_wallet_stores(&state);
-    let from_kp = load_wallet_keypair_from_stores(&stores, req.from_wallet_id.trim())?;
+    let source_wallet_id = req.from_wallet_id.trim().to_string();
+    let allowed_sources = parse_env_allowlist_csv("CLMM_WALLET_TRANSFER_SOURCE_ALLOWLIST");
+    if !allowed_sources.is_empty() && !allowed_sources.contains(&source_wallet_id) {
+        return Err(ApiError::bad_request(
+            "source wallet is not in CLMM_WALLET_TRANSFER_SOURCE_ALLOWLIST".to_string(),
+        ));
+    }
+    let mut allowed_recipients: HashSet<String> = parse_env_allowlist_csv("CLMM_WALLET_TRANSFER_ALLOWLIST");
+    for w in wallet_entries_from_stores(&stores) {
+        allowed_recipients.insert(w.pubkey);
+    }
+    if !allowed_recipients.is_empty() && !allowed_recipients.contains(&to_pubkey.to_string()) {
+        return Err(ApiError::bad_request(
+            "recipient is not in transfer allowlist (wallet stores + CLMM_WALLET_TRANSFER_ALLOWLIST)"
+                .to_string(),
+        ));
+    }
+    let from_kp = load_wallet_keypair_from_stores(&stores, &source_wallet_id)?;
     let from_pubkey = from_kp.pubkey();
     let bal = state
         .provider
@@ -442,7 +567,7 @@ pub async fn transfer_sol_between_wallets(
         .await
         .map_err(|e| ApiError::bad_request(format!("transfer failed: {e}")))?;
     Ok(Json(WalletTransferResponse {
-        from_wallet_id: req.from_wallet_id,
+        from_wallet_id: source_wallet_id,
         from_pubkey: from_pubkey.to_string(),
         to_pubkey: to_pubkey.to_string(),
         lamports: req.lamports,

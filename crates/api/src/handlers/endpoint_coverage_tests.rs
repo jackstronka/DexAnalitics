@@ -810,6 +810,16 @@ async fn wallet_management_endpoints_are_reachable() {
         .await,
         StatusCode::BAD_REQUEST
     );
+    assert_eq!(
+        request(
+            test_router(test_state()),
+            Method::POST,
+            "/api/v1/wallets/reconcile",
+            None,
+        )
+        .await,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

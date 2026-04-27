@@ -1,9 +1,18 @@
-import { useQuery, useQueries } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueries, useQueryClient } from '@tanstack/react-query'
 import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { DollarSign, TrendingDown, TrendingUp, Wallet as WalletIcon, ArrowRight, Copy } from 'lucide-react'
+import {
+  DollarSign,
+  TrendingDown,
+  TrendingUp,
+  Wallet as WalletIcon,
+  ArrowRight,
+  Copy,
+  HelpCircle,
+} from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import ApiDataHint from '@/components/ApiDataHint'
 import {
   getOrcaPositionsByOwner,
@@ -12,6 +21,10 @@ import {
   getJupiterPricesUsd,
   getWalletBalances,
   getWallets,
+  getActiveSigner,
+  createWallet,
+  setActiveSigner,
+  transferSol,
   getOrcaToken,
 } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
@@ -32,6 +45,7 @@ function copyText(text: string) {
 
 export default function Wallet() {
   const { t } = useI18n()
+  const queryClient = useQueryClient()
   const devPk = getDevWalletPubkey()
   const [selectedId, setSelectedId] = useState<string>(() => {
     if (typeof window === 'undefined') return ''
@@ -39,12 +53,68 @@ export default function Wallet() {
   })
   const [showZeroTokens, setShowZeroTokens] = useState(false)
   const [walletAutoRetryCount, setWalletAutoRetryCount] = useState(0)
+  const [newWalletId, setNewWalletId] = useState('')
+  const [transferTo, setTransferTo] = useState('')
+  const [transferLamports, setTransferLamports] = useState('1000000')
+  /** Sender for SOL transfer (independent of `selectedId` used for balance / Orca view). */
+  const [transferFromWalletId, setTransferFromWalletId] = useState('')
+  /** `__custom` = paste pubkey; otherwise a `wallet id` from the list. */
+  const [transferDestChoice, setTransferDestChoice] = useState('__custom')
 
   const { data: wallets } = useQuery({
     queryKey: ['wallets'],
     queryFn: getWallets,
     staleTime: 30_000,
   })
+  const { data: activeSigner } = useQuery({
+    queryKey: ['active-signer'],
+    queryFn: getActiveSigner,
+    staleTime: 10_000,
+  })
+
+  const createWalletM = useMutation({
+    mutationFn: createWallet,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['wallets'] })
+    },
+  })
+
+  const setActiveSignerM = useMutation({
+    mutationFn: setActiveSigner,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['active-signer'] })
+      void queryClient.invalidateQueries({ queryKey: ['api-signer-wallet'] })
+    },
+  })
+
+  const transferSolM = useMutation({
+    mutationFn: transferSol,
+  })
+
+  useEffect(() => {
+    const list = wallets?.wallets ?? []
+    if (list.length === 0) return
+    setTransferFromWalletId((prev) =>
+      prev && list.some((w) => w.id === prev) ? prev : list[0].id,
+    )
+  }, [wallets?.wallets])
+
+  useEffect(() => {
+    if (transferDestChoice !== '__custom' && transferDestChoice === transferFromWalletId) {
+      setTransferDestChoice('__custom')
+    }
+  }, [transferFromWalletId, transferDestChoice])
+
+  const transferRecipientPubkey = useMemo(() => {
+    if (transferDestChoice === '__custom') return transferTo.trim()
+    const row = wallets?.wallets?.find((x) => x.id === transferDestChoice)
+    return row?.pubkey?.trim() ?? ''
+  }, [transferDestChoice, transferTo, wallets?.wallets])
+
+  const transferDestOptions = useMemo(() => {
+    const list = wallets?.wallets ?? []
+    return list.filter((w) => w.id !== transferFromWalletId)
+  }, [wallets?.wallets, transferFromWalletId])
 
   const selectedWallet = wallets?.wallets.find((w) => w.id === selectedId) ?? null
   const ownerPk = selectedWallet?.pubkey ?? devPk ?? null
@@ -175,17 +245,10 @@ export default function Wallet() {
           <CardTitle>{t('wallet.walletsTitle')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <p className="text-xs text-muted-foreground">
-            Lista jest czytana z katalogu <code className="text-[11px]">CLMM_WALLETS_DIR</code> na hoście API. Jeden plik
-            JSON = jeden wpis w UI. Jeśli katalog jest pusty, fallback to{' '}
-            <code className="text-[11px]">VITE_DEV_WALLET_PUBKEY</code>.
-          </p>
+          <p className="text-xs text-muted-foreground">{t('wallet.walletsHint')}</p>
           {(wallets?.wallets ?? []).length === 0 ? (
             <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-              Brak portfeli w katalogu <code className="text-[11px]">{wallets?.wallets_dir ?? 'wallets/'}</code>. Dodaj
-              pliki <code className="text-[11px]">*.json</code> (keypair), ustaw{' '}
-              <code className="text-[11px]">CLMM_WALLETS_DIR</code> w root <code className="text-[11px]">.env</code> i
-              zrestartuj API.
+              {t('wallet.noWalletsHint')}
             </div>
           ) : (
             <div className="flex flex-wrap gap-2">
@@ -202,10 +265,177 @@ export default function Wallet() {
                   title={`${w.filename}\n${w.pubkey}`}
                 >
                   {w.id}
+                  {w.replication_status && (
+                    <span
+                      className={`ml-2 rounded px-1 text-[10px] ${
+                        w.replication_status === 'healthy'
+                          ? 'bg-green-500/20 text-green-300'
+                          : w.replication_status === 'conflict'
+                            ? 'bg-red-500/20 text-red-300'
+                            : 'bg-amber-500/20 text-amber-300'
+                      }`}
+                    >
+                      {w.replication_status}
+                    </span>
+                  )}
                 </Button>
               ))}
             </div>
           )}
+          <div className="rounded-md border px-3 py-2 space-y-2">
+            <div className="text-xs font-medium">Create wallet</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={newWalletId}
+                onChange={(e) => setNewWalletId(e.target.value)}
+                placeholder="wallet_ops_01"
+                className="h-8 min-w-[14rem] rounded border bg-background px-2 text-xs"
+              />
+              <Button
+                type="button"
+                size="sm"
+                onClick={() =>
+                  createWalletM.mutate({
+                    wallet_id: newWalletId.trim() || undefined,
+                    force: false,
+                  })
+                }
+                disabled={createWalletM.isPending}
+              >
+                {createWalletM.isPending ? 'Creating…' : 'Create'}
+              </Button>
+            </div>
+            {createWalletM.isError && (
+              <div className="text-xs text-destructive">
+                {(createWalletM.error as Error).message}
+              </div>
+            )}
+            {createWalletM.data && (
+              <div className="text-xs text-muted-foreground">
+                Created: <strong className="text-foreground">{createWalletM.data.wallet.id}</strong> (
+                {createWalletM.data.wallet.pubkey})
+              </div>
+            )}
+          </div>
+          <div className="rounded-md border px-3 py-2 space-y-2">
+            <div className="text-xs font-medium">Active signer</div>
+            <div className="text-xs text-muted-foreground">
+              Current: <strong className="text-foreground">{activeSigner?.wallet_id ?? 'env fallback'}</strong>
+              {activeSigner?.pubkey ? ` (${activeSigner.pubkey})` : ''}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(wallets?.wallets ?? []).map((w) => (
+                <Button
+                  key={`signer-${w.id}`}
+                  type="button"
+                  variant={activeSigner?.wallet_id === w.id ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setActiveSignerM.mutate({ wallet_id: w.id })}
+                  disabled={setActiveSignerM.isPending}
+                >
+                  use {w.id}
+                </Button>
+              ))}
+            </div>
+            {setActiveSignerM.isError && (
+              <div className="text-xs text-destructive">
+                {(setActiveSignerM.error as Error).message}
+              </div>
+            )}
+          </div>
+          <TooltipProvider delayDuration={200}>
+            <div className="rounded-md border px-3 py-2 space-y-3">
+            <div className="text-xs font-medium">Transfer SOL</div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-xs">
+                <span className="text-muted-foreground">{t('wallet.transferFrom')}</span>
+                <select
+                  className="h-8 rounded border bg-background px-2 text-xs"
+                  value={transferFromWalletId}
+                  onChange={(e) => setTransferFromWalletId(e.target.value)}
+                >
+                  {(wallets?.wallets ?? []).map((w) => (
+                    <option key={`src-${w.id}`} value={w.id}>
+                      {w.id} ({shortenAddress(w.pubkey, 6)})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs">
+                <span className="text-muted-foreground">{t('wallet.transferTo')}</span>
+                <select
+                  className="h-8 rounded border bg-background px-2 text-xs"
+                  value={transferDestChoice}
+                  onChange={(e) => setTransferDestChoice(e.target.value)}
+                >
+                  <option value="__custom">{t('wallet.transferToCustom')}</option>
+                  {transferDestOptions.map((w) => (
+                    <option key={`dst-${w.id}`} value={w.id}>
+                      {w.id} ({shortenAddress(w.pubkey, 6)})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {transferDestChoice === '__custom' && (
+              <input
+                value={transferTo}
+                onChange={(e) => setTransferTo(e.target.value)}
+                placeholder={t('wallet.recipientPubkey')}
+                className="h-8 w-full max-w-xl rounded border bg-background px-2 text-xs font-mono"
+              />
+            )}
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-1 text-xs">
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  {t('wallet.lamportsLabel')}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="inline-flex rounded p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        aria-label={t('wallet.lamportsTooltip')}
+                      >
+                        <HelpCircle className="h-3.5 w-3.5 shrink-0" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-xs leading-snug">
+                      {t('wallet.lamportsTooltip')}
+                    </TooltipContent>
+                  </Tooltip>
+                </span>
+                <input
+                  value={transferLamports}
+                  onChange={(e) => setTransferLamports(e.target.value)}
+                  placeholder="lamports"
+                  className="h-8 w-36 rounded border bg-background px-2 text-xs"
+                />
+              </label>
+              <Button
+                type="button"
+                size="sm"
+                disabled={transferSolM.isPending || !transferFromWalletId || !transferRecipientPubkey}
+                onClick={() =>
+                  transferSolM.mutate({
+                    from_wallet_id: transferFromWalletId,
+                    to_pubkey: transferRecipientPubkey,
+                    lamports: Number(transferLamports) || 0,
+                  })
+                }
+              >
+                {transferSolM.isPending ? 'Sending…' : 'Send'}
+              </Button>
+            </div>
+            {transferSolM.isError && (
+              <div className="text-xs text-destructive">{(transferSolM.error as Error).message}</div>
+            )}
+            {transferSolM.data && (
+              <div className="text-xs text-muted-foreground break-all">
+                Signature: <span className="font-mono">{transferSolM.data.signature}</span>
+              </div>
+            )}
+            </div>
+          </TooltipProvider>
           {ownerPk ? (
             <div className="rounded-md border px-3 py-2 text-xs">
               <div className="text-muted-foreground">{t('wallet.currentWallet')}</div>

@@ -1191,11 +1191,52 @@ export interface WalletEntry {
   id: string
   filename: string
   pubkey: string
+  present_in_primary?: boolean
+  present_in_secondary?: boolean
+  replication_status?: 'healthy' | 'degraded' | 'conflict'
+  fingerprint?: string | null
 }
 
 export interface WalletsListResponse {
-  wallets_dir: string
+  wallets_dir_primary: string
+  wallets_dir_secondary?: string | null
   wallets: WalletEntry[]
+}
+
+export interface CreateWalletRequest {
+  wallet_id?: string
+  force?: boolean
+}
+
+export interface CreateWalletResponse {
+  wallet: WalletEntry
+  primary_written: boolean
+  secondary_written: boolean
+  note?: string | null
+}
+
+export interface ActiveSignerResponse {
+  wallet_id?: string | null
+  pubkey?: string | null
+  source: string
+}
+
+export interface SetActiveSignerRequest {
+  wallet_id: string
+}
+
+export interface WalletTransferRequest {
+  from_wallet_id: string
+  to_pubkey: string
+  lamports: number
+}
+
+export interface WalletTransferResponse {
+  from_wallet_id: string
+  from_pubkey: string
+  to_pubkey: string
+  lamports: number
+  signature: string
 }
 
 export interface WalletTokenBalance {
@@ -1245,6 +1286,11 @@ export interface ConvertSolResponse {
 }
 
 export const getWallets = () => fetchJson<WalletsListResponse>('/wallets')
+export const createWallet = (body: CreateWalletRequest) =>
+  fetchJson<CreateWalletResponse>('/wallets/create', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 export const getWalletBalances = (owner: string) =>
   // This call may require multiple RPC fallbacks; allow longer than the global 15s timeout.
   fetchJsonWithTimeout<WalletBalancesResponse>(
@@ -1253,8 +1299,19 @@ export const getWalletBalances = (owner: string) =>
   )
 
 export const getApiSignerWallet = () => fetchJson<ApiSignerWalletResponse>('/wallets/api-signer')
+export const getActiveSigner = () => fetchJson<ActiveSignerResponse>('/wallets/active-signer')
+export const setActiveSigner = (body: SetActiveSignerRequest) =>
+  fetchJson<ActiveSignerResponse>('/wallets/active-signer', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 export const convertSol = (body: ConvertSolRequest) =>
   fetchJsonLong<ConvertSolResponse>('/wallets/convert-sol', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+export const transferSol = (body: WalletTransferRequest) =>
+  fetchJsonLong<WalletTransferResponse>('/wallets/transfer', {
     method: 'POST',
     body: JSON.stringify(body),
   })

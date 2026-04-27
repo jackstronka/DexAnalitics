@@ -30,6 +30,8 @@ Cargo.lock
 .idea/
 .run/
 .env
+# Default local wallet keypair JSONs (secrets)
+/wallets/
 .local/
 /web/.env.local
 /Docker/.erlang.cookie
