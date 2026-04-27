@@ -2,17 +2,25 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest, ConvertSolResponse,
-    WalletBalancesResponse, WalletEntry, WalletTokenBalance, WalletsListResponse,
+    ActiveSignerResponse, ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest,
+    ConvertSolResponse, CreateWalletRequest, CreateWalletResponse, SetActiveSignerRequest,
+    WalletBalancesResponse, WalletEntry, WalletReplicationStatus, WalletTokenBalance,
+    WalletTransferRequest, WalletTransferResponse, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use clmm_lp_protocols::orca::executor::WhirlpoolExecutor;
 use serde::Deserialize;
-use solana_sdk::{pubkey::Pubkey, signature::read_keypair_file, signer::Signer};
-use std::collections::HashSet;
-use std::path::PathBuf;
+use solana_sdk::{
+    pubkey::Pubkey, signature::Keypair, signature::read_keypair_file, signer::Signer,
+    transaction::Transaction,
+};
+use solana_system_interface::instruction as system_instruction;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -28,15 +36,183 @@ static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("reqwest client for wallet rpc")
 });
 
-fn resolve_wallets_dir(state: &AppState) -> PathBuf {
-    state
+type WalletReplica = Option<(String, String)>;
+type WalletReplicaPair = (WalletReplica, WalletReplica);
+
+#[derive(Debug, Clone)]
+struct WalletStores {
+    primary: PathBuf,
+    secondary: Option<PathBuf>,
+}
+
+fn resolve_wallet_stores(state: &AppState) -> WalletStores {
+    let primary = state
         .config
-        .wallets_dir
+        .wallets_dir_primary
         .as_ref()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
+        .or_else(|| {
+            state
+                .config
+                .wallets_dir
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| std::env::var("CLMM_WALLETS_DIR_PRIMARY").ok().map(PathBuf::from))
         .or_else(|| std::env::var("CLMM_WALLETS_DIR").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("wallets"))
+        .unwrap_or_else(|| PathBuf::from("wallets"));
+    let secondary = state
+        .config
+        .wallets_dir_secondary
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("CLMM_WALLETS_DIR_SECONDARY").ok().map(PathBuf::from))
+        .filter(|p| p != &primary);
+    WalletStores { primary, secondary }
+}
+
+fn wallet_file_path(dir: &Path, wallet_id: &str) -> PathBuf {
+    dir.join(format!("{wallet_id}.json"))
+}
+
+fn wallet_fingerprint_bytes(bytes: &[u8]) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+    // Keep dependencies minimal: SHA-256 via solana-sdk hash helper.
+    let h = solana_sdk::hash::hash(bytes);
+    B64.encode(h.to_bytes())
+}
+
+fn scan_wallet_dir(
+    dir: &PathBuf,
+    out: &mut BTreeMap<String, WalletReplicaPair>,
+    is_primary: bool,
+) {
+    if !dir.exists() {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let id = p
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let pubkey = match read_keypair_file(&p) {
+            Ok(kp) => kp.pubkey().to_string(),
+            Err(_) => continue,
+        };
+        let bytes = match fs::read(&p) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let fp = wallet_fingerprint_bytes(&bytes);
+        let ent = out.entry(id).or_insert((None, None));
+        if is_primary {
+            ent.0 = Some((pubkey, fp));
+        } else {
+            ent.1 = Some((pubkey, fp));
+        }
+    }
+}
+
+fn create_wallet_entry(
+    id: String,
+    primary: Option<(String, String)>,
+    secondary: Option<(String, String)>,
+) -> Option<WalletEntry> {
+    let chosen_pubkey = primary
+        .as_ref()
+        .map(|v| v.0.clone())
+        .or_else(|| secondary.as_ref().map(|v| v.0.clone()))?;
+    let fingerprint = primary
+        .as_ref()
+        .map(|v| v.1.clone())
+        .or_else(|| secondary.as_ref().map(|v| v.1.clone()));
+    let present_in_primary = primary.is_some();
+    let present_in_secondary = secondary.is_some();
+    let conflict = match (&primary, &secondary) {
+        (Some(a), Some(b)) => a.1 != b.1 || a.0 != b.0,
+        _ => false,
+    };
+    let replication_status = if conflict {
+        WalletReplicationStatus::Conflict
+    } else if present_in_primary && (present_in_secondary || secondary.is_none()) {
+        WalletReplicationStatus::Healthy
+    } else {
+        WalletReplicationStatus::Degraded
+    };
+    Some(WalletEntry {
+        id: id.clone(),
+        filename: format!("{id}.json"),
+        pubkey: chosen_pubkey,
+        present_in_primary,
+        present_in_secondary,
+        replication_status,
+        fingerprint,
+    })
+}
+
+fn load_wallet_keypair_from_stores(stores: &WalletStores, wallet_id: &str) -> Result<Keypair, ApiError> {
+    let p1 = wallet_file_path(&stores.primary, wallet_id);
+    if p1.exists() {
+        return read_keypair_file(&p1)
+            .map_err(|e| ApiError::bad_request(format!("wallet `{wallet_id}` read failed from primary: {e}")));
+    }
+    if let Some(sec) = &stores.secondary {
+        let p2 = wallet_file_path(sec, wallet_id);
+        if p2.exists() {
+            return read_keypair_file(&p2)
+                .map_err(|e| ApiError::bad_request(format!("wallet `{wallet_id}` read failed from secondary: {e}")));
+        }
+    }
+    Err(ApiError::bad_request(format!(
+        "wallet `{wallet_id}` not found in configured stores"
+    )))
+}
+
+fn load_signer_wallet_for_api(
+    state: &AppState,
+) -> Result<Option<std::sync::Arc<clmm_lp_execution::prelude::Wallet>>, ApiError> {
+    if let Ok(guard) = state.active_signer_wallet_id.try_read()
+        && let Some(wallet_id) = guard.as_ref()
+    {
+        let stores = resolve_wallet_stores(state);
+        let p1 = wallet_file_path(&stores.primary, wallet_id);
+        if p1.exists() {
+            return clmm_lp_execution::prelude::Wallet::from_file(
+                &p1,
+                "api-active-wallet",
+            )
+            .map(|w| Some(std::sync::Arc::new(w)))
+            .map_err(|e| ApiError::internal(format!("active signer load failed: {e}")));
+        }
+        if let Some(sec) = stores.secondary {
+            let p2 = wallet_file_path(&sec, wallet_id);
+            if p2.exists() {
+                return clmm_lp_execution::prelude::Wallet::from_file(
+                    &p2,
+                    "api-active-wallet",
+                )
+                .map(|w| Some(std::sync::Arc::new(w)))
+                .map_err(|e| ApiError::internal(format!("active signer load failed: {e}")));
+            }
+        }
+    }
+    load_wallet_from_env()
 }
 
 /// List wallet keypair files from the API host (directory).
@@ -50,54 +226,227 @@ fn resolve_wallets_dir(state: &AppState) -> PathBuf {
     )
 )]
 pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<WalletsListResponse>> {
-    let dir = resolve_wallets_dir(&state);
-    let dir_s = dir.to_string_lossy().to_string();
-
-    let mut wallets = Vec::new();
-    if dir.exists() {
-        let rd = std::fs::read_dir(&dir)
-            .map_err(|e| ApiError::internal(format!("read_dir {dir_s}: {e}")))?;
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("json") {
-                continue;
-            }
-            let filename = p
-                .file_name()
-                .and_then(|x| x.to_str())
-                .unwrap_or("")
-                .to_string();
-            if filename.is_empty() {
-                continue;
-            }
-            let id = p
-                .file_stem()
-                .and_then(|x| x.to_str())
-                .unwrap_or("")
-                .to_string();
-            if id.is_empty() {
-                continue;
-            }
-
-            let pubkey = read_keypair_file(&p)
-                .map(|kp| kp.pubkey().to_string())
-                .unwrap_or_else(|_| "".to_string());
-            if pubkey.is_empty() {
-                continue;
-            }
-
-            wallets.push(WalletEntry {
-                id,
-                filename,
-                pubkey,
-            });
-        }
+    let stores = resolve_wallet_stores(&state);
+    let mut merged: BTreeMap<String, WalletReplicaPair> = BTreeMap::new();
+    scan_wallet_dir(&stores.primary, &mut merged, true);
+    if let Some(sec) = &stores.secondary {
+        scan_wallet_dir(sec, &mut merged, false);
     }
-
+    let mut wallets: Vec<WalletEntry> = merged
+        .into_iter()
+        .filter_map(|(id, (primary, secondary))| create_wallet_entry(id, primary, secondary))
+        .collect();
     wallets.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(WalletsListResponse {
-        wallets_dir: dir_s,
+        wallets_dir_primary: stores.primary.to_string_lossy().to_string(),
+        wallets_dir_secondary: stores
+            .secondary
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
         wallets,
+    }))
+}
+
+/// Create a new local wallet keypair JSON file in primary/secondary stores.
+#[utoipa::path(
+    post,
+    path = "/wallets/create",
+    tag = "Wallets",
+    request_body = CreateWalletRequest,
+    responses(
+        (status = 200, description = "Wallet created", body = CreateWalletResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "I/O error")
+    )
+)]
+pub async fn create_wallet(
+    State(state): State<AppState>,
+    Json(req): Json<CreateWalletRequest>,
+) -> ApiResult<Json<CreateWalletResponse>> {
+    let stores = resolve_wallet_stores(&state);
+    let wallet_id = req
+        .wallet_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("wallet_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S")));
+    if !wallet_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ApiError::bad_request(
+            "wallet_id may contain only: a-z, A-Z, 0-9, '_' and '-'",
+        ));
+    }
+    fs::create_dir_all(&stores.primary)
+        .map_err(|e| ApiError::internal(format!("create primary dir failed: {e}")))?;
+    if let Some(sec) = &stores.secondary {
+        fs::create_dir_all(sec)
+            .map_err(|e| ApiError::internal(format!("create secondary dir failed: {e}")))?;
+    }
+
+    let p1 = wallet_file_path(&stores.primary, &wallet_id);
+    let p2 = stores
+        .secondary
+        .as_ref()
+        .map(|dir| wallet_file_path(dir, &wallet_id));
+    if !req.force && (p1.exists() || p2.as_ref().map(|p| p.exists()).unwrap_or(false)) {
+        return Err(ApiError::bad_request(format!(
+            "wallet `{wallet_id}` already exists (use force=true to overwrite)"
+        )));
+    }
+    let keypair = Keypair::new();
+    let bytes = serde_json::to_vec(&keypair.to_bytes().to_vec())
+        .map_err(|e| ApiError::internal(format!("serialize keypair failed: {e}")))?;
+
+    let primary_written;
+    let mut secondary_written = false;
+    {
+        let mut f = fs::File::create(&p1)
+            .map_err(|e| ApiError::internal(format!("create primary wallet file failed: {e}")))?;
+        f.write_all(&bytes)
+            .map_err(|e| ApiError::internal(format!("write primary wallet file failed: {e}")))?;
+        primary_written = true;
+    }
+    if let Some(path) = p2 {
+        match fs::File::create(&path).and_then(|mut f| f.write_all(&bytes)) {
+            Ok(_) => secondary_written = true,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.to_string_lossy(), "secondary wallet write failed");
+            }
+        }
+    } else {
+        secondary_written = true;
+    }
+    let wallet = create_wallet_entry(
+        wallet_id.clone(),
+        Some((keypair.pubkey().to_string(), wallet_fingerprint_bytes(&bytes))),
+        if secondary_written {
+            Some((keypair.pubkey().to_string(), wallet_fingerprint_bytes(&bytes)))
+        } else {
+            None
+        },
+    )
+    .ok_or_else(|| ApiError::internal("created wallet entry cannot be built"))?;
+    let note = if primary_written && secondary_written {
+        None
+    } else {
+        Some("wallet created, but secondary write failed".to_string())
+    };
+    Ok(Json(CreateWalletResponse {
+        wallet,
+        primary_written,
+        secondary_written,
+        note,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/wallets/active-signer",
+    tag = "Wallets",
+    responses((status = 200, description = "Active signer", body = ActiveSignerResponse))
+)]
+pub async fn get_active_signer(
+    State(state): State<AppState>,
+) -> ApiResult<Json<ActiveSignerResponse>> {
+    let active = state.active_signer_wallet_id.read().await.clone();
+    if let Some(wallet_id) = active {
+        let stores = resolve_wallet_stores(&state);
+        let kp = load_wallet_keypair_from_stores(&stores, &wallet_id)?;
+        return Ok(Json(ActiveSignerResponse {
+            wallet_id: Some(wallet_id),
+            pubkey: Some(kp.pubkey().to_string()),
+            source: "active_wallet".to_string(),
+        }));
+    }
+    let env_signer = load_wallet_from_env()
+        .map_err(|e| ApiError::internal(format!("load env signer failed: {e}")))?;
+    Ok(Json(ActiveSignerResponse {
+        wallet_id: None,
+        pubkey: env_signer.as_ref().map(|w| w.pubkey().to_string()),
+        source: "env_fallback".to_string(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/wallets/active-signer",
+    tag = "Wallets",
+    request_body = SetActiveSignerRequest,
+    responses((status = 200, description = "Active signer updated", body = ActiveSignerResponse))
+)]
+pub async fn set_active_signer(
+    State(state): State<AppState>,
+    Json(req): Json<SetActiveSignerRequest>,
+) -> ApiResult<Json<ActiveSignerResponse>> {
+    let wallet_id = req.wallet_id.trim();
+    if wallet_id.is_empty() {
+        return Err(ApiError::bad_request("wallet_id is required"));
+    }
+    let stores = resolve_wallet_stores(&state);
+    let kp = load_wallet_keypair_from_stores(&stores, wallet_id)?;
+    *state.active_signer_wallet_id.write().await = Some(wallet_id.to_string());
+    Ok(Json(ActiveSignerResponse {
+        wallet_id: Some(wallet_id.to_string()),
+        pubkey: Some(kp.pubkey().to_string()),
+        source: "active_wallet".to_string(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/wallets/transfer",
+    tag = "Wallets",
+    request_body = WalletTransferRequest,
+    responses(
+        (status = 200, description = "SOL transfer submitted", body = WalletTransferResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
+pub async fn transfer_sol_between_wallets(
+    State(state): State<AppState>,
+    Json(req): Json<WalletTransferRequest>,
+) -> ApiResult<Json<WalletTransferResponse>> {
+    if req.lamports == 0 {
+        return Err(ApiError::bad_request("lamports must be > 0"));
+    }
+    let to_pubkey =
+        Pubkey::from_str(req.to_pubkey.trim()).map_err(|_| ApiError::bad_request("invalid to_pubkey"))?;
+    let stores = resolve_wallet_stores(&state);
+    let from_kp = load_wallet_keypair_from_stores(&stores, req.from_wallet_id.trim())?;
+    let from_pubkey = from_kp.pubkey();
+    let bal = state
+        .provider
+        .get_balance(&from_pubkey)
+        .await
+        .map_err(|e| ApiError::internal(format!("read sender balance failed: {e}")))?;
+    let reserve = 10_000u64;
+    if bal < req.lamports.saturating_add(reserve) {
+        return Err(ApiError::bad_request(format!(
+            "insufficient SOL: have {bal} lamports, need at least {} + fee reserve",
+            req.lamports
+        )));
+    }
+    let ix = system_instruction::transfer(&from_pubkey, &to_pubkey, req.lamports);
+    let recent = state
+        .provider
+        .get_latest_blockhash()
+        .await
+        .map_err(|e| ApiError::internal(format!("latest blockhash failed: {e}")))?;
+    let tx =
+        Transaction::new_signed_with_payer(&[ix], Some(&from_pubkey), &[&from_kp], recent);
+    let sig = state
+        .provider
+        .send_and_confirm_transaction(&tx)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("transfer failed: {e}")))?;
+    Ok(Json(WalletTransferResponse {
+        from_wallet_id: req.from_wallet_id,
+        from_pubkey: from_pubkey.to_string(),
+        to_pubkey: to_pubkey.to_string(),
+        lamports: req.lamports,
+        signature: sig.to_string(),
     }))
 }
 
@@ -337,7 +686,7 @@ pub async fn get_api_signer_wallet(
 
     let rpc_url = state.provider.current_endpoint().await;
 
-    let w = load_wallet_from_env()
+    let w = load_signer_wallet_for_api(&state)
         .map_err(|e| ApiError::internal(format!("api-signer wallet load: {e}")))?;
     let Some(w) = w else {
         return Ok(Json(ApiSignerWalletResponse {
@@ -399,7 +748,7 @@ pub async fn convert_sol(
     if req.amount_raw == 0 {
         return Err(ApiError::bad_request("amount_raw must be > 0"));
     }
-    let signer = load_wallet_from_env()
+    let signer = load_signer_wallet_for_api(&state)
         .map_err(|e| ApiError::internal(format!("api-signer wallet load: {e}")))?
         .ok_or_else(|| {
             ApiError::bad_request(

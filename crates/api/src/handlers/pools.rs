@@ -261,10 +261,10 @@ pub async fn get_orca_volume_history(
         let Ok(row) = serde_json::from_str::<OrcaVolumeSnapshotRow>(t) else {
             continue;
         };
-        if let Some(ref want_pool) = q.pool_address {
-            if row.pool_address.trim() != want_pool.trim() {
-                continue;
-            }
+        if let Some(ref want_pool) = q.pool_address
+            && row.pool_address.trim() != want_pool.trim()
+        {
+            continue;
         }
         rows.push(row);
     }

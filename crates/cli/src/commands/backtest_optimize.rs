@@ -114,6 +114,7 @@ pub async fn fetch_swaps_for_optimize(query_arg: &str) -> Result<Option<Vec<Swap
 }
 
 /// Default strategy set for grid search.
+#[allow(clippy::too_many_arguments)]
 pub fn default_strategies(
     static_only: bool,
     indicator_strategies: bool,

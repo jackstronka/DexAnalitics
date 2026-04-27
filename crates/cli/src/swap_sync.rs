@@ -431,7 +431,7 @@ fn largest_mint_deltas(meta: &serde_json::Value) -> Vec<(String, i128)> {
     }
 
     let mut out = best_by_mint.into_iter().collect::<Vec<_>>();
-    out.sort_by(|a, b| b.1.abs().cmp(&a.1.abs()));
+    out.sort_by_key(|b| std::cmp::Reverse(b.1.abs()));
     out
 }
 

@@ -867,7 +867,7 @@ fn parse_lifecycle_rows_from_reader<R: BufRead>(reader: R) -> Vec<LifecycleRow> 
             source,
         });
     }
-    out.sort_by(|a, b| a.ts_utc.cmp(&b.ts_utc));
+    out.sort_by_key(|a| a.ts_utc);
     out
 }
 
@@ -994,7 +994,7 @@ fn parse_fee_checkpoint_rows_from_reader<R: BufRead>(reader: R) -> Vec<FeeCheckp
             liquidity,
         });
     }
-    out.sort_by(|a, b| a.ts_utc.cmp(&b.ts_utc));
+    out.sort_by_key(|a| a.ts_utc);
     out
 }
 
@@ -1594,7 +1594,7 @@ fn parse_registry_rows_from_reader<R: BufRead>(reader: R) -> Vec<RegistryRow> {
             rebalance_session_id,
         });
     }
-    out.sort_by(|a, b| a.ts_utc.cmp(&b.ts_utc));
+    out.sort_by_key(|a| a.ts_utc);
     out
 }
 

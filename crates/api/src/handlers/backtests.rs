@@ -1155,7 +1155,7 @@ pub async fn start_backtest_full(
     } else {
         req.windows_hours.clone()
     };
-    if windows.iter().any(|h| *h == 0) {
+    if windows.contains(&0) {
         return Err(ApiError::bad_request("windows_hours must be positive"));
     }
 
@@ -1906,8 +1906,6 @@ pub async fn apply_backtest_auto_tune_to_strategy(
         "il_limit"
     } else if s.starts_with("last_candle_") {
         "last_candle"
-    } else if s == "static" {
-        "static_range"
     } else {
         "static_range"
     };

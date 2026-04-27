@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ fn agent_data_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("data").join("agent"))
 }
 
-fn ensure_parent_dir(path: &PathBuf) -> ApiResult<()> {
+fn ensure_parent_dir(path: &Path) -> ApiResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| ApiError::internal(format!("create agent data dir: {e}")))?;

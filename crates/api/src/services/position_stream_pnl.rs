@@ -635,6 +635,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{chain_session_ids_from_edges, pool_mints_for_hodl};
 

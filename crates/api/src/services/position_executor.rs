@@ -78,6 +78,60 @@ fn expand_home_path(input: &str) -> String {
     p.to_string()
 }
 
+fn resolve_wallet_file_from_state(state: &AppState, wallet_id: &str) -> Option<String> {
+    let wid = wallet_id.trim();
+    if wid.is_empty() {
+        return None;
+    }
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(p) = state
+        .config
+        .wallets_dir_primary
+        .as_ref()
+        .or(state.config.wallets_dir.as_ref())
+    {
+        if !p.trim().is_empty() {
+            dirs.push(p.trim().to_string());
+        }
+    } else if let Ok(v) = env::var("CLMM_WALLETS_DIR_PRIMARY") {
+        if !v.trim().is_empty() {
+            dirs.push(v.trim().to_string());
+        }
+    } else if let Ok(v) = env::var("CLMM_WALLETS_DIR")
+        && !v.trim().is_empty()
+    {
+        dirs.push(v.trim().to_string());
+    }
+    if let Some(s) = state.config.wallets_dir_secondary.as_ref() {
+        if !s.trim().is_empty() {
+            dirs.push(s.trim().to_string());
+        }
+    } else if let Ok(v) = env::var("CLMM_WALLETS_DIR_SECONDARY")
+        && !v.trim().is_empty()
+    {
+        dirs.push(v.trim().to_string());
+    }
+    for d in dirs {
+        let path = std::path::PathBuf::from(d).join(format!("{wid}.json"));
+        if path.exists() {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn load_wallet_from_active_signer_or_env(state: &AppState) -> Result<Option<Arc<Wallet>>, ApiError> {
+    if let Ok(guard) = state.active_signer_wallet_id.try_read()
+        && let Some(wallet_id) = guard.as_ref()
+        && let Some(path) = resolve_wallet_file_from_state(state, wallet_id)
+    {
+        let w = Wallet::from_file(&path, "api-active-wallet")
+            .map_err(|e| ApiError::internal(format!("Failed to load active signer `{wallet_id}`: {e}")))?;
+        return Ok(Some(Arc::new(w)));
+    }
+    load_wallet_from_env()
+}
+
 /// Human-readable diagnostics for why API position ops may not find a signer wallet.
 pub fn wallet_config_diagnostic() -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -147,7 +201,7 @@ pub async fn resolve_executor_for_position_ops(
         }
     }
 
-    let wallet = match load_wallet_from_env() {
+    let wallet = match load_wallet_from_active_signer_or_env(state) {
         Ok(Some(w)) => w,
         Ok(None) => return None,
         Err(e) => {

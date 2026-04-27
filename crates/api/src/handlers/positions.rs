@@ -634,11 +634,10 @@ pub async fn list_closed_positions(
             entry.last_sid = Some(sid);
         }
         match event {
-            "registry_open" => {
-                if ts.is_some() {
-                    entry.opened_ts = ts;
-                }
+            "registry_open" if ts.is_some() => {
+                entry.opened_ts = ts;
             }
+            "registry_open" => {}
             "registry_close" => {
                 if ts.is_some() {
                     entry.closed_ts = ts;

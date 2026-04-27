@@ -210,6 +210,7 @@ fn sort_backtest_optimize_grid(results: &mut [OptimizeGridRow], objective: Backt
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Fetch recent market data
     MarketData {
