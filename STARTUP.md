@@ -144,7 +144,7 @@ curl http://localhost:8080/api/v1/health
 
 Expected response:
 ```json
-{"status":"healthy","version":"0.1.1-alpha.3"}
+{"status":"healthy","version":"0.2.0-alpha.1"}
 ```
 
 **Available endpoints:**

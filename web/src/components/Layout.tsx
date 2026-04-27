@@ -20,27 +20,30 @@ import { Button } from '@/components/ui/button'
 import ApiBackendBanner from '@/components/ApiBackendBanner'
 import DevWalletBar from '@/components/DevWalletBar'
 import { closedPositionsListQueryOptions, getHealth } from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
+import { APP_VERSION_LABEL } from '@/lib/version'
 import { connectWebSockets, disconnectWebSockets } from '@/lib/websocket'
-
-const navigation = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Wallet', href: '/wallet', icon: Wallet },
-  { name: 'Swap', href: '/swap', icon: ArrowLeftRight },
-  { name: 'Positions', href: '/positions', icon: Activity },
-  { name: 'Closed', href: '/positions/closed', icon: History },
-  { name: 'Strategies', href: '/strategies', icon: Target },
-  { name: 'Backtests', href: '/backtests', icon: BarChart3 },
-  { name: 'Pools', href: '/pools', icon: Droplets },
-  { name: 'Scripts', href: '/scripts', icon: Terminal },
-  { name: 'Logs', href: '/logs', icon: ScrollText },
-  { name: 'Bot activity', href: '/bot-activity', icon: History },
-  { name: 'Settings', href: '/settings', icon: Settings },
-]
 
 export default function Layout() {
   const location = useLocation()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const queryClient = useQueryClient()
+  const { locale, setLocale, t } = useI18n()
+
+  const navigation = [
+    { key: 'nav.dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { key: 'nav.wallet', href: '/wallet', icon: Wallet },
+    { key: 'nav.swap', href: '/swap', icon: ArrowLeftRight },
+    { key: 'nav.positions', href: '/positions', icon: Activity },
+    { key: 'nav.closed', href: '/positions/closed', icon: History },
+    { key: 'nav.strategies', href: '/strategies', icon: Target },
+    { key: 'nav.backtests', href: '/backtests', icon: BarChart3 },
+    { key: 'nav.pools', href: '/pools', icon: Droplets },
+    { key: 'nav.scripts', href: '/scripts', icon: Terminal },
+    { key: 'nav.logs', href: '/logs', icon: ScrollText },
+    { key: 'nav.botActivity', href: '/bot-activity', icon: History },
+    { key: 'nav.settings', href: '/settings', icon: Settings },
+  ] as const
 
   const healthQ = useQuery({
     queryKey: ['health'],
@@ -113,7 +116,7 @@ export default function Layout() {
             const isActive = location.pathname.startsWith(item.href)
             return (
               <Link
-                key={item.name}
+                key={item.key}
                 to={item.href}
                 className={`
                   flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors
@@ -130,7 +133,7 @@ export default function Layout() {
                 }}
               >
                 <item.icon className="h-5 w-5" />
-                {item.name}
+                {t(item.key)}
               </Link>
             )
           })}
@@ -145,10 +148,10 @@ export default function Layout() {
             />
             <span className="leading-tight">
               {healthQ.isPending
-                ? 'API…'
+                ? t('layout.apiPending')
                 : healthQ.isError
-                  ? 'Brak API'
-                  : 'API OK'}
+                  ? t('layout.apiMissing')
+                  : t('layout.apiOk')}
             </span>
           </div>
         </div>
@@ -169,8 +172,19 @@ export default function Layout() {
           <div className="flex-1 flex justify-end min-w-0">
             <DevWalletBar />
           </div>
+          <div className="flex items-center gap-2 shrink-0 text-xs text-muted-foreground">
+            <span>{t('layout.langLabel')}</span>
+            <select
+              className="h-8 rounded border bg-background px-2 text-xs text-foreground"
+              value={locale}
+              onChange={(e) => setLocale(e.target.value === 'en' ? 'en' : 'pl')}
+            >
+              <option value="pl">PL</option>
+              <option value="en">EN</option>
+            </select>
+          </div>
           <div className="text-sm text-muted-foreground shrink-0">
-            v0.1.1-alpha.2
+            {APP_VERSION_LABEL}
           </div>
         </header>
 

@@ -2,8 +2,11 @@ import { useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { getMetricsMode, type MetricsMode } from '@/lib/metricsMode'
+import { useI18n } from '@/lib/i18n'
+import { APP_VERSION } from '@/lib/version'
 
 export default function Settings() {
+  const { locale } = useI18n()
   const [metricsMode, setMetricsMode] = useState<MetricsMode>(() => getMetricsMode())
   const [apiKey, setApiKey] = useState('')
   const [rpcUrl, setRpcUrl] = useState('https://api.mainnet-beta.solana.com')
@@ -15,26 +18,26 @@ export default function Settings() {
       'clmm-settings',
       JSON.stringify({ apiKey, rpcUrl, dryRun, pnl_mode: metricsMode }),
     )
-    alert('Settings saved!')
+    alert(locale === 'pl' ? 'Ustawienia zapisane!' : 'Settings saved!')
   }
 
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-bold">Settings</h1>
+      <h1 className="text-3xl font-bold">{locale === 'pl' ? 'Ustawienia' : 'Settings'}</h1>
 
       <Card>
         <CardHeader>
-          <CardTitle>API Configuration</CardTitle>
-          <CardDescription>Configure your API connection settings</CardDescription>
+          <CardTitle>{locale === 'pl' ? 'Konfiguracja API' : 'API Configuration'}</CardTitle>
+          <CardDescription>{locale === 'pl' ? 'Skonfiguruj ustawienia połączenia API' : 'Configure your API connection settings'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">API Key</label>
+            <label className="text-sm font-medium">{locale === 'pl' ? 'Klucz API' : 'API Key'}</label>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder="Enter your API key"
+              placeholder={locale === 'pl' ? 'Wpisz klucz API' : 'Enter your API key'}
               className="w-full px-3 py-2 rounded-md border bg-background"
             />
           </div>
@@ -53,15 +56,15 @@ export default function Settings() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Execution Settings</CardTitle>
-          <CardDescription>Configure how transactions are executed</CardDescription>
+          <CardTitle>{locale === 'pl' ? 'Ustawienia wykonania' : 'Execution Settings'}</CardTitle>
+          <CardDescription>{locale === 'pl' ? 'Skonfiguruj sposób wykonywania transakcji' : 'Configure how transactions are executed'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <div className="font-medium">Dry Run Mode</div>
+              <div className="font-medium">{locale === 'pl' ? 'Tryb Dry Run' : 'Dry Run Mode'}</div>
               <div className="text-sm text-muted-foreground">
-                Simulate transactions without executing on-chain
+                {locale === 'pl' ? 'Symuluj transakcje bez wykonania on-chain' : 'Simulate transactions without executing on-chain'}
               </div>
             </div>
             <button
@@ -82,47 +85,49 @@ export default function Settings() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Metrics Mode</CardTitle>
-          <CardDescription>Select metrics source for position views</CardDescription>
+          <CardTitle>{locale === 'pl' ? 'Tryb metryk' : 'Metrics Mode'}</CardTitle>
+          <CardDescription>{locale === 'pl' ? 'Wybierz źródło metryk dla widoków pozycji' : 'Select metrics source for position views'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          <label className="text-sm font-medium">PnL/IL Mode</label>
+          <label className="text-sm font-medium">{locale === 'pl' ? 'Tryb PnL/IL' : 'PnL/IL Mode'}</label>
           <select
             value={metricsMode}
             onChange={(e) => setMetricsMode(e.target.value as MetricsMode)}
             className="w-full px-3 py-2 rounded-md border bg-background"
           >
-            <option value="live">Live stream (current default)</option>
+            <option value="live">{locale === 'pl' ? 'Live stream (domyślny)' : 'Live stream (current default)'}</option>
             <option value="settlement_v1">Settlement v1</option>
           </select>
           <p className="text-xs text-muted-foreground">
-            Settlement v1 uses finalized interpretation labels in position detail cards.
+            {locale === 'pl'
+              ? 'Settlement v1 używa finalnych etykiet interpretacji w kartach szczegółów pozycji.'
+              : 'Settlement v1 uses finalized interpretation labels in position detail cards.'}
           </p>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>About</CardTitle>
+          <CardTitle>{locale === 'pl' ? 'Informacje' : 'About'}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Version</span>
-            <span>0.1.1-alpha.2</span>
+            <span className="text-muted-foreground">{locale === 'pl' ? 'Wersja' : 'Version'}</span>
+            <span>{APP_VERSION}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Build</span>
-            <span>Development</span>
+            <span className="text-muted-foreground">{locale === 'pl' ? 'Build' : 'Build'}</span>
+            <span>{locale === 'pl' ? 'Deweloperski' : 'Development'}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-muted-foreground">License</span>
+            <span className="text-muted-foreground">{locale === 'pl' ? 'Licencja' : 'License'}</span>
             <span>MIT / Apache-2.0</span>
           </div>
         </CardContent>
       </Card>
 
       <div className="flex justify-end">
-        <Button onClick={handleSave}>Save Settings</Button>
+        <Button onClick={handleSave}>{locale === 'pl' ? 'Zapisz ustawienia' : 'Save Settings'}</Button>
       </div>
     </div>
   )

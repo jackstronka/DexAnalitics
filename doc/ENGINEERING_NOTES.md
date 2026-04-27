@@ -1,3 +1,31 @@
+## 2026-04-27 — Versioning reset to new feature stage (`0.2.0-alpha.1`)
+
+keywords: versioning, semver, release, web, api, cli, workspace, openapi
+
+- **What:** Bumped workspace and crate package versions from `0.1.1-alpha.3` to `0.2.0-alpha.1` and aligned frontend package version from `0.1.1-alpha.2` to the same release stage.
+- **Behavior:** App version shown in UI is no longer hardcoded; `Layout` and `Settings` now read frontend version from `web/package.json` via `web/src/lib/version.ts`.
+- **Why:** Repository functionality materially diverged from the initial cloned baseline; previous FE/Rust version split was misleading during diagnostics and release tracking.
+- **paths:** `Cargo.toml`, `crates/domain/Cargo.toml`, `crates/simulation/Cargo.toml`, `crates/optimization/Cargo.toml`, `crates/protocols/Cargo.toml`, `crates/execution/Cargo.toml`, `crates/data/Cargo.toml`, `crates/api/Cargo.toml`, `crates/cli/Cargo.toml`, `crates/api/src/openapi.rs`, `web/package.json`, `web/src/lib/version.ts`, `web/src/components/Layout.tsx`, `web/src/pages/Settings.tsx`
+
+## 2026-04-27 — UI readability + i18n completion pass on core pages
+
+keywords: web, i18n, readability, font-size, dashboard, closed-positions, strategies, strategy-create, settings, position-detail
+
+- **What:** Completed another i18n pass for user-facing labels on `Dashboard`, `ClosedPositions`, `Strategies`, `StrategyCreate`, `Settings`, and remaining mixed-copy blocks in `PositionDetail`.
+- **Behavior:** PL/EN switching now covers key titles, actions, status lines, and explanatory copy shown in those views, including long diagnostics sections in `PositionDetail`.
+- **Readability:** Added global utility overrides for very small font classes (`text-xs`, `text-[10px]`, `text-[11px]`) to improve legibility on dense dark-theme screens.
+- **paths:** `web/src/index.css`, `web/src/pages/Dashboard.tsx`, `web/src/pages/ClosedPositions.tsx`, `web/src/pages/Strategies.tsx`, `web/src/pages/StrategyCreate.tsx`, `web/src/pages/Settings.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/Pools.tsx`, `web/src/pages/BotActivity.tsx`, `web/src/pages/StrategyDetail.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/pages/PositionCreate.tsx`, `web/src/pages/ClosedPositionDetail.tsx`, `doc/BUGS.md`
+
+## 2026-04-27 — Frontend i18n foundation (PL/EN) with runtime language switch
+
+keywords: web, i18n, localization, pl, en, layout, wallet, ui
+
+- **What:** Added a lightweight frontend i18n provider (`I18nProvider`, `useI18n`) with persisted locale (`localStorage`) and dictionary-based translation keys.
+- **Behavior:** Added PL/EN switch in top layout; sidebar/navigation labels and key Wallet UI labels now switch at runtime without reload.
+- **Scope:** Extended migration pass now also covers core flow headers/actions on `Positions`, `Swap`, `Backtests`, and `PositionDetail` (while deeper per-row/table labels are still incremental).
+- **Deep-label pass:** Added bilingual labels for many table/status/action texts in `Positions` and `Swap`, plus additional performance/automation copy in `PositionDetail` and key section titles in `Backtests`.
+- **paths:** `web/src/lib/i18n.tsx`, `web/src/main.tsx`, `web/src/components/Layout.tsx`, `web/src/pages/Wallet.tsx`, `web/src/pages/Positions.tsx`, `web/src/pages/Swap.tsx`, `web/src/pages/Backtests.tsx`, `web/src/pages/PositionDetail.tsx`
+
 ## 2026-04-27 — Wallet balances partial-RPC diagnostics exposed to UI
 
 keywords: clmm-lp-api, web, wallet, balances, rpc, diagnostics, token-2022, tokenkeg

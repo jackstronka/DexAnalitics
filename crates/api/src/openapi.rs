@@ -42,7 +42,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "Bociarz LP API",
-        version = "0.1.1-alpha.3",
+        version = "0.2.0-alpha.1",
         description = "REST API for Bociarz LP (derived from CLMM Liquidity Provider). \
                        Provides endpoints for position management, strategy automation, \
                        pool analysis, and portfolio analytics.",
