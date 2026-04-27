@@ -2461,6 +2461,21 @@ pub struct WalletBalancesResponse {
     pub lamports: u64,
     pub sol: String,
     pub tokens: Vec<WalletTokenBalance>,
+    /// Number of token-account rows discovered before mint-level merge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_accounts_total: Option<u64>,
+    /// Legacy SPL-Token program read status (`Tokenkeg...`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_legacy_ok: Option<bool>,
+    /// Token-2022 program read status (`TokenzQd...`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_2022_ok: Option<bool>,
+    /// Best-effort error text for legacy SPL read when failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_legacy_error: Option<String>,
+    /// Best-effort error text for Token-2022 read when failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_2022_error: Option<String>,
 }
 
 /// `GET /wallets/api-signer` — API signing wallet (from KEYPAIR_PATH / SOLANA_KEYPAIR_PATH) and its SOL balance.

@@ -622,6 +622,19 @@ async fn start_strategy_executor_core(
     id: &str,
     strategy_config: serde_json::Value,
 ) -> ApiResult<Option<String>> {
+    // Defensive single-owner guard: if an executor object already exists for this strategy id,
+    // stop and remove it before starting a fresh one. This avoids overlapping loops during
+    // rapid restarts/autostart races.
+    if let Some(existing) = { state.executors.read().await.get(id).cloned() } {
+        warn!(
+            strategy_id = %id,
+            "start_strategy_executor_core: replacing existing executor instance"
+        );
+        existing.read().await.stop();
+        let mut execs = state.executors.write().await;
+        execs.remove(id);
+    }
+
     if let Err(e) =
         crate::services::strategy_service::try_heal_stale_strategy_links_for_strategy(state, id)
             .await

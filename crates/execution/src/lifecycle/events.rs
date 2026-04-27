@@ -162,6 +162,9 @@ pub struct RebalanceData {
     /// Optional id of the last successful optimize JSON application.
     #[serde(default)]
     pub optimization_run_id: Option<String>,
+    /// Optional annotation when final executed range differs from original strategy/recovery plan.
+    #[serde(default)]
+    pub range_adjustment_reason: Option<String>,
     /// Closed position NFT (before close+open rebalance). Same as `position` in API-only / stub flows.
     #[serde(default)]
     pub old_position: Option<String>,

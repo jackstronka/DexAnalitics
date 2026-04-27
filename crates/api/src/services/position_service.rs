@@ -729,6 +729,7 @@ Top up the API wallet and retry."
                         fees_a_collected: None,
                         fees_b_collected: None,
                         optimization_run_id: None,
+                        range_adjustment_reason: None,
                         old_position: Some(position_pubkey.to_string()),
                     },
                 )
@@ -959,6 +960,17 @@ Align ticks to pool tick_spacing and keep tick_lower < tick_upper. Detail: {raw}
 fn classify_close_position_error(err: anyhow::Error) -> ApiError {
     let raw = format!("{err:#}");
     let s = raw.to_lowercase();
+
+    if s.contains("custom(6005)")
+        || s.contains("custom_code=6005")
+        || (s.contains("instructionerror") && s.contains("6005") && s.contains("whirl"))
+    {
+        return ApiError::bad_request(format!(
+            "Close position failed: Whirlpool position is not empty yet (custom 6005 / ClosePositionNotEmpty). \
+Position must have zero remaining liquidity and all fees/rewards handled before final close can succeed. \
+Retry close; if it keeps failing, refresh position state and verify no residual liquidity remains. Detail: {raw}"
+        ));
+    }
 
     if s.contains("custom(3007)")
         || s.contains("custom_code=3007")
@@ -1263,6 +1275,22 @@ mod tests {
             ApiError::BadRequest(msg) => {
                 assert!(msg.contains("Whirlpool account ownership mismatch (custom 3007)"));
                 assert!(msg.contains("position NFT"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_position_error_6005_maps_to_bad_request_with_not_empty_hint() {
+        let err = classify_close_position_error(anyhow::anyhow!(
+            "transaction error: InstructionError(3, Custom(6005)) | ix_program=3:whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc | custom_code=6005"
+        ));
+        match err {
+            ApiError::BadRequest(msg) => {
+                assert!(
+                    msg.contains("Whirlpool position is not empty yet (custom 6005 / ClosePositionNotEmpty)")
+                );
+                assert!(msg.contains("zero remaining liquidity"));
             }
             other => panic!("unexpected error variant: {other:?}"),
         }

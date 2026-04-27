@@ -397,6 +397,38 @@ fn adapt_recover_open_ticks_if_needed(
     ((tick_lower, tick_upper), false)
 }
 
+fn recover_plan_ttl_secs() -> i64 {
+    std::env::var("CLMM_RECOVER_PLAN_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|v| (30..=3600).contains(v))
+        .unwrap_or(180)
+}
+
+fn recover_plan_drift_threshold_pct() -> Decimal {
+    std::env::var("CLMM_RECOVER_PLAN_MAX_DRIFT_PCT")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .and_then(Decimal::from_f64_retain)
+        .filter(|v| *v > Decimal::ZERO && *v <= Decimal::new(100, 0))
+        .map(|v| v / Decimal::new(100, 0))
+        .unwrap_or(Decimal::new(1, 2))
+}
+
+fn recenter_ticks_keep_width(tick_current: i32, tick_spacing: u16, tick_lower: i32, tick_upper: i32) -> (i32, i32) {
+    let spacing = i32::from(tick_spacing).max(1);
+    let width = (tick_upper - tick_lower).abs().max(spacing);
+    let half = width / 2;
+    let mut lo = tick_current.saturating_sub(half);
+    let mut hi = lo.saturating_add(width);
+    lo = (lo / spacing) * spacing;
+    hi = (hi / spacing) * spacing;
+    if hi <= lo {
+        hi = lo.saturating_add(spacing);
+    }
+    (lo, hi)
+}
+
 /// SPL Associated Token Account (classic SPL token program), same derivation as `spl_associated_token_account`.
 fn associated_token_address(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     spl_associated_token_address::get_associated_token_address(owner, mint, &spl_token::id())
@@ -529,6 +561,8 @@ pub struct RecoverOpenParams {
     pub pool: Pubkey,
     pub new_tick_lower: i32,
     pub new_tick_upper: i32,
+    pub planned_at_utc: Option<String>,
+    pub planned_price_ab: Option<Decimal>,
     pub reason: RebalanceReason,
     pub closed_position_nft: Pubkey,
     pub rebalance_session_id: Option<String>,
@@ -2055,6 +2089,7 @@ impl RebalanceExecutor {
                     fees_a_collected: Some(fa),
                     fees_b_collected: Some(fb),
                     optimization_run_id: params.optimization_run_id.clone(),
+                    range_adjustment_reason: None,
                     old_position: Some(params.position.to_string()),
                 },
             )
@@ -2109,13 +2144,91 @@ impl RebalanceExecutor {
                 return result;
             }
         };
-        let ((planned_tick_lower, planned_tick_upper), adapted_ticks) =
-            adapt_recover_open_ticks_if_needed(
-                pool_state.tick_current,
-                pool_state.tick_spacing,
-                p.new_tick_lower,
-                p.new_tick_upper,
-            );
+        let mut planned_tick_lower = p.new_tick_lower;
+        let mut planned_tick_upper = p.new_tick_upper;
+        let mut range_adjustment_reason: Option<String> = None;
+
+        // If the original plan is stale or drifted too far from current price, replan before recovery open.
+        // For RetouchShift this avoids reopening with an outdated range after long delays.
+        if p.reason == RebalanceReason::RetouchShift {
+            let ttl_secs = recover_plan_ttl_secs();
+            let drift_threshold = recover_plan_drift_threshold_pct();
+            let now = chrono::Utc::now();
+
+            let stale_plan = p
+                .planned_at_utc
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|ts| (now - ts.with_timezone(&chrono::Utc)).num_seconds() > ttl_secs)
+                .unwrap_or(false);
+
+            let drifted_plan = p.planned_price_ab.is_some_and(|planned_price| {
+                if planned_price <= Decimal::ZERO || pool_state.price <= Decimal::ZERO {
+                    return false;
+                }
+                let drift = (pool_state.price - planned_price).abs() / planned_price;
+                drift > drift_threshold
+            });
+
+            if stale_plan || drifted_plan {
+                let (lo, hi) = recenter_ticks_keep_width(
+                    pool_state.tick_current,
+                    pool_state.tick_spacing,
+                    planned_tick_lower,
+                    planned_tick_upper,
+                );
+                let reason = if stale_plan && drifted_plan {
+                    "recover_plan_stale_and_price_drift_replanned"
+                } else if stale_plan {
+                    "recover_plan_stale_replanned"
+                } else {
+                    "recover_plan_price_drift_replanned"
+                };
+                info!(
+                    op = "orca_rebalance",
+                    stage = "recover_open",
+                    tick_current = pool_state.tick_current,
+                    old_tick_lower = planned_tick_lower,
+                    old_tick_upper = planned_tick_upper,
+                    new_tick_lower = lo,
+                    new_tick_upper = hi,
+                    reason = reason,
+                    "recover_open replanned intended range before open"
+                );
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_recover_open_replanned",
+                    "recover_open",
+                    Some(p.pool),
+                    Some(p.closed_position_nft),
+                    p.rebalance_session_id.clone(),
+                    serde_json::json!({
+                        "reason": reason,
+                        "old_tick_lower": planned_tick_lower,
+                        "old_tick_upper": planned_tick_upper,
+                        "new_tick_lower": lo,
+                        "new_tick_upper": hi,
+                        "tick_current": pool_state.tick_current,
+                        "planned_at_utc": p.planned_at_utc,
+                        "planned_price_ab": p.planned_price_ab,
+                        "current_price_ab": pool_state.price
+                    }),
+                )
+                .await;
+                planned_tick_lower = lo;
+                planned_tick_upper = hi;
+                range_adjustment_reason = Some(reason.to_string());
+            }
+        }
+
+        let ((adapted_lower, adapted_upper), adapted_ticks) = adapt_recover_open_ticks_if_needed(
+            pool_state.tick_current,
+            pool_state.tick_spacing,
+            planned_tick_lower,
+            planned_tick_upper,
+        );
+        planned_tick_lower = adapted_lower;
+        planned_tick_upper = adapted_upper;
         if adapted_ticks {
             info!(
                 op = "orca_rebalance",
@@ -2127,6 +2240,9 @@ impl RebalanceExecutor {
                 new_tick_upper = planned_tick_upper,
                 "recover_open adapted stale intended range to include current tick"
             );
+            if range_adjustment_reason.is_none() {
+                range_adjustment_reason = Some("recover_open_adapted_to_include_current_tick".to_string());
+            }
         }
 
         let (recovered_amount_a_raw, recovered_amount_b_raw) =
@@ -2213,6 +2329,7 @@ impl RebalanceExecutor {
                     fees_a_collected: None,
                     fees_b_collected: None,
                     optimization_run_id: p.optimization_run_id.clone(),
+                    range_adjustment_reason,
                     old_position: Some(p.closed_position_nft.to_string()),
                 },
             )

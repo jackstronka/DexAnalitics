@@ -2,6 +2,7 @@
 
 use crate::lifecycle::RebalanceReason;
 use anyhow::Context;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -25,6 +26,12 @@ pub struct PendingOpenItem {
     pub closed_position_nft: String,
     #[serde(default)]
     pub rebalance_session_id: Option<String>,
+    /// UTC timestamp when strategy computed intended range.
+    #[serde(default)]
+    pub planned_at_utc: Option<String>,
+    /// Price B per A used at plan time (optional, for stale/drift checks before recovery open).
+    #[serde(default)]
+    pub planned_price_ab: Option<Decimal>,
     pub reason: RebalanceReason,
     pub optimization_run_id: Option<String>,
     pub attempts: u32,

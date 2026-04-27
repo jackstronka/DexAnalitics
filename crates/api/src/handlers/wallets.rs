@@ -17,6 +17,9 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -101,6 +104,47 @@ pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<Walle
 #[derive(Debug, Deserialize)]
 pub struct WalletBalancesQuery {
     pub owner: String,
+}
+
+fn append_tokens_from_rpc_value(v: &serde_json::Value, out: &mut Vec<WalletTokenBalance>) {
+    let Some(arr) = v["result"]["value"].as_array() else {
+        return;
+    };
+    for entry in arr {
+        let mint = entry["account"]["data"]["parsed"]["info"]["mint"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if mint.is_empty() {
+            continue;
+        }
+        let ui_amount = entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
+                    .as_f64()
+                    .map(|x| x.to_string())
+            })
+            .unwrap_or_else(|| "0".to_string());
+        out.push(WalletTokenBalance { mint, ui_amount });
+    }
+}
+
+fn merge_wallet_token_rows(rows: Vec<WalletTokenBalance>) -> Vec<WalletTokenBalance> {
+    use std::collections::BTreeMap;
+    let mut acc: BTreeMap<String, f64> = BTreeMap::new();
+    for row in rows {
+        let v = row.ui_amount.parse::<f64>().unwrap_or(0.0);
+        let e = acc.entry(row.mint).or_insert(0.0);
+        *e += v;
+    }
+    acc.into_iter()
+        .map(|(mint, amount)| WalletTokenBalance {
+            mint,
+            ui_amount: amount.to_string(),
+        })
+        .collect()
 }
 
 /// Read-only on-chain balances for a wallet owner (native SOL + SPL token accounts).
@@ -218,45 +262,43 @@ pub async fn get_wallet_balances(
     let lamports = bal_v["result"]["value"].as_u64().unwrap_or(0);
     let sol = format!("{:.9}", (lamports as f64) / 1e9);
 
-    let tok_v = rpc_call_try(
+    let tok_legacy = rpc_call_try(
         &urls,
         "getTokenAccountsByOwner",
         serde_json::json!([
             owner_pk.to_string(),
-            { "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+            { "programId": SPL_TOKEN_PROGRAM_ID },
+            { "encoding": "jsonParsed" }
+        ]),
+    )
+    .await;
+    let tok_2022 = rpc_call_try(
+        &urls,
+        "getTokenAccountsByOwner",
+        serde_json::json!([
+            owner_pk.to_string(),
+            { "programId": TOKEN_2022_PROGRAM_ID },
             { "encoding": "jsonParsed" }
         ]),
     )
     .await;
 
-    let mut tokens = Vec::new();
-    // If token RPC is slow/unavailable, we still return SOL (tokens empty).
-    if let Ok((_u, v)) = tok_v
-        && let Some(arr) = v["result"]["value"].as_array()
-    {
-        for entry in arr {
-            let mint = entry["account"]["data"]["parsed"]["info"]["mint"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            if mint.is_empty() {
-                continue;
-            }
-            // Prefer uiAmountString; fallback to uiAmount.
-            let ui_amount =
-                entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
-                            .as_f64()
-                            .map(|x| x.to_string())
-                    })
-                    .unwrap_or_else(|| "0".to_string());
-            tokens.push(WalletTokenBalance { mint, ui_amount });
-        }
+    // If one token RPC path is slow/unavailable, keep partial token list from the other one.
+    // If both fail, we still return SOL with tokens empty (existing behavior).
+    let legacy_ok = tok_legacy.is_ok();
+    let token_2022_ok = tok_2022.is_ok();
+    let legacy_err = tok_legacy.as_ref().err().cloned();
+    let token_2022_err = tok_2022.as_ref().err().cloned();
+
+    let mut token_rows = Vec::new();
+    if let Ok((_u, v)) = tok_legacy {
+        append_tokens_from_rpc_value(&v, &mut token_rows);
     }
-    tokens.sort_by(|a, b| a.mint.cmp(&b.mint));
+    if let Ok((_u, v)) = tok_2022 {
+        append_tokens_from_rpc_value(&v, &mut token_rows);
+    }
+    let token_accounts_total = token_rows.len() as u64;
+    let tokens = merge_wallet_token_rows(token_rows);
 
     Ok(Json(WalletBalancesResponse {
         owner: owner_pk.to_string(),
@@ -264,6 +306,11 @@ pub async fn get_wallet_balances(
         lamports,
         sol,
         tokens,
+        token_accounts_total: Some(token_accounts_total),
+        token_legacy_ok: Some(legacy_ok),
+        token_2022_ok: Some(token_2022_ok),
+        token_legacy_error: legacy_err,
+        token_2022_error: token_2022_err,
     }))
 }
 
@@ -405,4 +452,34 @@ pub async fn convert_sol(
         amount_raw: req.amount_raw,
         owner_pubkey: owner.to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_wallet_token_rows_sums_same_mint() {
+        let merged = merge_wallet_token_rows(vec![
+            WalletTokenBalance {
+                mint: "So11111111111111111111111111111111111111112".to_string(),
+                ui_amount: "1.25".to_string(),
+            },
+            WalletTokenBalance {
+                mint: "So11111111111111111111111111111111111111112".to_string(),
+                ui_amount: "0.75".to_string(),
+            },
+            WalletTokenBalance {
+                mint: "Es9vMFrzaCERmJfrF4H2XfNwS7TfGsDz3jAC5vVsQt1z".to_string(),
+                ui_amount: "2".to_string(),
+            },
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        let sol_row = merged
+            .iter()
+            .find(|r| r.mint == "So11111111111111111111111111111111111111112")
+            .expect("sol row");
+        assert_eq!(sol_row.ui_amount.parse::<f64>().unwrap_or(0.0), 2.0);
+    }
 }

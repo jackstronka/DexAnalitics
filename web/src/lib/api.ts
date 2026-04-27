@@ -1209,6 +1209,11 @@ export interface WalletBalancesResponse {
   lamports: number
   sol: string
   tokens: WalletTokenBalance[]
+  token_accounts_total?: number
+  token_legacy_ok?: boolean
+  token_2022_ok?: boolean
+  token_legacy_error?: string | null
+  token_2022_error?: string | null
 }
 
 export interface ApiSignerWalletResponse {

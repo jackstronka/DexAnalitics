@@ -1,3 +1,78 @@
+## 2026-04-27 — Wallet balances partial-RPC diagnostics exposed to UI
+
+keywords: clmm-lp-api, web, wallet, balances, rpc, diagnostics, token-2022, tokenkeg
+
+- **What:** Extended `WalletBalancesResponse` with read-path diagnostics for token account fetches (`token_legacy_ok`, `token_2022_ok`, `token_legacy_error`, `token_2022_error`, `token_accounts_total`).
+- **Behavior:** Wallet page now explicitly warns when API returned partial token data (one token-program RPC failed) and shows status/error details; toggle `Pokaż zera` no longer looks like a broken control in partial-data scenarios.
+- **Why:** Endpoint intentionally returns `200` with partial tokens to keep SOL visible during transient RPC issues; without diagnostics operators interpreted incomplete lists as missing UI logic.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/wallets.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`, `doc/BUGS.md`
+
+## 2026-04-27 — Wallet balances include Token-2022 accounts
+
+keywords: clmm-lp-api, wallet, balances, token-2022, spl, rpc, web
+
+- **What:** Extended `/wallets/balances` token discovery to query both token program families: legacy SPL Token (`Tokenkeg...`) and Token-2022 (`TokenzQd...`).
+- **Behavior:** Wallet page can now show full token inventory for owners that hold Token-2022 assets; duplicate mints across multiple token accounts/program reads are merged by mint with summed `ui_amount`.
+- **Why:** Previous implementation fetched only legacy SPL accounts, which caused incomplete wallet lists on initial load even with healthy RPC.
+- **Guards/tests:** Added unit regression `merge_wallet_token_rows_sums_same_mint`.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `doc/BUGS.md`
+
+## 2026-04-27 — Close error mapping for Whirlpool custom 6005 (`ClosePositionNotEmpty`)
+
+keywords: clmm-lp-api, close-position, whirlpool, custom-6005, error-mapping, operator-ux
+
+- **What:** Extended API close error classifier with a dedicated branch for Whirlpool `custom 6005`.
+- **Behavior:** `Close Position` now returns a clear 400 message that the position is not empty (`ClosePositionNotEmpty`) and points operators to residual liquidity/fee/reward settlement instead of exposing only opaque chain text.
+- **Guards/tests:** Added unit regression `close_position_error_6005_maps_to_bad_request_with_not_empty_hint`.
+- **paths:** `crates/api/src/services/position_service.rs`, `doc/BUGS.md`
+
+## 2026-04-27 — Recovery open now replans stale Retouch ranges (TTL + price drift)
+
+keywords: execution, retouch_shift, pending-open, recovery, replan, ttl, price-drift
+
+- **What:** Extended pending-open artifacts with plan metadata (`planned_at_utc`, `planned_price_ab`) and wired it into recovery open flow.
+- **Behavior:** In `recover_open_after_incomplete`, `RetouchShift` plans are validated before open: if stale (`CLMM_RECOVER_PLAN_TTL_SECS`, default 180s) or price drift exceeds threshold (`CLMM_RECOVER_PLAN_MAX_DRIFT_PCT`, default 1%), range is replanned around current tick while keeping previous width.
+- **Observability:** Recovery emits diagnostic row `bot_recover_open_replanned` and persists `range_adjustment_reason` in lifecycle `RebalanceData`.
+- **Why:** Prevent executing outdated close-time plans when market moved materially before recovery could reopen.
+- **paths:** `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/lifecycle/events.rs`, `doc/BUGS.md`
+
+## 2026-04-27 — Pending-open recovery single-claim guard + safe executor replacement
+
+keywords: execution, pending-open, duplicate-open, rebalance-session-id, strategy-executor, api
+
+- **What:** Added a global claim set for pending-open recovery items so only one executor worker can process a given recovery key at once (`sid:<rebalance_session_id>` or `pool+closed_position` fallback).
+- **Behavior:** If another worker already owns the claim, the item stays in queue unchanged (attempt counter is not incremented by the losing worker), reducing duplicate recovery/open races.
+- **What (API start guard):** `start_strategy_executor_core` now defensively stops and removes any existing executor instance for the same strategy id before starting a fresh one.
+- **Why:** Existing open guard (`bot_open_guard_blocked`) prevented duplicate on-chain opens, but logs still showed duplicate open attempts from concurrent loops; this change removes that upstream trigger source.
+- **paths:** `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/strategies.rs`, `doc/BUGS.md`
+
+## 2026-04-27 — Position history shows close-time price instead of close range
+
+keywords: web, position-detail, close-price, lifecycle, event_price_a_usd
+
+- **What:** Replaced `range @ close` column in `PositionDetail` lineage table with `close price`.
+- **Behavior:** Value is sourced from lifecycle close event payload (`details.event_price_a_usd`) per position; UI shows pair-aware label (e.g. `USDC per 1 SOL`) and `—` when event price is unavailable.
+- **Why:** For operational review, close-time price is more actionable than rendering close tick range.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `doc/BUGS.md`
+
+## 2026-04-27 — Position history close range parses `old_tick_*` lifecycle fields
+
+keywords: web, position-detail, lifecycle, old_tick_lower, old_tick_upper, range-close
+
+- **What:** Updated `PositionDetail` history range extraction to parse multiple lifecycle detail key variants.
+- **Behavior change:** `range @ close` now falls back to `old_tick_lower/old_tick_upper` when `tick_lower/tick_upper` are absent; open range also accepts `new_tick_lower/new_tick_upper` fallback.
+- **Why:** Close lifecycle rows often store the closed range under `old_tick_*`, which previously rendered as blank (`—`) despite data being present.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `doc/BUGS.md`
+
+## 2026-04-27 — Positions strategy badge uses diagnostics as source-of-truth
+
+keywords: web, positions, position-detail, diagnostics, linked-strategy, react-query
+
+- **What:** Updated `Positions` strategy column to derive `linked/not linked` directly from per-row `position-diagnostics` (`linked_strategies`) instead of intersecting diagnostics with `GET /strategies` `position_addresses`.
+- **Why:** The previous intersection could show false `Not linked` when diagnostics had a valid link but strategy config/cache lagged behind, causing drift vs `PositionDetail`.
+- **Behavior:** `GET /strategies` is now used only to enrich linked rows with strategy parameter summary; when details are unavailable, UI still shows linked state with diagnostics fallback label.
+- **paths:** `web/src/pages/Positions.tsx`, `doc/BUGS.md`
+
 ## 2026-04-24 — Wallet UX: auto-retry SPL token fetch when initial response is empty
 
 keywords: wallet, spl, rpc, retry, ui, balances

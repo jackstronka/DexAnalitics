@@ -23,6 +23,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
@@ -74,6 +75,23 @@ impl Default for ExecutorConfig {
 }
 
 type ReopenHook = Arc<dyn Fn(Pubkey, Pubkey) + Send + Sync>;
+static GLOBAL_PENDING_OPEN_CLAIMS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn pending_open_claims() -> &'static Mutex<HashSet<String>> {
+    GLOBAL_PENDING_OPEN_CLAIMS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn pending_open_claim_key(item: &pending_open::PendingOpenItem) -> String {
+    if let Some(sid) = item
+        .rebalance_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return format!("sid:{sid}");
+    }
+    format!("pool:{}|closed:{}", item.pool.trim(), item.closed_position_nft.trim())
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PriceSample {
@@ -664,15 +682,43 @@ impl StrategyExecutor {
         let mut kept: Vec<super::pending_open::PendingOpenItem> = Vec::new();
 
         for mut item in std::mem::take(&mut store.items) {
+            let claim_key = pending_open_claim_key(&item);
+            let claimed = {
+                let mut claims = pending_open_claims().lock().await;
+                claims.insert(claim_key.clone())
+            };
+            if !claimed {
+                // Another executor/cycle is already handling this pending-open item.
+                // Keep it in queue unchanged (do not burn attempts on duplicate workers).
+                kept.push(item);
+                continue;
+            }
             if item.attempts >= max_a {
+                {
+                    let mut claims = pending_open_claims().lock().await;
+                    claims.remove(&claim_key);
+                }
                 continue;
             }
             item.attempts += 1;
             item.last_attempt_at = Some(chrono::Utc::now().to_rfc3339());
-            let pool = solana_sdk::pubkey::Pubkey::from_str(item.pool.trim())
-                .map_err(|e| anyhow::anyhow!("pending pool pubkey: {e}"))?;
-            let closed = solana_sdk::pubkey::Pubkey::from_str(item.closed_position_nft.trim())
-                .map_err(|e| anyhow::anyhow!("pending closed NFT pubkey: {e}"))?;
+            let pool = match solana_sdk::pubkey::Pubkey::from_str(item.pool.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut claims = pending_open_claims().lock().await;
+                    claims.remove(&claim_key);
+                    return Err(anyhow::anyhow!("pending pool pubkey: {e}"));
+                }
+            };
+            let closed = match solana_sdk::pubkey::Pubkey::from_str(item.closed_position_nft.trim())
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut claims = pending_open_claims().lock().await;
+                    claims.remove(&claim_key);
+                    return Err(anyhow::anyhow!("pending closed NFT pubkey: {e}"));
+                }
+            };
 
             let res = self
                 .rebalance_executor
@@ -680,6 +726,8 @@ impl StrategyExecutor {
                     pool,
                     new_tick_lower: item.intended_tick_lower,
                     new_tick_upper: item.intended_tick_upper,
+                    planned_at_utc: item.planned_at_utc.clone(),
+                    planned_price_ab: item.planned_price_ab,
                     reason: item.reason.clone(),
                     closed_position_nft: closed,
                     rebalance_session_id: item.rebalance_session_id.clone(),
@@ -772,6 +820,10 @@ impl StrategyExecutor {
                         "pending_open recovery failed (max attempts)"
                     );
                 }
+            }
+            {
+                let mut claims = pending_open_claims().lock().await;
+                claims.remove(&claim_key);
             }
         }
 
@@ -1158,6 +1210,8 @@ impl StrategyExecutor {
                                     intended_tick_upper: *new_tick_upper,
                                     closed_position_nft: position.address.to_string(),
                                     rebalance_session_id: result.rebalance_session_id.clone(),
+                                    planned_at_utc: Some(chrono::Utc::now().to_rfc3339()),
+                                    planned_price_ab: Some(pool.price),
                                     reason: reason.clone(),
                                     optimization_run_id: self
                                         .optimization_run_id

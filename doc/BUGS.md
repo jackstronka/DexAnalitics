@@ -28,6 +28,95 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260427-04 — Wallet balances endpoint omitted Token-2022 accounts
+
+status: partially fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-27  
+fixed_in: local  
+keywords: wallet, balances, token-2022, spl, getTokenAccountsByOwner, rpc, web
+
+- **Symptom:** Po wejściu na `Wallet` część tokenów nie pojawiała się na liście on-chain mimo poprawnego owner pubkey i działającego RPC/SOL.
+- **Root cause:** API `GET /wallets/balances` czytało token accounts tylko dla programu SPL Token legacy (`Tokenkeg...`), pomijając konta Token-2022 (`TokenzQd...`).
+- **Fix:** Endpoint pobiera teraz token accounts z obu programów (`Tokenkeg...` + `TokenzQd...`), scala wynik per `mint` (sumowanie `ui_amount`) i zachowuje dotychczasowe fallbacki (SOL zwracany nawet przy częściowej niedostępności token RPC).
+- **Symptom (follow-up):** Po wdrożeniu odczytu z obu programów UI nadal potrafi pokazać mniej tokenów niż oczekiwane; toggle `Pokaż zera` nie zmienia listy.
+- **Root cause (follow-up):** Endpoint `wallets/balances` pracuje w trybie partial-success: gdy któryś call RPC (`legacy` albo `token-2022`) nie powiedzie się, API nadal zwraca `200` z tokenami tylko z działającej gałęzi. UI wcześniej nie pokazywał, że wynik jest częściowy.
+- **Fix (follow-up):** API zwraca teraz status diagnostyczny obu odczytów (`token_legacy_ok`, `token_2022_ok`, `token_*_error`, `token_accounts_total`), a Wallet UI pokazuje ostrzeżenie „lista może być niepełna” z konkretnym statusem/błędem RPC.
+- **Guards/tests:** Dodano regresyjny unit test `merge_wallet_token_rows_sums_same_mint`.
+- **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`
+
+---
+
+### BUG-20260427-03 — Close Position returned opaque Whirlpool custom 6005
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-27  
+fixed_in: local  
+keywords: close-position, whirlpool, custom-6005, closepositionnotempty, not-empty, liquidity, fees, rewards
+
+- **Symptom:** Manual close failed with `InstructionError(3, Custom(6005))` on Whirlpool ix (`whirLb...`) and API returned generic bad-request chain without clear remediation.
+- **Symptom (session evidence):** Error payload included `custom_code=6005` on `/positions/{pda}` close attempt from Position Detail UI.
+- **Root cause:** `classify_close_position_error` in API had dedicated branches for `3007` and `6018`, but no explicit mapping for Whirlpool `6005` (`ClosePositionNotEmpty`), so operators got opaque output.
+- **Fix:** Added explicit close error mapping for `custom 6005` with actionable hint: position is not empty yet (remaining liquidity and/or unsettled fee/reward legs) and close should be retried after state refresh/settlement.
+- **Guards/tests:** Added regression test `close_position_error_6005_maps_to_bad_request_with_not_empty_hint`.
+- **Paths:** `crates/api/src/services/position_service.rs`
+
+---
+
+### BUG-20260427-01 — Position history `range @ close` was blank despite close ticks present
+
+status: fixed  
+severity: low  
+reported_by: user  
+first_seen: 2026-04-27  
+fixed_in: local  
+keywords: position-detail, range-close, old_tick_lower, old_tick_upper, lifecycle, web
+
+- **Symptom:** W `PositionDetail -> Position history` kolumna `range @ close` pokazywała `—` mimo że event close miał ticki w details.
+- **Root cause:** Frontend parser czytał wyłącznie `details.tick_lower/tick_upper`; close rows często zapisują zamykany zakres jako `old_tick_lower/old_tick_upper`, więc parser nie widział danych.
+- **Fix:** Rozszerzono parser zakresów w `PositionDetail`: open czyta `tick_*` i fallback `new_tick_*`, close czyta `tick_*` i fallback `old_tick_*`.
+- **Guards/tests:** `npx tsc --noEmit` w `web/`.
+- **Paths:** `web/src/pages/PositionDetail.tsx`
+
+---
+
+### BUG-20260427-02 — Monitored positions table showed stale/zero PnL from monitor cache
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-27  
+fixed_in: local  
+keywords: positions, monitored-positions, pnl, fees, source-of-truth, stream-pnl, fallback-monitor
+
+- **Symptom:** W `Positions -> Monitored positions (API)` kolumna `PnL` często pokazywała `0.000%` lub nieadekwatne wartości, mimo aktywnej pozycji i zmian na `Position Detail`. Użytkownik pytał też, czy `Fees` są z właściwego źródła.
+- **Root cause:** Lista pozycji renderowała `PnL` z `position.pnl.net_pnl_pct` (monitor cache), które nie jest wiarygodnym live source dla tej tabeli. `Fees` były liczone poprawnie z valuation path (`fees_earned_usd`), ale UI nie pokazywał jawnie źródła (`live_valuation` vs `fallback_monitor`), więc zera wyglądały jak błąd.
+- **Fix:** `Positions` pobiera teraz per-wiersz `stream-pnl` i używa `net_pnl_pct` z tego endpointu jako priorytetowego źródła. Gdy stream nie jest dostępny, zostaje fallback do monitor cache z etykietą źródła. Przy `Fees` dodano czytelny znacznik źródła valuation.
+- **Guards/tests:** `npx tsc --noEmit` (web), ręczna weryfikacja: PnL na liście zgadza się kierunkiem/skalą z `Position Detail -> stream`.
+- **Paths:** `web/src/pages/Positions.tsx`
+
+---
+
+### BUG-20260427-01 — Position history ranges used raw tick ratio (wrong scale for token pair)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-27  
+fixed_in: local  
+keywords: position-history, rotations, range-open, range-close, tick-to-price, decimals, ui
+
+- **Symptom:** W `Position history (rotations)` kolumny `range @ open` / `range @ close` pokazywały nielogiczne zakresy (np. `0.085... USDC per 1 SOL` zamiast ~`85...`), mimo poprawnych ticków.
+- **Root cause:** UI konwertowało tick -> `tickToPriceRatio` (raw `B_raw/A_raw`) i wyświetlało wynik bez korekty o decymale tokenów (`10^(decA-decB)`), więc zakres był przeskalowany.
+- **Fix:** W `PositionDetail` zakres ticków jest teraz liczony jako raw ratio -> UI ratio przez `uiPriceFromRawPriceRatio`, z decimalami z Orca token metadata (`getOrcaToken`) i fallbackiem dla znanych mintów/labeli (USDC/USDT/SOL/BTC/ETH).
+- **Guards/tests:** `npx tsc --noEmit` (web), ręczna weryfikacja na `/positions/{pda}`: zakresy dla SOL/USDC są w skali dziesiątek/setek, nie setnych.
+- **Paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/whirlpoolTicks.ts`
+
+---
+
 ### BUG-20260424-05 — Wallet page showed SOL immediately but SPL tokens appeared only after manual refresh
 
 status: fixed  
@@ -199,9 +288,12 @@ keywords: rebalance, duplicate-open, rebalance-session-id, strategy-link, orphan
 - **Symptom:** A single `rebalance_session_id` could contain two `bot_open_position` rows (e.g. `7FW...` and `85A...`), while strategy link/heal followed only one path (`old -> new`), leaving the second position orphaned from strategy management.
 - **Root cause:** Open/link flow assumes one successful open per session (`new_position: Option<Pubkey>` + one reopen hook call). There was no explicit guardrail to block duplicate open execution for an already-opened session id.
 - **Fix:** Added open guard in rebalance executor: before open, block when lifecycle already has `bot_open_position` for session id, or when session is already inflight/completed in-process; emit diagnostic `bot_open_guard_blocked`. Added session helper in lifecycle ledger reader for `session_has_bot_open_position`.
+- **Symptom (2026-04-27, follow-up):** Guard blocked duplicate attempts (`bot_open_guard_blocked`), but duplicate triggers still appeared in logs for the same session (`session_open_inflight_or_completed`), indicating concurrent workers were still attempting recovery/open.
+- **Root cause (2026-04-27, follow-up):** Pending-open recovery processing had no cross-executor claim/lease for the same session item, so parallel executor loops could race on one `rebalance_session_id` and rely on late open guard rejection. Additionally, strategy start path could replace executor instances without explicitly stopping/removing any pre-existing one first.
+- **Fix (follow-up):** Added global pending-open claim key (`sid:<rebalance_session_id>`; fallback `pool+closed_position`) so only one worker processes a recovery item at a time; non-claiming workers keep item untouched (no extra attempts). Added defensive replacement guard in `start_strategy_executor_core` to stop+remove any existing executor instance before spawning a fresh one for the same strategy id.
 - **Fix (observability/UI):** Added tick-range context to close rows (`old_tick_*`, `planned_new_tick_*`) and previous-range context to open rows (`prev_tick_*`, `new_tick_*` in details), then rendered side-by-side graphical range panels in Logs session view.
 - **Guards/tests:** `cargo check -p clmm-lp-execution`; `npx tsc --noEmit` (in `web/`).
-- **Paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/pages/Logs.tsx`
+- **Paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/pages/Logs.tsx`
 
 ---
 
@@ -437,6 +529,9 @@ keywords: positions-ui, position-detail, monitored-positions, linked-strategy, r
 - **Fix (follow-up):** Dla `['strategies']` w tych widokach ustawiono też `staleTime: 0`, `refetchOnWindowFocus: true` i krótki `refetchInterval` (15s), aby zbić ryzyko utrzymywania starego link-statusu przy długiej sesji SPA i globalnym cache `staleTime=5m`.
 - **Fix (follow-up 2):** `PositionDetail` filtruje listę linked strategii przez `diagnostics.linked_strategies` (backend source-of-truth), więc sekcja `Position Info` nie pokazuje linku, którego backend już nie widzi.
 - **Fix (follow-up 3):** `Positions` (`Monitored positions (API)`) również opiera badge `Strategy` o `position-diagnostics` per-wiersz (a nie tylko `GET /strategies`), więc status `linked/not linked` jest zgodny z backend source-of-truth także na liście.
+- **Symptom (2026-04-27, regression):** Dla pozycji z linked strategią sekcja `PositionDetail -> Diagnostics` pokazywała strategię poprawnie, ale `Positions -> Monitored positions (API)` wracało do `Not linked`.
+- **Root cause (2026-04-27, regression):** W `Positions` status był nadal liczony jako przecięcie dwóch źródeł (`diagnostics.linked_strategies` AND `GET /strategies` mapowane po `position_addresses`). Gdy diagnostics miało link, a cache/config `/strategies` chwilowo nie zawierało tego PDA, UI pokazywał false-negative `Not linked`.
+- **Fix (follow-up 4):** `Positions` renderuje status linku bezpośrednio z `position-diagnostics` (source-of-truth); `GET /strategies` służy tylko do wzbogacenia opisu parametrami, z fallbackiem do danych z diagnostics gdy szczegóły strategii nie są dostępne.
 - **Guards/tests:** Weryfikacja ręczna na tej samej pozycji: `Position Info` i `Monitored positions (API)` pokazują spójny status linku.
 - **Paths:** `web/src/pages/Positions.tsx`, `web/src/pages/PositionDetail.tsx`
 
@@ -752,8 +847,11 @@ keywords: rebalance, close_without_open, swap_mix, recovery, strategy
 - **Root cause (follow-up 2026-04-17):** Recovery używa sztywno `intended_tick_lower/upper` z momentu close; gdy rynek przesunie się poza ten zakres, `quote_deposit_budget_in_range` odrzuca open (`tick_current` poza nowym pasmem). Ścieżka `recover_open_after_incomplete` nie stosuje adaptacji zakresu (widen/recenter), więc ponawia ten sam niepoprawny zakres.
 - **Fix:** Do wdrożenia: twardy marker `rebalance_incomplete` + trwały `pending-open` recovery gdy close zakończony, a open nie doszedł do skutku; UI powinno pokazywać taki status zamiast "po prostu closed".
 - **Fix (2026-04-17, quality):** `pending-open` zapisuje telemetry per item (`last_attempt_at`, `stuck_reason`, `stuck_since`, `last_alert_attempts`) i klasyfikuje `stuck_reason` automatycznie z `last_error` (`tick_out_of_range`, `quote_failed`, `rpc_timeout`, `insufficient_balance`, `unknown`). Dodano próg `CLMM_PENDING_OPEN_ALERT_ATTEMPTS` (default 10): po przekroczeniu emitowany jest alert `Pending Open Stuck` (z deduplikacją per item).
+- **Symptom (2026-04-27, follow-up):** Dla `retouch_shift` finalny range open po recovery mógł odbiegać od pierwotnego planu strategii po kilku minutach opóźnienia (stary plan z momentu close był wykonywany na nowym rynku).
+- **Root cause (2026-04-27, follow-up):** `pending-open` nie trzymał metadanych świeżości planu (`planned_at`, `planned_price`) i recovery otwierał na starych `intended_tick_*` bez jawnej polityki stale/drift replan.
+- **Fix (2026-04-27, follow-up):** `pending-open` zapisuje teraz `planned_at_utc` i `planned_price_ab`. Recovery dla `RetouchShift` sprawdza TTL (`CLMM_RECOVER_PLAN_TTL_SECS`, default 180s) i drift ceny (`CLMM_RECOVER_PLAN_MAX_DRIFT_PCT`, default 1%). Przy stale/drift replanuje zakres (zachowując szerokość) wokół bieżącego ticka, loguje `bot_recover_open_replanned`, i zapisuje `range_adjustment_reason` do zdarzenia rebalance.
 - **Guards/tests:** test scenariusza: close success + swap rounds + open failure/abort => wpis `rebalance_incomplete` + recovery artifact; dodatkowo testy klasyfikacji `stuck_reason` i progowego alertowania attempts.
-- **Paths:** `data/ledger/orca_position_lifecycle.jsonl`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/positions.rs`
+- **Paths:** `data/ledger/orca_position_lifecycle.jsonl`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/lifecycle/events.rs`, `crates/api/src/handlers/positions.rs`
 
 ### BUG-20260410-05 — Collect Fees: brak executora mimo aktywnego środowiska
 

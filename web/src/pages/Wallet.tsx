@@ -82,6 +82,16 @@ export default function Wallet() {
     !!balances &&
     balances.tokens.length === 0 &&
     walletAutoRetryCount < MAX_WALLET_AUTO_RETRIES
+  const tokenLegacyOk = balances?.token_legacy_ok
+  const token2022Ok = balances?.token_2022_ok
+  const hasPartialTokenData =
+    !!balances &&
+    ((tokenLegacyOk === false && token2022Ok === true) ||
+      (tokenLegacyOk === true && token2022Ok === false))
+  const tokenReadErrors = [
+    balances?.token_legacy_error ? `SPL legacy: ${balances.token_legacy_error}` : null,
+    balances?.token_2022_error ? `Token-2022: ${balances.token_2022_error}` : null,
+  ].filter(Boolean) as string[]
 
   useEffect(() => {
     setWalletAutoRetryCount(0)
@@ -268,6 +278,11 @@ export default function Wallet() {
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-xs text-muted-foreground">
                     Tokeny SPL: <strong className="text-foreground">{balances.tokens.length}</strong>
+                    {typeof balances.token_accounts_total === 'number' && (
+                      <span className="ml-2">
+                        (konta tokenowe: <strong className="text-foreground">{balances.token_accounts_total}</strong>)
+                      </span>
+                    )}
                   </div>
                   <Button
                     type="button"
@@ -280,6 +295,21 @@ export default function Wallet() {
                     {showZeroTokens ? 'Ukryj zera' : 'Pokaż zera'}
                   </Button>
                 </div>
+                {(hasPartialTokenData || tokenReadErrors.length > 0) && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 space-y-1">
+                    <div>
+                      Lista tokenów może być niepełna: jeden z odczytów RPC dla programów tokenów nie powiódł się.
+                    </div>
+                    <div className="text-[11px] opacity-90">
+                      Status: legacy={String(tokenLegacyOk)} | token-2022={String(token2022Ok)}
+                    </div>
+                    {tokenReadErrors.length > 0 && (
+                      <div className="text-[11px] opacity-90 break-all">
+                        {tokenReadErrors.join(' | ')}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {balances.tokens.length === 0 ? (
                   <div className="text-muted-foreground text-xs space-y-1">

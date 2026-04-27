@@ -25,6 +25,7 @@ import {
   getStrategies,
   setStrategyPositionExecutor,
   getJupiterPricesUsd,
+  getOrcaToken,
   linkPositionStrategy,
   runBacktestFromOpenPosition,
   sendPositionAgentLlmReply,
@@ -38,14 +39,18 @@ import {
   formatDate,
   formatFeeBaseUnitsClause,
   formatLineageFeesCollectedUsdMain,
+  formatNumber,
+  formatInvertedTokenPriceRange,
   formatPercentFixed,
   formatPrincipalDeltaUsdOrDash,
   formatUsdField,
   formatUsdFixed,
   formatUsdUncollectedFees,
+  formatTokenPriceRange,
   formatUsdcPriceRange,
   shortenAddress,
 } from '@/lib/utils'
+import { tickToPriceRatio, uiPriceFromRawPriceRatio } from '@/lib/whirlpoolTicks'
 import { getMetricsMode } from '@/lib/metricsMode'
 
 /** Wrapped SOL mint — network fees are in native SOL (lamports). */
@@ -145,6 +150,184 @@ function parseNum(v: unknown): number | null {
     return Number.isFinite(n) ? n : null
   }
   return null
+}
+
+function fallbackDecimalsForPair(
+  mint?: string | null,
+  tokenLabel?: string | null,
+): number | null {
+  const m = (mint ?? '').trim()
+  if (m === 'So11111111111111111111111111111111111111112') return 9
+  if (m === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v') return 6 // USDC
+  if (m === 'Es9vMFrzaCERmJfrF4H2FYD7sJ5W6z5xLr9P7hX9Jf6') return 6 // USDT
+  const label = (tokenLabel ?? '').trim().toUpperCase()
+  if (label === 'USDC' || label === 'USDT') return 6
+  if (label === 'SOL' || label === 'WSOL') return 9
+  if (label.includes('BTC')) return 8
+  if (label.includes('ETH')) return 8
+  return null
+}
+
+type TickRange = {
+  lower: number
+  upper: number
+}
+
+type PositionOpenCloseRanges = {
+  open?: TickRange
+}
+
+function parseTickRangeFromDetailsUsingKeys(
+  details: unknown,
+  keyPairs: ReadonlyArray<readonly [string, string]>,
+): TickRange | null {
+  if (!details || typeof details !== 'object') return null
+  const obj = details as Record<string, unknown>
+  for (const [lowerKey, upperKey] of keyPairs) {
+    const lower = Number(obj[lowerKey])
+    const upper = Number(obj[upperKey])
+    if (!Number.isInteger(lower) || !Number.isInteger(upper) || lower >= upper) continue
+    return { lower, upper }
+  }
+  return null
+}
+
+function extractOpenCloseRangesByPosition(rows: LedgerRow[]): Map<string, PositionOpenCloseRanges> {
+  const out = new Map<string, PositionOpenCloseRanges>()
+  for (const r of rows) {
+    const position = typeof r.position_pubkey === 'string' ? r.position_pubkey.trim() : ''
+    if (!position) continue
+    const event = typeof r.event === 'string' ? r.event : ''
+    if (
+      event !== 'bot_open_position' &&
+      event !== 'bot_open_position_full_range' &&
+      event !== 'position_open' &&
+      event !== 'bot_close_position' &&
+      event !== 'position_close'
+    ) {
+      continue
+    }
+    const cur = out.get(position) ?? {}
+    if (
+      (event === 'bot_open_position' ||
+        event === 'bot_open_position_full_range' ||
+        event === 'position_open') &&
+      cur.open == null
+    ) {
+      // Open rows can store ticks under generic `tick_*` or explicit `new_tick_*`.
+      const openRange = parseTickRangeFromDetailsUsingKeys(r.details, [
+        ['tick_lower', 'tick_upper'],
+        ['new_tick_lower', 'new_tick_upper'],
+      ])
+      if (openRange) cur.open = openRange
+    }
+    out.set(position, cur)
+  }
+  return out
+}
+
+function parseCloseEventPriceFromDetails(details: unknown): number | null {
+  if (!details || typeof details !== 'object') return null
+  const obj = details as Record<string, unknown>
+  const raw = obj.event_price_a_usd
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw
+  if (typeof raw === 'string') {
+    const n = Number(raw)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
+function extractClosePriceByPosition(rows: LedgerRow[]): Map<string, number> {
+  const out = new Map<string, { tsMs: number; price: number }>()
+  for (const r of rows) {
+    const position = typeof r.position_pubkey === 'string' ? r.position_pubkey.trim() : ''
+    if (!position) continue
+    const event = typeof r.event === 'string' ? r.event : ''
+    if (event !== 'bot_close_position' && event !== 'position_close') continue
+    const price = parseCloseEventPriceFromDetails(r.details)
+    if (price == null) continue
+    const tsRaw = typeof r.ts_utc === 'string' ? r.ts_utc : ''
+    const tsMs = Date.parse(tsRaw)
+    const existing = out.get(position)
+    if (!existing || (Number.isFinite(tsMs) && tsMs >= existing.tsMs)) {
+      out.set(position, { tsMs: Number.isFinite(tsMs) ? tsMs : existing?.tsMs ?? 0, price })
+    }
+  }
+  const flat = new Map<string, number>()
+  for (const [position, v] of out.entries()) flat.set(position, v.price)
+  return flat
+}
+
+function formatRangeFromTicks(
+  range: TickRange | undefined,
+  tokenALabel?: string | null,
+  tokenBLabel?: string | null,
+  decimalsA?: number | null,
+  decimalsB?: number | null,
+  invertQuote = false,
+): string {
+  if (!range) return '—'
+  const quote =
+    tokenALabel && tokenBLabel ? `${tokenBLabel} per 1 ${tokenALabel}` : 'token B per 1 token A'
+  const invQuote =
+    tokenALabel && tokenBLabel ? `${tokenALabel} per 1 ${tokenBLabel}` : 'token A per 1 token B'
+  const lowerRaw = tickToPriceRatio(range.lower)
+  const upperRaw = tickToPriceRatio(range.upper)
+  const lower =
+    decimalsA != null && decimalsB != null
+      ? uiPriceFromRawPriceRatio(lowerRaw, decimalsA, decimalsB)
+      : null
+  const upper =
+    decimalsA != null && decimalsB != null
+      ? uiPriceFromRawPriceRatio(upperRaw, decimalsA, decimalsB)
+      : null
+  if (lower == null || upper == null) return `${range.lower} -> ${range.upper} ticks`
+  if (invertQuote) {
+    return (
+      formatInvertedTokenPriceRange(lower, upper, invQuote) ??
+      `${range.lower} -> ${range.upper} ticks`
+    )
+  }
+  return (
+    formatTokenPriceRange(lower, upper, quote) ??
+    `${range.lower} -> ${range.upper} ticks`
+  )
+}
+
+function formatClosePriceAtEvent(
+  price: number | undefined,
+  tokenALabel?: string | null,
+  tokenBLabel?: string | null,
+): string {
+  if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return '—'
+  const base = tokenALabel?.trim() || 'token A'
+  const quote = tokenBLabel?.trim() || 'USD'
+  return `${formatNumber(price, 6)} ${quote} per 1 ${base}`
+}
+
+function parseRangeAdjustmentReason(row: LedgerRow): string | null {
+  const direct = row.range_adjustment_reason
+  if (typeof direct === 'string' && direct.trim().length > 0) return direct.trim()
+  const details = row.details
+  if (details && typeof details === 'object') {
+    const nested = (details as Record<string, unknown>).range_adjustment_reason
+    if (typeof nested === 'string' && nested.trim().length > 0) return nested.trim()
+  }
+  return null
+}
+
+function rangeAdjustmentBadge(reason: string | null): { text: string; className: string } {
+  if (!reason) {
+    return {
+      text: 'as planned',
+      className: 'border-emerald-600/40 bg-emerald-500/10 text-emerald-300',
+    }
+  }
+  return {
+    text: reason.startsWith('recover_plan_') ? 'replanned' : 'adapted',
+    className: 'border-amber-600/40 bg-amber-500/10 text-amber-300',
+  }
 }
 
 function estimateNowUsdcFromPosition(position: {
@@ -271,6 +454,7 @@ export default function PositionDetail() {
   const [backtestJobId, setBacktestJobId] = useState<string | null>(null)
   const [showOnlyNonZeroBreakdown, setShowOnlyNonZeroBreakdown] = useState(true)
   const [agentInput, setAgentInput] = useState('')
+  const [invertRangeQuote, setInvertRangeQuote] = useState(false)
   const metricsMode = useMemo(() => getMetricsMode(), [])
   const isSettlementMode = metricsMode === 'settlement_v1'
 
@@ -284,6 +468,28 @@ export default function PositionDetail() {
     refetchOnWindowFocus: true,
     refetchInterval: 15_000,
   })
+  const mintA = position?.token_mint_a?.trim() ?? ''
+  const mintB = position?.token_mint_b?.trim() ?? ''
+  const tokenAMetaQ = useQuery({
+    queryKey: ['orca-token', mintA],
+    queryFn: () => getOrcaToken(mintA),
+    enabled: mintA.length > 0,
+    staleTime: 60 * 60 * 1000,
+  })
+  const tokenBMetaQ = useQuery({
+    queryKey: ['orca-token', mintB],
+    queryFn: () => getOrcaToken(mintB),
+    enabled: mintB.length > 0,
+    staleTime: 60 * 60 * 1000,
+  })
+  const tokenDecimalsA = useMemo(
+    () => tokenAMetaQ.data?.decimals ?? fallbackDecimalsForPair(position?.token_mint_a, position?.token_a_label),
+    [tokenAMetaQ.data?.decimals, position?.token_mint_a, position?.token_a_label],
+  )
+  const tokenDecimalsB = useMemo(
+    () => tokenBMetaQ.data?.decimals ?? fallbackDecimalsForPair(position?.token_mint_b, position?.token_b_label),
+    [tokenBMetaQ.data?.decimals, position?.token_mint_b, position?.token_b_label],
+  )
 
   const { data: diag } = useQuery({
     queryKey: ['position-diagnostics', address],
@@ -392,6 +598,14 @@ export default function PositionDetail() {
 
   const ledgerDigest = ledgerQueries.map((q) => `${q.isFetched}:${q.data?.rows_returned ?? 0}:${q.data?.file_missing}`).join('|')
   const mergedLifecycleRows = useMemo(() => mergeLifecycleLedgerRows(ledgerQueries), [ledgerDigest])
+  const nodeOpenCloseRanges = useMemo(
+    () => extractOpenCloseRangesByPosition(mergedLifecycleRows),
+    [mergedLifecycleRows],
+  )
+  const closePriceByPosition = useMemo(
+    () => extractClosePriceByPosition(mergedLifecycleRows),
+    [mergedLifecycleRows],
+  )
 
   const ilDigest = ilQueries.map((q) => `${q.isFetched}:${q.data?.rows_returned ?? 0}`).join('|')
   const mergedIlTimelineRows = useMemo(() => mergeIlLedgerRows(ilQueries), [ilDigest])
@@ -400,6 +614,21 @@ export default function PositionDetail() {
     () => [...mergedLifecycleRows, ...mergedIlTimelineRows],
     [mergedLifecycleRows, mergedIlTimelineRows],
   )
+  const rangeAdjustmentReasonByPosition = useMemo(() => {
+    const out = new Map<string, string>()
+    for (const row of timelineRows) {
+      if (!row || typeof row !== 'object') continue
+      const event = typeof row.event === 'string' ? row.event : ''
+      if (event !== 'il:rebalance' && event !== 'rebalance') continue
+      const reason = parseRangeAdjustmentReason(row)
+      if (!reason) continue
+      const posRaw = row.position ?? row.position_pubkey
+      const position = typeof posRaw === 'string' ? posRaw.trim() : ''
+      if (!position) continue
+      out.set(position, reason)
+    }
+    return out
+  }, [timelineRows])
 
   const sessionLedgerIdx = useMemo(
     () => chainSet.findIndex((p) => p === address?.trim()),
@@ -1445,7 +1674,18 @@ export default function PositionDetail() {
                 </p>
 
                 {streamLineage.nodes.length > 0 ? (
-                  <div className="overflow-x-auto rounded-md border">
+                  <div className="space-y-2">
+                    <div className="flex justify-end">
+                      <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border/70 bg-muted/25 px-2.5 py-1 text-[11px] text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={invertRangeQuote}
+                          onChange={(e) => setInvertRangeQuote(e.target.checked)}
+                        />
+                        Pokazuj zakres jako A per 1 B (zamiast B per 1 A)
+                      </label>
+                    </div>
+                    <div className="overflow-x-auto rounded-md border">
                     <table className="w-full text-xs">
                       <thead className="bg-muted/50">
                         <tr>
@@ -1453,6 +1693,8 @@ export default function PositionDetail() {
                           <th className="px-2 py-1 text-left">position</th>
                           <th className="px-2 py-1 text-left">opened</th>
                           <th className="px-2 py-1 text-left">closed / last</th>
+                          <th className="px-2 py-1 text-left">range @ open</th>
+                          <th className="px-2 py-1 text-left">close price</th>
                           <th className="px-2 py-1 text-left">start value</th>
                           <th className="px-2 py-1 text-left">end value</th>
                           <th className="px-2 py-1 text-left">current value</th>
@@ -1485,6 +1727,39 @@ export default function PositionDetail() {
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap">
                               {n.closed_ts_utc ? formatDate(n.closed_ts_utc) : '—'}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]" title="Zakres ceny z eventu open w notacji wybranej przełącznikiem.">
+                              {formatRangeFromTicks(
+                                nodeOpenCloseRanges.get(n.position_address)?.open,
+                                n.token_a_label,
+                                n.token_b_label,
+                                tokenDecimalsA,
+                                tokenDecimalsB,
+                                invertRangeQuote,
+                              )}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]" title="Cena bazowa z eventu close (`details.event_price_a_usd`).">
+                              <div className="space-y-1">
+                                <div>
+                                  {formatClosePriceAtEvent(
+                                    closePriceByPosition.get(n.position_address),
+                                    n.token_a_label,
+                                    n.token_b_label,
+                                  )}
+                                </div>
+                                {(() => {
+                                  const reason = rangeAdjustmentReasonByPosition.get(n.position_address) ?? null
+                                  const badge = rangeAdjustmentBadge(reason)
+                                  return (
+                                    <span
+                                      className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] ${badge.className}`}
+                                      title={reason ? `range_adjustment_reason: ${reason}` : 'No range adjustment recorded.'}
+                                    >
+                                      {badge.text}
+                                    </span>
+                                  )
+                                })()}
+                              </div>
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono">
                               {usdOrDash(n.baseline_value_usd, 3)}
@@ -1588,6 +1863,7 @@ export default function PositionDetail() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">No lineage rows yet (missing IL edges / DB snapshots).</p>

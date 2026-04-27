@@ -10,12 +10,13 @@ import {
   getOrcaPositionsByOwner,
   getPoolState,
   getPositionDiagnostics,
+  getPositionStreamPnL,
   getPositions,
   getStrategies,
   getStrandedRebalances,
   dismissStrandedRebalance,
 } from '@/lib/api'
-import type { Position, Strategy } from '@/lib/api'
+import type { Position, PositionStrategyDiagnostics, Strategy } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import {
   formatUSD,
@@ -27,6 +28,7 @@ import {
   formatUsdUncollectedFees,
 } from '@/lib/utils'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
+import { getMetricsMode } from '@/lib/metricsMode'
 
 function rangeCellClass(inRange: boolean | undefined) {
   if (inRange === true) {
@@ -118,6 +120,7 @@ function normalizePendingReopenReason(v?: string | null) {
 export default function Positions() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const metricsMode = getMetricsMode()
   const devPk = getDevWalletPubkey()
   const [ownerInput, setOwnerInput] = useState(() => devPk ?? '')
   const [appliedOwner, setAppliedOwner] = useState(() => devPk ?? '')
@@ -181,16 +184,22 @@ export default function Positions() {
       retry: 0,
     })),
   })
-  const linkedStrategyIdsByPosition = useMemo(() => {
-    const map = new Map<string, Set<string>>()
+  const positionStreamPnlQueries = useQueries({
+    queries: positions.map((position) => ({
+      queryKey: ['position-stream-pnl', position.address, metricsMode],
+      queryFn: () => getPositionStreamPnL(position.address, metricsMode),
+      staleTime: 30_000,
+      retry: 0,
+    })),
+  })
+  const diagnosticsLinkedByPosition = useMemo(() => {
+    const map = new Map<string, PositionStrategyDiagnostics[]>()
     positions.forEach((position, idx) => {
-      const linked = positionDiagnosticsQueries[idx]?.data?.linked_strategies ?? []
-      const ids = new Set(
-        linked
-          .map((s) => (typeof s?.strategy_id === 'string' ? s.strategy_id.trim() : ''))
-          .filter((x) => x.length > 0),
+      const linked = (positionDiagnosticsQueries[idx]?.data?.linked_strategies ?? []).filter(
+        (s): s is PositionStrategyDiagnostics =>
+          !!s && typeof s.strategy_id === 'string' && s.strategy_id.trim().length > 0,
       )
-      map.set(position.address.trim(), ids)
+      map.set(position.address.trim(), linked)
     })
     return map
   }, [positions, positionDiagnosticsQueries])
@@ -220,15 +229,10 @@ export default function Positions() {
     return m
   }, [positions, chainQ.data])
 
-  const strategiesByPosition = useMemo(() => {
-    const map = new Map<string, Strategy[]>()
+  const strategiesById = useMemo(() => {
+    const map = new Map<string, Strategy>()
     for (const s of strategiesQ.data?.strategies ?? []) {
-      for (const addr of s.parameters?.position_addresses ?? []) {
-        const key = String(addr).trim()
-        if (!key) continue
-        if (!map.has(key)) map.set(key, [])
-        map.get(key)!.push(s)
-      }
+      map.set(s.id.trim(), s)
     }
     return map
   }, [strategiesQ.data])
@@ -320,11 +324,7 @@ export default function Positions() {
                       </td>
                       <td className="py-4 max-w-[18rem]">
                         {(() => {
-                          const linked = strategiesByPosition.get(position.address.trim()) ?? []
-                          const linkedIds = linkedStrategyIdsByPosition.get(position.address.trim())
-                          const backendLinked = linkedIds
-                            ? linked.filter((s) => linkedIds.has(s.id.trim()))
-                            : linked
+                          const backendLinked = diagnosticsLinkedByPosition.get(position.address.trim()) ?? []
                           const diagnosticsPending =
                             positionDiagnosticsQueries[idx]?.isLoading ||
                             positionDiagnosticsQueries[idx]?.isFetching
@@ -336,15 +336,24 @@ export default function Positions() {
                           }
                           return (
                             <div className="space-y-1.5">
-                              {backendLinked.map((s) => (
-                                <div key={s.id} className="text-xs leading-tight">
+                              {backendLinked.map((diagLinked) => {
+                                const strategy = strategiesById.get(diagLinked.strategy_id.trim())
+                                return (
+                                  <div key={diagLinked.strategy_id} className="text-xs leading-tight">
                                   <div className="font-medium">
-                                    {s.name}{' '}
-                                    <span className="text-muted-foreground">({strategyTypeLabel(s.strategy_type)})</span>
+                                    {strategy?.name ?? diagLinked.name}{' '}
+                                    <span className="text-muted-foreground">
+                                      ({strategyTypeLabel(strategy?.strategy_type ?? diagLinked.strategy_type)})
+                                    </span>
                                   </div>
-                                  <div className="text-muted-foreground">{strategyParamsSummary(s)}</div>
+                                  {strategy ? (
+                                    <div className="text-muted-foreground">{strategyParamsSummary(strategy)}</div>
+                                  ) : (
+                                    <div className="text-muted-foreground">linked (details from diagnostics)</div>
+                                  )}
                                 </div>
-                              ))}
+                                )
+                              })}
                             </div>
                           )
                         })()}
@@ -430,13 +439,45 @@ export default function Positions() {
                         {formatUSD(position.value_usd)}
                       </td>
                       <td className={`py-4 text-right ${
-                        parseFloat(position.pnl.net_pnl_pct) >= 0 ? 'text-green-500' : 'text-red-500'
+                        (() => {
+                          const pnlQ = positionStreamPnlQueries[idx]
+                          const streamPct = parseNum(pnlQ?.data?.net_pnl_pct)
+                          const fallbackPct = parseNum(position.pnl.net_pnl_pct)
+                          const pct = streamPct ?? fallbackPct ?? 0
+                          return pct >= 0 ? 'text-green-500' : 'text-red-500'
+                        })()
                       }`}>
-                        {formatPercentFixed(position.pnl.net_pnl_pct, 3)}
+                        {(() => {
+                          const pnlQ = positionStreamPnlQueries[idx]
+                          const streamPct = parseNum(pnlQ?.data?.net_pnl_pct)
+                          if (streamPct !== null) {
+                            return (
+                              <div className="space-y-0.5">
+                                <div>{formatPercentFixed(streamPct, 3)}</div>
+                                <div className="text-[10px] text-muted-foreground">source: stream</div>
+                              </div>
+                            )
+                          }
+                          const fallbackPct = parseNum(position.pnl.net_pnl_pct)
+                          return (
+                            <div className="space-y-0.5">
+                              <div>{formatPercentFixed(fallbackPct ?? 0, 3)}</div>
+                              <div className="text-[10px] text-muted-foreground">source: monitor cache</div>
+                            </div>
+                          )
+                        })()}
                       </td>
                       <td className="py-4 text-right text-green-500">
                         <div className="space-y-0.5">
                           <div>{formatUsdUncollectedFees(position.pnl.fees_earned_usd)}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            source:{' '}
+                            {position.valuation_source === 'live_valuation'
+                              ? 'live valuation'
+                              : position.valuation_source === 'fallback_monitor'
+                                ? 'fallback monitor'
+                                : 'unknown'}
+                          </div>
                           {position.uncollected_fees ? (
                             <div className="text-[10px] text-muted-foreground font-mono">
                               {position.uncollected_fees.token_a_label}:{' '}
