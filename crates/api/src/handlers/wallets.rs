@@ -5,8 +5,8 @@ use crate::models::{
     ActiveSignerResponse, ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateWalletRequest, CreateWalletResponse, SetActiveSignerRequest,
     WalletBalancesResponse, WalletEntry, WalletReplicationStatus, WalletTokenBalance,
-    WalletReconcileItem, WalletReconcileResponse, WalletTransferRequest, WalletTransferResponse,
-    WalletsListResponse,
+    WalletReconcileItem, WalletReconcileResponse, WalletTransferLogEntry, WalletTransferRequest,
+    WalletTransferResponse, WalletTransfersListResponse, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::state::AppState;
@@ -23,19 +23,10 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .expect("reqwest client for wallet rpc")
-});
 
 type WalletReplica = Option<(String, String)>;
 type WalletReplicaPair = (WalletReplica, WalletReplica);
@@ -256,12 +247,21 @@ fn parse_env_allowlist_csv(var: &str) -> HashSet<String> {
 pub async fn list_wallets(State(state): State<AppState>) -> ApiResult<Json<WalletsListResponse>> {
     let stores = resolve_wallet_stores(&state);
     let wallets = wallet_entries_from_stores(&stores);
+    let transfer_min_lamports = std::env::var("CLMM_WALLET_TRANSFER_MIN_LAMPORTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1_000_000);
+    let transfer_max_lamports = std::env::var("CLMM_WALLET_TRANSFER_MAX_LAMPORTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
     Ok(Json(WalletsListResponse {
         wallets_dir_primary: stores.primary.to_string_lossy().to_string(),
         wallets_dir_secondary: stores
             .secondary
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
+        transfer_min_lamports,
+        transfer_max_lamports,
         wallets,
     }))
 }
@@ -566,6 +566,41 @@ pub async fn transfer_sol_between_wallets(
         .send_and_confirm_transaction(&tx)
         .await
         .map_err(|e| ApiError::bad_request(format!("transfer failed: {e}")))?;
+
+    // Best-effort local log (append-only JSONL) for ops/audit.
+    {
+        let log_dir = PathBuf::from("data").join("wallet-transfers");
+        let log_path = log_dir.join("sol_transfers.jsonl");
+        if let Err(e) = fs::create_dir_all(&log_dir) {
+            tracing::warn!(error = %e, path = %log_dir.to_string_lossy(), "wallet transfer log: create_dir_all failed");
+        } else {
+            let entry = WalletTransferLogEntry {
+                ts_utc: chrono::Utc::now().to_rfc3339(),
+                from_wallet_id: source_wallet_id.clone(),
+                from_pubkey: from_pubkey.to_string(),
+                to_pubkey: to_pubkey.to_string(),
+                lamports: req.lamports,
+                signature: sig.to_string(),
+                rpc_url: Some(state.provider.current_endpoint().await),
+            };
+            match serde_json::to_string(&entry) {
+                Ok(line) => {
+                    if let Err(e) = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                        .and_then(|mut f| writeln!(f, "{line}"))
+                    {
+                        tracing::warn!(error = %e, path = %log_path.to_string_lossy(), "wallet transfer log: append failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "wallet transfer log: serialize failed");
+                }
+            }
+        }
+    }
+
     Ok(Json(WalletTransferResponse {
         from_wallet_id: source_wallet_id,
         from_pubkey: from_pubkey.to_string(),
@@ -576,30 +611,77 @@ pub async fn transfer_sol_between_wallets(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WalletTransfersQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /wallets/transfers` — recent local transfer log (best-effort).
+#[utoipa::path(
+    get,
+    path = "/wallets/transfers",
+    tag = "Wallets",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max number of transfers to return (default 50, max 200)")
+    ),
+    responses((status = 200, description = "Recent transfers (local log)", body = WalletTransfersListResponse))
+)]
+pub async fn list_wallet_transfers(
+    Query(q): Query<WalletTransfersQuery>,
+) -> ApiResult<Json<WalletTransfersListResponse>> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let log_path = PathBuf::from("data")
+        .join("wallet-transfers")
+        .join("sol_transfers.jsonl");
+    let text = match fs::read_to_string(&log_path) {
+        Ok(t) => t,
+        Err(_) => {
+            return Ok(Json(WalletTransfersListResponse { transfers: vec![] }));
+        }
+    };
+    let mut rows: Vec<WalletTransferLogEntry> = text
+        .lines()
+        .rev()
+        .take(limit)
+        .filter_map(|line| serde_json::from_str::<WalletTransferLogEntry>(line).ok())
+        .collect();
+    // We iterated newest->oldest; keep that order (newest first) in response.
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+    Ok(Json(WalletTransfersListResponse { transfers: rows }))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct WalletBalancesQuery {
     pub owner: String,
 }
 
-fn append_tokens_from_rpc_value(v: &serde_json::Value, out: &mut Vec<WalletTokenBalance>) {
-    let Some(arr) = v["result"]["value"].as_array() else {
-        return;
-    };
-    for entry in arr {
-        let mint = entry["account"]["data"]["parsed"]["info"]["mint"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+fn append_tokens_from_keyed_accounts(
+    accounts: &[solana_client::rpc_response::RpcKeyedAccount],
+    out: &mut Vec<WalletTokenBalance>,
+) {
+    // We expect `jsonParsed` encoding (Solana client does this internally for token accounts).
+    // Instead of relying on a nested RPC JSON shape, we extract fields from the keyed accounts.
+    for ka in accounts {
+        // `UiAccountData` is an untagged enum; the Json variant serializes to:
+        // { program: "...", parsed: { ... }, space: ... }
+        let data_v = match serde_json::to_value(&ka.account.data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let parsed = data_v.get("parsed").unwrap_or(&serde_json::Value::Null);
+        let info = parsed.get("info").unwrap_or(&serde_json::Value::Null);
+        let mint = info.get("mint").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if mint.is_empty() {
             continue;
         }
-        let ui_amount = entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"]
-            .as_str()
+        let token_amount = info.get("tokenAmount").unwrap_or(&serde_json::Value::Null);
+        let ui_amount = token_amount
+            .get("uiAmountString")
+            .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .or_else(|| {
-                entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"]
-                    .as_f64()
-                    .map(|x| x.to_string())
-            })
+            .or_else(|| token_amount.get("uiAmount").and_then(|v| v.as_f64()).map(|x| x.to_string()))
             .unwrap_or_else(|| "0".to_string());
         out.push(WalletTokenBalance { mint, ui_amount });
     }
@@ -645,131 +727,66 @@ pub async fn get_wallet_balances(
     let owner_pk =
         Pubkey::from_str(owner_trim).map_err(|_| ApiError::bad_request("invalid owner pubkey"))?;
 
-    let primary = state.provider.current_endpoint().await;
-    let mut urls: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |u: String| {
-        let t = u.trim().to_string();
-        if t.is_empty() {
-            return;
-        }
-        if seen.insert(t.clone()) {
-            urls.push(t);
-        }
-    };
-    push(primary.clone());
-    if let Ok(fb) = std::env::var("SOLANA_RPC_URL_FALLBACK") {
-        push(fb);
-    }
-    // Always include free public endpoints as last resort.
-    push("https://api.mainnet-beta.solana.com".to_string());
-    push("https://solana.publicnode.com".to_string());
+    let rpc_url_used = state.provider.current_endpoint().await;
+    let token_timeout_ms = std::env::var("CLMM_WALLET_BALANCES_TOKEN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(4500);
+    let token_deadline = Duration::from_millis(token_timeout_ms);
+    let spl_pid = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).expect("SPL token program id");
+    let t22_pid = Pubkey::from_str(TOKEN_2022_PROGRAM_ID).expect("token-2022 program id");
 
-    async fn rpc_call_try(
-        urls: &[String],
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<(String, serde_json::Value), String> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params
-        });
-        let mut last_err: Option<String> = None;
-        for url in urls {
-            let resp = HTTP
-                .post(url)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                // Keep this endpoint responsive; try next RPC on timeout.
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await;
-            let resp = match resp {
-                Ok(r) => r,
-                Err(e) => {
-                    last_err = Some(format!("{url}: request: {e}"));
-                    continue;
-                }
-            };
-            let status = resp.status();
-            let text = match resp.text().await {
-                Ok(t) => t,
-                Err(e) => {
-                    last_err = Some(format!("{url}: body: {e}"));
-                    continue;
-                }
-            };
-            // Some providers return plain text on failure (e.g. "Out of CU").
-            if text.trim_start().starts_with("Out of CU") {
-                last_err = Some(format!("{url}: {text}"));
-                continue;
-            }
-            let v: serde_json::Value = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(e) => {
-                    last_err = Some(format!(
-                        "{url}: json: {e}; body={}",
-                        text.chars().take(200).collect::<String>()
-                    ));
-                    continue;
-                }
-            };
-            if !status.is_success() {
-                last_err = Some(format!("{url}: http {status}: {v}"));
-                continue;
-            }
-            if v.get("error").is_some() {
-                last_err = Some(format!("{url}: rpc error: {v}"));
-                continue;
-            }
-            return Ok((url.clone(), v));
-        }
-        Err(last_err.unwrap_or_else(|| "all rpc endpoints failed".to_string()))
-    }
+    let bal_fut = state.provider.get_balance(&owner_pk);
+    let legacy_fut = state
+        .provider
+        .get_token_accounts_by_owner_json_parsed(&owner_pk, &spl_pid);
+    let tok2022_fut = state
+        .provider
+        .get_token_accounts_by_owner_json_parsed(&owner_pk, &t22_pid);
 
-    let owner_s = owner_pk.to_string();
-    let (rpc_url_used, bal_v) = rpc_call_try(&urls, "getBalance", serde_json::json!([owner_s]))
-        .await
-        .map_err(ApiError::internal)?;
-    let lamports = bal_v["result"]["value"].as_u64().unwrap_or(0);
+    // Run the heavy token reads concurrently, but keep a hard deadline so the endpoint stays responsive
+    // even when public RPCs 429/403/timeout.
+    let (bal_res, legacy_res, tok2022_res) = tokio::join!(
+        bal_fut,
+        tokio::time::timeout(token_deadline, legacy_fut),
+        tokio::time::timeout(token_deadline, tok2022_fut)
+    );
+
+    let lamports = bal_res.map_err(|e| ApiError::internal(format!("getBalance failed: {e}")))?;
     let sol = format!("{:.9}", (lamports as f64) / 1e9);
 
-    let tok_legacy = rpc_call_try(
-        &urls,
-        "getTokenAccountsByOwner",
-        serde_json::json!([
-            owner_pk.to_string(),
-            { "programId": SPL_TOKEN_PROGRAM_ID },
-            { "encoding": "jsonParsed" }
-        ]),
-    )
-    .await;
-    let tok_2022 = rpc_call_try(
-        &urls,
-        "getTokenAccountsByOwner",
-        serde_json::json!([
-            owner_pk.to_string(),
-            { "programId": TOKEN_2022_PROGRAM_ID },
-            { "encoding": "jsonParsed" }
-        ]),
-    )
-    .await;
+    let tok_legacy: anyhow::Result<Vec<solana_client::rpc_response::RpcKeyedAccount>> = match legacy_res {
+        Ok(r) => r,
+        Err(_) => Err(anyhow::anyhow!(
+            "timeout after {token_timeout_ms}ms (token accounts legacy)"
+        )),
+    };
+    let tok_2022: anyhow::Result<Vec<solana_client::rpc_response::RpcKeyedAccount>> = match tok2022_res {
+        Ok(r) => r,
+        Err(_) => Err(anyhow::anyhow!(
+            "timeout after {token_timeout_ms}ms (token accounts token-2022)"
+        )),
+    };
 
     // If one token RPC path is slow/unavailable, keep partial token list from the other one.
     // If both fail, we still return SOL with tokens empty (existing behavior).
     let legacy_ok = tok_legacy.is_ok();
     let token_2022_ok = tok_2022.is_ok();
-    let legacy_err = tok_legacy.as_ref().err().cloned();
-    let token_2022_err = tok_2022.as_ref().err().cloned();
+    let legacy_err = tok_legacy
+        .as_ref()
+        .err()
+        .map(|e| format!("getTokenAccountsByOwner: {e}"));
+    let token_2022_err = tok_2022
+        .as_ref()
+        .err()
+        .map(|e| format!("getTokenAccountsByOwner: {e}"));
 
     let mut token_rows = Vec::new();
-    if let Ok((_u, v)) = tok_legacy {
-        append_tokens_from_rpc_value(&v, &mut token_rows);
+    if let Ok(v) = tok_legacy {
+        append_tokens_from_keyed_accounts(&v, &mut token_rows);
     }
-    if let Ok((_u, v)) = tok_2022 {
-        append_tokens_from_rpc_value(&v, &mut token_rows);
+    if let Ok(v) = tok_2022 {
+        append_tokens_from_keyed_accounts(&v, &mut token_rows);
     }
     let token_accounts_total = token_rows.len() as u64;
     let tokens = merge_wallet_token_rows(token_rows);

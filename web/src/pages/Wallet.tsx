@@ -25,6 +25,7 @@ import {
   createWallet,
   setActiveSigner,
   transferSol,
+  getWalletTransfers,
   getOrcaToken,
 } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
@@ -56,6 +57,8 @@ export default function Wallet() {
   const [newWalletId, setNewWalletId] = useState('')
   const [transferTo, setTransferTo] = useState('')
   const [transferLamports, setTransferLamports] = useState('1000000')
+  const [transferSolText, setTransferSolText] = useState('0.001')
+  const [transferAmountLastEdited, setTransferAmountLastEdited] = useState<'lamports' | 'sol'>('lamports')
   /** Sender for SOL transfer (independent of `selectedId` used for balance / Orca view). */
   const [transferFromWalletId, setTransferFromWalletId] = useState('')
   /** `__custom` = paste pubkey; otherwise a `wallet id` from the list. */
@@ -89,6 +92,17 @@ export default function Wallet() {
 
   const transferSolM = useMutation({
     mutationFn: transferSol,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['wallet-transfers'] })
+      // balance may change for current selected wallet as well
+      await queryClient.invalidateQueries({ queryKey: ['wallet-balances'] })
+    },
+  })
+
+  const transfersQuery = useQuery({
+    queryKey: ['wallet-transfers'],
+    queryFn: () => getWalletTransfers(20),
+    staleTime: 10_000,
   })
 
   useEffect(() => {
@@ -116,6 +130,28 @@ export default function Wallet() {
     return list.filter((w) => w.id !== transferFromWalletId)
   }, [wallets?.wallets, transferFromWalletId])
 
+  const transferLamportsN = Number.parseInt(transferLamports, 10)
+  const transferLamportsOk = Number.isFinite(transferLamportsN) && transferLamportsN > 0
+  const transferMin = wallets?.transfer_min_lamports ?? 1_000_000
+  const transferMax = wallets?.transfer_max_lamports ?? null
+  const transferWithinMin = transferLamportsOk && transferLamportsN >= transferMin
+  const transferWithinMax = !transferLamportsOk ? false : transferMax == null ? true : transferLamportsN <= transferMax
+  const transferWithinLimits = transferWithinMin && transferWithinMax
+  const transferSolUi =
+    transferLamportsOk ? (transferLamportsN / 1_000_000_000).toFixed(9).replace(/0+$/, '').replace(/\.$/, '') : ''
+
+  function setLamportsFromSol(sol: number) {
+    const lamports = Math.round(sol * 1_000_000_000)
+    setTransferAmountLastEdited('lamports')
+    setTransferLamports(String(lamports))
+    setTransferSolText(sol.toString())
+  }
+
+  useEffect(() => {
+    if (transferAmountLastEdited === 'sol') return
+    setTransferSolText(transferSolUi || '')
+  }, [transferLamports, transferSolUi, transferAmountLastEdited])
+
   const selectedWallet = wallets?.wallets.find((w) => w.id === selectedId) ?? null
   const ownerPk = selectedWallet?.pubkey ?? devPk ?? null
 
@@ -142,10 +178,20 @@ export default function Wallet() {
     enabled: !!ownerPk,
     staleTime: 20_000,
   })
-  const balances = balancesQuery.data
+  // React Query may keep previous data briefly during owner switches; only render balances/warnings
+  // when the payload matches the currently selected owner.
+  const balancesRaw = balancesQuery.data
+  const balances =
+    balancesRaw && ownerPk && balancesRaw.owner?.trim() === ownerPk.trim() ? balancesRaw : null
   const bLoad = balancesQuery.isLoading
   const bErr = balancesQuery.isError
   const bError = balancesQuery.error
+  const tokenLegacyOk = balances?.token_legacy_ok
+  const token2022Ok = balances?.token_2022_ok
+  const tokenReadErrors = [
+    balances?.token_legacy_error ? `SPL legacy: ${balances.token_legacy_error}` : null,
+    balances?.token_2022_error ? `Token-2022: ${balances.token_2022_error}` : null,
+  ].filter(Boolean) as string[]
   const MAX_WALLET_AUTO_RETRIES = 4
   const shouldAutoRetryTokens =
     !!ownerPk &&
@@ -153,17 +199,13 @@ export default function Wallet() {
     !bErr &&
     !!balances &&
     balances.tokens.length === 0 &&
-    walletAutoRetryCount < MAX_WALLET_AUTO_RETRIES
-  const tokenLegacyOk = balances?.token_legacy_ok
-  const token2022Ok = balances?.token_2022_ok
+    walletAutoRetryCount < MAX_WALLET_AUTO_RETRIES &&
+    // avoid hammering RPC when both token reads are known to fail (403/429 etc.)
+    !(tokenLegacyOk === false && token2022Ok === false && tokenReadErrors.length > 0)
   const hasPartialTokenData =
     !!balances &&
     ((tokenLegacyOk === false && token2022Ok === true) ||
       (tokenLegacyOk === true && token2022Ok === false))
-  const tokenReadErrors = [
-    balances?.token_legacy_error ? `SPL legacy: ${balances.token_legacy_error}` : null,
-    balances?.token_2022_error ? `Token-2022: ${balances.token_2022_error}` : null,
-  ].filter(Boolean) as string[]
 
   useEffect(() => {
     setWalletAutoRetryCount(0)
@@ -361,30 +403,32 @@ export default function Wallet() {
                   ))}
                 </select>
               </label>
-              <label className="flex flex-col gap-1 text-xs">
-                <span className="text-muted-foreground">{t('wallet.transferTo')}</span>
-                <select
-                  className="h-8 rounded border bg-background px-2 text-xs"
-                  value={transferDestChoice}
-                  onChange={(e) => setTransferDestChoice(e.target.value)}
-                >
-                  <option value="__custom">{t('wallet.transferToCustom')}</option>
-                  {transferDestOptions.map((w) => (
-                    <option key={`dst-${w.id}`} value={w.id}>
-                      {w.id} ({shortenAddress(w.pubkey, 6)})
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="flex flex-col gap-2">
+                <label className="flex flex-col gap-1 text-xs">
+                  <span className="text-muted-foreground">{t('wallet.transferTo')}</span>
+                  <select
+                    className="h-8 rounded border bg-background px-2 text-xs"
+                    value={transferDestChoice}
+                    onChange={(e) => setTransferDestChoice(e.target.value)}
+                  >
+                    <option value="__custom">{t('wallet.transferToCustom')}</option>
+                    {transferDestOptions.map((w) => (
+                      <option key={`dst-${w.id}`} value={w.id}>
+                        {w.id} ({shortenAddress(w.pubkey, 6)})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {transferDestChoice === '__custom' && (
+                  <input
+                    value={transferTo}
+                    onChange={(e) => setTransferTo(e.target.value)}
+                    placeholder={t('wallet.recipientPubkey')}
+                    className="h-8 w-full rounded border bg-background px-2 text-xs font-mono"
+                  />
+                )}
+              </div>
             </div>
-            {transferDestChoice === '__custom' && (
-              <input
-                value={transferTo}
-                onChange={(e) => setTransferTo(e.target.value)}
-                placeholder={t('wallet.recipientPubkey')}
-                className="h-8 w-full max-w-xl rounded border bg-background px-2 text-xs font-mono"
-              />
-            )}
             <div className="flex flex-wrap items-end gap-2">
               <label className="flex flex-col gap-1 text-xs">
                 <span className="flex items-center gap-1 text-muted-foreground">
@@ -406,26 +450,83 @@ export default function Wallet() {
                 </span>
                 <input
                   value={transferLamports}
-                  onChange={(e) => setTransferLamports(e.target.value)}
+                  onChange={(e) => {
+                    setTransferAmountLastEdited('lamports')
+                    setTransferLamports(e.target.value)
+                  }}
                   placeholder="lamports"
                   className="h-8 w-36 rounded border bg-background px-2 text-xs"
                 />
               </label>
+              <div className="flex flex-col gap-1 text-xs">
+                <span className="text-muted-foreground">{t('wallet.solPreview')}</span>
+                <input
+                  value={transferSolText}
+                  onChange={(e) => {
+                    const next = e.target.value
+                    setTransferAmountLastEdited('sol')
+                    setTransferSolText(next)
+                    const sol = Number.parseFloat(next)
+                    if (Number.isFinite(sol)) {
+                      const lamports = Math.round(sol * 1_000_000_000)
+                      if (Number.isFinite(lamports)) setTransferLamports(String(lamports))
+                    }
+                  }}
+                  placeholder="SOL"
+                  inputMode="decimal"
+                  className="h-8 w-36 rounded border bg-background px-2 font-mono text-xs"
+                />
+              </div>
+              <div className="flex flex-col gap-1 text-xs">
+                <span className="text-muted-foreground">{t('wallet.quickAmounts')}</span>
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => setLamportsFromSol(0.01)}>
+                    0.01
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => setLamportsFromSol(0.1)}>
+                    0.1
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => setLamportsFromSol(1)}>
+                    1
+                  </Button>
+                </div>
+              </div>
               <Button
                 type="button"
                 size="sm"
-                disabled={transferSolM.isPending || !transferFromWalletId || !transferRecipientPubkey}
+                disabled={
+                  transferSolM.isPending ||
+                  !transferFromWalletId ||
+                  !transferRecipientPubkey ||
+                  !transferLamportsOk ||
+                  !transferWithinLimits
+                }
                 onClick={() =>
                   transferSolM.mutate({
                     from_wallet_id: transferFromWalletId,
                     to_pubkey: transferRecipientPubkey,
-                    lamports: Number(transferLamports) || 0,
+                    lamports: transferLamportsN || 0,
                   })
                 }
               >
                 {transferSolM.isPending ? 'Sending…' : 'Send'}
               </Button>
             </div>
+            {!transferLamportsOk && (
+              <div className="text-xs text-destructive">Podaj dodatnią liczbę lamportów.</div>
+            )}
+            {transferLamportsOk && !transferWithinMin && (
+              <div className="text-xs text-destructive">
+                Minimum: <span className="font-mono">{transferMin}</span> lamports (
+                <span className="font-mono">{(transferMin / 1_000_000_000).toFixed(9).replace(/0+$/, '').replace(/\.$/, '')}</span> SOL)
+              </div>
+            )}
+            {transferLamportsOk && transferMax != null && !transferWithinMax && (
+              <div className="text-xs text-destructive">
+                Maximum: <span className="font-mono">{transferMax}</span> lamports (
+                <span className="font-mono">{(transferMax / 1_000_000_000).toFixed(9).replace(/0+$/, '').replace(/\.$/, '')}</span> SOL)
+              </div>
+            )}
             {transferSolM.isError && (
               <div className="text-xs text-destructive">{(transferSolM.error as Error).message}</div>
             )}
@@ -434,6 +535,31 @@ export default function Wallet() {
                 Signature: <span className="font-mono">{transferSolM.data.signature}</span>
               </div>
             )}
+            <div className="rounded-md border bg-muted/10 px-3 py-2 text-xs space-y-2">
+              <div className="font-medium">{t('wallet.transferHistory')}</div>
+              {transfersQuery.isLoading ? (
+                <div className="text-muted-foreground">loading…</div>
+              ) : transfersQuery.isError ? (
+                <div className="text-muted-foreground">—</div>
+              ) : (transfersQuery.data?.transfers?.length ?? 0) === 0 ? (
+                <div className="text-muted-foreground">—</div>
+              ) : (
+                <div className="space-y-1">
+                  {transfersQuery.data!.transfers.slice(0, 8).map((tr) => (
+                    <div key={tr.signature} className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-muted-foreground">
+                        <span className="font-mono">{tr.ts_utc.replace('T', ' ').replace('Z', '')}</span>{' '}
+                        · <strong className="text-foreground">{tr.from_wallet_id}</strong> →{' '}
+                        <span className="font-mono">{shortenAddress(tr.to_pubkey, 6)}</span>
+                      </div>
+                      <div className="font-mono">
+                        {(tr.lamports / 1_000_000_000).toFixed(6)} SOL
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             </div>
           </TooltipProvider>
           {ownerPk ? (

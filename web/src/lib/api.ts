@@ -1200,6 +1200,8 @@ export interface WalletEntry {
 export interface WalletsListResponse {
   wallets_dir_primary: string
   wallets_dir_secondary?: string | null
+  transfer_min_lamports: number
+  transfer_max_lamports?: number | null
   wallets: WalletEntry[]
 }
 
@@ -1315,6 +1317,23 @@ export const transferSol = (body: WalletTransferRequest) =>
     method: 'POST',
     body: JSON.stringify(body),
   })
+
+export interface WalletTransferLogEntry {
+  ts_utc: string
+  from_wallet_id: string
+  from_pubkey: string
+  to_pubkey: string
+  lamports: number
+  signature: string
+  rpc_url?: string | null
+}
+
+export interface WalletTransfersListResponse {
+  transfers: WalletTransferLogEntry[]
+}
+
+export const getWalletTransfers = (limit = 20) =>
+  fetchJson<WalletTransfersListResponse>(`/wallets/transfers?${new URLSearchParams({ limit: String(limit) })}`)
 
 // Bot activity (JSONL ledger + registry; Slack digest)
 export interface BotActivityJsonlResponse {

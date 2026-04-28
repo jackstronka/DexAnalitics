@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcTransactionConfig;
+use solana_client::rpc_request::TokenAccountsFilter;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_client::rpc_response::RpcKeyedAccount;
 use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
@@ -253,6 +255,27 @@ impl RpcProvider {
                 .get_account(&addr)
                 .await
                 .context("Failed to get account")
+        })
+        .await
+    }
+
+    /// Gets token accounts for `owner` filtered by `program_id`, using `jsonParsed` encoding.
+    ///
+    /// This is used by API read-only wallet balances and benefits from the same retry/failover
+    /// logic as other on-chain reads.
+    pub async fn get_token_accounts_by_owner_json_parsed(
+        &self,
+        owner: &Pubkey,
+        program_id: &Pubkey,
+    ) -> Result<Vec<RpcKeyedAccount>> {
+        let owner = *owner;
+        let program_id = *program_id;
+        self.execute_with_retry(|client| async move {
+            client
+                // Solana client internally uses `jsonParsed` encoding for this endpoint.
+                .get_token_accounts_by_owner(&owner, TokenAccountsFilter::ProgramId(program_id))
+                .await
+                .context("Failed to get token accounts by owner")
         })
         .await
     }

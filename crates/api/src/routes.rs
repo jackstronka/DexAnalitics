@@ -229,6 +229,7 @@ fn create_base_router(state: AppState) -> Router {
         .route("/wallets/active-signer", post(handlers::set_active_signer))
         .route("/wallets/convert-sol", post(handlers::convert_sol))
         .route("/wallets/transfer", post(handlers::transfer_sol_between_wallets))
+        .route("/wallets/transfers", get(handlers::list_wallet_transfers))
         .route("/wallets/reconcile", post(handlers::reconcile_wallet_stores))
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))

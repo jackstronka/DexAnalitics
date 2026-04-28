@@ -38,6 +38,9 @@ const pl: Dictionary = {
   'wallet.lamportsLabel': 'Lamports',
   'wallet.lamportsTooltip':
     '1 SOL = 1 000 000 000 lamportów — najmniejsza jednostka natywnego SOL na Solanie.',
+  'wallet.solPreview': 'SOL (podgląd)',
+  'wallet.quickAmounts': 'Szybkie kwoty',
+  'wallet.transferHistory': 'Ostatnie transfery (lokalny log)',
   'wallet.currentWallet': 'Aktualny portfel',
   'wallet.copy': 'Kopiuj',
   'wallet.onChainTitle': 'Saldo on-chain (read-only)',
@@ -120,6 +123,9 @@ const en: Dictionary = {
   'wallet.lamportsLabel': 'Lamports',
   'wallet.lamportsTooltip':
     '1 SOL = 1,000,000,000 lamports — the smallest unit of native SOL on Solana.',
+  'wallet.solPreview': 'SOL (preview)',
+  'wallet.quickAmounts': 'Quick amounts',
+  'wallet.transferHistory': 'Recent transfers (local log)',
   'wallet.currentWallet': 'Current wallet',
   'wallet.copy': 'Copy',
   'wallet.onChainTitle': 'On-chain balance (read-only)',

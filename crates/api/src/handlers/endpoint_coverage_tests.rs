@@ -820,6 +820,16 @@ async fn wallet_management_endpoints_are_reachable() {
         .await,
         StatusCode::OK
     );
+    assert_eq!(
+        request(
+            test_router(test_state()),
+            Method::GET,
+            "/api/v1/wallets/transfers",
+            None,
+        )
+        .await,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

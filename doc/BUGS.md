@@ -60,6 +60,8 @@ keywords: wallet, balances, token-2022, spl, getTokenAccountsByOwner, rpc, web
 - **Symptom (follow-up):** Po wdrożeniu odczytu z obu programów UI nadal potrafi pokazać mniej tokenów niż oczekiwane; toggle `Pokaż zera` nie zmienia listy.
 - **Root cause (follow-up):** Endpoint `wallets/balances` pracuje w trybie partial-success: gdy któryś call RPC (`legacy` albo `token-2022`) nie powiedzie się, API nadal zwraca `200` z tokenami tylko z działającej gałęzi. UI wcześniej nie pokazywał, że wynik jest częściowy.
 - **Fix (follow-up):** API zwraca teraz status diagnostyczny obu odczytów (`token_legacy_ok`, `token_2022_ok`, `token_*_error`, `token_accounts_total`), a Wallet UI pokazuje ostrzeżenie „lista może być niepełna” z konkretnym statusem/błędem RPC.
+- **Symptom (new):** Użytkownik widzi `http 403 Forbidden` z `solana.publicnode.com` (`blocked parameter: params.1.programId`) dla `getTokenAccountsByOwner` oraz sporadyczne błędy sieciowe; oba odczyty mogą być `legacy=false | token-2022=false`, mimo że saldo SOL działa.
+- **Root cause (new):** Część darmowych RPC blokuje wywołania `getTokenAccountsByOwner` z filtrem `programId` (legacy/Token-2022). Obecna diagnostyka zwracała tylko ostatni błąd z listy endpointów, co zaciemniało który endpoint i dlaczego nie zadziałał.
 - **Guards/tests:** Dodano regresyjny unit test `merge_wallet_token_rows_sums_same_mint`.
 - **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`
 

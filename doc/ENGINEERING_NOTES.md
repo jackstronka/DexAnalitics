@@ -6,6 +6,14 @@ keywords: github-actions, docker, ci, node24, build-push, metadata-action, setup
 - **Behavior:** `Docker Build & Push` no longer relies on deprecated Node 20 action runtimes and is aligned with upcoming GitHub-hosted runner defaults (Node 24).
 - **paths:** `.github/workflows/docker.yml`
 
+## 2026-04-28 — Wallet balances uses `SOLANA_RPC_FALLBACK_URLS` (CSV)
+
+keywords: wallets, balances, rpc, failover, SOLANA_RPC_FALLBACK_URLS, CLMM_RPC_DENYLIST, getTokenAccountsByOwner
+
+- **What:** `GET /wallets/balances` now builds its RPC URL rotation from `SOLANA_RPC_URL` (primary) + `SOLANA_RPC_FALLBACK_URLS` (comma-separated), matching the repo-wide `RpcConfig` convention.
+- **Why:** Avoid confusing split-brain config where wallets/balances ignored CSV fallbacks and hardcoded public endpoints that can 403/429 on token account reads.
+- **paths:** `crates/api/src/handlers/wallets.rs`
+
 ## 2026-04-27 — Wallet transfer source allowlist + manual runbook
 
 keywords: wallets, transfer, source-allowlist, runbook, operations

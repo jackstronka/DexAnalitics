@@ -7,6 +7,7 @@ import {
   getBotIlLedger,
   getBotLedger,
   getBotRegistry,
+  getWalletTransfers,
   getPendingOpenRecovery,
   getStrandedRebalances,
   reconcileStrandedRebalances,
@@ -121,6 +122,8 @@ function shortText(s: string, head = 6, tail = 4): string {
   if (s.length <= head + tail + 3) return s
   return `${s.slice(0, head)}…${s.slice(-tail)}`
 }
+
+const WALLET_TRANSFER_KEYS = ['ts_utc', 'from_wallet_id', 'from_pubkey', 'to_pubkey', 'lamports', 'signature', 'rpc_url']
 
 function ledgerSessionId(row: LedgerRow): string {
   const sidRaw = row.rebalance_session_id
@@ -511,6 +514,11 @@ export default function Logs() {
     queryKey: ['logs-registry', limit, filter],
     queryFn: () => getBotRegistry(limit, filter || undefined),
   })
+  const walletTransfersQ = useQuery({
+    queryKey: ['logs-wallet-transfers', limit],
+    queryFn: () => getWalletTransfers(Math.min(limit, 200)),
+    staleTime: 10_000,
+  })
   const pendingQ = useQuery({
     queryKey: ['logs-pending-open'],
     queryFn: getPendingOpenRecovery,
@@ -725,6 +733,84 @@ export default function Logs() {
           ) : pendingQ.data ? (
             <PendingOpenBox data={pendingQ.data} />
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle>{L('Transfery SOL (wallets)', 'SOL transfers (wallets)')}</CardTitle>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void qc.invalidateQueries({ queryKey: ['logs-wallet-transfers'] })
+            }}
+          >
+            <RefreshCw className="h-4 w-4 mr-2" />
+            {L('Odśwież', 'Refresh')}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {walletTransfersQ.isLoading ? (
+            <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>
+          ) : walletTransfersQ.isError ? (
+            <p className="text-sm text-destructive">{(walletTransfersQ.error as Error).message}</p>
+          ) : !walletTransfersQ.data?.transfers?.length ? (
+            <p className="text-sm text-muted-foreground">—</p>
+          ) : (
+            <div className="overflow-x-auto rounded-md border">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    {WALLET_TRANSFER_KEYS.map((k) => (
+                      <th key={k} className="px-3 py-2 font-medium whitespace-nowrap">
+                        {k}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {walletTransfersQ.data.transfers.map((tr) => (
+                    <tr key={tr.signature} className="border-t border-border/60 hover:bg-muted/30">
+                      <td className="px-3 py-2 font-mono text-xs" title={tr.ts_utc}>
+                        {tr.ts_utc}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs" title={tr.from_wallet_id}>
+                        {tr.from_wallet_id}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs" title={tr.from_pubkey}>
+                        <LinkSolscan
+                          href={solscanAccountUrl(tr.from_pubkey)}
+                          label={shortText(tr.from_pubkey, 4, 4)}
+                          title={tr.from_pubkey}
+                        />
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs" title={tr.to_pubkey}>
+                        <LinkSolscan
+                          href={solscanAccountUrl(tr.to_pubkey)}
+                          label={shortText(tr.to_pubkey, 4, 4)}
+                          title={tr.to_pubkey}
+                        />
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs" title={String(tr.lamports)}>
+                        {tr.lamports}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs" title={tr.signature}>
+                        <LinkSolscan
+                          href={solscanTxUrl(tr.signature)}
+                          label={shortText(tr.signature, 6, 6)}
+                          title={tr.signature}
+                        />
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs" title={tr.rpc_url ?? '—'}>
+                        {tr.rpc_url ?? '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </CardContent>
       </Card>
 

@@ -2467,6 +2467,11 @@ pub struct WalletsListResponse {
     /// Secondary wallets directory scanned on API host (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wallets_dir_secondary: Option<String>,
+    /// Minimum lamports per SOL transfer (dust guard).
+    pub transfer_min_lamports: u64,
+    /// Optional maximum lamports per SOL transfer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_max_lamports: Option<u64>,
     pub wallets: Vec<WalletEntry>,
 }
 
@@ -2518,6 +2523,26 @@ pub struct WalletTransferResponse {
     pub to_pubkey: String,
     pub lamports: u64,
     pub signature: String,
+}
+
+/// One transfer log entry (append-only JSONL on API host).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletTransferLogEntry {
+    /// UTC timestamp (RFC3339).
+    pub ts_utc: String,
+    pub from_wallet_id: String,
+    pub from_pubkey: String,
+    pub to_pubkey: String,
+    pub lamports: u64,
+    pub signature: String,
+    /// RPC endpoint used for submission (best-effort).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletTransfersListResponse {
+    pub transfers: Vec<WalletTransferLogEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
