@@ -92,6 +92,18 @@ struct ReadinessCacheEntry {
     response: BacktestDataReadinessResponse,
 }
 
+type SnapshotReadinessEval = (
+    u64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    u64,
+    u64,
+    Option<String>,
+);
+
 fn parse_snapshot_variants(raw: Option<&Vec<String>>) -> Result<Vec<SnapshotVariant>, ApiError> {
     let requested: Vec<String> = raw
         .cloned()
@@ -356,20 +368,7 @@ fn evaluate_snapshot_readiness(
     cfg: &ReadinessConfig,
     range_start_utc: Option<DateTime<Utc>>,
     range_end_utc: Option<DateTime<Utc>>,
-) -> Result<
-    (
-        u64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<f64>,
-        u64,
-        u64,
-        Option<String>,
-    ),
-    String,
-> {
+) -> Result<SnapshotReadinessEval, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let reader = std::io::BufReader::new(file);
     let mut timestamps: Vec<DateTime<Utc>> = Vec::new();
@@ -442,9 +441,10 @@ fn evaluate_snapshot_readiness(
             }
         }
 
-        let coverage = Some(((timestamps.len() as f64 / expected_rows) * 100.0).clamp(0.0, 100.0));
+        let coverage_value = ((timestamps.len() as f64 / expected_rows) * 100.0).clamp(0.0, 100.0);
+        let coverage = Some(coverage_value);
         let hard_ok = max_gap_min <= (cfg.hard_gap_multiplier * cadence_minutes) as f64;
-        let recommended_ok = coverage.unwrap_or(0.0) >= cfg.recommended_coverage_pct
+        let recommended_ok = coverage_value >= cfg.recommended_coverage_pct
             && max_gap_min <= (cfg.recommended_gap_multiplier * cadence_minutes) as f64;
 
         let hard_hours = if hard_ok { requested_hours } else { 0 };
