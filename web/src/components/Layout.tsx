@@ -13,6 +13,7 @@ import {
   Terminal,
   ScrollText,
   BarChart3,
+  Database,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -38,6 +39,7 @@ export default function Layout() {
     { key: 'nav.closed', href: '/positions/closed', icon: History },
     { key: 'nav.strategies', href: '/strategies', icon: Target },
     { key: 'nav.backtests', href: '/backtests', icon: BarChart3 },
+    { key: 'nav.dataQuality', href: '/data-quality', icon: Database },
     { key: 'nav.pools', href: '/pools', icon: Droplets },
     { key: 'nav.scripts', href: '/scripts', icon: Terminal },
     { key: 'nav.logs', href: '/logs', icon: ScrollText },

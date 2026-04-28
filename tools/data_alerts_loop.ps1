@@ -67,6 +67,9 @@ Set-Location $RepoRoot
 $logDir = Join-Path $RepoRoot "data\snapshot_logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir "data-alerts-loop.log"
+$mutexName = "Global\clmm-lp-data-alerts-loop"
+$loopMutex = $null
+$hasMutex = $false
 
 function Write-Log([string] $msg) {
   $line = "{0} {1}" -f (Get-Date -Format "o"), $msg
@@ -79,53 +82,79 @@ $qvScript = Join-Path $RepoRoot "tools\quick_verify_alert.ps1"
 if (-not (Test-Path -LiteralPath $snapScript)) { throw "Missing $snapScript" }
 if (-not $SkipQuickVerify -and -not (Test-Path -LiteralPath $qvScript)) { throw "Missing $qvScript" }
 
-Write-Log ("data_alerts_loop start: snapshot every {0}s, quick_verify every {1}s, SkipQuickVerify={2}" -f $SnapshotIntervalSeconds, $QuickVerifyIntervalSeconds, $SkipQuickVerify)
-
-$lastQuickVerify = [datetime]::MinValue
-
-while ($true) {
-  $iterStart = Get-Date
-
-  try {
-    Write-Log "run snapshot_health_alert"
-    $snapArgs = @{
-      RepoRoot                   = $RepoRoot
-      MinMinutesBetweenSameIssues = $SnapshotThrottleMinutes
-      MaxAgeMinutes10m            = $MaxAgeMinutes10m
-      MaxAgeMinutes5m           = $MaxAgeMinutes5m
-      MaxHeartbeatAgeMinutes10m = $MaxHeartbeatAgeMinutes10m
-      MaxHeartbeatAgeMinutes5m  = $MaxHeartbeatAgeMinutes5m
-      ExpectOrcaTarget            = $ExpectOrcaTarget
-    }
-    if ($SkipSlack) { $snapArgs.SkipSlack = $true }
-    & $snapScript @snapArgs
-    Write-Log ("snapshot_health_alert exit {0}" -f $LASTEXITCODE)
-  } catch {
-    Write-Log ("snapshot_health_alert ERROR: {0}" -f $_)
+try {
+  $loopMutex = New-Object System.Threading.Mutex($false, $mutexName)
+  $hasMutex = $loopMutex.WaitOne(0, $false)
+  if (-not $hasMutex) {
+    Write-Log ("lock already held -> start refused ({0})" -f $mutexName)
+    exit 0
   }
+} catch {
+  Write-Log ("ERROR acquiring lock {0}: {1}" -f $mutexName, $_)
+  throw
+}
 
-  if (-not $SkipQuickVerify) {
-    $elapsedSinceQv = ($iterStart - $lastQuickVerify).TotalSeconds
-    if ($elapsedSinceQv -ge $QuickVerifyIntervalSeconds) {
-      try {
-        Write-Log "run quick_verify_alert"
-        $qvArgs = @{
-          RepoRoot                      = $RepoRoot
-          MinMinutesBetweenSameIssues   = $QuickVerifyThrottleMinutes
+Write-Log ("data_alerts_loop start: snapshot every {0}s, quick_verify every {1}s, SkipQuickVerify={2}, lock={3}" -f $SnapshotIntervalSeconds, $QuickVerifyIntervalSeconds, $SkipQuickVerify, $mutexName)
+
+try {
+  $lastQuickVerify = [datetime]::MinValue
+
+  while ($true) {
+    $iterStart = Get-Date
+
+    try {
+      Write-Log "run snapshot_health_alert"
+      $snapArgs = @{
+        RepoRoot                   = $RepoRoot
+        MinMinutesBetweenSameIssues = $SnapshotThrottleMinutes
+        MaxAgeMinutes10m            = $MaxAgeMinutes10m
+        MaxAgeMinutes5m           = $MaxAgeMinutes5m
+        MaxHeartbeatAgeMinutes10m = $MaxHeartbeatAgeMinutes10m
+        MaxHeartbeatAgeMinutes5m  = $MaxHeartbeatAgeMinutes5m
+        ExpectOrcaTarget            = $ExpectOrcaTarget
+      }
+      if ($SkipSlack) { $snapArgs.SkipSlack = $true }
+      & $snapScript @snapArgs
+      Write-Log ("snapshot_health_alert exit {0}" -f $LASTEXITCODE)
+    } catch {
+      Write-Log ("snapshot_health_alert ERROR: {0}" -f $_)
+    }
+
+    if (-not $SkipQuickVerify) {
+      $elapsedSinceQv = ($iterStart - $lastQuickVerify).TotalSeconds
+      if ($elapsedSinceQv -ge $QuickVerifyIntervalSeconds) {
+        try {
+          Write-Log "run quick_verify_alert"
+          $qvArgs = @{
+            RepoRoot                      = $RepoRoot
+            MinMinutesBetweenSameIssues   = $QuickVerifyThrottleMinutes
+          }
+          if ($SkipSlack) { $qvArgs.SkipSlack = $true }
+          if ($QuickVerifySkipDecodeAudit) { $qvArgs.SkipDecodeAudit = $true }
+          & $qvScript @qvArgs
+          Write-Log ("quick_verify_alert exit {0}" -f $LASTEXITCODE)
+          $lastQuickVerify = Get-Date
+        } catch {
+          Write-Log ("quick_verify_alert ERROR: {0}" -f $_)
         }
-        if ($SkipSlack) { $qvArgs.SkipSlack = $true }
-        if ($QuickVerifySkipDecodeAudit) { $qvArgs.SkipDecodeAudit = $true }
-        & $qvScript @qvArgs
-        Write-Log ("quick_verify_alert exit {0}" -f $LASTEXITCODE)
-        $lastQuickVerify = Get-Date
-      } catch {
-        Write-Log ("quick_verify_alert ERROR: {0}" -f $_)
       }
     }
-  }
 
-  $elapsed = ((Get-Date) - $iterStart).TotalSeconds
-  $sleep = [Math]::Max(5, $SnapshotIntervalSeconds - [int][Math]::Ceiling($elapsed))
-  Write-Log ("sleep {0}s" -f $sleep)
-  Start-Sleep -Seconds $sleep
+    $elapsed = ((Get-Date) - $iterStart).TotalSeconds
+    $sleep = [Math]::Max(5, $SnapshotIntervalSeconds - [int][Math]::Ceiling($elapsed))
+    Write-Log ("sleep {0}s" -f $sleep)
+    Start-Sleep -Seconds $sleep
+  }
+} finally {
+  if ($loopMutex -and $hasMutex) {
+    try {
+      $loopMutex.ReleaseMutex() | Out-Null
+      Write-Log "lock released"
+    } catch {
+      Write-Log ("ERROR releasing lock: {0}" -f $_)
+    }
+  }
+  if ($loopMutex) {
+    $loopMutex.Dispose()
+  }
 }

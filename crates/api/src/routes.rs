@@ -174,6 +174,10 @@ fn create_base_router(state: AppState) -> Router {
             "/backtests/strategy-catalog",
             get(handlers::get_backtest_strategy_catalog),
         )
+        .route(
+            "/backtests/data-readiness",
+            post(handlers::get_backtest_data_readiness),
+        )
         .route("/backtests/full", post(handlers::start_backtest_full))
         .route("/backtests/full/{id}", get(handlers::get_backtest_full_job))
         .route(

@@ -1697,6 +1697,10 @@ pub struct BacktestFullRequest {
     /// Optional curated pool ids subset (default: all curated pools with snapshots).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_ids: Option<Vec<String>>,
+    /// Optional snapshot variants to compare in one run: `10m`, `5m`.
+    /// If omitted, API defaults to `["10m"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_variants: Option<Vec<String>>,
     /// Optional LP share override (recommended for Meteora snapshot-only mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_share: Option<f64>,
@@ -1746,6 +1750,10 @@ pub struct BacktestFullRequest {
     /// Override bollinger rebalance steps, e.g. `[24,48]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bollinger_rebalance_steps_grid: Option<Vec<u64>>,
+    /// Override bollinger rebalance cadence in hours (preferred), e.g. `[2,4,8]`.
+    /// API converts hours to step counts depending on selected snapshot cadence (`10m`/`5m`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bollinger_rebalance_hours_grid: Option<Vec<f64>>,
     /// Override last-candle candle steps (non-snapshot mode), e.g. `[1,2,3,4]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_candle_steps_grid: Option<Vec<u64>>,
@@ -1758,6 +1766,95 @@ pub struct BacktestFullRequest {
     /// Override last-candle rebalance seconds (snapshot mode), e.g. `[900,1800,3600,14400]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_candle_rebalance_seconds_grid: Option<Vec<u64>>,
+}
+
+/// Request for data readiness diagnostics used by Backtests/Data Quality UI.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestDataReadinessRequest {
+    /// Optional curated pool ids subset (default: all curated pools with snapshots).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_ids: Option<Vec<String>>,
+    /// Snapshot variants to inspect (`10m`, `5m`). Defaults to `["10m"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_variants: Option<Vec<String>>,
+    /// Optional analysis window lower bound (inclusive, RFC3339 UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_start_utc: Option<String>,
+    /// Optional analysis window upper bound (inclusive, RFC3339 UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_end_utc: Option<String>,
+}
+
+/// Readiness metrics for one pool + snapshot variant.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestDataReadinessRow {
+    pub pool_id: String,
+    pub pool_label: String,
+    pub protocol: String,
+    pub pool_address: String,
+    pub snapshot_variant: String,
+    pub cadence_minutes: u64,
+    pub rows: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_continuous_ts_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gap_minutes: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_pct: Option<f64>,
+    pub max_backtest_hours_hard: u64,
+    pub max_backtest_hours_recommended: u64,
+    /// Operational status for near-real-time data quality.
+    pub status: String,
+    /// Optional machine-readable reason explaining current status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    /// Age of latest snapshot row relative to now (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_age_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Aggregated readiness for selected pools/variants.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestDataReadinessAggregate {
+    pub pool_count: u64,
+    pub variant_count: u64,
+    pub max_backtest_hours_hard: u64,
+    pub max_backtest_hours_recommended: u64,
+    /// Aggregate operational status (`ok`, `degraded`, `recovering`, `missing`).
+    pub status: String,
+    pub status_ok_count: u64,
+    pub status_degraded_count: u64,
+    pub status_recovering_count: u64,
+    pub status_missing_count: u64,
+    /// Data source used for this response (`db` or `fallback`).
+    pub source: String,
+    /// Number of selected pool+variant rows present in DB but older than `db_max_age_secs`.
+    pub db_stale_rows: u64,
+}
+
+/// Active thresholds used by readiness evaluator (resolved from ENV/defaults).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestDataReadinessThresholds {
+    pub cache_ttl_secs: i64,
+    pub db_max_age_secs: i64,
+    pub hard_gap_multiplier: u64,
+    pub recommended_coverage_pct: f64,
+    pub recommended_gap_multiplier: u64,
+    pub recommended_fallback_ratio: f64,
+}
+
+/// Response for data readiness diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BacktestDataReadinessResponse {
+    pub rows: Vec<BacktestDataReadinessRow>,
+    pub aggregate: BacktestDataReadinessAggregate,
+    pub thresholds: BacktestDataReadinessThresholds,
 }
 
 fn default_true() -> bool {
@@ -1839,6 +1936,8 @@ pub struct BacktestFullWindowResult {
     pub pool_label: String,
     pub pool_address: String,
     pub protocol: String,
+    /// Snapshot variant used for this result (`10m` or `5m`).
+    pub snapshot_variant: String,
     pub window_hours: u32,
     pub metrics: Vec<BacktestFullMetricRow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

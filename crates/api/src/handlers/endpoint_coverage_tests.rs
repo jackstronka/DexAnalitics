@@ -105,6 +105,83 @@ async fn all_health_endpoints_are_reachable() {
 }
 
 #[tokio::test]
+async fn backtests_data_readiness_returns_thresholds_payload() {
+    let state = test_state();
+    let router = test_router(state);
+    let (status, body) = request_body(
+        router,
+        Method::POST,
+        "/api/v1/backtests/data-readiness",
+        Some(serde_json::json!({
+            "pool_ids": ["ORCA_SOL_USDC"],
+            "snapshot_variants": ["10m"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+
+    let v: serde_json::Value = serde_json::from_str(&body).expect("valid json body");
+    let rows = v
+        .get("rows")
+        .and_then(|x| x.as_array())
+        .expect("rows array present");
+    assert_eq!(rows.len(), 1, "expected one pool x one variant row");
+    assert!(rows[0].get("status").is_some(), "row status field missing");
+
+    let agg = v
+        .get("aggregate")
+        .and_then(|x| x.as_object())
+        .expect("aggregate object present");
+    assert_eq!(
+        agg.get("pool_count").and_then(|x| x.as_u64()).unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        agg.get("variant_count").and_then(|x| x.as_u64()).unwrap_or(0),
+        1
+    );
+    assert!(agg.contains_key("source"));
+    assert!(agg.contains_key("db_stale_rows"));
+    assert!(agg.contains_key("status"));
+    assert!(agg.contains_key("status_ok_count"));
+    assert!(agg.contains_key("status_degraded_count"));
+    assert!(agg.contains_key("status_recovering_count"));
+    assert!(agg.contains_key("status_missing_count"));
+
+    let th = v
+        .get("thresholds")
+        .and_then(|x| x.as_object())
+        .expect("thresholds object present");
+    assert!(th.contains_key("cache_ttl_secs"));
+    assert!(th.contains_key("db_max_age_secs"));
+    assert!(th.contains_key("hard_gap_multiplier"));
+    assert!(th.contains_key("recommended_coverage_pct"));
+    assert!(th.contains_key("recommended_gap_multiplier"));
+    assert!(th.contains_key("recommended_fallback_ratio"));
+}
+
+#[tokio::test]
+async fn backtests_data_readiness_rejects_unknown_variant() {
+    let state = test_state();
+    let router = test_router(state);
+    let (status, body) = request_body(
+        router,
+        Method::POST,
+        "/api/v1/backtests/data-readiness",
+        Some(serde_json::json!({
+            "pool_ids": ["ORCA_SOL_USDC"],
+            "snapshot_variants": ["1m"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert!(
+        body.contains("unsupported snapshot variant"),
+        "unexpected body={body}"
+    );
+}
+
+#[tokio::test]
 async fn all_position_endpoints_are_reachable() {
     let state = test_state();
     let router = test_router(state);

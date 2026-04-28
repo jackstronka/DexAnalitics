@@ -19,6 +19,7 @@ use prettytable::{Table, row};
 use primitive_types::U256;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -143,6 +144,33 @@ enum FeeSwapDecodeStatusArg {
 
 type OptimizeGridRow = (f64, f64, f64, String, TrackerSummary, Decimal);
 type SnapshotVaultPoint = (i64, u64, u64, Option<String>, Option<String>);
+
+#[derive(Debug, Serialize)]
+struct OrcaWhirlpoolSnapshot {
+    ts_utc: String,
+    slot: u64,
+    pool_address: String,
+    token_mint_a: String,
+    token_mint_b: String,
+    token_vault_a: String,
+    token_vault_b: String,
+    vault_amount_a: u64,
+    vault_amount_b: u64,
+    liquidity_active: String,
+    tick_current: i32,
+    fee_rate_raw: u16,
+    protocol_fee_rate_bps: u16,
+    fee_growth_global_a: String,
+    fee_growth_global_b: String,
+    protocol_fee_owed_a: u64,
+    protocol_fee_owed_b: u64,
+    effective_fee_rate_pct: f64,
+    /// Whether the Orca pool state was decoded successfully.
+    parse_ok: bool,
+    /// Detailed decode error (only set when `parse_ok=false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_error: Option<String>,
+}
 
 /// After primary `score`, break ties so rankings are not an arbitrary permutation (common when
 /// `objective fees` and many strategies share the same range with **zero rebalances** → identical fees).
@@ -702,6 +730,12 @@ enum Commands {
         /// Optional snapshot output suffix (e.g. `5m` writes `snapshots_5m.jsonl` instead of `snapshots.jsonl`).
         #[arg(long)]
         snapshots_suffix: Option<String>,
+        /// Additional retry attempts per pool snapshot on transient failures.
+        #[arg(long, default_value_t = 2)]
+        snapshot_retry_attempts: usize,
+        /// Backoff between retry attempts (milliseconds).
+        #[arg(long, default_value_t = 12000)]
+        snapshot_retry_backoff_ms: u64,
     },
     /// Pre-slice Orca `snapshots.jsonl` into rolling windows under `data/backtest-snapshot-cache/` for fast `backtest`/`backtest-optimize` (`--prepared-snapshot-window`).
     SnapshotBacktestPrep {
@@ -4651,6 +4685,8 @@ async fn main() -> Result<()> {
         Commands::SnapshotRunCuratedAll {
             limit,
             snapshots_suffix,
+            snapshot_retry_attempts,
+            snapshot_retry_backoff_ms,
         } => {
             use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
             use clmm_lp_domain::prelude::calculate_effective_fee_rate;
@@ -4672,6 +4708,8 @@ async fn main() -> Result<()> {
                 protocol: String,
                 pool_address: String,
                 error: String,
+                attempts: usize,
+                final_failure: bool,
             }
 
             #[derive(Debug, Serialize)]
@@ -4685,6 +4723,7 @@ async fn main() -> Result<()> {
                 meteora: ProtocolRunStats,
                 errors: Vec<RunErrorEntry>,
             }
+            let max_attempts = snapshot_retry_attempts.saturating_add(1).max(1);
 
             let startup_path = std::path::Path::new("STARTUP.md");
             let content = std::fs::read_to_string(startup_path).map_err(|e| {
@@ -4858,110 +4897,120 @@ async fn main() -> Result<()> {
             let rpc = std::sync::Arc::new(clmm_lp_protocols::rpc::RpcProvider::mainnet());
             let slot_now = rpc.get_slot().await.unwrap_or(0);
 
-            // ---- Orca snapshots (proper fields) ----
-            #[derive(Debug, Serialize)]
-            struct OrcaWhirlpoolSnapshot {
-                ts_utc: String,
-                slot: u64,
-                pool_address: String,
-                token_mint_a: String,
-                token_mint_b: String,
-                token_vault_a: String,
-                token_vault_b: String,
-                vault_amount_a: u64,
-                vault_amount_b: u64,
-                liquidity_active: String,
-                tick_current: i32,
-                fee_rate_raw: u16,
-                protocol_fee_rate_bps: u16,
-                fee_growth_global_a: String,
-                fee_growth_global_b: String,
-                protocol_fee_owed_a: u64,
-                protocol_fee_owed_b: u64,
-                effective_fee_rate_pct: f64,
-            }
-
             let orca_reader =
                 clmm_lp_protocols::orca::pool_reader::WhirlpoolReader::new(rpc.clone());
             for pool_address in orca_pool_addrs.into_iter() {
-                let result: anyhow::Result<()> = async {
-                    let state = orca_reader.get_pool_state(&pool_address).await?;
-                    let accounts = rpc
-                        .get_multiple_accounts(&[state.token_vault_a, state.token_vault_b])
-                        .await?;
+                let mut attempts = 0usize;
+                let mut last_err: Option<anyhow::Error> = None;
+                for attempt in 1..=max_attempts {
+                    attempts = attempt;
+                    let result: anyhow::Result<()> = async {
+                        let state = orca_reader.get_pool_state(&pool_address).await?;
+                        let accounts = rpc
+                            .get_multiple_accounts(&[state.token_vault_a, state.token_vault_b])
+                            .await?;
 
-                    let vault_amount_a = accounts
-                        .first()
-                        .and_then(|a| a.as_ref())
-                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                        .map(|a| a.amount)
-                        .unwrap_or(0);
-                    let vault_amount_b = accounts
-                        .get(1)
-                        .and_then(|a| a.as_ref())
-                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                        .map(|a| a.amount)
-                        .unwrap_or(0);
+                        let vault_amount_a = accounts
+                            .first()
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                            .map(|a| a.amount)
+                            .unwrap_or(0);
+                        let vault_amount_b = accounts
+                            .get(1)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                            .map(|a| a.amount)
+                            .unwrap_or(0);
 
-                    let base_fee = state.fee_rate();
-                    let proto = rust_decimal::Decimal::from(state.protocol_fee_rate_bps)
-                        / rust_decimal::Decimal::from(10_000);
-                    let eff = calculate_effective_fee_rate(base_fee, proto);
-                    let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
+                        let base_fee = state.fee_rate();
+                        let proto = rust_decimal::Decimal::from(state.protocol_fee_rate_bps)
+                            / rust_decimal::Decimal::from(10_000);
+                        let eff = calculate_effective_fee_rate(base_fee, proto);
+                        let eff_pct = eff.to_f64().unwrap_or(0.0) * 100.0;
 
-                    let snap = OrcaWhirlpoolSnapshot {
-                        ts_utc: chrono::Utc::now().to_rfc3339(),
-                        slot: slot_now,
-                        pool_address: pool_address.to_string(),
-                        token_mint_a: state.token_mint_a.to_string(),
-                        token_mint_b: state.token_mint_b.to_string(),
-                        token_vault_a: state.token_vault_a.to_string(),
-                        token_vault_b: state.token_vault_b.to_string(),
-                        vault_amount_a,
-                        vault_amount_b,
-                        liquidity_active: state.liquidity.to_string(),
-                        tick_current: state.tick_current,
-                        fee_rate_raw: state.fee_rate_bps,
-                        protocol_fee_rate_bps: state.protocol_fee_rate_bps,
-                        fee_growth_global_a: state.fee_growth_global_a.to_string(),
-                        fee_growth_global_b: state.fee_growth_global_b.to_string(),
-                        protocol_fee_owed_a: state.protocol_fee_owed_a,
-                        protocol_fee_owed_b: state.protocol_fee_owed_b,
-                        effective_fee_rate_pct: eff_pct,
-                    };
+                        let snap = OrcaWhirlpoolSnapshot {
+                            ts_utc: chrono::Utc::now().to_rfc3339(),
+                            slot: slot_now,
+                            pool_address: pool_address.to_string(),
+                            token_mint_a: state.token_mint_a.to_string(),
+                            token_mint_b: state.token_mint_b.to_string(),
+                            token_vault_a: state.token_vault_a.to_string(),
+                            token_vault_b: state.token_vault_b.to_string(),
+                            vault_amount_a,
+                            vault_amount_b,
+                            liquidity_active: state.liquidity.to_string(),
+                            tick_current: state.tick_current,
+                            fee_rate_raw: state.fee_rate_bps,
+                            protocol_fee_rate_bps: state.protocol_fee_rate_bps,
+                            fee_growth_global_a: state.fee_growth_global_a.to_string(),
+                            fee_growth_global_b: state.fee_growth_global_b.to_string(),
+                            protocol_fee_owed_a: state.protocol_fee_owed_a,
+                            protocol_fee_owed_b: state.protocol_fee_owed_b,
+                            effective_fee_rate_pct: eff_pct,
+                            parse_ok: true,
+                            parse_error: None,
+                        };
 
-                    let mut dir = std::path::PathBuf::from("data");
-                    dir.push("pool-snapshots");
-                    dir.push("orca");
-                    dir.push(&pool_address);
-                    std::fs::create_dir_all(&dir)?;
-                    let mut path = dir;
-                    path.push(snapshot_jsonl_name.as_str());
+                        let mut dir = std::path::PathBuf::from("data");
+                        dir.push("pool-snapshots");
+                        dir.push("orca");
+                        dir.push(&pool_address);
+                        std::fs::create_dir_all(&dir)?;
+                        let mut path = dir;
+                        path.push(snapshot_jsonl_name.as_str());
 
-                    let line = serde_json::to_string(&snap)?;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&path)?;
-                    use std::io::Write;
-                    f.write_all(line.as_bytes())?;
-                    f.write_all(b"\n")?;
+                        let line = serde_json::to_string(&snap)?;
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)?;
+                        use std::io::Write;
+                        f.write_all(line.as_bytes())?;
+                        f.write_all(b"\n")?;
 
-                    println!("âś… Snapshot appended: {}", path.display());
-                    Ok(())
-                }
-                .await;
-
-                match result {
-                    Ok(()) => orca_success += 1,
-                    Err(e) => {
-                        eprintln!("âťŚ Orca snapshot failed for {}: {}", pool_address, e);
-                        run_errors.push(RunErrorEntry {
-                            protocol: "orca".to_string(),
-                            pool_address: pool_address.clone(),
-                            error: e.to_string(),
-                        });
+                        println!("âś… Snapshot appended: {}", path.display());
+                        Ok(())
                     }
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            if attempt > 1 {
+                                println!(
+                                    "⚙️ Orca snapshot recovered after retry: pool={} attempts={}",
+                                    pool_address, attempt
+                                );
+                            }
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            if attempt < max_attempts {
+                                let msg = last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                                eprintln!(
+                                    "⚠️ Orca snapshot attempt {}/{} failed for {}: {}; retrying in {}ms",
+                                    attempt, max_attempts, pool_address, msg, snapshot_retry_backoff_ms
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    *snapshot_retry_backoff_ms,
+                                ))
+                                .await;
+                            }
+                        }
+                    }
+                }
+                if let Some(e) = last_err {
+                    eprintln!("âťŚ Orca snapshot failed for {}: {}", pool_address, e);
+                    run_errors.push(RunErrorEntry {
+                        protocol: "orca".to_string(),
+                        pool_address: pool_address.clone(),
+                        error: e.to_string(),
+                        attempts,
+                        final_failure: true,
+                    });
+                } else {
+                    orca_success += 1;
                 }
             }
 
@@ -5021,7 +5070,11 @@ async fn main() -> Result<()> {
                 protocol_fees_token_b: Option<u64>,
             }
             for pool_address in raydium_pool_addrs.into_iter() {
-                let result: anyhow::Result<()> = async {
+                let mut attempts = 0usize;
+                let mut last_err: Option<anyhow::Error> = None;
+                for attempt in 1..=max_attempts {
+                    attempts = attempt;
+                    let result: anyhow::Result<()> = async {
                     let acct = rpc.get_account_by_address(&pool_address).await?;
                     let (parsed, parse_ok, parse_error) =
                         match clmm_lp_protocols::raydium::pool_reader::parse_pool_state(&acct.data)
@@ -5110,18 +5163,45 @@ async fn main() -> Result<()> {
                     println!("âś… Snapshot appended: {}", path.display());
                     Ok(())
                 }
-                .await;
-
-                match result {
-                    Ok(()) => raydium_success += 1,
-                    Err(e) => {
-                        eprintln!("âťŚ Raydium snapshot failed for {}: {}", pool_address, e);
-                        run_errors.push(RunErrorEntry {
-                            protocol: "raydium".to_string(),
-                            pool_address: pool_address.clone(),
-                            error: e.to_string(),
-                        });
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            if attempt > 1 {
+                                println!(
+                                    "⚙️ Raydium snapshot recovered after retry: pool={} attempts={}",
+                                    pool_address, attempt
+                                );
+                            }
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            if attempt < max_attempts {
+                                let msg = last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                                eprintln!(
+                                    "⚠️ Raydium snapshot attempt {}/{} failed for {}: {}; retrying in {}ms",
+                                    attempt, max_attempts, pool_address, msg, snapshot_retry_backoff_ms
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    *snapshot_retry_backoff_ms,
+                                ))
+                                .await;
+                            }
+                        }
                     }
+                }
+                if let Some(e) = last_err {
+                    eprintln!("âťŚ Raydium snapshot failed for {}: {}", pool_address, e);
+                    run_errors.push(RunErrorEntry {
+                        protocol: "raydium".to_string(),
+                        pool_address: pool_address.clone(),
+                        error: e.to_string(),
+                        attempts,
+                        final_failure: true,
+                    });
+                } else {
+                    raydium_success += 1;
                 }
             }
 
@@ -5169,7 +5249,11 @@ async fn main() -> Result<()> {
                 protocol_fee_amount_b: Option<u64>,
             }
             for pool_address in meteora_pool_addrs.into_iter() {
-                let result: anyhow::Result<()> = async {
+                let mut attempts = 0usize;
+                let mut last_err: Option<anyhow::Error> = None;
+                for attempt in 1..=max_attempts {
+                    attempts = attempt;
+                    let result: anyhow::Result<()> = async {
                     let acct = rpc.get_account_by_address(&pool_address).await?;
                     let (parsed, parse_ok, parse_error) =
                         match clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data) {
@@ -5244,18 +5328,45 @@ async fn main() -> Result<()> {
                     println!("âś… Snapshot appended: {}", path.display());
                     Ok(())
                 }
-                .await;
-
-                match result {
-                    Ok(()) => meteora_success += 1,
-                    Err(e) => {
-                        eprintln!("âťŚ Meteora snapshot failed for {}: {}", pool_address, e);
-                        run_errors.push(RunErrorEntry {
-                            protocol: "meteora".to_string(),
-                            pool_address: pool_address.clone(),
-                            error: e.to_string(),
-                        });
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            if attempt > 1 {
+                                println!(
+                                    "⚙️ Meteora snapshot recovered after retry: pool={} attempts={}",
+                                    pool_address, attempt
+                                );
+                            }
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            if attempt < max_attempts {
+                                let msg = last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                                eprintln!(
+                                    "⚠️ Meteora snapshot attempt {}/{} failed for {}: {}; retrying in {}ms",
+                                    attempt, max_attempts, pool_address, msg, snapshot_retry_backoff_ms
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    *snapshot_retry_backoff_ms,
+                                ))
+                                .await;
+                            }
+                        }
                     }
+                }
+                if let Some(e) = last_err {
+                    eprintln!("âťŚ Meteora snapshot failed for {}: {}", pool_address, e);
+                    run_errors.push(RunErrorEntry {
+                        protocol: "meteora".to_string(),
+                        pool_address: pool_address.clone(),
+                        error: e.to_string(),
+                        attempts,
+                        final_failure: true,
+                    });
+                } else {
+                    meteora_success += 1;
                 }
             }
 
@@ -6513,4 +6624,73 @@ fn print_optimization_report(
         lower, upper
     );
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OrcaWhirlpoolSnapshot;
+
+    #[test]
+    fn orca_snapshot_serialization_includes_parse_ok_and_skips_null_parse_error() {
+        let row = OrcaWhirlpoolSnapshot {
+            ts_utc: "2026-04-28T14:00:00Z".to_string(),
+            slot: 123,
+            pool_address: "pool".to_string(),
+            token_mint_a: "mint_a".to_string(),
+            token_mint_b: "mint_b".to_string(),
+            token_vault_a: "vault_a".to_string(),
+            token_vault_b: "vault_b".to_string(),
+            vault_amount_a: 1,
+            vault_amount_b: 2,
+            liquidity_active: "100".to_string(),
+            tick_current: 10,
+            fee_rate_raw: 30,
+            protocol_fee_rate_bps: 100,
+            fee_growth_global_a: "1".to_string(),
+            fee_growth_global_b: "2".to_string(),
+            protocol_fee_owed_a: 0,
+            protocol_fee_owed_b: 0,
+            effective_fee_rate_pct: 0.3,
+            parse_ok: true,
+            parse_error: None,
+        };
+        let v = serde_json::to_value(&row).expect("serialize");
+        assert_eq!(v.get("parse_ok").and_then(|x| x.as_bool()), Some(true));
+        assert!(
+            v.get("parse_error").is_none(),
+            "parse_error should be omitted when null"
+        );
+    }
+
+    #[test]
+    fn orca_snapshot_serialization_includes_parse_error_when_present() {
+        let row = OrcaWhirlpoolSnapshot {
+            ts_utc: "2026-04-28T14:00:00Z".to_string(),
+            slot: 123,
+            pool_address: "pool".to_string(),
+            token_mint_a: "mint_a".to_string(),
+            token_mint_b: "mint_b".to_string(),
+            token_vault_a: "vault_a".to_string(),
+            token_vault_b: "vault_b".to_string(),
+            vault_amount_a: 1,
+            vault_amount_b: 2,
+            liquidity_active: "100".to_string(),
+            tick_current: 10,
+            fee_rate_raw: 30,
+            protocol_fee_rate_bps: 100,
+            fee_growth_global_a: "1".to_string(),
+            fee_growth_global_b: "2".to_string(),
+            protocol_fee_owed_a: 0,
+            protocol_fee_owed_b: 0,
+            effective_fee_rate_pct: 0.3,
+            parse_ok: false,
+            parse_error: Some("decode failed".to_string()),
+        };
+        let v = serde_json::to_value(&row).expect("serialize");
+        assert_eq!(v.get("parse_ok").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(
+            v.get("parse_error").and_then(|x| x.as_str()),
+            Some("decode failed")
+        );
+    }
 }

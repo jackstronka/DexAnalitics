@@ -3,7 +3,8 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     BacktestAutoTuneApplyResponse, BacktestAutoTuneStartRequest, BacktestAutoTuneStatusResponse,
-    BacktestAutoTuneWinner,
+    BacktestAutoTuneWinner, BacktestDataReadinessAggregate, BacktestDataReadinessRequest,
+    BacktestDataReadinessResponse, BacktestDataReadinessRow, BacktestDataReadinessThresholds,
     BacktestFromClosedPositionRequest, BacktestFromOpenPositionRequest, BacktestFullJobResponse,
     BacktestFullJobStatusResponse, BacktestFullMetricRow, BacktestFullRequest,
     BacktestFullWindowResult, BacktestJobResponse, BacktestJobStatusResponse,
@@ -19,6 +20,7 @@ use clmm_lp_protocols::ledger::position_registry::registry_path;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader};
@@ -32,6 +34,612 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug)]
+struct SnapshotVariant {
+    label: &'static str,
+    suffix: Option<&'static str>,
+    cadence_minutes: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ReadinessConfig {
+    cache_ttl_secs: i64,
+    db_max_age_secs: i64,
+    hard_gap_multiplier: u64,
+    recommended_coverage_pct: f64,
+    recommended_gap_multiplier: u64,
+    recommended_fallback_ratio: f64,
+}
+
+impl ReadinessConfig {
+    fn from_env() -> Self {
+        fn env_i64(name: &str, default: i64) -> i64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(default)
+        }
+        fn env_u64(name: &str, default: u64) -> u64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(default)
+        }
+        fn env_f64(name: &str, default: f64) -> f64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(default)
+        }
+        Self {
+            cache_ttl_secs: env_i64("BACKTEST_READINESS_CACHE_TTL_SECS", 120).max(0),
+            db_max_age_secs: env_i64("BACKTEST_READINESS_DB_MAX_AGE_SECS", 600).max(0),
+            hard_gap_multiplier: env_u64("BACKTEST_READINESS_HARD_GAP_MULTIPLIER", 6).max(1),
+            recommended_coverage_pct: env_f64("BACKTEST_READINESS_RECOMMENDED_COVERAGE_PCT", 95.0)
+                .clamp(0.0, 100.0),
+            recommended_gap_multiplier: env_u64("BACKTEST_READINESS_RECOMMENDED_GAP_MULTIPLIER", 2)
+                .max(1),
+            recommended_fallback_ratio: env_f64("BACKTEST_READINESS_RECOMMENDED_FALLBACK_RATIO", 0.7)
+                .clamp(0.0, 1.0),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ReadinessCacheEntry {
+    ts_utc: chrono::DateTime<Utc>,
+    response: BacktestDataReadinessResponse,
+}
+
+fn parse_snapshot_variants(raw: Option<&Vec<String>>) -> Result<Vec<SnapshotVariant>, ApiError> {
+    let requested: Vec<String> = raw
+        .cloned()
+        .unwrap_or_else(|| vec!["10m".to_string()])
+        .into_iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if requested.is_empty() {
+        return Err(ApiError::bad_request(
+            "snapshot_variants must include at least one of: 10m, 5m",
+        ));
+    }
+    let mut uniq = BTreeSet::new();
+    for v in requested {
+        uniq.insert(v);
+    }
+    let mut out = Vec::new();
+    for v in uniq {
+        match v.as_str() {
+            "10m" => out.push(SnapshotVariant {
+                label: "10m",
+                suffix: None,
+                cadence_minutes: 10,
+            }),
+            "5m" => out.push(SnapshotVariant {
+                label: "5m",
+                suffix: Some("5m"),
+                cadence_minutes: 5,
+            }),
+            other => {
+                return Err(ApiError::bad_request(format!(
+                    "unsupported snapshot variant `{other}`; allowed: 10m, 5m"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn hours_grid_to_steps(hours: &[f64], cadence_minutes: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    for h in hours {
+        if !h.is_finite() || *h <= 0.0 {
+            continue;
+        }
+        let steps = ((*h * 60.0) / cadence_minutes as f64).round();
+        if !steps.is_finite() || steps <= 0.0 {
+            continue;
+        }
+        let steps_u64 = steps as u64;
+        if steps_u64 > 0 {
+            out.push(steps_u64);
+        }
+    }
+    out
+}
+
+fn snapshot_file_name_for_variant(variant: SnapshotVariant) -> String {
+    match variant.suffix {
+        Some(s) => format!("snapshots_{s}.jsonl"),
+        None => "snapshots.jsonl".to_string(),
+    }
+}
+
+async fn load_readiness_rows_from_db(
+    db: &Database,
+    pool_ids: &[String],
+    variant_labels: &[String],
+    cfg: &ReadinessConfig,
+) -> Result<Option<Vec<BacktestDataReadinessRow>>, sqlx::Error> {
+    if pool_ids.is_empty() || variant_labels.is_empty() {
+        return Ok(None);
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            pool_id,
+            pool_label,
+            protocol,
+            pool_address,
+            snapshot_variant,
+            cadence_minutes,
+            rows,
+            oldest_ts_utc,
+            latest_ts_utc,
+            oldest_continuous_ts_utc,
+            max_gap_minutes,
+            coverage_pct,
+            max_backtest_hours_hard,
+            max_backtest_hours_recommended,
+            note,
+            computed_at
+        FROM backtest_data_readiness_rows
+        WHERE pool_id = ANY($1)
+          AND snapshot_variant = ANY($2)
+          AND computed_at >= NOW() - ($3::bigint * INTERVAL '1 second')
+        "#,
+    )
+    .bind(pool_ids)
+    .bind(variant_labels)
+    .bind(cfg.db_max_age_secs)
+    .fetch_all(db.pool())
+    .await?;
+
+    let expected = pool_ids.len() * variant_labels.len();
+    if rows.len() != expected {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let oldest_ts_utc = r
+            .try_get::<Option<chrono::DateTime<Utc>>, _>("oldest_ts_utc")?
+            .map(|d| d.to_rfc3339());
+        let latest_ts_utc = r
+            .try_get::<Option<chrono::DateTime<Utc>>, _>("latest_ts_utc")?
+            .map(|d| d.to_rfc3339());
+        let oldest_continuous_ts_utc = r
+            .try_get::<Option<chrono::DateTime<Utc>>, _>("oldest_continuous_ts_utc")?
+            .map(|d| d.to_rfc3339());
+        out.push(BacktestDataReadinessRow {
+            pool_id: r.try_get("pool_id")?,
+            pool_label: r.try_get("pool_label")?,
+            protocol: r.try_get("protocol")?,
+            pool_address: r.try_get("pool_address")?,
+            snapshot_variant: r.try_get("snapshot_variant")?,
+            cadence_minutes: r.try_get::<i64, _>("cadence_minutes")?.max(0) as u64,
+            rows: r.try_get::<i64, _>("rows")?.max(0) as u64,
+            oldest_ts_utc,
+            latest_ts_utc,
+            oldest_continuous_ts_utc,
+            max_gap_minutes: r.try_get("max_gap_minutes")?,
+            coverage_pct: r.try_get("coverage_pct")?,
+            max_backtest_hours_hard: r.try_get::<i64, _>("max_backtest_hours_hard")?.max(0) as u64,
+            max_backtest_hours_recommended: r
+                .try_get::<i64, _>("max_backtest_hours_recommended")?
+                .max(0) as u64,
+            status: "ok".to_string(),
+            status_reason: None,
+            latest_age_secs: None,
+            note: r.try_get("note")?,
+        });
+    }
+    Ok(Some(out))
+}
+
+async fn count_stale_readiness_rows_in_db(
+    db: &Database,
+    pool_ids: &[String],
+    variant_labels: &[String],
+    cfg: &ReadinessConfig,
+) -> Result<u64, sqlx::Error> {
+    if pool_ids.is_empty() || variant_labels.is_empty() {
+        return Ok(0);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT COUNT(*) AS n
+        FROM backtest_data_readiness_rows
+        WHERE pool_id = ANY($1)
+          AND snapshot_variant = ANY($2)
+          AND computed_at < NOW() - ($3::bigint * INTERVAL '1 second')
+        "#,
+    )
+    .bind(pool_ids)
+    .bind(variant_labels)
+    .bind(cfg.db_max_age_secs)
+    .fetch_one(db.pool())
+    .await?;
+    Ok(row.try_get::<i64, _>("n")?.max(0) as u64)
+}
+
+async fn upsert_readiness_rows_best_effort(
+    db: &Database,
+    rows: &[BacktestDataReadinessRow],
+) -> Result<(), sqlx::Error> {
+    for r in rows {
+        let oldest_ts_utc = r.oldest_ts_utc.as_deref().and_then(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
+        let latest_ts_utc = r.latest_ts_utc.as_deref().and_then(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
+        let oldest_continuous_ts_utc = r.oldest_continuous_ts_utc.as_deref().and_then(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO backtest_data_readiness_rows (
+                pool_id, pool_label, protocol, pool_address, snapshot_variant,
+                cadence_minutes, rows, oldest_ts_utc, latest_ts_utc, oldest_continuous_ts_utc,
+                max_gap_minutes, coverage_pct, max_backtest_hours_hard, max_backtest_hours_recommended,
+                note, computed_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+            ON CONFLICT (pool_id, snapshot_variant) DO UPDATE SET
+                pool_label = EXCLUDED.pool_label,
+                protocol = EXCLUDED.protocol,
+                pool_address = EXCLUDED.pool_address,
+                cadence_minutes = EXCLUDED.cadence_minutes,
+                rows = EXCLUDED.rows,
+                oldest_ts_utc = EXCLUDED.oldest_ts_utc,
+                latest_ts_utc = EXCLUDED.latest_ts_utc,
+                oldest_continuous_ts_utc = EXCLUDED.oldest_continuous_ts_utc,
+                max_gap_minutes = EXCLUDED.max_gap_minutes,
+                coverage_pct = EXCLUDED.coverage_pct,
+                max_backtest_hours_hard = EXCLUDED.max_backtest_hours_hard,
+                max_backtest_hours_recommended = EXCLUDED.max_backtest_hours_recommended,
+                note = EXCLUDED.note,
+                computed_at = EXCLUDED.computed_at
+            "#,
+        )
+        .bind(&r.pool_id)
+        .bind(&r.pool_label)
+        .bind(&r.protocol)
+        .bind(&r.pool_address)
+        .bind(&r.snapshot_variant)
+        .bind(r.cadence_minutes as i64)
+        .bind(r.rows as i64)
+        .bind(oldest_ts_utc)
+        .bind(latest_ts_utc)
+        .bind(oldest_continuous_ts_utc)
+        .bind(r.max_gap_minutes)
+        .bind(r.coverage_pct)
+        .bind(r.max_backtest_hours_hard as i64)
+        .bind(r.max_backtest_hours_recommended as i64)
+        .bind(&r.note)
+        .execute(db.pool())
+        .await?;
+    }
+    Ok(())
+}
+
+fn readiness_cache_key(
+    pool_ids: &[String],
+    variants: &[String],
+    range_start_utc: Option<&str>,
+    range_end_utc: Option<&str>,
+) -> String {
+    let mut p = pool_ids.to_vec();
+    p.sort_unstable();
+    let mut v = variants.to_vec();
+    v.sort_unstable();
+    format!(
+        "pools={};variants={};start={};end={}",
+        p.join(","),
+        v.join(","),
+        range_start_utc.unwrap_or("-"),
+        range_end_utc.unwrap_or("-")
+    )
+}
+
+fn evaluate_snapshot_readiness(
+    path: &std::path::Path,
+    cadence_minutes: u64,
+    cfg: &ReadinessConfig,
+    range_start_utc: Option<DateTime<Utc>>,
+    range_end_utc: Option<DateTime<Utc>>,
+) -> Result<
+    (
+        u64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+        u64,
+        u64,
+        Option<String>,
+    ),
+    String,
+> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut timestamps: Vec<DateTime<Utc>> = Vec::new();
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(t) else {
+            continue;
+        };
+        let Some(ts) = v.get("ts_utc").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(dt) = DateTime::parse_from_rfc3339(ts) else {
+            continue;
+        };
+        timestamps.push(dt.with_timezone(&Utc));
+    }
+    timestamps.sort_unstable();
+    timestamps.dedup();
+    if let Some(start) = range_start_utc {
+        timestamps.retain(|t| *t >= start);
+    }
+    if let Some(end) = range_end_utc {
+        timestamps.retain(|t| *t <= end);
+    }
+    if timestamps.is_empty() {
+        return Ok((0, None, None, None, None, None, 0, 0, Some("No timestamp rows".to_string())));
+    }
+
+    // For explicit [from,to] analysis range, evaluate strict quality on the whole requested
+    // interval (not "continuous from latest"). This matches operator expectation:
+    // selected window is either OK or incomplete.
+    if let (Some(range_start), Some(range_end)) = (range_start_utc, range_end_utc) {
+        let requested_minutes = range_end
+            .signed_duration_since(range_start)
+            .num_minutes()
+            .max(0) as u64;
+        let requested_hours = requested_minutes / 60;
+        let expected_rows =
+            ((requested_minutes as f64) / cadence_minutes as f64).round().max(1.0) + 1.0;
+
+        let first = timestamps.first().cloned();
+        let last = timestamps.last().cloned();
+        let mut max_gap_min = 0.0_f64;
+        if let Some(f) = first {
+            max_gap_min = max_gap_min.max(
+                f.signed_duration_since(range_start)
+                    .num_minutes()
+                    .max(0) as f64,
+            );
+        }
+        if let Some(l) = last {
+            max_gap_min = max_gap_min.max(
+                range_end
+                    .signed_duration_since(l)
+                    .num_minutes()
+                    .max(0) as f64,
+            );
+        }
+        for i in 1..timestamps.len() {
+            let delta = timestamps[i]
+                .signed_duration_since(timestamps[i - 1])
+                .num_minutes()
+                .max(0) as f64;
+            if delta > max_gap_min {
+                max_gap_min = delta;
+            }
+        }
+
+        let coverage = Some(((timestamps.len() as f64 / expected_rows) * 100.0).clamp(0.0, 100.0));
+        let hard_ok = max_gap_min <= (cfg.hard_gap_multiplier * cadence_minutes) as f64;
+        let recommended_ok = coverage.unwrap_or(0.0) >= cfg.recommended_coverage_pct
+            && max_gap_min <= (cfg.recommended_gap_multiplier * cadence_minutes) as f64;
+
+        let hard_hours = if hard_ok { requested_hours } else { 0 };
+        let recommended_hours = if recommended_ok { requested_hours } else { 0 };
+        let note = if hard_ok && recommended_ok {
+            Some("Selected range OK".to_string())
+        } else {
+            Some("Selected range incomplete".to_string())
+        };
+
+        return Ok((
+            timestamps.len() as u64,
+            first.map(|d| d.to_rfc3339()),
+            last.map(|d| d.to_rfc3339()),
+            Some(range_start.to_rfc3339()),
+            Some(max_gap_min),
+            coverage,
+            hard_hours,
+            recommended_hours,
+            note,
+        ));
+    }
+
+    let oldest = timestamps.first().cloned();
+    let latest = timestamps.last().cloned();
+    let threshold = (cadence_minutes * cfg.hard_gap_multiplier) as i64;
+    let mut oldest_cont_idx = timestamps.len() - 1;
+    let mut max_gap_min = 0.0_f64;
+    for i in (1..timestamps.len()).rev() {
+        let delta = timestamps[i].signed_duration_since(timestamps[i - 1]).num_minutes();
+        if delta as f64 > max_gap_min {
+            max_gap_min = delta as f64;
+        }
+        if delta > threshold {
+            break;
+        }
+        oldest_cont_idx = i - 1;
+    }
+
+    let oldest_cont = timestamps.get(oldest_cont_idx).cloned();
+    let hard_minutes = latest
+        .zip(oldest_cont)
+        .map(|(l, o)| l.signed_duration_since(o).num_minutes().max(0) as u64)
+        .unwrap_or(0);
+    let hard_hours = hard_minutes / 60;
+
+    let mut expected_rows = 0.0_f64;
+    let mut actual_rows = 0.0_f64;
+    for i in oldest_cont_idx + 1..timestamps.len() {
+        let delta = timestamps[i]
+            .signed_duration_since(timestamps[i - 1])
+            .num_minutes()
+            .max(1) as f64;
+        expected_rows += (delta / cadence_minutes as f64).round().max(1.0);
+        actual_rows += 1.0;
+    }
+    let coverage = if expected_rows > 0.0 {
+        Some((actual_rows / expected_rows * 100.0).clamp(0.0, 100.0))
+    } else {
+        Some(100.0)
+    };
+    let recommended_hours = if let Some(cov) = coverage {
+        if cov >= cfg.recommended_coverage_pct
+            && max_gap_min <= (cfg.recommended_gap_multiplier * cadence_minutes) as f64
+        {
+            hard_hours
+        } else {
+            ((hard_hours as f64) * cfg.recommended_fallback_ratio)
+                .floor()
+                .max(0.0) as u64
+        }
+    } else {
+        0
+    };
+
+    Ok((
+        timestamps.len() as u64,
+        oldest.map(|d| d.to_rfc3339()),
+        latest.map(|d| d.to_rfc3339()),
+        timestamps.get(oldest_cont_idx).map(|d| d.to_rfc3339()),
+        Some(max_gap_min),
+        coverage,
+        hard_hours,
+        recommended_hours.min(hard_hours),
+        None,
+    ))
+}
+
+fn classify_readiness_status(
+    row: &BacktestDataReadinessRow,
+    has_custom_range: bool,
+    now: DateTime<Utc>,
+) -> (String, Option<String>, Option<i64>) {
+    let latest_age_secs = row
+        .latest_ts_utc
+        .as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| now.signed_duration_since(dt.with_timezone(&Utc)).num_seconds());
+
+    if row.rows == 0 {
+        return (
+            "missing".to_string(),
+            Some("no_rows".to_string()),
+            latest_age_secs,
+        );
+    }
+
+    if let Some(note) = row.note.as_deref()
+        && note.to_ascii_lowercase().contains("missing file")
+    {
+        return (
+            "missing".to_string(),
+            Some("missing_file".to_string()),
+            latest_age_secs,
+        );
+    }
+
+    if has_custom_range {
+        if row.max_backtest_hours_hard > 0 {
+            if row.max_backtest_hours_recommended > 0 {
+                return ("ok".to_string(), Some("range_ok".to_string()), latest_age_secs);
+            }
+            return (
+                "degraded".to_string(),
+                Some("range_quality_below_recommended".to_string()),
+                latest_age_secs,
+            );
+        }
+        return (
+            "degraded".to_string(),
+            Some("range_incomplete".to_string()),
+            latest_age_secs,
+        );
+    }
+
+    let stale_threshold_secs = if row.cadence_minutes <= 5 { 12 * 60 } else { 20 * 60 };
+    if let Some(age) = latest_age_secs && age > stale_threshold_secs {
+        return (
+            "degraded".to_string(),
+            Some("stale_latest_snapshot".to_string()),
+            Some(age),
+        );
+    }
+
+    if row.max_backtest_hours_hard == 0 {
+        return (
+            "degraded".to_string(),
+            Some("hard_window_unavailable".to_string()),
+            latest_age_secs,
+        );
+    }
+
+    if row.max_backtest_hours_recommended == 0 {
+        return (
+            "recovering".to_string(),
+            Some("recommended_window_unavailable".to_string()),
+            latest_age_secs,
+        );
+    }
+
+    ("ok".to_string(), None, latest_age_secs)
+}
+
+fn aggregate_readiness_status(
+    rows: &[BacktestDataReadinessRow],
+) -> (String, u64, u64, u64, u64) {
+    let mut ok_count = 0_u64;
+    let mut degraded_count = 0_u64;
+    let mut recovering_count = 0_u64;
+    let mut missing_count = 0_u64;
+    for row in rows {
+        match row.status.as_str() {
+            "ok" => ok_count += 1,
+            "degraded" => degraded_count += 1,
+            "recovering" => recovering_count += 1,
+            _ => missing_count += 1,
+        }
+    }
+    let status = if degraded_count > 0 {
+        "degraded"
+    } else if recovering_count > 0 {
+        "recovering"
+    } else if !rows.is_empty() && missing_count == rows.len() as u64 {
+        "missing"
+    } else {
+        "ok"
+    };
+    (
+        status.to_string(),
+        ok_count,
+        degraded_count,
+        recovering_count,
+        missing_count,
+    )
+}
 
 static JOBS: LazyLock<RwLock<HashMap<String, BacktestJobResponse>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -55,6 +663,10 @@ static AUTO_TUNE_STATUS: LazyLock<RwLock<BacktestAutoTuneStatusResponse>> = Lazy
 /// Cache: `(exe path | mtime secs)` -> `backtest-optimize --help` text.
 /// Key includes modification time so a rebuilt `clmm-lp-cli` is re-probed without restarting API.
 static CLI_BACKTEST_OPTIMIZE_HELP_TEXT: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static BACKTEST_READINESS_CONFIG: LazyLock<ReadinessConfig> =
+    LazyLock::new(ReadinessConfig::from_env);
+static BACKTEST_READINESS_CACHE: LazyLock<Mutex<HashMap<String, ReadinessCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn clmm_lp_cli_filename() -> &'static str {
@@ -1138,6 +1750,252 @@ pub async fn get_backtest_strategy_catalog() -> ApiResult<Json<BacktestStrategyC
     }))
 }
 
+/// Compute snapshot data readiness for backtests (coverage/max-gap/max-back-hours).
+#[utoipa::path(
+    post,
+    path = "/backtests/data-readiness",
+    tag = "Analytics",
+    request_body = BacktestDataReadinessRequest,
+    responses((status = 200, description = "Data readiness", body = BacktestDataReadinessResponse))
+)]
+pub async fn get_backtest_data_readiness(
+    State(state): State<AppState>,
+    Json(req): Json<BacktestDataReadinessRequest>,
+) -> ApiResult<Json<BacktestDataReadinessResponse>> {
+    let range_start_utc = req
+        .range_start_utc
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|e| ApiError::bad_request(format!("invalid range_start_utc: {e}")))
+        })
+        .transpose()?;
+    let range_end_utc = req
+        .range_end_utc
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|e| ApiError::bad_request(format!("invalid range_end_utc: {e}")))
+        })
+        .transpose()?;
+    if let (Some(s), Some(e)) = (range_start_utc, range_end_utc)
+        && s > e
+    {
+        return Err(ApiError::bad_request(
+            "range_start_utc must be <= range_end_utc",
+        ));
+    }
+
+    let mut pools = curated_backtest_pools();
+    if let Some(ids) = req.pool_ids.as_ref() {
+        let want: std::collections::HashSet<String> = ids.iter().map(|s| s.to_ascii_uppercase()).collect();
+        pools.retain(|p| want.contains(&p.id.to_ascii_uppercase()));
+    }
+    if pools.is_empty() {
+        return Err(ApiError::bad_request(
+            "No pools selected for data readiness check",
+        ));
+    }
+    let variants = parse_snapshot_variants(req.snapshot_variants.as_ref())?;
+    let variant_labels: Vec<String> = variants.iter().map(|v| v.label.to_string()).collect();
+    let selected_pool_ids: Vec<String> = pools.iter().map(|p| p.id.to_string()).collect();
+    let cache_key = readiness_cache_key(
+        &selected_pool_ids,
+        &variant_labels,
+        req.range_start_utc.as_deref(),
+        req.range_end_utc.as_deref(),
+    );
+    let cfg = BACKTEST_READINESS_CONFIG.clone();
+    let has_custom_range = range_start_utc.is_some() || range_end_utc.is_some();
+    if cfg.cache_ttl_secs > 0 {
+        let cached = {
+            let cache = BACKTEST_READINESS_CACHE
+                .lock()
+                .expect("backtest readiness cache lock");
+            cache.get(&cache_key).cloned()
+        };
+        if let Some(entry) = cached {
+            let age_secs = (Utc::now() - entry.ts_utc).num_seconds();
+            if age_secs >= 0 && age_secs <= cfg.cache_ttl_secs {
+                return Ok(Json(entry.response));
+            }
+        }
+    }
+    let mut used_db_source = false;
+    let db_stale_rows = if !has_custom_range && let Some(db) = state.db.as_ref() {
+        count_stale_readiness_rows_in_db(db, &selected_pool_ids, &variant_labels, &cfg)
+            .await
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut rows: Vec<BacktestDataReadinessRow> = if !has_custom_range && let Some(db) = state.db.as_ref() {
+        match load_readiness_rows_from_db(db, &selected_pool_ids, &variant_labels, &cfg).await {
+            Ok(Some(db_rows)) => {
+                used_db_source = true;
+                db_rows
+            }
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                warn!(error = %e, "readiness DB lookup failed; using on-demand fallback");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    if rows.is_empty() {
+        for variant in variants {
+            for pool in &pools {
+                let path = PathBuf::from("data")
+                    .join("pool-snapshots")
+                    .join(pool.protocol)
+                    .join(pool.pool_address)
+                    .join(snapshot_file_name_for_variant(variant));
+                if !path.exists() {
+                    rows.push(BacktestDataReadinessRow {
+                        pool_id: pool.id.to_string(),
+                        pool_label: pool.label.to_string(),
+                        protocol: pool.protocol.to_string(),
+                        pool_address: pool.pool_address.to_string(),
+                        snapshot_variant: variant.label.to_string(),
+                        cadence_minutes: variant.cadence_minutes,
+                        rows: 0,
+                        oldest_ts_utc: None,
+                        latest_ts_utc: None,
+                        oldest_continuous_ts_utc: None,
+                        max_gap_minutes: None,
+                        coverage_pct: None,
+                        max_backtest_hours_hard: 0,
+                        max_backtest_hours_recommended: 0,
+                        status: "missing".to_string(),
+                        status_reason: Some("missing_file".to_string()),
+                        latest_age_secs: None,
+                        note: Some(format!("Missing file: {}", path.display())),
+                    });
+                    continue;
+                }
+                let (count, oldest, latest, oldest_cont, max_gap, coverage, hard_h, rec_h, note) =
+                    evaluate_snapshot_readiness(
+                        &path,
+                        variant.cadence_minutes,
+                        &cfg,
+                        range_start_utc,
+                        range_end_utc,
+                    )
+                        .map_err(ApiError::internal)?;
+                rows.push(BacktestDataReadinessRow {
+                    pool_id: pool.id.to_string(),
+                    pool_label: pool.label.to_string(),
+                    protocol: pool.protocol.to_string(),
+                    pool_address: pool.pool_address.to_string(),
+                    snapshot_variant: variant.label.to_string(),
+                    cadence_minutes: variant.cadence_minutes,
+                    rows: count,
+                    oldest_ts_utc: oldest,
+                    latest_ts_utc: latest,
+                    oldest_continuous_ts_utc: oldest_cont,
+                    max_gap_minutes: max_gap,
+                    coverage_pct: coverage,
+                    max_backtest_hours_hard: hard_h,
+                    max_backtest_hours_recommended: rec_h,
+                    status: "ok".to_string(),
+                    status_reason: None,
+                    latest_age_secs: None,
+                    note,
+                });
+            }
+        }
+        if !has_custom_range && let Some(db) = state.db.as_ref()
+            && let Err(e) = upsert_readiness_rows_best_effort(db, &rows).await
+        {
+            warn!(error = %e, "readiness DB upsert failed after on-demand fallback");
+        }
+    }
+    let pool_count = rows
+        .iter()
+        .map(|r| r.pool_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64;
+    let variant_count = rows
+        .iter()
+        .map(|r| r.snapshot_variant.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64;
+    let now = Utc::now();
+    for row in &mut rows {
+        let (status, reason, latest_age_secs) = classify_readiness_status(row, has_custom_range, now);
+        row.status = status;
+        row.status_reason = reason;
+        row.latest_age_secs = latest_age_secs;
+    }
+    let (
+        aggregate_status,
+        status_ok_count,
+        status_degraded_count,
+        status_recovering_count,
+        status_missing_count,
+    ) = aggregate_readiness_status(&rows);
+    let aggregate = BacktestDataReadinessAggregate {
+        pool_count,
+        variant_count,
+        max_backtest_hours_hard: rows
+            .iter()
+            .map(|r| r.max_backtest_hours_hard)
+            .min()
+            .unwrap_or(0),
+        max_backtest_hours_recommended: rows
+            .iter()
+            .map(|r| r.max_backtest_hours_recommended)
+            .min()
+            .unwrap_or(0),
+        status: aggregate_status,
+        status_ok_count,
+        status_degraded_count,
+        status_recovering_count,
+        status_missing_count,
+        source: if used_db_source {
+            "db".to_string()
+        } else {
+            "fallback".to_string()
+        },
+        db_stale_rows,
+    };
+    let thresholds = BacktestDataReadinessThresholds {
+        cache_ttl_secs: cfg.cache_ttl_secs,
+        db_max_age_secs: cfg.db_max_age_secs,
+        hard_gap_multiplier: cfg.hard_gap_multiplier,
+        recommended_coverage_pct: cfg.recommended_coverage_pct,
+        recommended_gap_multiplier: cfg.recommended_gap_multiplier,
+        recommended_fallback_ratio: cfg.recommended_fallback_ratio,
+    };
+    let response = BacktestDataReadinessResponse {
+        rows,
+        aggregate,
+        thresholds,
+    };
+    if cfg.cache_ttl_secs > 0 {
+        let mut cache = BACKTEST_READINESS_CACHE
+            .lock()
+            .expect("backtest readiness cache lock");
+        cache.insert(
+            cache_key,
+            ReadinessCacheEntry {
+                ts_utc: Utc::now(),
+                response: response.clone(),
+            },
+        );
+    }
+    Ok(Json(response))
+}
+
 /// Run FULL backtest matrix (curated pools × windows) via `backtest-optimize`.
 #[utoipa::path(
     post,
@@ -1167,6 +2025,7 @@ pub async fn start_backtest_full(
     if pools.is_empty() {
         return Err(ApiError::bad_request("No pools selected for full backtest run"));
     }
+    let snapshot_variants = parse_snapshot_variants(req.snapshot_variants.as_ref())?;
 
     let id = Uuid::new_v4().to_string();
     let job = BacktestFullJobResponse {
@@ -1252,6 +2111,7 @@ pub async fn start_backtest_full(
     let threshold_rebalance_on_range_exit_immediately =
         req.threshold_rebalance_on_range_exit_immediately;
     let periodic_grid_steps = req.periodic_grid_steps.clone();
+    let bollinger_rebalance_hours_grid = req.bollinger_rebalance_hours_grid.clone();
     let retouch_offset_pct = req.retouch_offset_pct;
     let bollinger_window_grid = req.bollinger_window_grid.clone();
     let bollinger_k_grid = req.bollinger_k_grid.clone();
@@ -1300,6 +2160,8 @@ pub async fn start_backtest_full(
         let help_text = cli_backtest_optimize_help_text(&cli_path);
         let threshold_oor_flag_accepts_value = help_text
             .contains("--threshold-rebalance-on-range-exit-immediately <");
+        let snapshot_jsonl_suffix_requested = snapshot_variants.iter().any(|v| v.suffix.is_some());
+        let snapshot_jsonl_suffix_supported = help_text.contains("snapshot-jsonl-suffix");
         let threshold_grid_requested = threshold_grid_pct
             .as_ref()
             .map(|v| !v.is_empty())
@@ -1340,6 +2202,7 @@ pub async fn start_backtest_full(
             .map(|v| !v.is_empty())
             .unwrap_or(false);
         let requested_grid_overrides = [
+            ("--snapshot-jsonl-suffix", snapshot_jsonl_suffix_requested),
             ("--threshold-grid-pct", threshold_grid_requested),
             (
                 "--threshold-min-rebalance-interval-hours",
@@ -1380,6 +2243,19 @@ pub async fn start_backtest_full(
                 }
             })
             .collect();
+        if !snapshot_jsonl_suffix_supported && snapshot_jsonl_suffix_requested {
+            let mut w = FULL_JOBS.write().await;
+            if let Some(mut cur) = w.get(&job_id).cloned() {
+                cur.status = "failed".to_string();
+                cur.stderr = Some(format!(
+                    "clmm-lp-cli at {} does not support --snapshot-jsonl-suffix required for selected snapshot_variants. Rebuild CLI (`cargo build --release -p clmm-lp-cli` or `cargo build -p clmm-lp-cli`) and restart API.",
+                    cli_path.display()
+                ));
+                cur.finished_ts_utc = Some(chrono::Utc::now().to_rfc3339());
+                w.insert(job_id.clone(), cur);
+            }
+            return;
+        }
         if !missing_grid_flags.is_empty() {
             warn!(
                 "backtests/full: clmm-lp-cli {} missing requested optimize-grid flags: {}",
@@ -1403,33 +2279,51 @@ pub async fn start_backtest_full(
         let mut all_results: Vec<BacktestFullWindowResult> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
-        for pool in pools {
-            let snapshots_path = PathBuf::from("data")
-                .join("pool-snapshots")
-                .join(pool.protocol)
-                .join(pool.pool_address)
-                .join("snapshots.jsonl");
-            if !snapshots_path.exists() {
-                errors.push(format!(
-                    "{} {}h: missing snapshots file {}",
-                    pool.id,
-                    0,
-                    snapshots_path.display()
-                ));
-                continue;
-            }
-            for h in &windows {
-                let mut cmd = Command::new(&cli_path);
-                cmd.arg("backtest-optimize");
-                cmd.arg("--symbol-a").arg(pool.symbol_a);
-                cmd.arg("--mint-a").arg(pool.mint_a);
-                cmd.arg("--symbol-b").arg(pool.symbol_b);
-                cmd.arg("--mint-b").arg(pool.mint_b);
-                cmd.arg("--price-path-source").arg("snapshots");
-                cmd.arg("--fee-source").arg("snapshots");
-                cmd.arg("--snapshot-protocol").arg(pool.protocol);
-                cmd.arg("--snapshot-pool-address").arg(pool.pool_address);
-                cmd.arg("--hours").arg(h.to_string());
+        for variant in &snapshot_variants {
+            for pool in &pools {
+                let snapshot_filename = match variant.suffix {
+                    Some(s) => format!("snapshots_{s}.jsonl"),
+                    None => "snapshots.jsonl".to_string(),
+                };
+                let snapshots_path = PathBuf::from("data")
+                    .join("pool-snapshots")
+                    .join(pool.protocol)
+                    .join(pool.pool_address)
+                    .join(snapshot_filename);
+                if !snapshots_path.exists() {
+                    errors.push(format!(
+                        "{} {}: missing snapshots file {}",
+                        variant.label,
+                        pool.id,
+                        snapshots_path.display()
+                    ));
+                    continue;
+                }
+                let bollinger_rebalance_steps_for_variant = match (
+                    bollinger_rebalance_hours_grid.as_ref(),
+                    bollinger_rebalance_steps_grid.as_ref(),
+                ) {
+                    (Some(hours), _) if !hours.is_empty() => {
+                        Some(hours_grid_to_steps(hours, variant.cadence_minutes))
+                    }
+                    (_, Some(steps)) => Some(steps.clone()),
+                    _ => None,
+                };
+                for h in &windows {
+                    let mut cmd = Command::new(&cli_path);
+                    cmd.arg("backtest-optimize");
+                    cmd.arg("--symbol-a").arg(pool.symbol_a);
+                    cmd.arg("--mint-a").arg(pool.mint_a);
+                    cmd.arg("--symbol-b").arg(pool.symbol_b);
+                    cmd.arg("--mint-b").arg(pool.mint_b);
+                    cmd.arg("--price-path-source").arg("snapshots");
+                    cmd.arg("--fee-source").arg("snapshots");
+                    cmd.arg("--snapshot-protocol").arg(pool.protocol);
+                    cmd.arg("--snapshot-pool-address").arg(pool.pool_address);
+                    if let Some(suffix) = variant.suffix {
+                        cmd.arg("--snapshot-jsonl-suffix").arg(suffix);
+                    }
+                    cmd.arg("--hours").arg(h.to_string());
                 if let Some(dev_pct) = static_deviation_pct.or(oor_recenter_deviation_pct) {
                     let width_pct = 2.0 * dev_pct;
                     cmd.arg("--min-range-pct").arg(width_pct.to_string());
@@ -1510,7 +2404,10 @@ pub async fn start_backtest_full(
                             .join(","),
                     );
                 }
-                if let Some(v) = bollinger_rebalance_steps_grid.as_ref().filter(|v| !v.is_empty()) {
+                if let Some(v) = bollinger_rebalance_steps_for_variant
+                    .as_ref()
+                    .filter(|v| !v.is_empty())
+                {
                     cmd.arg("--bollinger-rebalance-steps-grid").arg(
                         v.iter()
                             .map(|x| x.to_string())
@@ -1559,7 +2456,8 @@ pub async fn start_backtest_full(
                     Ok(out) => {
                         if !out.status.success() {
                             errors.push(format!(
-                                "{} {}h: exit {:?}: {}",
+                                "{} {} {}h: exit {:?}: {}",
+                                variant.label,
                                 pool.id,
                                 h,
                                 out.status.code(),
@@ -1577,15 +2475,20 @@ pub async fn start_backtest_full(
                             pool_label: pool.label.to_string(),
                             pool_address: pool.pool_address.to_string(),
                             protocol: pool.protocol.to_string(),
+                            snapshot_variant: variant.label.to_string(),
                             window_hours: *h,
                             metrics,
                             note: None,
                         });
                     }
                     Err(e) => {
-                        errors.push(format!("{} {}h: spawn error: {}", pool.id, h, e));
+                        errors.push(format!(
+                            "{} {} {}h: spawn error: {}",
+                            variant.label, pool.id, h, e
+                        ));
                     }
                 }
+            }
             }
         }
 
@@ -1922,4 +2825,246 @@ pub async fn apply_backtest_auto_tune_to_strategy(
         updated: true,
         note: "Applied latest auto-tune winner to strategy config. Restart strategy if running to reload executor config.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ReadinessConfig, SnapshotVariant, aggregate_readiness_status, classify_readiness_status,
+        evaluate_snapshot_readiness, hours_grid_to_steps, parse_snapshot_variants,
+        readiness_cache_key, snapshot_file_name_for_variant,
+    };
+    use crate::models::BacktestDataReadinessRow;
+    use chrono::{Duration, Utc};
+    use std::io::Write;
+
+    #[test]
+    fn parse_snapshot_variants_defaults_and_deduplicates() {
+        let default_variants = parse_snapshot_variants(None).expect("default variants should parse");
+        assert_eq!(default_variants.len(), 1);
+        assert_eq!(default_variants[0].label, "10m");
+        assert_eq!(default_variants[0].cadence_minutes, 10);
+
+        let raw = vec!["5m".to_string(), "10m".to_string(), "5m".to_string()];
+        let variants =
+            parse_snapshot_variants(Some(&raw)).expect("provided variants should parse and dedupe");
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].label, "10m");
+        assert_eq!(variants[1].label, "5m");
+    }
+
+    #[test]
+    fn parse_snapshot_variants_rejects_unknown_or_empty() {
+        let empty = vec!["".to_string(), "   ".to_string()];
+        assert!(parse_snapshot_variants(Some(&empty)).is_err());
+
+        let bad = vec!["1m".to_string()];
+        assert!(parse_snapshot_variants(Some(&bad)).is_err());
+    }
+
+    #[test]
+    fn hours_grid_to_steps_converts_and_filters_invalid_values() {
+        let hours = vec![2.0, 4.5, 0.0, -1.0, f64::NAN];
+        let steps_10m = hours_grid_to_steps(&hours, 10);
+        assert_eq!(steps_10m, vec![12, 27]);
+
+        let steps_5m = hours_grid_to_steps(&[2.0], 5);
+        assert_eq!(steps_5m, vec![24]);
+    }
+
+    #[test]
+    fn readiness_cache_key_is_order_invariant() {
+        let p1 = vec!["b".to_string(), "a".to_string()];
+        let v1 = vec!["5m".to_string(), "10m".to_string()];
+        let p2 = vec!["a".to_string(), "b".to_string()];
+        let v2 = vec!["10m".to_string(), "5m".to_string()];
+        assert_eq!(
+            readiness_cache_key(&p1, &v1, None, None),
+            readiness_cache_key(&p2, &v2, None, None)
+        );
+    }
+
+    #[test]
+    fn snapshot_file_name_matches_variant() {
+        let v10 = SnapshotVariant {
+            label: "10m",
+            suffix: None,
+            cadence_minutes: 10,
+        };
+        let v5 = SnapshotVariant {
+            label: "5m",
+            suffix: Some("5m"),
+            cadence_minutes: 5,
+        };
+        assert_eq!(snapshot_file_name_for_variant(v10), "snapshots.jsonl");
+        assert_eq!(snapshot_file_name_for_variant(v5), "snapshots_5m.jsonl");
+    }
+
+    #[test]
+    fn evaluate_snapshot_readiness_handles_short_window() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        // 6 points every 10 minutes => 50 minutes of continuous data.
+        for i in 0..6 {
+            let ts = format!("2026-01-01T00:{:02}:00Z", i * 10);
+            let line = format!(r#"{{"ts_utc":"{ts}"}}"#);
+            writeln!(tmp, "{line}").expect("write line");
+        }
+
+        let cfg = ReadinessConfig {
+            cache_ttl_secs: 120,
+            db_max_age_secs: 600,
+            hard_gap_multiplier: 6,
+            recommended_coverage_pct: 95.0,
+            recommended_gap_multiplier: 2,
+            recommended_fallback_ratio: 0.7,
+        };
+        let result =
+            evaluate_snapshot_readiness(tmp.path(), 10, &cfg, None, None).expect("readiness");
+        assert_eq!(result.0, 6);
+        assert_eq!(result.6, 0);
+        assert_eq!(result.7, 0);
+        assert_eq!(result.8, None);
+        assert!(result.5.unwrap_or(0.0) > 90.0);
+    }
+
+    #[test]
+    fn evaluate_snapshot_readiness_applies_recommended_fallback_on_large_gap() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        // Gap: 90 minutes between the first and second row.
+        let lines = [
+            r#"{"ts_utc":"2026-01-01T00:00:00Z"}"#,
+            r#"{"ts_utc":"2026-01-01T01:30:00Z"}"#,
+            r#"{"ts_utc":"2026-01-01T01:40:00Z"}"#,
+            r#"{"ts_utc":"2026-01-01T01:50:00Z"}"#,
+            r#"{"ts_utc":"2026-01-01T02:00:00Z"}"#,
+            r#"{"ts_utc":"2026-01-01T02:10:00Z"}"#,
+            r#"{"ts_utc":"2026-01-01T02:20:00Z"}"#,
+        ];
+        for line in lines {
+            writeln!(tmp, "{line}").expect("write line");
+        }
+
+        let cfg = ReadinessConfig {
+            cache_ttl_secs: 120,
+            db_max_age_secs: 600,
+            hard_gap_multiplier: 20,
+            recommended_coverage_pct: 95.0,
+            recommended_gap_multiplier: 2,
+            recommended_fallback_ratio: 0.5,
+        };
+        let result =
+            evaluate_snapshot_readiness(tmp.path(), 10, &cfg, None, None).expect("readiness");
+        assert_eq!(result.6, 2);
+        assert_eq!(result.7, 1);
+        assert_eq!(result.8, None);
+    }
+
+    #[test]
+    fn classify_readiness_status_marks_stale_rows_as_degraded() {
+        let now = Utc::now();
+        let row = BacktestDataReadinessRow {
+            pool_id: "p".to_string(),
+            pool_label: "p".to_string(),
+            protocol: "orca".to_string(),
+            pool_address: "x".to_string(),
+            snapshot_variant: "10m".to_string(),
+            cadence_minutes: 10,
+            rows: 10,
+            oldest_ts_utc: None,
+            latest_ts_utc: Some((now - Duration::minutes(30)).to_rfc3339()),
+            oldest_continuous_ts_utc: None,
+            max_gap_minutes: Some(10.0),
+            coverage_pct: Some(99.0),
+            max_backtest_hours_hard: 10,
+            max_backtest_hours_recommended: 10,
+            status: "ok".to_string(),
+            status_reason: None,
+            latest_age_secs: None,
+            note: None,
+        };
+        let (status, reason, age) = classify_readiness_status(&row, false, now);
+        assert_eq!(status, "degraded");
+        assert_eq!(reason.as_deref(), Some("stale_latest_snapshot"));
+        assert!(age.unwrap_or_default() > 20 * 60);
+    }
+
+    #[test]
+    fn classify_readiness_status_uses_range_logic_for_custom_window() {
+        let now = Utc::now();
+        let row = BacktestDataReadinessRow {
+            pool_id: "p".to_string(),
+            pool_label: "p".to_string(),
+            protocol: "orca".to_string(),
+            pool_address: "x".to_string(),
+            snapshot_variant: "5m".to_string(),
+            cadence_minutes: 5,
+            rows: 50,
+            oldest_ts_utc: None,
+            latest_ts_utc: Some((now - Duration::hours(6)).to_rfc3339()),
+            oldest_continuous_ts_utc: None,
+            max_gap_minutes: Some(8.0),
+            coverage_pct: Some(92.0),
+            max_backtest_hours_hard: 24,
+            max_backtest_hours_recommended: 0,
+            status: "ok".to_string(),
+            status_reason: None,
+            latest_age_secs: None,
+            note: Some("Selected range incomplete".to_string()),
+        };
+        let (status, reason, _) = classify_readiness_status(&row, true, now);
+        assert_eq!(status, "degraded");
+        assert_eq!(reason.as_deref(), Some("range_quality_below_recommended"));
+    }
+
+    #[test]
+    fn aggregate_readiness_status_prioritizes_degraded_over_recovering() {
+        let rows = vec![
+            BacktestDataReadinessRow {
+                pool_id: "a".to_string(),
+                pool_label: "a".to_string(),
+                protocol: "orca".to_string(),
+                pool_address: "a".to_string(),
+                snapshot_variant: "10m".to_string(),
+                cadence_minutes: 10,
+                rows: 1,
+                oldest_ts_utc: None,
+                latest_ts_utc: None,
+                oldest_continuous_ts_utc: None,
+                max_gap_minutes: None,
+                coverage_pct: None,
+                max_backtest_hours_hard: 0,
+                max_backtest_hours_recommended: 0,
+                status: "recovering".to_string(),
+                status_reason: None,
+                latest_age_secs: None,
+                note: None,
+            },
+            BacktestDataReadinessRow {
+                pool_id: "b".to_string(),
+                pool_label: "b".to_string(),
+                protocol: "orca".to_string(),
+                pool_address: "b".to_string(),
+                snapshot_variant: "10m".to_string(),
+                cadence_minutes: 10,
+                rows: 1,
+                oldest_ts_utc: None,
+                latest_ts_utc: None,
+                oldest_continuous_ts_utc: None,
+                max_gap_minutes: None,
+                coverage_pct: None,
+                max_backtest_hours_hard: 0,
+                max_backtest_hours_recommended: 0,
+                status: "degraded".to_string(),
+                status_reason: None,
+                latest_age_secs: None,
+                note: None,
+            },
+        ];
+        let (status, ok, degraded, recovering, missing) = aggregate_readiness_status(&rows);
+        assert_eq!(status, "degraded");
+        assert_eq!(ok, 0);
+        assert_eq!(degraded, 1);
+        assert_eq!(recovering, 1);
+        assert_eq!(missing, 0);
+    }
 }

@@ -351,6 +351,7 @@ export interface BacktestFullRequest {
   include_indicator_strategies?: boolean
   objective?: string
   pool_ids?: string[]
+  snapshot_variants?: string[]
   lp_share?: number
   capital_usd?: number
   target_vs_hodl_usd?: number
@@ -370,10 +371,68 @@ export interface BacktestFullRequest {
   bollinger_window_grid?: number[]
   bollinger_k_grid?: number[]
   bollinger_rebalance_steps_grid?: number[]
+  bollinger_rebalance_hours_grid?: number[]
   last_candle_steps_grid?: number[]
   last_candle_rebalance_steps_grid?: number[]
   last_candle_seconds_grid?: number[]
   last_candle_rebalance_seconds_grid?: number[]
+}
+
+export interface BacktestDataReadinessRequest {
+  pool_ids?: string[]
+  snapshot_variants?: string[]
+  range_start_utc?: string
+  range_end_utc?: string
+}
+
+export interface BacktestDataReadinessRow {
+  pool_id: string
+  pool_label: string
+  protocol: string
+  pool_address: string
+  snapshot_variant: string
+  cadence_minutes: number
+  rows: number
+  oldest_ts_utc?: string | null
+  latest_ts_utc?: string | null
+  oldest_continuous_ts_utc?: string | null
+  max_gap_minutes?: number | null
+  coverage_pct?: number | null
+  max_backtest_hours_hard: number
+  max_backtest_hours_recommended: number
+  status: 'ok' | 'degraded' | 'recovering' | 'missing'
+  status_reason?: string | null
+  latest_age_secs?: number | null
+  note?: string | null
+}
+
+export interface BacktestDataReadinessAggregate {
+  pool_count: number
+  variant_count: number
+  max_backtest_hours_hard: number
+  max_backtest_hours_recommended: number
+  status: 'ok' | 'degraded' | 'recovering' | 'missing'
+  status_ok_count: number
+  status_degraded_count: number
+  status_recovering_count: number
+  status_missing_count: number
+  source: 'db' | 'fallback'
+  db_stale_rows: number
+}
+
+export interface BacktestDataReadinessThresholds {
+  cache_ttl_secs: number
+  db_max_age_secs: number
+  hard_gap_multiplier: number
+  recommended_coverage_pct: number
+  recommended_gap_multiplier: number
+  recommended_fallback_ratio: number
+}
+
+export interface BacktestDataReadinessResponse {
+  rows: BacktestDataReadinessRow[]
+  aggregate: BacktestDataReadinessAggregate
+  thresholds: BacktestDataReadinessThresholds
 }
 
 export interface BacktestFullMetricRow {
@@ -396,6 +455,7 @@ export interface BacktestFullWindowResult {
   pool_label: string
   pool_address: string
   protocol: string
+  snapshot_variant: string
   window_hours: number
   metrics: BacktestFullMetricRow[]
   note?: string | null
@@ -967,6 +1027,12 @@ export const startBacktestFull = (body: BacktestFullRequest) =>
 
 export const getBacktestFullJob = (id: string) =>
   fetchJson<BacktestFullJobResponse>(`/backtests/full/${encodeURIComponent(id)}`)
+
+export const getBacktestDataReadiness = (body: BacktestDataReadinessRequest) =>
+  fetchJson<BacktestDataReadinessResponse>('/backtests/data-readiness', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 
 export const startBacktestAutoTune = (body: BacktestAutoTuneStartRequest) =>
   fetchJsonLong<BacktestAutoTuneStatusResponse>('/backtests/auto-tune/start', {

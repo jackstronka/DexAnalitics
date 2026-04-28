@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   getBacktestAutoTuneStatus,
+  getBacktestDataReadiness,
   getBacktestFullJob,
   getPools,
   getBacktestStrategyCatalog,
@@ -9,6 +10,7 @@ import {
   startBacktestFull,
   stopBacktestAutoTune,
   type BacktestFullWindowResult,
+  type BacktestDataReadinessResponse,
   type Pool,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -152,6 +154,17 @@ function parseCsvUInt64s(raw: string): number[] | undefined {
   return arr.length > 0 ? arr : undefined
 }
 
+/** Positive float CSV parser (e.g. hour grids). */
+function parseCsvPositiveFloats(raw: string): number[] | undefined {
+  const arr = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => Number(s))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  return arr.length > 0 ? arr : undefined
+}
+
 function strategyTooltip(strategy: string): string | undefined {
   const boll = strategy.match(/^bollinger_w(\d+)_k([0-9.]+)_r(\d+)$/i)
   if (boll) {
@@ -209,10 +222,10 @@ type StrategyHelp = {
 type GridPreset = {
   name: 'Ultra-safe' | 'Conservative' | 'Balanced' | 'Aggressive' | 'Scalper'
   thresholdGridPct: string
-  periodicGridSteps: string
+  periodicGridHours: string
   bollingerWindowGrid: string
   bollingerKGrid: string
-  bollingerRebalanceStepsGrid: string
+  bollingerRebalanceHoursGrid: string
   lastCandleSecondsGrid: string
   lastCandleRebalanceSecondsGrid: string
 }
@@ -311,50 +324,50 @@ const GRID_PRESETS: GridPreset[] = [
   {
     name: 'Ultra-safe',
     thresholdGridPct: '10,15,20',
-    periodicGridSteps: '72,96,144',
+    periodicGridHours: '72,96,144',
     bollingerWindowGrid: '30,40',
     bollingerKGrid: '2.5,3.0',
-    bollingerRebalanceStepsGrid: '48,72',
+    bollingerRebalanceHoursGrid: '8,12',
     lastCandleSecondsGrid: '1800,3600,7200',
     lastCandleRebalanceSecondsGrid: '14400,43200,86400',
   },
   {
     name: 'Conservative',
     thresholdGridPct: '7,10,15',
-    periodicGridSteps: '48,72',
+    periodicGridHours: '48,72',
     bollingerWindowGrid: '20,30',
     bollingerKGrid: '2.0,2.5',
-    bollingerRebalanceStepsGrid: '48',
+    bollingerRebalanceHoursGrid: '8',
     lastCandleSecondsGrid: '1800,3600',
     lastCandleRebalanceSecondsGrid: '3600,14400,43200',
   },
   {
     name: 'Balanced',
     thresholdGridPct: '3,5,7,10',
-    periodicGridSteps: '24,48,72',
+    periodicGridHours: '24,48,72',
     bollingerWindowGrid: '20',
     bollingerKGrid: '1.5,2.0,2.5',
-    bollingerRebalanceStepsGrid: '24,48',
+    bollingerRebalanceHoursGrid: '4,8',
     lastCandleSecondsGrid: '900,1800,2700,3600',
     lastCandleRebalanceSecondsGrid: '1800,3600,14400,43200',
   },
   {
     name: 'Aggressive',
     thresholdGridPct: '2,3,5,7',
-    periodicGridSteps: '12,24,48',
+    periodicGridHours: '12,24,48',
     bollingerWindowGrid: '10,20',
     bollingerKGrid: '1.0,1.5,2.0',
-    bollingerRebalanceStepsGrid: '12,24',
+    bollingerRebalanceHoursGrid: '2,4',
     lastCandleSecondsGrid: '900,1800,2700',
     lastCandleRebalanceSecondsGrid: '900,1800,2700,3600,14400',
   },
   {
     name: 'Scalper',
     thresholdGridPct: '1,1.5,2,3',
-    periodicGridSteps: '6,12,24',
+    periodicGridHours: '6,12,24',
     bollingerWindowGrid: '8,10,14',
     bollingerKGrid: '0.8,1.0,1.5',
-    bollingerRebalanceStepsGrid: '6,12,24',
+    bollingerRebalanceHoursGrid: '1,2,4',
     lastCandleSecondsGrid: '300,600,900',
     lastCandleRebalanceSecondsGrid: '300,600,900,1800',
   },
@@ -373,10 +386,11 @@ function strategyFamily(strategy: string): string {
 }
 
 export default function Backtests() {
-  const { t, locale } = useI18n()
-  const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
+  const { t } = useI18n()
   const [selectedWindows, setSelectedWindows] = useState<number[]>([...WINDOWS])
+  const [customWindowHours, setCustomWindowHours] = useState('')
   const [selectedPools, setSelectedPools] = useState<string[]>(POOLS.map((p) => p.id))
+  const [selectedSnapshotVariants, setSelectedSnapshotVariants] = useState<string[]>(['10m'])
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>([])
   const [includeIndicators, setIncludeIndicators] = useState(true)
   const [objective, setObjective] = useState('vs-hodl')
@@ -393,18 +407,19 @@ export default function Backtests() {
   const [thresholdMinRebalanceIntervalHours, setThresholdMinRebalanceIntervalHours] = useState('0')
   const [thresholdRebalanceOnRangeExitImmediately, setThresholdRebalanceOnRangeExitImmediately] =
     useState(true)
-  /** CLI/back-end: periodic hours grid (u64). */
-  const [periodicGridSteps, setPeriodicGridSteps] = useState('12,24,48,72')
+  /** CLI/back-end legacy flag name: periodic-grid-steps actually means wall-clock hours. */
+  const [periodicGridHours, setPeriodicGridHours] = useState('12,24,48,72')
   const [retouchOffsetPct, setRetouchOffsetPct] = useState('0')
   const [bollingerWindowGrid, setBollingerWindowGrid] = useState('20')
   const [bollingerKGrid, setBollingerKGrid] = useState('1,1.5,2,0.2,5')
-  const [bollingerRebalanceStepsGrid, setBollingerRebalanceStepsGrid] = useState('24,48')
+  const [bollingerRebalanceHoursGrid, setBollingerRebalanceHoursGrid] = useState('4,8')
   const [lastCandleSecondsGrid, setLastCandleSecondsGrid] = useState('900,1800,2700,3600')
   const [lastCandleRebalanceSecondsGrid, setLastCandleRebalanceSecondsGrid] = useState(
     '900,1800,2700,3600,14400,43200',
   )
   const [jobId, setJobId] = useState<string | null>(null)
   const [lastRunCapitalUsd, setLastRunCapitalUsd] = useState<number | null>(8000)
+  const customWindowHoursNum = parseOptionalNumber(customWindowHours)
   const poolsQ = useQuery({
     queryKey: ['pools'],
     queryFn: getPools,
@@ -449,6 +464,17 @@ export default function Backtests() {
     },
   })
 
+  const readinessQ = useQuery<BacktestDataReadinessResponse>({
+    queryKey: ['backtests-data-readiness', selectedPools, selectedSnapshotVariants],
+    queryFn: () =>
+      getBacktestDataReadiness({
+        pool_ids: selectedPools,
+        snapshot_variants: selectedSnapshotVariants,
+      }),
+    enabled: selectedPools.length > 0 && selectedSnapshotVariants.length > 0,
+    refetchInterval: 60_000,
+  })
+
   const strategies = catalogQ.data?.strategies ?? []
   const selectedStrategySet = useMemo(
     () => new Set(selectedStrategies),
@@ -472,12 +498,33 @@ export default function Backtests() {
     () => OBJECTIVES.find((o) => o.id === objective) ?? OBJECTIVES[0],
     [objective],
   )
+  const effectiveWindows = useMemo(() => {
+    const set = new Set<number>(selectedWindows)
+    if (
+      customWindowHoursNum !== undefined &&
+      Number.isFinite(customWindowHoursNum) &&
+      customWindowHoursNum > 0
+    ) {
+      set.add(Math.floor(customWindowHoursNum))
+    }
+    return [...set].filter((x) => x > 0).sort((a, b) => a - b)
+  }, [selectedWindows, customWindowHoursNum])
+  const readinessHardHours = readinessQ.data?.aggregate.max_backtest_hours_hard ?? 0
+  const readinessRecommendedHours =
+    readinessQ.data?.aggregate.max_backtest_hours_recommended ?? 0
+  const customWindowExceedsHard =
+    customWindowHoursNum !== undefined &&
+    customWindowHoursNum > 0 &&
+    readinessHardHours > 0 &&
+    customWindowHoursNum > readinessHardHours
 
   const sortedResults = useMemo(() => {
     const items = (jobQ.data?.results ?? []) as BacktestFullWindowResult[]
     return [...items].sort((a, b) => {
       const byPool = a.pool_label.localeCompare(b.pool_label)
       if (byPool !== 0) return byPool
+      const byVariant = a.snapshot_variant.localeCompare(b.snapshot_variant)
+      if (byVariant !== 0) return byVariant
       return a.window_hours - b.window_hours
     })
   }, [jobQ.data?.results])
@@ -500,8 +547,9 @@ export default function Backtests() {
       const ratio1h24h = v24 > 0 ? v1 / (v24 / 24) : 0
       const label = approxWindowVol < 100_000 ? 'niska' : approxWindowVol < 1_000_000 ? 'srednia' : 'wysoka'
       return {
-        key: `${r.pool_id}-${r.window_hours}`,
+        key: `${r.pool_id}-${r.snapshot_variant}-${r.window_hours}`,
         poolLabel: r.pool_label,
+        snapshotVariant: r.snapshot_variant,
         windowHours: r.window_hours,
         approxWindowVol,
         ratio1h24h,
@@ -513,8 +561,9 @@ export default function Backtests() {
   const qualifyingTop3 = useMemo(
     () =>
       sortedResults.map((r) => ({
-        key: `${r.pool_id}-${r.window_hours}`,
+        key: `${r.pool_id}-${r.snapshot_variant}-${r.window_hours}`,
         poolLabel: r.pool_label,
+        snapshotVariant: r.snapshot_variant,
         windowHours: r.window_hours,
         families: (() => {
           const grouped = new Map<string, typeof r.metrics>()
@@ -601,17 +650,24 @@ export default function Backtests() {
   }, [sortedResults, topSortBy])
 
   const windowStats = useMemo(() => {
-    const byWindow = new Map<number, number[]>()
+    const byWindow = new Map<string, { snapshotVariant: string; windowHours: number; values: number[] }>()
     for (const r of sortedResults) {
-      const cur = byWindow.get(r.window_hours) ?? []
-      for (const m of r.metrics) cur.push(m.vs_hodl)
-      byWindow.set(r.window_hours, cur)
+      const key = `${r.snapshot_variant}:${r.window_hours}`
+      const cur = byWindow.get(key) ?? {
+        snapshotVariant: r.snapshot_variant,
+        windowHours: r.window_hours,
+        values: [],
+      }
+      for (const m of r.metrics) cur.values.push(m.vs_hodl)
+      byWindow.set(key, cur)
     }
-    return [...byWindow.entries()]
-      .map(([windowHours, vsHodlValues]) => {
+    return [...byWindow.values()]
+      .map(({ snapshotVariant, windowHours, values: vsHodlValues }) => {
         const target = parseOptionalNumber(targetVsHodlUsd) ?? Number.NEGATIVE_INFINITY
         const qualifiedCount = vsHodlValues.filter((v) => v >= target).length
         return {
+          key: `${snapshotVariant}:${windowHours}`,
+          snapshotVariant,
           windowHours,
           totalCount: vsHodlValues.length,
           qualifiedCount,
@@ -632,10 +688,10 @@ export default function Backtests() {
 
   const applyPreset = (preset: GridPreset) => {
     setThresholdGridPct(preset.thresholdGridPct)
-    setPeriodicGridSteps(preset.periodicGridSteps)
+    setPeriodicGridHours(preset.periodicGridHours)
     setBollingerWindowGrid(preset.bollingerWindowGrid)
     setBollingerKGrid(preset.bollingerKGrid)
-    setBollingerRebalanceStepsGrid(preset.bollingerRebalanceStepsGrid)
+    setBollingerRebalanceHoursGrid(preset.bollingerRebalanceHoursGrid)
     setLastCandleSecondsGrid(preset.lastCandleSecondsGrid)
     setLastCandleRebalanceSecondsGrid(preset.lastCandleRebalanceSecondsGrid)
   }
@@ -665,6 +721,56 @@ export default function Backtests() {
                   {h}h
                 </label>
               ))}
+            </div>
+            <div className="max-w-xs">
+              <div className="text-xs text-muted-foreground">{t('backtests.customWindowHours')}</div>
+              <input
+                className="mt-1 w-full rounded border bg-background px-2 py-1 text-sm"
+                value={customWindowHours}
+                onChange={(e) => setCustomWindowHours(e.target.value)}
+                placeholder={t('backtests.customWindowPlaceholder')}
+              />
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {t('backtests.dataConsistencySelected')}{' '}
+              {readinessQ.isPending
+                ? t('backtests.calculating')
+                : readinessQ.isError
+                  ? t('backtests.unavailable')
+                  : `${t('backtests.recommended')} ${readinessRecommendedHours}h | ${t('backtests.hardLimit')} ${readinessHardHours}h`}
+            </div>
+            {customWindowExceedsHard && (
+              <div className="text-xs text-red-500">
+                {t('backtests.customWindowExceedsHard')}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-base font-medium">{t('backtests.snapshotDataVariant')}</div>
+            <div className="flex flex-wrap gap-4">
+              {[
+                { id: '10m', label: '10m (snapshots.jsonl)' },
+                { id: '5m', label: '5m (snapshots_5m.jsonl)' },
+              ].map((v) => (
+                <label key={v.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedSnapshotVariants.includes(v.id)}
+                    onChange={() =>
+                      toggleSelection(
+                        selectedSnapshotVariants,
+                        v.id,
+                        setSelectedSnapshotVariants,
+                      )
+                    }
+                  />
+                  {v.label}
+                </label>
+              ))}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {t('backtests.snapshotVariantHint')}
             </div>
           </div>
 
@@ -701,24 +807,24 @@ export default function Backtests() {
                   <div>
                     <div className="font-medium">{s.label}</div>
                     <div className="text-muted-foreground">
-                      {L('parametry', 'parameters')}: {s.parameters.join(', ')}
+                      {t('backtests.parameters')}: {s.parameters.join(', ')}
                     </div>
                     {STRATEGY_HELP[s.id] && (
                       <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
                         <div>
-                          <span className="font-medium text-foreground">{L('Co robi:', 'What it does:')}</span>{' '}
+                          <span className="font-medium text-foreground">{t('backtests.whatItDoes')}</span>{' '}
                           {STRATEGY_HELP[s.id].what}
                         </div>
                         <div>
-                          <span className="font-medium text-foreground">{L('Trigger:', 'Trigger:')}</span>{' '}
+                          <span className="font-medium text-foreground">{t('backtests.trigger')}</span>{' '}
                           {STRATEGY_HELP[s.id].trigger}
                         </div>
                         <div>
-                          <span className="font-medium text-foreground">{L('Kiedy używać:', 'When to use:')}</span>{' '}
+                          <span className="font-medium text-foreground">{t('backtests.whenToUse')}</span>{' '}
                           {STRATEGY_HELP[s.id].whenToUse}
                         </div>
                         <div>
-                          <span className="font-medium text-foreground">{L('Ryzyko:', 'Risk:')}</span>{' '}
+                          <span className="font-medium text-foreground">{t('backtests.risk')}</span>{' '}
                           {STRATEGY_HELP[s.id].risk}
                         </div>
                       </div>
@@ -728,7 +834,7 @@ export default function Backtests() {
               ))}
             </div>
             <div className="mt-2 rounded border p-3 text-xs">
-              <div className="mb-1 font-semibold">{L('Jak czytać parametry', 'How to read parameters')}</div>
+              <div className="mb-1 font-semibold">{t('backtests.howToReadParams')}</div>
               <div className="grid gap-1 md:grid-cols-2">
                 {PARAM_GLOSSARY.map((g) => (
                   <div key={g.key}>
@@ -741,7 +847,7 @@ export default function Backtests() {
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div className="space-y-2">
-              <div className="text-sm font-medium">{L('Objective', 'Objective')}</div>
+              <div className="text-sm font-medium">{t('backtests.objective')}</div>
               <select
                 className="w-full rounded border bg-background px-3 py-2 text-sm"
                 value={objective}
@@ -757,12 +863,12 @@ export default function Backtests() {
                 {selectedObjective.description}
               </div>
               <div className="text-xs text-muted-foreground">
-                {L('Przykład użycia', 'Example use case')}: {selectedObjective.useCase}
+                {t('backtests.exampleUseCase')}: {selectedObjective.useCase}
               </div>
             </div>
             {selectedPoolsIncludeMeteora && (
               <div className="space-y-2">
-                <div className="text-sm font-medium">{L('LP share (Meteora, opcjonalnie)', 'LP share (Meteora, optional)')}</div>
+                <div className="text-sm font-medium">{t('backtests.lpShareMeteoraOptional')}</div>
                 <input
                   className="w-full rounded border bg-background px-3 py-2 text-sm"
                   value={lpShare}
@@ -771,7 +877,7 @@ export default function Backtests() {
               </div>
             )}
             <div className="space-y-2">
-              <div className="text-sm font-medium">{L('Kwota symulacji (USD)', 'Simulation amount (USD)')}</div>
+              <div className="text-sm font-medium">{t('backtests.simAmountUsd')}</div>
               <input
                 className="w-full rounded border bg-background px-3 py-2 text-sm"
                 value={capitalUsd}
@@ -779,15 +885,15 @@ export default function Backtests() {
               />
             </div>
             <div className="space-y-2">
-              <div className="text-sm font-medium">{L('Cel vs HODL (USD)', 'Target vs HODL (USD)')}</div>
+              <div className="text-sm font-medium">{t('backtests.targetVsHodlUsd')}</div>
               <input
                 className="w-full rounded border bg-background px-3 py-2 text-sm"
                 value={targetVsHodlUsd}
                 onChange={(e) => setTargetVsHodlUsd(e.target.value)}
-                  placeholder={L('np. 50 (zostaw puste = bez filtra)', 'e.g. 50 (leave empty = no filter)')}
+                  placeholder={t('backtests.targetVsHodlPlaceholder')}
               />
               <div className="text-xs text-muted-foreground">
-                {L('Pokazujemy tylko strategie spelniajace warunek: vs_hodl >= target.', 'Only strategies meeting condition are shown: vs_hodl >= target.')}
+                {t('backtests.targetVsHodlHint')}
               </div>
             </div>
             <div className="space-y-1 pt-8">
@@ -797,19 +903,16 @@ export default function Backtests() {
                   checked={includeIndicators}
                   onChange={(e) => setIncludeIndicators(e.target.checked)}
                 />
-                {L('Dodaj strategie wskaznikowe (Bollinger + Last Candle)', 'Include indicator strategies (Bollinger + Last Candle)')}
+                {t('backtests.includeIndicatorStrategies')}
               </label>
               <div className="text-xs text-muted-foreground">
-                {L(
-                  'Dodaje do siatki optimize: Bollinger (6 presetów: k = 1.5/2.0/2.5 x rebalance co 24/48 kroków) oraz Last Candle (14 presetów różnych okien świecy i częstotliwości rebalansu). To zwiększa liczbę testowanych konfiguracji i czas liczenia.',
-                  'Adds to optimize grid: Bollinger (6 presets: k = 1.5/2.0/2.5 x rebalance every 24/48 steps) and Last Candle (14 presets with different candle windows and rebalance frequency). This increases the number of tested configurations and runtime.',
-                )}
+                {t('backtests.includeIndicatorsHint')}
               </div>
             </div>
           </div>
 
           <div className="rounded border p-3 text-xs space-y-3">
-              <div className="text-sm font-semibold">{L('Konfiguracja parametrow strategii (grid)', 'Strategy parameter configuration (grid)')}</div>
+              <div className="text-sm font-semibold">{t('backtests.strategyGridConfig')}</div>
             <div className="flex flex-wrap gap-2">
               {GRID_PRESETS.map((preset) => (
                 <button
@@ -817,7 +920,7 @@ export default function Backtests() {
                   type="button"
                   className="rounded border px-2 py-1 text-xs hover:bg-accent"
                   onClick={() => applyPreset(preset)}
-                  title={L(`Ustaw preset ${preset.name}`, `Apply preset ${preset.name}`)}
+                  title={`${t('backtests.applyPresetTitle')} ${preset.name}`}
                 >
                   {preset.name}
                 </button>
@@ -830,35 +933,26 @@ export default function Backtests() {
                 </div>
                 <div className="font-medium">static_deviation_pct</div>
                 <div className="text-muted-foreground">
-                  {L(
-                    'Opcjonalny stały zakres dla `static`: X oznacza `entry * (1±X%)` (np. 10). Gdy ustawione, siatka width jest spinana do jednego wariantu. Używane dla wielu par.',
-                    'Optional fixed range for `static`: X means `entry * (1±X%)` (e.g. 10). When set, width grid is pinned to one variant. Used for many pairs.',
-                  )}
+                  {t('backtests.staticDeviationHelp')}
                 </div>
                 <input
                   className="mt-1 w-full rounded border bg-background px-2 py-1"
                   value={staticDeviationPct}
                   onChange={(e) => setStaticDeviationPct(e.target.value)}
-                  placeholder={L('np. 10', 'e.g. 10')}
+                  placeholder={t('backtests.eg10')}
                   disabled={staticManualReady}
                 />
                 <div className="mt-2 font-medium">
                   static_manual_lower / static_manual_upper
                   <span
                     className="ml-1 cursor-help text-muted-foreground"
-                  title={L(
-                    'Manualny zakres static działa tylko przy jednej wybranej parze. Gdy podasz poprawny lower/upper, ma priorytet nad static_deviation_pct.',
-                    'Manual static range works only with one selected pair. When valid lower/upper is provided, it takes priority over static_deviation_pct.',
-                  )}
+                  title={t('backtests.staticManualTitleHelp')}
                   >
                     ⓘ
                   </span>
                 </div>
                 <div className="text-muted-foreground">
-                  {L(
-                    'Ręczny zakres ceny dla `static` (dwa inputy). Jest użyty tylko gdy wybrana jest jedna para.',
-                    'Manual price range for `static` (two inputs). It is used only when one pair is selected.',
-                  )}
+                  {t('backtests.staticManualHelp')}
                 </div>
                 <div className="mt-1 grid grid-cols-2 gap-2">
                   <input
@@ -876,10 +970,7 @@ export default function Backtests() {
                 </div>
                 {!singlePoolSelected && (staticManualLower.trim() !== '' || staticManualUpper.trim() !== '') && (
                   <div className="mt-1 text-muted-foreground">
-                    {L(
-                      'Wybrano wiele par: ręczny `lower/upper` nie będzie użyty. Dla tego runu działa `static_deviation_pct`.',
-                      'Multiple pairs selected: manual `lower/upper` is ignored. `static_deviation_pct` is used for this run.',
-                    )}
+                    {t('backtests.staticManualIgnoredMultiPool')}
                   </div>
                 )}
               </div>
@@ -889,16 +980,13 @@ export default function Backtests() {
                 </div>
                 <div className="font-medium">oor_recenter_deviation_pct</div>
                 <div className="text-muted-foreground">
-                  {L(
-                    'Osobny stały zakres dla `oor_recenter`: X oznacza `entry * (1±X%)`. Użyj przy porównaniu `static` vs `oor_recenter` na tej samej szerokości.',
-                    'Separate fixed range for `oor_recenter`: X means `entry * (1±X%)`. Use when comparing `static` vs `oor_recenter` at the same width.',
-                  )}
+                  {t('backtests.oorRecenterDeviationHelp')}
                 </div>
                 <input
                   className="mt-1 w-full rounded border bg-background px-2 py-1"
                   value={oorRecenterDeviationPct}
                   onChange={(e) => setOorRecenterDeviationPct(e.target.value)}
-                  placeholder={L('np. 10', 'e.g. 10')}
+                  placeholder={t('backtests.eg10')}
                 />
               </div>
               <div className="md:col-span-2">
@@ -912,7 +1000,7 @@ export default function Backtests() {
                 </div>
                 <div className="font-medium">threshold_grid_pct</div>
                 <div className="text-muted-foreground">
-                  {L('Progi (%) dla strategii threshold; nizsze = czestsze triggerowanie.', 'Threshold (%) for threshold strategy; lower values trigger more often.')}
+                  {t('backtests.thresholdGridHelp')}
                 </div>
                 <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={thresholdGridPct} onChange={(e) => setThresholdGridPct(e.target.value)} />
                 <div className="mt-2 font-medium">threshold_min_rebalance_interval_hours</div>
@@ -945,10 +1033,7 @@ export default function Backtests() {
                   retouch_offset_pct
                   <span
                     className="ml-1 cursor-help text-muted-foreground"
-                    title={L(
-                      'Offset procentowy wzgledem ceny OOR (w % ceny, nie w jednostkach absolutnych). 0 = nowy zakres dotyka ceny; +0.1 przesuwa zakres o +0.1% (w prawo), -0.1 o -0.1% (w lewo).',
-                      'Percent offset relative to OOR price (% of price, not absolute units). 0 = range edge touches price; +0.1 shifts range by +0.1% (right), -0.1 by -0.1% (left).',
-                    )}
+                    title={t('backtests.retouchOffsetTitle')}
                   >
                     ⓘ
                   </span>
@@ -963,10 +1048,7 @@ export default function Backtests() {
                   value={retouchOffsetPct}
                   onChange={(e) => setRetouchOffsetPct(e.target.value)}
                   placeholder="np. 0.1 lub -0.1"
-                  title={L(
-                    'Przyklad: zakres startowy 98-100, cena OOR=101, width bez zmian; offset 0 => zakres dotyka 101. Offset +0.1 => caly zakres przesuniety o +0.1% ceny.',
-                    'Example: starting range 98-100, OOR price=101, unchanged width; offset 0 => range touches 101. Offset +0.1 => whole range shifted by +0.1% of price.',
-                  )}
+                  title={t('backtests.retouchOffsetExample')}
                 />
               </div>
               <div>
@@ -975,7 +1057,7 @@ export default function Backtests() {
                   Interwaly periodic w godzinach (wall-clock); nizsze = czestsze rebalance.
                   Legacy periodic krokowy jest ukryty.
                 </div>
-                <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={periodicGridSteps} onChange={(e) => setPeriodicGridSteps(e.target.value)} />
+                <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={periodicGridHours} onChange={(e) => setPeriodicGridHours(e.target.value)} />
               </div>
               <div>
                 <div className="font-medium">bollinger_window_grid</div>
@@ -988,9 +1070,9 @@ export default function Backtests() {
                 <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={bollingerKGrid} onChange={(e) => setBollingerKGrid(e.target.value)} />
               </div>
               <div>
-                <div className="font-medium">bollinger_rebalance_steps_grid</div>
-                <div className="text-muted-foreground">Czestotliwosc przebudowy Bollinger (kroki).</div>
-                <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={bollingerRebalanceStepsGrid} onChange={(e) => setBollingerRebalanceStepsGrid(e.target.value)} />
+                <div className="font-medium">bollinger_rebalance_hours_grid</div>
+                <div className="text-muted-foreground">Czestotliwosc przebudowy Bollinger (godziny). API przelicza na kroki dla 10m/5m.</div>
+                <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={bollingerRebalanceHoursGrid} onChange={(e) => setBollingerRebalanceHoursGrid(e.target.value)} />
               </div>
               <div>
                 <div className="font-medium">last_candle_seconds_grid</div>
@@ -1007,13 +1089,18 @@ export default function Backtests() {
 
           <Button
             disabled={
-              fullRunMut.isPending || selectedWindows.length === 0 || selectedPools.length === 0
+              fullRunMut.isPending ||
+              effectiveWindows.length === 0 ||
+              selectedPools.length === 0 ||
+              selectedSnapshotVariants.length === 0 ||
+              customWindowExceedsHard
             }
             onClick={() => {
               const runCapitalUsd = parseOptionalNumber(capitalUsd) ?? 8000
               setLastRunCapitalUsd(runCapitalUsd)
               fullRunMut.mutate({
-                windows_hours: selectedWindows,
+                windows_hours: effectiveWindows,
+                snapshot_variants: selectedSnapshotVariants,
                 include_strategy_ids:
                   selectedStrategies.length > 0 ? selectedStrategies : undefined,
                 include_indicator_strategies: includeIndicators,
@@ -1036,11 +1123,13 @@ export default function Backtests() {
                 ),
                 threshold_rebalance_on_range_exit_immediately:
                   thresholdRebalanceOnRangeExitImmediately,
-                periodic_grid_steps: parseCsvUInt64s(periodicGridSteps),
+                periodic_grid_steps: parseCsvUInt64s(periodicGridHours),
                 retouch_offset_pct: parseOptionalNumber(retouchOffsetPct),
                 bollinger_window_grid: parseCsvUInt64s(bollingerWindowGrid),
                 bollinger_k_grid: parseCsvFloats(bollingerKGrid),
-                bollinger_rebalance_steps_grid: parseCsvUInt64s(bollingerRebalanceStepsGrid),
+                bollinger_rebalance_hours_grid: parseCsvPositiveFloats(
+                  bollingerRebalanceHoursGrid,
+                ),
                 last_candle_seconds_grid: parseCsvUInt64s(lastCandleSecondsGrid),
                 last_candle_rebalance_seconds_grid: parseCsvUInt64s(
                   lastCandleRebalanceSecondsGrid,
@@ -1048,18 +1137,18 @@ export default function Backtests() {
               })
             }}
           >
-            {fullRunMut.isPending ? L('Uruchamiam...', 'Starting...') : L('Uruchom FULL porownanie', 'Run FULL comparison')}
+            {fullRunMut.isPending ? t('backtests.starting') : t('backtests.runFullComparison')}
           </Button>
 
           <div className="rounded border p-3 space-y-2">
-            <div className="text-sm font-semibold">{L('Auto-Tune (background)', 'Auto-Tune (background)')}</div>
+            <div className="text-sm font-semibold">{t('backtests.autoTuneBg')}</div>
             <div className="text-xs text-muted-foreground">
               Cyklicznie odpala FULL optimize i aktualizuje najlepszego winnera. Mozesz potem
               zastosowac winnera w sekcji Strategies.
             </div>
             <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
-                <div className="text-xs font-medium">{L('Interwał (min)', 'Interval (min)')}</div>
+                <div className="text-xs font-medium">{t('backtests.intervalMin')}</div>
                 <input
                   className="w-28 rounded border bg-background px-2 py-1 text-sm"
                   value={autoTuneIntervalMinutes}
@@ -1073,7 +1162,8 @@ export default function Backtests() {
                   startAutoTuneMut.mutate({
                     interval_minutes: parseOptionalNumber(autoTuneIntervalMinutes),
                     full_request: {
-                      windows_hours: selectedWindows,
+                      windows_hours: effectiveWindows,
+                      snapshot_variants: selectedSnapshotVariants,
                       include_strategy_ids:
                         selectedStrategies.length > 0 ? selectedStrategies : undefined,
                       include_indicator_strategies: includeIndicators,
@@ -1096,12 +1186,12 @@ export default function Backtests() {
                       ),
                       threshold_rebalance_on_range_exit_immediately:
                         thresholdRebalanceOnRangeExitImmediately,
-                      periodic_grid_steps: parseCsvUInt64s(periodicGridSteps),
+                      periodic_grid_steps: parseCsvUInt64s(periodicGridHours),
                       retouch_offset_pct: parseOptionalNumber(retouchOffsetPct),
                       bollinger_window_grid: parseCsvUInt64s(bollingerWindowGrid),
                       bollinger_k_grid: parseCsvFloats(bollingerKGrid),
-                      bollinger_rebalance_steps_grid: parseCsvUInt64s(
-                        bollingerRebalanceStepsGrid,
+                      bollinger_rebalance_hours_grid: parseCsvPositiveFloats(
+                        bollingerRebalanceHoursGrid,
                       ),
                       last_candle_seconds_grid: parseCsvUInt64s(lastCandleSecondsGrid),
                       last_candle_rebalance_seconds_grid: parseCsvUInt64s(
@@ -1111,23 +1201,23 @@ export default function Backtests() {
                   })
                 }
               >
-                {L('Start Auto-Tune', 'Start Auto-Tune')}
+                {t('backtests.startAutoTune')}
               </Button>
               <Button
                 variant="outline"
                 disabled={stopAutoTuneMut.isPending}
                 onClick={() => stopAutoTuneMut.mutate()}
               >
-                {L('Stop Auto-Tune', 'Stop Auto-Tune')}
+                {t('backtests.stopAutoTune')}
               </Button>
             </div>
             <div className="text-xs text-muted-foreground">
-              {L('Status', 'Status')}: {autoTuneStatusQ.data?.running ? L('running', 'running') : L('stopped', 'stopped')} | {L('notatka', 'note')}:{' '}
+              {t('backtests.status')}: {autoTuneStatusQ.data?.running ? t('backtests.running') : t('backtests.stopped')} | {t('backtests.note')}:{' '}
               {autoTuneStatusQ.data?.note ?? '—'}
             </div>
             {autoTuneStatusQ.data?.latest_winner && (
               <div className="text-xs">
-                {L('Najnowszy winner', 'Latest winner')}: <span className="font-mono">{autoTuneStatusQ.data.latest_winner.strategy}</span>{' '}
+                {t('backtests.latestWinner')}: <span className="font-mono">{autoTuneStatusQ.data.latest_winner.strategy}</span>{' '}
                 ({fmt(autoTuneStatusQ.data.latest_winner.score, 3)} score,{' '}
                 {autoTuneStatusQ.data.latest_winner.pool_label},{' '}
                 {autoTuneStatusQ.data.latest_winner.window_hours}h; PnL{' '}
@@ -1146,7 +1236,7 @@ export default function Backtests() {
 
           {jobId && (
             <div className="text-sm text-muted-foreground">
-              Job: <span className="font-mono">{jobId}</span> | {L('status', 'status')}:{' '}
+              Job: <span className="font-mono">{jobId}</span> | {t('backtests.status')}:{' '}
               <span className="font-medium">{jobQ.data?.status ?? 'running'}</span>
             </div>
           )}
@@ -1163,15 +1253,12 @@ export default function Backtests() {
           <CardHeader>
             <CardTitle>{t('backtests.qualifying')}</CardTitle>
             <CardDescription>
-              {L(
-                'Szybki przeglad: TOP 3 warianty z kazdej rodziny strategii dla kazdej pary i okna. Wynik finansowy (PnL, vs HODL) w kolorze: zieleń = na plusie, czerwień = na minusie; kwoty w USD z separatorem tysięcy.',
-                'Quick overview: TOP 3 variants from each strategy family for each pair and window. Financial outcome (PnL, vs HODL) is color-coded: green = positive, red = negative; USD amounts include thousands separators.',
-              )}
+              {t('backtests.qualifyingDesc')}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">{L('Sortuj TOP wg:', 'Sort TOP by:')}</span>
+              <span className="font-medium">{t('backtests.sortTopBy')}</span>
               <select
                 className="rounded border bg-background px-2 py-1"
                 value={topSortBy}
@@ -1192,11 +1279,11 @@ export default function Backtests() {
               {qualifyingTop3.map((g) => (
                 <div key={g.key} className="rounded border p-3">
                   <div className="mb-2 text-sm font-medium">
-                    {g.poolLabel} - {g.windowHours}h
+                    {g.poolLabel} - {g.snapshotVariant} - {g.windowHours}h
                   </div>
                   {g.families.length === 0 ? (
                     <div className="text-sm text-muted-foreground">
-                      {L('Brak strategii spelniajacych warunek.', 'No strategies satisfy the condition.')}
+                      {t('backtests.noStrategiesMeetCondition')}
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -1356,7 +1443,7 @@ export default function Backtests() {
           <CardHeader>
             <CardTitle>{t('backtests.liquidityRegime')}</CardTitle>
             <CardDescription>
-              {L('Kontekst wolumenu z biezacego API Orca dla pooli użytych w rankingu.', 'Volume context from current Orca API for pools used in ranking.')}
+              {t('backtests.liquidityRegimeDesc')}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -1366,7 +1453,7 @@ export default function Backtests() {
                   <tr className="border-b text-left">
                     <th className="p-2">Pair / okno</th>
                     <th className="p-2" title="Przyblizony wolumen dla okna (v24h * okno/24).">
-                      {L('Szac. wolumen (okno)', 'Approx volume (window)')}
+                      {t('backtests.approxVolumeWindow')}
                     </th>
                     <th
                       className="p-2"
@@ -1374,14 +1461,14 @@ export default function Backtests() {
                     >
                       1h/24h intensity
                     </th>
-                    <th className="p-2">{L('Reżim', 'Regime')}</th>
+                    <th className="p-2">{t('backtests.regime')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {liquidityRegime.map((x) => (
                     <tr key={x.key} className="border-b">
                       <td className="p-2">
-                        {x.poolLabel} - {x.windowHours}h
+                        {x.poolLabel} - {x.snapshotVariant} - {x.windowHours}h
                       </td>
                       <td className="p-2">{fmt(x.approxWindowVol)}</td>
                       <td className="p-2">{fmt(x.ratio1h24h, 3)}</td>
@@ -1400,7 +1487,7 @@ export default function Backtests() {
           <CardHeader>
             <CardTitle>{t('backtests.targetPerWindow')}</CardTitle>
             <CardDescription>
-              {L('Szybki podglad: ile strategii przechodzi target i jaka jest mediana vs HODL.', 'Quick view: how many strategies pass target and median vs HODL.')}
+              {t('backtests.targetPerWindowDesc')}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -1408,13 +1495,13 @@ export default function Backtests() {
               {windowStats.map((s) => {
                 const pct = s.totalCount > 0 ? (s.qualifiedCount / s.totalCount) * 100 : 0
                 return (
-                  <div key={s.windowHours} className="rounded border p-3">
-                    <div className="text-sm font-medium">{s.windowHours}h</div>
+                  <div key={s.key} className="rounded border p-3">
+                    <div className="text-sm font-medium">{s.snapshotVariant} - {s.windowHours}h</div>
                     <div className="mt-1 text-sm text-muted-foreground">
-                      {L('target pass', 'target pass')}: {s.qualifiedCount}/{s.totalCount}
+                      {t('backtests.targetPass')}: {s.qualifiedCount}/{s.totalCount}
                     </div>
                     <div className="mt-1 text-sm">
-                      {L('mediana vs HODL', 'median vs HODL')}: {fmt(s.medianVsHodl)} USD
+                      {t('backtests.medianVsHodl')}: {fmt(s.medianVsHodl)} USD
                     </div>
                     <div className="mt-2 h-2 w-full overflow-hidden rounded bg-muted">
                       <div
@@ -1436,13 +1523,13 @@ export default function Backtests() {
           <CardHeader>
             <CardTitle>{t('backtests.globalTop')}</CardTitle>
             <CardDescription>
-              {L('Agregacja przez wszystkie pary i okna czasowe.', 'Aggregation across all pairs and time windows.')}
+              {t('backtests.globalTopDesc')}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="mb-3 space-y-1 text-xs text-muted-foreground">
               <div>
-                {L('Wystapienia = liczba wariantow (strategia + inny range) policzonych w calym runie.', 'Appearances = number of variants (strategy + different range) computed in full run.')}
+                {t('backtests.appearancesHint')}
               </div>
               <div>
                 Kapitał startowy (do średniego end / Avg PnL%): {fmt(lastRunCapitalUsd)} USD
@@ -1453,7 +1540,7 @@ export default function Backtests() {
                 <thead>
                   <tr className="border-b text-left">
                     <th className="p-2">#</th>
-                    <th className="p-2">{L('Strategia', 'Strategy')}</th>
+                    <th className="p-2">{t('backtests.strategy')}</th>
                     <th
                       className="p-2"
                       title="Ile wariantow tej strategii pojawilo sie lacznie (pool x okno x range)."
@@ -1515,10 +1602,10 @@ export default function Backtests() {
       )}
 
       {sortedResults.map((r) => (
-        <Card key={`${r.pool_id}-${r.window_hours}`}>
+        <Card key={`${r.pool_id}-${r.snapshot_variant}-${r.window_hours}`}>
           <CardHeader>
             <CardTitle>
-              {r.pool_label} - {r.window_hours}h
+              {r.pool_label} - {r.snapshot_variant} - {r.window_hours}h
             </CardTitle>
             <CardDescription>{r.protocol.toUpperCase()}</CardDescription>
           </CardHeader>
@@ -1530,8 +1617,8 @@ export default function Backtests() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b text-left">
-                    <th className="p-2">{L('Miejsce', 'Rank')}</th>
-                    <th className="p-2">{L('Strategia', 'Strategy')}</th>
+                    <th className="p-2">{t('backtests.rank')}</th>
+                    <th className="p-2">{t('backtests.strategy')}</th>
                     <th className="p-2" title="Zakres ceny (USD), dla ktorego liczono ten wariant.">
                       Range (USD)
                     </th>

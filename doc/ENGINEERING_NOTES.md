@@ -1,3 +1,98 @@
+## 2026-04-28 — Snapshot schema parity: Orca `parse_ok/parse_error`
+
+keywords: orca, raydium, meteora, snapshots, parse_ok, parse_error, schema-consistency, cli
+
+- **What:** Added `parse_ok` and `parse_error` fields to Orca snapshot rows in `snapshot-run-curated-all` to keep JSONL contract aligned with Raydium/Meteora.
+- **Behavior:** Orca appended rows now include `parse_ok=true` and omit `parse_error` (null skipped) on successful writes; failures remain represented in run-level status/errors.
+- **paths:** `crates/cli/src/main.rs`
+
+## 2026-04-28 — Etap 3 MVP: retry collectora, single-writer locki, statusy readiness
+
+keywords: etap3, snapshot-run-curated-all, retry, single-writer, mutex, readiness-status, data-quality, backtests, api, web, i18n
+
+- **What:** Added per pool/protocol retry in `snapshot-run-curated-all` with configurable attempts/backoff and enriched run errors (`attempts`, `final_failure`) for faster transient failure recovery within the same cycle.
+- **Ops safety:** Added single-instance process mutex guards in snapshot monitor loops to prevent parallel writers (`lock already held -> start refused`).
+- **Readiness model/UI:** Extended readiness API with row/aggregate operational status (`ok/degraded/recovering/missing`), status reasons/counters, and rendered status badges/counters in `Data Quality` (PL/EN i18n).
+- **Tests:** Added unit tests for readiness status classifier/aggregate prioritization and expanded endpoint coverage assertions for new readiness status contract.
+- **paths:** `crates/cli/src/main.rs`, `tools/run_snapshot_health_monitor_loop.ps1`, `tools/data_alerts_loop.ps1`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `web/src/lib/api.ts`, `web/src/pages/DataQuality.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-04-28 — Backtests UI: moved local `L(...)` strings to central i18n
+
+keywords: web, backtests, i18n, localization, consistency, pl, en
+
+- **What:** Replaced local inline `L(pl,en)` usage in `Backtests.tsx` with centralized `t('backtests.*')` keys for Backtests controls, consistency/status copy, strategy help labels, auto-tune section, and ranking table labels.
+- **Why:** Keep translation source in one place (`web/src/lib/i18n.tsx`) and avoid mixed per-file localization patterns.
+- **paths:** `web/src/pages/Backtests.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-04-28 — Data Quality: configurable date-range window (default 72h)
+
+keywords: data-quality, backtests, readiness, date-range, lookback, ui, api
+
+- **What:** `POST /backtests/data-readiness` now accepts optional `range_start_utc` / `range_end_utc` (RFC3339) and computes readiness strictly inside that window.
+- **UI:** Added date-range panel on `Data Quality` with default "last 72h", editable datetime fields, validation (`from <= to`), and request wiring to API.
+- **Behavior:** DB-first cached readiness is used only for full default flow; custom date ranges are always computed on-demand from snapshot files to avoid stale aggregate mismatch.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/lib/api.ts`, `web/src/lib/i18n.tsx`, `web/src/pages/DataQuality.tsx`
+
+## 2026-04-28 — Etap 2B: readiness source + stale DB alert
+
+keywords: backtests, data-readiness, source, db, fallback, stale, data-quality, api, web
+
+- **What:** Extended readiness aggregate with `source` (`db` / `fallback`) and `db_stale_rows` to expose freshness risk when selected rows exist in DB but are older than `db_max_age_secs`.
+- **UI:** `Data Quality` now shows source of computed readiness plus stale-row alert counter for operators.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `web/src/lib/api.ts`, `web/src/pages/DataQuality.tsx`
+
+## 2026-04-28 — Etap 2A: DB-first readiness cache with on-demand fallback
+
+keywords: backtests, data-readiness, postgres, cache, fallback, thresholds, etapp2a
+
+- **What:** Added persistent readiness table `backtest_data_readiness_rows` and switched `POST /backtests/data-readiness` to prefer fresh DB rows (full pool×variant set), with automatic fallback to current on-demand JSONL scan when DB is stale/incomplete.
+- **Behavior:** After fallback compute, API performs best-effort upsert to DB so subsequent calls can be served from DB-first path.
+- **Config:** Added `BACKTEST_READINESS_DB_MAX_AGE_SECS` (default `600`) and exposed it in `thresholds` response payload (now also shown in `Data Quality` thresholds panel).
+- **paths:** `crates/data/migrations/006_backtest_data_readiness.sql`, `crates/data/src/repositories/database.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/models.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `web/src/lib/api.ts`, `web/src/pages/DataQuality.tsx`, `.env.example`
+
+## 2026-04-28 — Backtests readiness: API regression tests (endpoint + helpers)
+
+keywords: backtests, data-readiness, api, regression-tests, thresholds, snapshot-variants
+
+- **What:** Added regression guards for readiness logic in API backtests handler (`parse_snapshot_variants`, `hours_grid_to_steps`, readiness cache-key stability, snapshot filename mapping, and `evaluate_snapshot_readiness` behavior for continuous vs gapped data).
+- **Integration tests:** Added endpoint-level tests for `POST /backtests/data-readiness` to verify response shape includes `rows`, `aggregate`, and `thresholds`, plus `400` on unsupported snapshot variant.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`
+
+## 2026-04-28 — Data Quality panel: active readiness thresholds from API
+
+keywords: data-quality, backtests, readiness, thresholds, env, web, api
+
+- **What:** Extended `POST /backtests/data-readiness` response with `thresholds` payload exposing active evaluator config (`cache_ttl_secs`, gap multipliers, coverage %, fallback ratio).
+- **UI:** Added an "Active API thresholds" panel on `/data-quality` that renders live threshold values returned by API, so operators can verify current readiness strictness without checking server env directly.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/DataQuality.tsx`
+
+## 2026-04-28 — Data readiness: API cache TTL + ENV thresholds
+
+keywords: backtests, data-readiness, cache, ttl, env, coverage, max-gap
+
+- **What:** Added in-memory response cache for `POST /backtests/data-readiness` with configurable TTL (`BACKTEST_READINESS_CACHE_TTL_SECS`).
+- **Config:** Readiness thresholds are now configurable via ENV (`BACKTEST_READINESS_HARD_GAP_MULTIPLIER`, `BACKTEST_READINESS_RECOMMENDED_COVERAGE_PCT`, `BACKTEST_READINESS_RECOMMENDED_GAP_MULTIPLIER`, `BACKTEST_READINESS_RECOMMENDED_FALLBACK_RATIO`), documented in `.env.example`.
+- **Why:** Keep readiness endpoint responsive as snapshot files grow while allowing ops to tune strictness without code changes.
+- **paths:** `crates/api/src/handlers/backtests.rs`, `.env.example`
+
+## 2026-04-28 — Backtests data-readiness API + Data Quality page + custom window hours
+
+keywords: backtests, data-quality, readiness, coverage, max-gap, custom-window, snapshots, snapshots_5m, web, api
+
+- **What:** Added `POST /backtests/data-readiness` that evaluates per pool/variant snapshot continuity and returns `coverage_pct`, `max_gap_minutes`, and aggregated `max_backtest_hours` (`recommended` + `hard`).
+- **Backtests UX:** Time-window section now supports custom user-entered hours and validates against readiness hard-limit for currently selected pools/variants.
+- **Navigation/UI:** Added new menu route/page `Data Quality` (`/data-quality`) to display readiness statistics for collected data across 10m/5m variants.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`, `web/src/pages/DataQuality.tsx`, `web/src/components/Layout.tsx`, `web/src/App.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-04-28 — Backtests FULL: snapshot variants (10m/5m) + Bollinger rebalance hours
+
+keywords: backtests, full, snapshots, snapshots_5m, snapshot-jsonl-suffix, bollinger, rebalance-hours, web, api
+
+- **What:** `POST /backtests/full` now accepts `snapshot_variants` (`10m`, `5m`) and can run/compare both in one job; each result row is tagged with `snapshot_variant`.
+- **Bollinger UX/API:** Backtests UI now edits Bollinger rebalance cadence in hours (`bollinger_rebalance_hours_grid`) instead of raw steps; API converts hours -> steps per selected snapshot cadence (`10m` / `5m`) before forwarding to CLI.
+- **Why:** Step-based inputs were ambiguous across 10m vs 5m data; explicit hours keep strategy intent stable and make cross-cadence comparisons interpretable.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `web/src/lib/api.ts`, `web/src/pages/Backtests.tsx`
+
 ## 2026-04-27 — Docker workflow upgraded for Node 24-compatible actions
 
 keywords: github-actions, docker, ci, node24, build-push, metadata-action, setup-buildx, login-action

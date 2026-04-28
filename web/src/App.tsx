@@ -21,6 +21,7 @@ import Scripts from '@/pages/Scripts'
 import Wallet from '@/pages/Wallet'
 import Swap from '@/pages/Swap'
 import Backtests from '@/pages/Backtests'
+import DataQuality from '@/pages/DataQuality'
 
 function App() {
   return (
@@ -62,6 +63,7 @@ function App() {
             <Route path="logs" element={<Logs />} />
             <Route path="bot-activity" element={<BotActivity />} />
             <Route path="backtests" element={<Backtests />} />
+            <Route path="data-quality" element={<DataQuality />} />
           </Route>
         </Routes>
         <Toaster />
