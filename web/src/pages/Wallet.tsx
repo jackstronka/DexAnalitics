@@ -206,6 +206,7 @@ export default function Wallet() {
     !!balances &&
     ((tokenLegacyOk === false && token2022Ok === true) ||
       (tokenLegacyOk === true && token2022Ok === false))
+  const tokenReadsBothFailed = tokenLegacyOk === false && token2022Ok === false
 
   useEffect(() => {
     setWalletAutoRetryCount(0)
@@ -653,9 +654,17 @@ export default function Wallet() {
                   </Button>
                 </div>
                 {(hasPartialTokenData || tokenReadErrors.length > 0) && (
-                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 space-y-1">
+                  <div
+                    className={
+                      tokenReadsBothFailed
+                        ? 'rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 space-y-1'
+                        : 'rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-xs text-blue-100 space-y-1'
+                    }
+                  >
                     <div>
-                      Lista tokenów może być niepełna: jeden z odczytów RPC dla programów tokenów nie powiódł się.
+                      {tokenReadsBothFailed
+                        ? 'Lista tokenów może być niepełna: oba odczyty RPC dla programów tokenów nie powiodły się.'
+                        : 'Częściowy status odczytu tokenów: lista legacy jest dostępna, a odczyt token-2022 nie powiódł się.'}
                     </div>
                     <div className="text-[11px] opacity-90">
                       Status: legacy={String(tokenLegacyOk)} | token-2022={String(token2022Ok)}
