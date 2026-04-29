@@ -353,7 +353,7 @@ fn filter_penalized_token_endpoints(endpoints: &[String]) -> Vec<String> {
         guard.penalized_until.retain(|_, until| *until > now);
         let healthy = out
             .iter()
-            .filter(|ep| guard.penalized_until.get(*ep).is_none())
+            .filter(|ep| !guard.penalized_until.contains_key(*ep))
             .cloned()
             .collect::<Vec<_>>();
         if !healthy.is_empty() {

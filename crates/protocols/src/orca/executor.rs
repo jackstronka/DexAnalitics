@@ -28,7 +28,7 @@ use spl_associated_token_account::instruction::create_associated_token_account;
 use spl_token::state::Account as SplTokenAccount;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 fn is_whirlpool_custom_code(err: &str, code: u32) -> bool {
     // Errors are produced by `RpcProvider::send_and_confirm_transaction` and typically include:
@@ -92,6 +92,20 @@ fn open_native_sol_pad_lamports() -> u64 {
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(12_000_000)
+}
+
+fn sol_first_auto_unwrap_enabled() -> bool {
+    std::env::var("CLMM_SOL_FIRST_AUTO_UNWRAP")
+        .ok()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "y"))
+        .unwrap_or(true)
+}
+
+fn sol_first_keep_wsol_min_raw() -> u64 {
+    std::env::var("CLMM_SOL_FIRST_KEEP_WSOL_MIN_RAW")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 fn parse_insufficient_lamports_from_log_line(line: &str) -> Option<(u64, u64)> {
@@ -428,6 +442,9 @@ impl WhirlpoolExecutor {
             .await?;
         if res.success {
             res.created_position = Some(position_pda);
+            let _ = self
+                .maybe_auto_unwrap_wsol_to_native(payer, "open_position")
+                .await;
         }
         Ok(res)
     }
@@ -508,6 +525,9 @@ impl WhirlpoolExecutor {
             .await?;
         if res.success {
             res.created_position = Some(position_pda);
+            let _ = self
+                .maybe_auto_unwrap_wsol_to_native(payer, "open_full_range_position")
+                .await;
         }
         Ok(res)
     }
@@ -573,6 +593,37 @@ impl WhirlpoolExecutor {
                 .context("build sync_native")?,
         );
         Ok(ixs)
+    }
+
+    async fn maybe_auto_unwrap_wsol_to_native(
+        &self,
+        payer: &Keypair,
+        context: &'static str,
+    ) -> Result<()> {
+        if !sol_first_auto_unwrap_enabled() {
+            return Ok(());
+        }
+        let keep_min = sol_first_keep_wsol_min_raw();
+        let current = self.read_wsol_balance_raw(&payer.pubkey()).await.unwrap_or(0);
+        if current <= keep_min {
+            return Ok(());
+        }
+        let unwrap_raw = current.saturating_sub(keep_min);
+        match self.submit_wsol_unwrap_with_signature(unwrap_raw, payer).await {
+            Ok(unwrap_sig) => {
+                info!(
+                    context,
+                    unwrap_raw,
+                    keep_min,
+                    unwrap_signature = %unwrap_sig,
+                    "SOL-first auto-unwrap after successful operation"
+                );
+            }
+            Err(e) => {
+                warn!(context, unwrap_raw, keep_min, error = %e, "SOL-first auto-unwrap skipped");
+            }
+        }
+        Ok(())
     }
 
     /// Transfer native SOL into the owner's wSOL ATA + `sync_native` so SPL balance is usable by Orca swaps.
@@ -773,6 +824,9 @@ impl WhirlpoolExecutor {
                 .await?;
 
             if res.success {
+                let _ = self
+                    .maybe_auto_unwrap_wsol_to_native(payer, "swap_exact_in")
+                    .await;
                 return Ok(res);
             }
 
@@ -982,6 +1036,9 @@ impl WhirlpoolExecutor {
                 .await?;
 
             if res.success {
+                let _ = self
+                    .maybe_auto_unwrap_wsol_to_native(payer, "close_position")
+                    .await;
                 return Ok(res);
             }
 

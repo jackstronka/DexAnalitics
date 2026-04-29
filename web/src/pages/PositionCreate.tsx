@@ -21,6 +21,7 @@ import {
   swapBeforeOpen as swapBeforeOpenTx,
   type QuoteOpenBudgetResponse,
   type WalletBalancesResponse,
+  type WalletEffectiveBalancesResponse,
 } from '@/lib/api'
 import {
   alignPriceRatioToTicks,
@@ -279,6 +280,8 @@ export default function PositionCreate() {
   /** Tryb „wspólna kwota USD”: edycja Amount A/B → przelicza docelowe USD i drugą nogę (debounce + binary search po API). */
   const budgetLegDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const budgetLegAbortRef = useRef<AbortController | null>(null)
+  /** Avoid treating React Query placeholder cache as the wrong owner after `effectiveOwnerPk` changes. */
+  const prevEffectiveOwnerPkRef = useRef<string | null>(null)
   const [budgetLegSyncing, setBudgetLegSyncing] = useState(false)
   const [budgetLegSyncError, setBudgetLegSyncError] = useState<string | null>(null)
 
@@ -339,7 +342,25 @@ export default function PositionCreate() {
     queryFn: () => getWalletEffectiveBalances(effectiveOwnerPk!),
     enabled: !!effectiveOwnerPk,
     staleTime: 20_000,
+    refetchInterval: (query) => {
+      const d = query.state.data as WalletEffectiveBalancesResponse | undefined
+      if (!d || d.is_stale) return 2_500
+      return 10_000
+    },
+    refetchOnMount: 'always',
   })
+
+  useEffect(() => {
+    if (!effectiveOwnerPk) {
+      prevEffectiveOwnerPkRef.current = null
+      return
+    }
+    const prev = prevEffectiveOwnerPkRef.current
+    if (prev !== null && prev !== effectiveOwnerPk) {
+      void queryClient.invalidateQueries({ queryKey: ['wallet-balances', effectiveOwnerPk] })
+    }
+    prevEffectiveOwnerPkRef.current = effectiveOwnerPk
+  }, [effectiveOwnerPk, queryClient])
 
   const strategyOptions = useMemo(
     () => strategiesQ.data?.strategies ?? [],
@@ -656,6 +677,10 @@ export default function PositionCreate() {
       jupiterGeneric: 'https://jup.ag/swap' as string,
     }
     if (!effectiveOwnerPk || !tokenA || !tokenB || !effectiveBalancesQ.data) {
+      return empty
+    }
+    // Warmup / SWR placeholder can expose zeros with is_stale=true — never treat as funding truth.
+    if (effectiveBalancesQ.data.is_stale) {
       return empty
     }
     if (
@@ -1623,7 +1648,9 @@ export default function PositionCreate() {
               ) : null}
               {!!effectiveBalancesQ.data?.is_stale && (
                 <InlineError as="div" className="text-xs">
-                  Uzywany jest ostatni znany stan portfela (stale {Math.max(0, (effectiveBalancesQ.data.stale_age_ms / 1000)).toFixed(1)}s), odswiezanie trwa w tle.
+                  Używany jest ostatni znany stan portfela (stale{' '}
+                  {Math.max(0, effectiveBalancesQ.data.stale_age_ms / 1000).toFixed(1)}s), odświeżanie trwa w tle.
+                  Walidacja funduszy względem kwot jest wstrzymana do świeżego odczytu.
                 </InlineError>
               )}
 

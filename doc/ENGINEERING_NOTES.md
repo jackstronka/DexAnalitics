@@ -1,3 +1,29 @@
+## 2026-04-30 — Orca positions-by-owner: try all configured Solana RPC endpoints
+
+keywords: clmm-lp-api, orca, fetch_positions_for_owner, SOLANA_RPC_URL, SOLANA_RPC_FALLBACK_URLS, public-rpc, 403
+
+- **What:** `GET /orca/positions-by-owner` (Whirlpool scan for wallet) no longer uses only `provider.current_endpoint()`. It walks `RpcProvider::all_endpoints()` (primary + fallbacks) until `fetch_positions_for_owner` succeeds.
+- **Why:** Some public RPCs (e.g. PublicNode) can return HTTP 403 for a given client/region; the rest of the stack already has multi-endpoint config, but this route used a single `RpcClient` and surfaced `Internal error: … 403 …`.
+- **What (errors):** If every endpoint fails, the API returns **502 Bad Gateway** with an explicit hint to set `SOLANA_RPC_URL` / `SOLANA_RPC_FALLBACK_URLS` instead of a generic 500.
+- **paths:** `crates/api/src/handlers/orca_onchain.rs`
+
+## 2026-04-30 — PositionCreate: poll effective balances when stale; no false funding block
+
+keywords: web, position-create, effective-balances, is-stale, react-query, refetch-interval, funding-validation
+
+- **What:** `PositionCreate` now uses faster `refetchInterval` while effective balances are missing or `is_stale`, `refetchOnMount: 'always'`, and invalidates `wallet-balances` when `effectiveOwnerPk` changes. `fundingCheck` and submit are skipped for insufficient-fund errors until `is_stale` is false; submit shows a clear “refreshing” message if the user tries early.
+- **Why:** Warmup placeholder from `GET /wallets/effective-balances` must not be treated as ground truth for preflight token checks.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
+## 2026-04-29 — SOL-first policy: automatic WSOL cleanup after swap/open
+
+keywords: wallets, wsol, sol-first, auto-unwrap, swap, open-position, orca, execution
+
+- **What:** Added SOL-first cleanup in Orca executor: after successful `swap_exact_in`, `open_position`, `open_full_range_position`, and `close_position`, API wallet attempts to unwrap WSOL leftovers back to native SOL.
+- **What:** Added env controls: `CLMM_SOL_FIRST_AUTO_UNWRAP` (default `true`) and `CLMM_SOL_FIRST_KEEP_WSOL_MIN_RAW` (default `0`) for optional advanced mode that keeps a WSOL reserve.
+- **Why:** Aligns behavior with common wallet UX (native SOL primary, WSOL as transient execution format) and reduces operational failures caused by low native SOL while funds sit in WSOL.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `.env.example`
+
 ## 2026-04-29 — Propagate effective-balance stale semantics beyond Wallet page
 
 keywords: web, wallet, swap, position-create, effective-balances, stale, rpc, non-blocking

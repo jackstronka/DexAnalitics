@@ -28,6 +28,35 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260430-02 — Positions page: `fetch_positions_for_owner` 403 from PublicNode → internal error
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-30  
+fixed_in: local  
+keywords: positions-ui, orca, positions-by-owner, fetch_positions_for_owner, publicnode, 403, SOLANA_RPC_URL, bad-gateway
+
+- **Symptom:** Internal error mentioning `fetch_positions_for_owner: HTTP status client error (403 Forbidden) for url (https://solana.publicnode.com/)` when loading Positions (on-chain Orca scan).
+- **Root cause:** `/orca/positions-by-owner` built a single `RpcClient` from `current_endpoint()` only, so it did not use the same multi-endpoint policy as `RpcProvider`’s fallbacks; a blocked/limiting public RPC failed the whole request.
+- **Fix:** Handler tries each URL from `all_endpoints()` until success; on total failure returns **502** with guidance to set `SOLANA_RPC_URL` / `SOLANA_RPC_FALLBACK_URLS`.
+- **Paths:** `crates/api/src/handlers/orca_onchain.rs`, `doc/ENGINEERING_NOTES.md`
+
+### BUG-20260430-01 — PositionCreate: stale effective-balances warmup blocked „Za mało tokenów” / open
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-30  
+fixed_in: local  
+keywords: position-create, effective-balances, is-stale, react-query, refetch-interval, funding-validation, warmup-placeholder
+
+- **Symptom:** On `/positions/new`, wallet lines stayed at 0 SOL / 0 USDC for minutes with stale banner; funding validation treated placeholder zeros as real and blocked open („Za mało tokenów…”).
+- **Root cause:** After fast-return warmup (`is_stale=true`), `PositionCreate` did not poll like Wallet; React Query could sit on placeholder data and `fundingCheck` treated zeros as deficits.
+- **Fix:** Aggressive `refetchInterval` when stale or missing data (~2.5s) vs ~10s when fresh; `refetchOnMount: 'always'`; invalidate `wallet-balances` when `effectiveOwnerPk` changes; skip token/SOL funding validation while `is_stale`; submit shows explicit „balances refreshing” instead of false insufficient-funds.
+- **Guards/tests:** `npm run build` in `web/` (tsc + vite); manual: cold load `/positions/new` — banner may flash but open must not false-block once balances settle.
+- **Paths:** `web/src/pages/PositionCreate.tsx`
+
 ### BUG-20260429-03 — Swap: partial WSOL->SOL unwrap failed + mixed-language raw errors + low dark-mode contrast
 
 status: fixed  

@@ -14,6 +14,8 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 pub struct OrcaPositionsByOwnerQuery {
@@ -45,19 +47,58 @@ pub async fn orca_positions_by_owner(
     let owner_pk =
         Pubkey::from_str(owner_trim).map_err(|_| ApiError::bad_request("invalid owner pubkey"))?;
 
-    let endpoint = state.provider.current_endpoint().await;
-    let config = if endpoint.contains("devnet") {
-        WhirlpoolsConfigInput::SolanaDevnet
-    } else {
-        WhirlpoolsConfigInput::SolanaMainnet
-    };
-    set_whirlpools_config_address(config)
-        .map_err(|e| ApiError::internal(format!("orca config: {e}")))?;
+    // `fetch_positions_for_owner` uses a standalone `RpcClient`, unlike most handlers that go through
+    // `RpcProvider::execute_with_retry`. Try each configured endpoint (primary + fallbacks) so a 403/429
+    // from one public RPC (e.g. PublicNode) does not break `/orca/positions-by-owner` / Positions UI.
+    let endpoints = state.provider.all_endpoints();
+    if endpoints.is_empty() {
+        return Err(ApiError::internal("no Solana RPC endpoints configured"));
+    }
 
-    let rpc = RpcClient::new(endpoint.clone());
-    let raw = fetch_positions_for_owner(&rpc, owner_pk)
-        .await
-        .map_err(|e| ApiError::internal(format!("fetch_positions_for_owner: {e}")))?;
+    const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+    let mut last_err = String::from("no attempt");
+    let mut raw: Option<Vec<PositionOrBundle>> = None;
+    let mut endpoint_used: Option<String> = None;
+
+    for endpoint in endpoints.iter() {
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        if let Err(e) = set_whirlpools_config_address(config) {
+            warn!(endpoint = %endpoint, err = %e, "set_whirlpools_config_address failed; trying next RPC");
+            last_err = format!("orca config: {e}");
+            continue;
+        }
+
+        let rpc = RpcClient::new_with_timeout(endpoint.clone(), RPC_TIMEOUT);
+        match fetch_positions_for_owner(&rpc, owner_pk).await {
+            Ok(positions) => {
+                endpoint_used = Some(endpoint.clone());
+                raw = Some(positions);
+                break;
+            }
+            Err(e) => {
+                warn!(
+                    endpoint = %endpoint,
+                    err = %e,
+                    "fetch_positions_for_owner failed; trying next Solana RPC if configured"
+                );
+                last_err = e.to_string();
+            }
+        }
+    }
+
+    let raw = raw.ok_or_else(|| {
+        ApiError::bad_gateway(format!(
+            "fetch_positions_for_owner: all RPC endpoints failed (last: {last_err}). \
+             Set SOLANA_RPC_URL and/or SOLANA_RPC_FALLBACK_URLS to reachable Solana JSON-RPC endpoints."
+        ))
+    })?;
+    let endpoint = endpoint_used.ok_or_else(|| {
+        ApiError::internal("fetch_positions_for_owner: internal endpoint bookkeeping mismatch")
+    })?;
 
     let mut entries = Vec::new();
     for p in raw {
