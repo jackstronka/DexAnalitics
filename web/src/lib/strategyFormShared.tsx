@@ -21,6 +21,11 @@ export const STRATEGY_COPY: Record<
     body:
       'Rebalance przy wyjściu poza zakres albo gdy cena oddali się od środka zakresu o więcej niż podany próg %. Szerokość zakresu dotyczy nowego pasma po rebalance.',
   },
+  bollinger: {
+    title: 'Bollinger',
+    body:
+      'Rebalance interwałowy na bazie pasm Bollingera liczonych z live punktów ceny z pętli strategii (window, k). To nie jest tryb snapshot 5m/10m z Backtests. Nowy zakres pozycji jest ustawiany na [lower, upper] z bieżącego okna.',
+  },
   il_limit: {
     title: 'Limit IL',
     body:
@@ -39,12 +44,12 @@ export const STRATEGY_COPY: Record<
   last_candle: {
     title: 'Last candle',
     body:
-      'Poza zakresem: nowe granice z ostatniej zamkniętej świecy (low/high). Gdy brak świecy lub jest płaska, fallback do pasma z Range Width %.',
+      'Trigger zdarzeniowy (OOR): strategia sprawdza wyjście poza zakres i wtedy wyznacza nowe granice z ostatniej zamkniętej świecy (low/high). Gdy brak świecy lub świeca jest płaska, fallback do pasma z Range Width %.',
   },
   last_candle_periodic: {
     title: 'Last candle (periodic)',
     body:
-      'Tryb interwałowy: rebalance co N minut niezależnie od in-range/OOR. Granice są z ostatniej zamkniętej świecy (low/high), a przy braku świecy lub płaskiej świecy fallback do pasma z Range Width %.',
+      'Trigger czasowy (interwał): rebalance co N minut, niezależnie od tego czy pozycja jest in-range/OOR. Granice są z ostatniej zamkniętej świecy (low/high), a przy braku świecy lub płaskiej świecy fallback do pasma z Range Width %.',
   },
 }
 
@@ -67,6 +72,12 @@ export const FIELD_ENABLED: Record<StrategyType, Record<FieldKey, boolean>> = {
     rangeWidth: true,
     maxIl: false,
     rebalanceThreshold: true,
+    minInterval: true,
+  },
+  bollinger: {
+    rangeWidth: false,
+    maxIl: false,
+    rebalanceThreshold: false,
     minInterval: true,
   },
   il_limit: {
@@ -113,6 +124,10 @@ export const TOOLTIPS = {
     'Tryb limit IL: gdy |IL| przekroczy ten %, silnik może zarekomendować zamknięcie (próg „close”).',
   rebalanceThresholdThreshold:
     'Przy pozycji w zakresie: rebalance, gdy cena oddali się od środka pasma o co najmniej ten %. Poza zakresem rebalance może nastąpić wcześniej.',
+  bollingerWindow:
+    'Bollinger (live): liczba ostatnich punktów ceny używana do wyliczenia SMA i odchylenia standardowego. Mniejsze okno = szybsza reakcja (więcej szumu), większe = gładsze pasma. Punkt = jedna próbka z pętli strategii (nie snapshot 5m/10m).',
+  bollingerK:
+    'Bollinger: mnożnik odchylenia standardowego (k) dla pasm (SMA ± k·σ). Niższe k = ciaśniejsze pasmo i częstsze rebalance; wyższe k = szersze pasmo i rzadsze rebalance. Start: 2.0 (agresywniej 1.5, spokojniej 2.5).',
   rebalanceThresholdIl:
     'Tryb limit IL: gdy |IL| przekroczy ten próg (i spełnione są reguły odstępu), rekomendowany jest rebalance.',
   minIntervalPeriodic:
@@ -174,6 +189,8 @@ export function buildParameters(
     minRebalanceIntervalMinutes: number | ''
     retouchOffsetPct: number | ''
     candleMinutes: number | ''
+    bollingerWindow: number | ''
+    bollingerK: number | ''
     periodicRequiresOutOfRange: boolean
     rebalanceOnRangeExitImmediately: boolean
     autoStart: boolean
@@ -203,6 +220,20 @@ export function buildParameters(
     const n = Number(state.candleMinutes)
     if (Number.isFinite(n) && n > 0) {
       p.candle_seconds = Math.max(60, Math.floor(n * 60))
+    }
+  }
+  if (strategyType === 'bollinger') {
+    if (state.bollingerWindow !== '') {
+      const n = Number(state.bollingerWindow)
+      if (Number.isFinite(n) && n >= 2) {
+        p.bollinger_window = Math.floor(n)
+      }
+    }
+    if (state.bollingerK !== '') {
+      const n = Number(state.bollingerK)
+      if (Number.isFinite(n) && n > 0) {
+        p.bollinger_k = n
+      }
     }
   }
 

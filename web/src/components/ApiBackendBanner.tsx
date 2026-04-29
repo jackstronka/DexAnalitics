@@ -20,7 +20,7 @@ export default function ApiBackendBanner() {
   return (
     <div
       role="alert"
-      className="flex items-start gap-3 border-b border-destructive/50 bg-destructive/10 px-6 py-3 text-sm text-foreground"
+      className="flex items-start gap-3 border-b border-destructive/60 bg-destructive/25 px-6 py-3 text-sm text-destructive-foreground"
     >
       <AlertTriangle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
       <div className="space-y-1 min-w-0">
@@ -33,9 +33,7 @@ export default function ApiBackendBanner() {
           <code className="rounded bg-muted px-1 py-0.5 text-[11px]">API_PORT</code> (np. 8081) albo{' '}
           <code className="rounded bg-muted px-1 py-0.5 text-[11px]">API_UPSTREAM</code> (np. http://127.0.0.1:8081).
         </p>
-        {q.error instanceof Error && (
-          <p className="text-xs text-destructive/90 font-mono break-all">{q.error.message}</p>
-        )}
+        {q.error instanceof Error && <p className="text-xs font-mono break-all">{q.error.message}</p>}
       </div>
     </div>
   )

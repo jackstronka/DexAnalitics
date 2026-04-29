@@ -16,6 +16,8 @@ pub enum StrategyMode {
     Periodic,
     /// Rebalance when out of range OR when deviation from range midpoint exceeds threshold.
     Threshold,
+    /// Rebalance on interval using rolling Bollinger bands as the target LP range.
+    Bollinger,
     /// Rebalance only when price exits the range (matches backtest `OorRecenter`; no in-range midpoint recenters).
     OorRecenter,
     /// Shift only the exiting edge towards current price, once per out-of-range episode.
@@ -52,6 +54,10 @@ pub struct DecisionConfig {
     /// For `Threshold`: deviation from range midpoint that triggers rebalance.
     /// Expressed as a ratio (e.g. 0.05 = 5%).
     pub threshold_pct: Decimal,
+    /// For `Bollinger`: rolling window length in points/samples.
+    pub bollinger_window_points: u64,
+    /// For `Bollinger`: standard deviation multiplier (k).
+    pub bollinger_k: Decimal,
     /// For `RetouchShift`: shift full retouched band by this ratio (0.001 = +0.1%).
     pub retouch_offset_pct: Decimal,
     /// Range width for new positions (as percentage).
@@ -77,6 +83,8 @@ impl Default for DecisionConfig {
             periodic_requires_out_of_range: false,
             rebalance_on_range_exit_immediately: true,
             threshold_pct: Decimal::new(5, 3),    // 0.5% by default
+            bollinger_window_points: 20,
+            bollinger_k: Decimal::new(2, 0),
             retouch_offset_pct: Decimal::ZERO,
             range_width_pct: Decimal::new(10, 2), // 10%
             last_candle_seconds: 3600,
@@ -99,6 +107,8 @@ pub struct DecisionContext {
     pub retouch_armed: Option<bool>,
     /// Optional tick band derived from last closed candle low/high.
     pub last_candle_ticks: Option<(i32, i32)>,
+    /// Optional tick band derived from rolling Bollinger window.
+    pub bollinger_ticks: Option<(i32, i32)>,
 }
 
 /// Decision engine for automated strategy execution.
@@ -228,6 +238,29 @@ impl DecisionEngine {
                     };
                 }
 
+                Decision::Hold
+            }
+
+            StrategyMode::Bollinger => {
+                if context.minutes_since_rebalance >= cfg.min_rebalance_interval_minutes {
+                    if let Some((new_lower, new_upper)) = context.bollinger_ticks {
+                        debug!(
+                            new_lower = new_lower,
+                            new_upper = new_upper,
+                            window_points = cfg.bollinger_window_points,
+                            k = %cfg.bollinger_k,
+                            "Bollinger interval rebalance"
+                        );
+                        return Decision::Rebalance {
+                            new_tick_lower: new_lower,
+                            new_tick_upper: new_upper,
+                        };
+                    }
+                    debug!(
+                        window_points = cfg.bollinger_window_points,
+                        "Bollinger: interval reached but not enough rolling points yet"
+                    );
+                }
                 Decision::Hold
             }
 
@@ -496,6 +529,7 @@ mod tests {
             minutes_since_rebalance: 48 * 60,
             retouch_armed: None,
             last_candle_ticks: None,
+            bollinger_ticks: None,
         }
     }
 

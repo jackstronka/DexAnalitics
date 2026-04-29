@@ -5,6 +5,7 @@ import * as Tabs from '@radix-ui/react-tabs'
 import { ArrowLeft, RefreshCw, X, DollarSign } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
 import { PositionLifecycleTimeline } from '@/components/PositionLifecycleTimeline'
 import {
@@ -1090,8 +1091,8 @@ export default function PositionDetail() {
               </CardHeader>
               <CardContent className="text-sm space-y-2">
                 {lastRebalanceIncomplete ? (
-                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2">
-                    <div className="font-medium text-destructive">
+                  <ErrorBanner className="text-destructive-foreground">
+                    <div className="font-medium">
                       {locale === 'pl'
                         ? 'Rebalance niepełny — stara pozycja zamknięta, nowa nieotwarta'
                         : 'Rebalance incomplete — old position closed, new one not opened'}
@@ -1112,7 +1113,7 @@ export default function PositionDetail() {
                         <span className="font-medium">{locale === 'pl' ? 'wskazówka:' : 'hint:'}</span> {lastRebalanceIncomplete.hint}
                       </div>
                     ) : null}
-                  </div>
+                  </ErrorBanner>
                 ) : null}
 
                 {!lastRebalanceIncomplete && lastRebalanceSession ? (
@@ -1603,9 +1604,7 @@ export default function PositionDetail() {
             </CardHeader>
             <CardContent className="space-y-3">
               {actionError ? (
-                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive break-words">
-                  {actionError}
-                </div>
+                <ErrorBanner className="break-words">{actionError}</ErrorBanner>
               ) : null}
               {actionInfo ? (
                 <div className="rounded-md border border-emerald-600/40 bg-emerald-950/20 px-3 py-2 text-sm text-emerald-200 break-words">
@@ -1699,9 +1698,9 @@ export default function PositionDetail() {
             </CardHeader>
             <CardContent className="space-y-3">
               {runBacktestM.isError && (runBacktestM.error as Error)?.message !== 'Cancelled' ? (
-                <div className="text-sm text-destructive">
+                <ErrorBanner>
                   {(runBacktestM.error as Error)?.message ?? (locale === 'pl' ? 'Backtest nieudany' : 'Backtest failed')}
-                </div>
+                </ErrorBanner>
               ) : null}
               {backtestJobId ? (
                 <div className="text-sm text-muted-foreground">
@@ -1742,8 +1741,10 @@ export default function PositionDetail() {
               <CardHeader>
                 <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
               </CardHeader>
-              <CardContent className="text-sm text-destructive">
-                {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
+              <CardContent>
+                <ErrorBanner>
+                  {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
+                </ErrorBanner>
               </CardContent>
             </Card>
           ) : streamLineage ? (

@@ -1,3 +1,47 @@
+## 2026-04-29 — WSOL partial unwrap regression guards + translator hardening
+
+keywords: swap, wsol, unwrap, partial, tests, i18n, error-normalization, safeguards
+
+- **What:** Extracted WSOL partial unwrap arithmetic into a small helper (`compute_unwrap_rewrap_amount`) and added unit tests for full unwrap, partial unwrap, and insufficient-balance rejection.
+- **What:** Extended API error normalizer with additional WSOL patterns: legacy `partial unwrap is not supported` fallback and `close succeeded but remainder re-wrap failed`.
+- **Why:** Keeps partial unwrap behavior stable over refactors and ensures users still get actionable PL/EN errors across mixed backend versions/failure modes.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `web/src/lib/api.ts`, `doc/BUGS.md`
+
+## 2026-04-29 — Meteora snapshot parity in `snapshot-run-curated-all` (stable vault fields)
+
+keywords: cli, backtests, snapshot-run-curated-all, meteora, lp_share, vault_amount_a, vault_amount_b, token-2022, snapshot-only
+
+- **What:** Updated Meteora branch in `snapshot-run-curated-all` to emit stable vault fields: `vault_amount_a`/`vault_amount_b` are now always serialized (u64) plus `vault_amount_source` (`rpc_token_account` / `missing_fallback_zero`), instead of optional fields dropped on decode miss.
+- **What:** Added extension-friendly token-account decode fallback in this path (same intent as curated collector) so reserve balances are recovered also when strict SPL unpack fails.
+- **Why:** Backtests FULL depended on Meteora vault fields for automatic `lp_share` (TVL proxy); missing optional fields caused avoidable `--lp-share` hard-stop despite fresh snapshot runs.
+- **paths:** `crates/cli/src/main.rs`, `doc/BUGS.md`
+
+## 2026-04-29 — Swap UX hardening: partial WSOL unwrap + localized errors + dark-mode error contrast
+
+keywords: swap, wsol, unwrap, partial, i18n, error-normalization, dark-theme, destructive-contrast
+
+- **What:** Enabled partial `WSOL -> SOL` conversion in live executor path (unwrap requested amount, keep remainder wrapped), added known-error normalization/localization in frontend API error parser, and improved readability of swap error banners.
+- **Global UI contrast:** Increased dark-theme `--destructive` token brightness so existing `text-destructive` usages across pages remain readable.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/index.css`, `doc/BUGS.md`
+
+## 2026-04-29 — Strategy link reconciliation after global pending-open claims
+
+keywords: strategies, pending-open, reopen-hook, linked-positions, position_addresses, managed-allowlist, regression
+
+- **What:** Hardened reopen link updates for global pending-open queue processing: on successful `old -> new` reopen, API now resolves owning strategies by `old_position` and updates links there (instead of only the claimant executor's strategy id).
+- **Why:** Pending-open items can be claimed by any running executor; claimant-centric update could miss the actual owner strategy and leave active PDAs as `Not linked`.
+- **Behavior:** After replacement, managed allowlist sync runs for each touched strategy to keep executor scope aligned with updated links.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `doc/BUGS.md`
+
+## 2026-04-29 — Strategies UI cleanup + live Bollinger mode
+
+keywords: strategies, strategy-create, strategy-edit, dry_run, bollinger, execution, decision-engine, api, web
+
+- **What:** Strategy Create/Edit now hide non-applicable parameter fields (instead of disabled placeholders), and Strategy Create exposes `Dry run`/`Auto-execute` toggles so `dry_run` is not forced to `true`.
+- **Live Bollinger:** Added first-class `bollinger` strategy type in API/execution with `bollinger_window` + `bollinger_k` parameters; executor computes rolling Bollinger bands from live sampled pool prices and rebalances on interval using band-derived ticks.
+- **Compatibility:** Backtests/optimize remain unchanged; this change targets live strategy create/edit and live executor mapping.
+- **paths:** `web/src/pages/StrategyCreate.tsx`, `web/src/pages/StrategyEdit.tsx`, `web/src/lib/strategyFormShared.tsx`, `web/src/lib/api.ts`, `crates/api/src/models.rs`, `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/services/simulation_analytics.rs`, `crates/execution/src/strategy/decision.rs`, `crates/execution/src/strategy/executor.rs`, `doc/BUGS.md`
+
 ## 2026-04-28 — Snapshot schema parity: Orca `parse_ok/parse_error`
 
 keywords: orca, raydium, meteora, snapshots, parse_ok, parse_error, schema-consistency, cli
@@ -15,6 +59,14 @@ keywords: etap3, snapshot-run-curated-all, retry, single-writer, mutex, readines
 - **Readiness model/UI:** Extended readiness API with row/aggregate operational status (`ok/degraded/recovering/missing`), status reasons/counters, and rendered status badges/counters in `Data Quality` (PL/EN i18n).
 - **Tests:** Added unit tests for readiness status classifier/aggregate prioritization and expanded endpoint coverage assertions for new readiness status contract.
 - **paths:** `crates/cli/src/main.rs`, `tools/run_snapshot_health_monitor_loop.ps1`, `tools/data_alerts_loop.ps1`, `crates/api/src/models.rs`, `crates/api/src/handlers/backtests.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `web/src/lib/api.ts`, `web/src/pages/DataQuality.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-04-29 — Backtests UI: Last Candle seconds -> minutes
+
+keywords: backtests, ui, last-candle, minutes, seconds, unit-conversion, snapshot-mode
+
+- **What:** Changed `last_candle_seconds_grid` and `last_candle_rebalance_seconds_grid` UI inputs to be entered in **minutes**, while keeping the API payload names and converting to seconds right before sending to `/backtests/full` and `/backtests/auto-tune/start`.
+- **Why:** Make the UI consistent/less confusing with the rest of time-based controls and with typical operator intuition.
+- **paths:** `web/src/pages/Backtests.tsx`
 
 ## 2026-04-28 — Backtests UI: moved local `L(...)` strings to central i18n
 

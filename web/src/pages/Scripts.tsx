@@ -290,8 +290,8 @@ export default function Scripts() {
       )}
 
       {error && (
-        <Card className="border-destructive/50">
-          <CardContent className="pt-6 text-destructive text-sm">
+        <Card className="border-destructive/60 bg-destructive/25">
+          <CardContent className="pt-6 text-destructive-foreground text-sm">
             {(error as Error).message}
           </CardContent>
         </Card>

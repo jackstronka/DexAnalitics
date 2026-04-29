@@ -969,6 +969,17 @@ impl StrategyExecutor {
         } else {
             None
         };
+        let bollinger_ticks = if matches!(cfg.strategy_mode, StrategyMode::Bollinger) {
+            self.record_price_and_compute_bollinger_ticks(
+                &position.address,
+                &pool,
+                cfg.bollinger_window_points.max(2),
+                cfg.bollinger_k,
+            )
+            .await
+        } else {
+            None
+        };
 
         let context = DecisionContext {
             position: position.clone(),
@@ -976,6 +987,7 @@ impl StrategyExecutor {
             minutes_since_rebalance,
             retouch_armed,
             last_candle_ticks,
+            bollinger_ticks,
         };
 
         let decision = self.decision_engine.decide(&context);
@@ -1097,6 +1109,92 @@ impl StrategyExecutor {
         Some((lo, hi))
     }
 
+    async fn record_price_and_compute_bollinger_ticks(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &WhirlpoolState,
+        window_points: u64,
+        k: Decimal,
+    ) -> Option<(i32, i32)> {
+        let now = chrono::Utc::now().timestamp();
+        let keep_after = now.saturating_sub(24 * 60 * 60);
+        let w = window_points.max(2) as usize;
+        let kf = k.to_f64().unwrap_or(2.0);
+        if !kf.is_finite() || kf <= 0.0 {
+            return None;
+        }
+
+        let mut samples = self.price_samples.write().await;
+        let entry = samples.entry(*position).or_insert_with(VecDeque::new);
+        entry.push_back(PriceSample {
+            ts_unix: now,
+            price_ab: pool.price,
+        });
+        while entry
+            .front()
+            .is_some_and(|s| s.ts_unix < keep_after || entry.len() > 4096)
+        {
+            entry.pop_front();
+        }
+
+        if entry.len() < w {
+            return None;
+        }
+        let mut values = Vec::with_capacity(w);
+        for s in entry.iter().rev().take(w) {
+            let p = s.price_ab.to_f64().unwrap_or(0.0);
+            if !p.is_finite() || p <= 0.0 {
+                return None;
+            }
+            values.push(p);
+        }
+        if values.len() < w {
+            return None;
+        }
+        values.reverse();
+
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        if !mean.is_finite() || mean <= 0.0 {
+            return None;
+        }
+        let var = values
+            .iter()
+            .map(|v| {
+                let d = *v - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / values.len() as f64;
+        let sigma = var.sqrt();
+        let mut lo_price = mean - (kf * sigma);
+        let mut hi_price = mean + (kf * sigma);
+        if !(lo_price.is_finite() && hi_price.is_finite()) {
+            return None;
+        }
+        if lo_price <= 0.0 {
+            lo_price = mean.max(1e-12) * 0.999;
+        }
+        if hi_price <= lo_price {
+            hi_price = lo_price * 1.001;
+        }
+
+        let mut lo = clmm_lp_protocols::prelude::price_to_tick(
+            Decimal::from_f64_retain(lo_price).unwrap_or(pool.price),
+        );
+        let mut hi = clmm_lp_protocols::prelude::price_to_tick(
+            Decimal::from_f64_retain(hi_price).unwrap_or(pool.price),
+        );
+        let spacing = pool.tick_spacing as i32;
+        if spacing > 0 {
+            lo = lo.div_euclid(spacing) * spacing;
+            hi = ((hi + spacing - 1).div_euclid(spacing)) * spacing;
+        }
+        if hi <= lo {
+            hi = lo + spacing.max(1);
+        }
+        Some((lo, hi))
+    }
+
     /// Executes a decision.
     async fn execute_decision(
         &self,
@@ -1127,6 +1225,7 @@ impl StrategyExecutor {
                 let reason = match self.decision_engine.config().strategy_mode {
                     StrategyMode::RetouchShift => RebalanceReason::RetouchShift,
                     StrategyMode::Periodic => RebalanceReason::Periodic,
+                    StrategyMode::Bollinger => RebalanceReason::Periodic,
                     StrategyMode::OorRecenter => RebalanceReason::RangeExit,
                     StrategyMode::LastCandle => RebalanceReason::RangeExit,
                     StrategyMode::LastCandlePeriodic => RebalanceReason::Periodic,

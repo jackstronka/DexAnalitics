@@ -540,6 +540,7 @@ export type StrategyType =
   | 'static_range'
   | 'periodic'
   | 'threshold'
+  | 'bollinger'
   | 'il_limit'
   | 'oor_recenter'
   | 'retouch_shift'
@@ -568,6 +569,10 @@ export type OptimizeApplyPolicy =
 
 export interface StrategyParameters {
   rebalance_threshold_pct?: number
+  /** Bollinger: rolling window length in points/samples. */
+  bollinger_window?: number
+  /** Bollinger: standard deviation multiplier (k). */
+  bollinger_k?: number
   retouch_offset_pct?: number
   max_il_pct?: number
   /** Legacy fallback (hours). UI should prefer minutes. */
@@ -728,8 +733,133 @@ export interface ComponentHealth {
 
 /** Best-effort message from failed fetch (JSON `message`, plain text, or HTML hint). */
 function messageFromErrorBody(text: string, status: number): string {
+  const isPl =
+    typeof navigator !== 'undefined' &&
+    typeof navigator.language === 'string' &&
+    navigator.language.toLowerCase().startsWith('pl')
   const statusLine = `HTTP ${status}`
   const trimmed = text.trim()
+  const localizeKnownError = (raw: string): string => {
+    const partialUnwrap = raw.match(
+      /wsol_to_native failed:\s*wsol unwrap failed:\s*partial unwrap.*requested (\d+) raw,\s*current WSOL (\d+) raw/i,
+    )
+    if (partialUnwrap) {
+      const req = Number(partialUnwrap[1])
+      const cur = Number(partialUnwrap[2])
+      if (Number.isFinite(req) && Number.isFinite(cur)) {
+        if (isPl) {
+          return `Konwersja WSOL->SOL: częściowy unwrap jest teraz wspierany, ale ta próba nie powiodła się. Żądano ${req.toLocaleString()} lamportów, aktualne WSOL ${cur.toLocaleString()} lamportów. Spróbuj ponownie.`
+        }
+        return `WSOL->SOL conversion: partial unwrap is supported, but this attempt failed. Requested ${req.toLocaleString()} lamports, current WSOL ${cur.toLocaleString()} lamports. Retry the operation.`
+      }
+    }
+
+    const legacyPartialUnwrap = raw.match(/partial unwrap is not supported yet in safe mode/i)
+    if (legacyPartialUnwrap) {
+      if (isPl) {
+        return 'Konwersja częściowego WSOL->SOL była chwilowo niedostępna w trybie bezpiecznym. Zaktualizuj backend i spróbuj ponownie.'
+      }
+      return 'Partial WSOL->SOL conversion was temporarily unavailable in safe mode. Update backend and retry.'
+    }
+
+    const partialRewrapFailed = raw.match(/wsol unwrap partial: close succeeded but remainder re-wrap failed: (.+)$/i)
+    if (partialRewrapFailed) {
+      const reason = partialRewrapFailed[1]?.trim() || raw
+      if (isPl) {
+        return `Konwersja WSOL->SOL: zamknięcie WSOL się udało, ale odtworzenie pozostałej części WSOL nie powiodło się (${reason}). Sprawdź saldo i spróbuj ponownie.`
+      }
+      return `WSOL->SOL conversion: WSOL close succeeded, but re-wrapping the remainder failed (${reason}). Check balances and retry.`
+    }
+
+    const insufficientNative = raw.match(/insufficient native SOL balance \(have (\d+) raw, need (\d+) raw\)/i)
+    if (insufficientNative) {
+      const have = Number(insufficientNative[1])
+      const need = Number(insufficientNative[2])
+      if (Number.isFinite(have) && Number.isFinite(need)) {
+        const fmtSol = (v: number) => (v / 1e9).toLocaleString(undefined, { maximumFractionDigits: 6 })
+        if (isPl) {
+          return `Za mało natywnego SOL. Masz ~${fmtSol(have)} SOL (${have.toLocaleString()} lamportów), wymagane ~${fmtSol(need)} SOL (${need.toLocaleString()} lamportów).`
+        }
+        return `Insufficient native SOL. Have ~${fmtSol(have)} SOL (${have.toLocaleString()} lamports), need ~${fmtSol(need)} SOL (${need.toLocaleString()} lamports).`
+      }
+    }
+
+    const insufficientWsol = raw.match(/insufficient WSOL balance \(have (\d+) raw, need (\d+) raw\)/i)
+    if (insufficientWsol) {
+      const have = Number(insufficientWsol[1])
+      const need = Number(insufficientWsol[2])
+      if (Number.isFinite(have) && Number.isFinite(need)) {
+        const fmt = (v: number) => (v / 1e9).toLocaleString(undefined, { maximumFractionDigits: 6 })
+        if (isPl) {
+          return `Za mało WSOL. Masz ~${fmt(have)} WSOL, wymagane ~${fmt(need)} WSOL.`
+        }
+        return `Insufficient WSOL. Have ~${fmt(have)} WSOL, need ~${fmt(need)} WSOL.`
+      }
+    }
+
+    const transferInsufficientSol = raw.match(/insufficient SOL: have (\d+) lamports, need at least (\d+) \+ fee reserve/i)
+    if (transferInsufficientSol) {
+      const have = Number(transferInsufficientSol[1])
+      const need = Number(transferInsufficientSol[2])
+      if (Number.isFinite(have) && Number.isFinite(need)) {
+        if (isPl) {
+          return `Za mało SOL na transfer. Masz ${have.toLocaleString()} lamportów, potrzeba co najmniej ${need.toLocaleString()} lamportów + rezerwa na fee.`
+        }
+        return `Insufficient SOL for transfer. Have ${have.toLocaleString()} lamports, need at least ${need.toLocaleString()} lamports + fee reserve.`
+      }
+    }
+
+    const normalizePrefix = (s: string) => s.toLowerCase()
+    const lower = normalizePrefix(raw)
+    if (lower.startsWith('open position failed: api host cannot sign transactions')) {
+      return isPl
+        ? 'Otwarcie pozycji nie powiodło się: host API nie może podpisać transakcji (brak skonfigurowanego portfela/executora).'
+        : 'Open position failed: API host cannot sign transactions (missing configured wallet/executor).'
+    }
+    if (lower.startsWith('open position failed: slippage/min-out too tight')) {
+      return isPl
+        ? 'Otwarcie pozycji nie powiodło się: zbyt ciasny slippage/min-out względem ruchu ceny puli. Zwiększ slippage lub zmniejsz kwotę.'
+        : 'Open position failed: slippage/min-out too tight vs pool move. Increase slippage or lower amount.'
+    }
+    if (lower.startsWith('open position failed: invalid tick bounds')) {
+      return isPl
+        ? 'Otwarcie pozycji nie powiodło się: nieprawidłowe ticki dla tej puli (spacing/range).'
+        : 'Open position failed: invalid tick bounds for this pool (spacing/range).'
+    }
+    if (lower.startsWith('open position failed: insufficient funds/tokens')) {
+      return isPl
+        ? 'Otwarcie pozycji nie powiodło się: za mało środków/tokenów dla zadanych limitów. Doładuj portfel API signer albo zmniejsz kwoty.'
+        : 'Open position failed: insufficient funds/tokens for requested caps. Fund API signer wallet or lower amounts.'
+    }
+
+    if (lower.startsWith('close position failed: whirlpool position is not empty yet')) {
+      return isPl
+        ? 'Zamknięcie pozycji nie powiodło się: pozycja Whirlpool nie jest pusta (najpierw zdejmij płynność/odbierz opłaty).'
+        : 'Close position failed: Whirlpool position is not empty yet (remove liquidity/collect fees first).'
+    }
+    if (lower.startsWith('close position failed: whirlpool account ownership mismatch')) {
+      return isPl
+        ? 'Zamknięcie pozycji nie powiodło się: niezgodność właściciela konta Whirlpool.'
+        : 'Close position failed: Whirlpool account ownership mismatch.'
+    }
+    if (lower.startsWith('close position failed: api host cannot sign transactions')) {
+      return isPl
+        ? 'Zamknięcie pozycji nie powiodło się: host API nie może podpisać transakcji (brak skonfigurowanego portfela/executora).'
+        : 'Close position failed: API host cannot sign transactions (missing configured wallet/executor).'
+    }
+    if (lower.startsWith('close position failed: whirlpool min-out/slippage too tight')) {
+      return isPl
+        ? 'Zamknięcie pozycji nie powiodło się: zbyt ciasny min-out/slippage względem ruchu ceny puli.'
+        : 'Close position failed: min-out/slippage too tight vs pool move.'
+    }
+    if (lower.startsWith('close position failed: insufficient funds/tokens')) {
+      return isPl
+        ? 'Zamknięcie pozycji nie powiodło się: za mało środków/tokenów na portfelu podpisującym.'
+        : 'Close position failed: insufficient funds/tokens on signer wallet.'
+    }
+
+    return raw
+  }
   if (!trimmed) {
     if (status === 408) {
       return `${statusLine} (empty body) — zwykle timeout warstwy HTTP API (Tower) albo proxy; endpoint /positions/:addr wymaga dłuższego limitu po stronie serwera (on-chain router) i wolnego RPC.`
@@ -740,7 +870,7 @@ function messageFromErrorBody(text: string, status: number): string {
     const j = JSON.parse(trimmed) as Record<string, unknown>
     const m = j.message ?? j.error ?? j.detail ?? j.title
     if (typeof m === 'string' && m.length > 0) {
-      return m
+      return localizeKnownError(m)
     }
   } catch {
     /* not JSON */
@@ -748,7 +878,8 @@ function messageFromErrorBody(text: string, status: number): string {
   if (trimmed.startsWith('<!') || trimmed.startsWith('<html')) {
     return `${statusLine} — odpowiedź to HTML (zły URL API albo proxy Vite nie trafia na backend).`
   }
-  return trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed
+  const normalized = localizeKnownError(trimmed)
+  return normalized.length > 400 ? `${normalized.slice(0, 400)}…` : normalized
 }
 
 async function fetchJsonWithTimeout<T>(

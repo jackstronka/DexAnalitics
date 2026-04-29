@@ -275,6 +275,15 @@ impl WhirlpoolExecutor {
         self.read_spl_token_amount_opt(&ata).await
     }
 
+    fn compute_unwrap_rewrap_amount(current_wsol: u64, amount_wsol_lamports: u64) -> Result<u64> {
+        if amount_wsol_lamports > current_wsol {
+            anyhow::bail!(
+                "wsol unwrap failed: insufficient WSOL balance (have {current_wsol} raw, need {amount_wsol_lamports} raw)"
+            );
+        }
+        Ok(current_wsol.saturating_sub(amount_wsol_lamports))
+    }
+
     /// Fail fast with a clear message if the **signing wallet** cannot cover raw deposit caps.
     async fn preflight_open_liquidity_balances(
         &self,
@@ -600,7 +609,10 @@ impl WhirlpoolExecutor {
         Ok(Some(res.signature))
     }
 
-    /// Convert WSOL -> native SOL by closing WSOL ATA (full amount only).
+    /// Convert WSOL -> native SOL.
+    ///
+    /// - full unwrap: close WSOL ATA (single tx)
+    /// - partial unwrap: close WSOL ATA, then re-wrap the remainder (best-effort)
     pub async fn submit_wsol_unwrap_with_signature(
         &self,
         amount_wsol_lamports: u64,
@@ -616,16 +628,7 @@ impl WhirlpoolExecutor {
         if current_wsol == 0 {
             anyhow::bail!("wsol unwrap failed: WSOL balance is 0");
         }
-        if amount_wsol_lamports > current_wsol {
-            anyhow::bail!(
-                "wsol unwrap failed: insufficient WSOL balance (have {current_wsol} raw, need {amount_wsol_lamports} raw)"
-            );
-        }
-        if amount_wsol_lamports < current_wsol {
-            anyhow::bail!(
-                "wsol unwrap failed: partial unwrap is not supported yet in safe mode; requested {amount_wsol_lamports} raw, current WSOL {current_wsol} raw. Use Max to unwrap full balance."
-            );
-        }
+        let rewrap = Self::compute_unwrap_rewrap_amount(current_wsol, amount_wsol_lamports)?;
         let ix = spl_token::instruction::close_account(&spl_token::id(), &ata, &owner, &owner, &[])
             .context("build close_account for WSOL ATA")?;
         let res = self
@@ -637,6 +640,26 @@ impl WhirlpoolExecutor {
                 .error
                 .unwrap_or_else(|| "wsol unwrap transaction failed".to_string());
             anyhow::bail!("wsol unwrap failed: {msg}");
+        }
+        if rewrap > 0 {
+            let ixs = self
+                .ensure_wsol_ata_funded(rewrap, payer, false)
+                .await
+                .context("prepare partial unwrap remainder re-wrap")?;
+            if !ixs.is_empty() {
+                let rewrap_res = self
+                    .send_transaction_with_signers(&ixs, payer, &[])
+                    .await
+                    .map_err(|e| anyhow::anyhow!("wsol partial re-wrap send: {e}"))?;
+                if !rewrap_res.success {
+                    let msg = rewrap_res
+                        .error
+                        .unwrap_or_else(|| "wsol partial re-wrap transaction failed".to_string());
+                    anyhow::bail!(
+                        "wsol unwrap partial: close succeeded but remainder re-wrap failed: {msg}"
+                    );
+                }
+            }
         }
         Ok(res.signature)
     }
@@ -1094,5 +1117,33 @@ mod tests {
         assert!(failure.slot.is_none());
         assert_eq!(failure.error, Some("test error".to_string()));
         assert!(failure.created_position.is_none());
+    }
+
+    #[test]
+    fn test_compute_unwrap_rewrap_amount_full() {
+        let current = 301_550_000u64;
+        let requested = current;
+        let rewrap = WhirlpoolExecutor::compute_unwrap_rewrap_amount(current, requested).unwrap();
+        assert_eq!(rewrap, 0);
+    }
+
+    #[test]
+    fn test_compute_unwrap_rewrap_amount_partial() {
+        let current = 301_550_000u64;
+        let requested = 50_000_000u64;
+        let rewrap = WhirlpoolExecutor::compute_unwrap_rewrap_amount(current, requested).unwrap();
+        assert_eq!(rewrap, 251_550_000);
+    }
+
+    #[test]
+    fn test_compute_unwrap_rewrap_amount_insufficient() {
+        let current = 30_000_000u64;
+        let requested = 50_000_000u64;
+        let err = WhirlpoolExecutor::compute_unwrap_rewrap_amount(current, requested)
+            .expect_err("expected insufficient WSOL error");
+        let msg = err.to_string();
+        assert!(msg.contains("insufficient WSOL balance"));
+        assert!(msg.contains("have 30000000 raw"));
+        assert!(msg.contains("need 50000000 raw"));
     }
 }

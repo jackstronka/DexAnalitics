@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { History, RefreshCw, Send } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import {
   getBotLedger,
   getBotIlLedger,
@@ -219,7 +220,7 @@ export default function BotActivity() {
         <CardContent>
           {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</p>}
           {ledgerQ.isError && (
-            <p className="text-sm text-destructive">{(ledgerQ.error as Error).message}</p>
+            <ErrorBanner>{(ledgerQ.error as Error).message}</ErrorBanner>
           )}
           {ledgerQ.data && <LedgerTable data={ledgerQ.data} />}
         </CardContent>
@@ -237,7 +238,7 @@ export default function BotActivity() {
         <CardContent>
           {ilLedgerQ.isLoading && <p className="text-sm text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</p>}
           {ilLedgerQ.isError && (
-            <p className="text-sm text-destructive">{(ilLedgerQ.error as Error).message}</p>
+            <ErrorBanner>{(ilLedgerQ.error as Error).message}</ErrorBanner>
           )}
           {ilLedgerQ.data && <LedgerTable data={ilLedgerQ.data} columnKeys={IL_LEDGER_KEYS} />}
         </CardContent>
@@ -253,7 +254,7 @@ export default function BotActivity() {
         <CardContent>
           {registryQ.isLoading && <p className="text-sm text-muted-foreground">{locale === 'pl' ? 'Ładowanie…' : 'Loading…'}</p>}
           {registryQ.isError && (
-            <p className="text-sm text-destructive">{(registryQ.error as Error).message}</p>
+            <ErrorBanner>{(registryQ.error as Error).message}</ErrorBanner>
           )}
           {registryQ.data && <LedgerTable data={registryQ.data} />}
         </CardContent>

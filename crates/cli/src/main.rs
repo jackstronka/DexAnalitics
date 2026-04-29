@@ -5206,6 +5206,26 @@ async fn main() -> Result<()> {
             }
 
             // ---- Meteora raw snapshots ----
+            fn decode_any_token_account(data: &[u8]) -> Option<(u64, String)> {
+                use spl_token::solana_program::program_pack::Pack;
+                use spl_token::state::Account as SplTokenAccount;
+
+                if let Ok(a) = SplTokenAccount::unpack(data) {
+                    return Some((a.amount, a.owner.to_string()));
+                }
+
+                // Fallback for token accounts with extensions (e.g. Token-2022):
+                // base Account layout keeps owner at [32..64] and amount at [64..72].
+                if data.len() >= 72 {
+                    let mut amount_bytes = [0u8; 8];
+                    amount_bytes.copy_from_slice(&data[64..72]);
+                    let amount = u64::from_le_bytes(amount_bytes);
+                    let owner = solana_sdk::bs58::encode(&data[32..64]).into_string();
+                    return Some((amount, owner));
+                }
+                None
+            }
+
             #[derive(Debug, Serialize)]
             struct MeteoraLbPairSnapshot {
                 ts_utc: String,
@@ -5238,10 +5258,9 @@ async fn main() -> Result<()> {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 token_vault_b: Option<String>,
 
-                #[serde(skip_serializing_if = "Option::is_none")]
-                vault_amount_a: Option<u64>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                vault_amount_b: Option<u64>,
+                vault_amount_a: u64,
+                vault_amount_b: u64,
+                vault_amount_source: String,
 
                 #[serde(skip_serializing_if = "Option::is_none")]
                 protocol_fee_amount_a: Option<u64>,
@@ -5260,9 +5279,7 @@ async fn main() -> Result<()> {
                             Ok(p) => (Some(p), true, None),
                             Err(e) => (None, false, Some(e.to_string())),
                         };
-                    let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
-                        use spl_token::solana_program::program_pack::Pack;
-                        use spl_token::state::Account as SplTokenAccount;
+                    let (vault_amount_a, vault_amount_b, vault_amount_source) = if let Some(ref p) = parsed {
                         let accounts = rpc
                             .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
                             .await
@@ -5271,19 +5288,22 @@ async fn main() -> Result<()> {
                             let a = accounts
                                 .first()
                                 .and_then(|a| a.as_ref())
-                                .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                                .map(|a| a.amount);
+                                .and_then(|a| decode_any_token_account(&a.data))
+                                .map(|(amount, _)| amount);
                             let b = accounts
                                 .get(1)
                                 .and_then(|a| a.as_ref())
-                                .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                                .map(|a| a.amount);
-                            (a, b)
+                                .and_then(|a| decode_any_token_account(&a.data))
+                                .map(|(amount, _)| amount);
+                            match (a, b) {
+                                (Some(va), Some(vb)) => (va, vb, "rpc_token_account".to_string()),
+                                _ => (0, 0, "missing_fallback_zero".to_string()),
+                            }
                         } else {
-                            (None, None)
+                            (0, 0, "missing_fallback_zero".to_string())
                         }
                     } else {
-                        (None, None)
+                        (0, 0, "missing_fallback_zero".to_string())
                     };
                     let snap = MeteoraLbPairSnapshot {
                         ts_utc: chrono::Utc::now().to_rfc3339(),
@@ -5304,6 +5324,7 @@ async fn main() -> Result<()> {
                         token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
                         vault_amount_a,
                         vault_amount_b,
+                        vault_amount_source,
                         protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),
                         protocol_fee_amount_b: parsed.as_ref().map(|p| p.protocol_fee_amount_y),
                     };

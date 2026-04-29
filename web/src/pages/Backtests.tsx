@@ -154,6 +154,16 @@ function parseCsvUInt64s(raw: string): number[] | undefined {
   return arr.length > 0 ? arr : undefined
 }
 
+/**
+ * UI helper: these inputs are in minutes, but API fields are named `*_seconds_grid`
+ * and are consumed by CLI/engine as seconds.
+ */
+function parseCsvMinutesToSeconds(raw: string): number[] | undefined {
+  const mins = parseCsvUInt64s(raw)
+  if (!mins) return undefined
+  return mins.map((m) => m * 60)
+}
+
 /** Positive float CSV parser (e.g. hour grids). */
 function parseCsvPositiveFloats(raw: string): number[] | undefined {
   const arr = raw
@@ -328,8 +338,9 @@ const GRID_PRESETS: GridPreset[] = [
     bollingerWindowGrid: '30,40',
     bollingerKGrid: '2.5,3.0',
     bollingerRebalanceHoursGrid: '8,12',
-    lastCandleSecondsGrid: '1800,3600,7200',
-    lastCandleRebalanceSecondsGrid: '14400,43200,86400',
+    // UI values are in minutes; API/CLI expects seconds.
+    lastCandleSecondsGrid: '30,60,120',
+    lastCandleRebalanceSecondsGrid: '240,720,1440',
   },
   {
     name: 'Conservative',
@@ -338,8 +349,8 @@ const GRID_PRESETS: GridPreset[] = [
     bollingerWindowGrid: '20,30',
     bollingerKGrid: '2.0,2.5',
     bollingerRebalanceHoursGrid: '8',
-    lastCandleSecondsGrid: '1800,3600',
-    lastCandleRebalanceSecondsGrid: '3600,14400,43200',
+    lastCandleSecondsGrid: '30,60',
+    lastCandleRebalanceSecondsGrid: '60,240,720',
   },
   {
     name: 'Balanced',
@@ -348,8 +359,8 @@ const GRID_PRESETS: GridPreset[] = [
     bollingerWindowGrid: '20',
     bollingerKGrid: '1.5,2.0,2.5',
     bollingerRebalanceHoursGrid: '4,8',
-    lastCandleSecondsGrid: '900,1800,2700,3600',
-    lastCandleRebalanceSecondsGrid: '1800,3600,14400,43200',
+    lastCandleSecondsGrid: '15,30,45,60',
+    lastCandleRebalanceSecondsGrid: '30,60,240,720',
   },
   {
     name: 'Aggressive',
@@ -358,8 +369,8 @@ const GRID_PRESETS: GridPreset[] = [
     bollingerWindowGrid: '10,20',
     bollingerKGrid: '1.0,1.5,2.0',
     bollingerRebalanceHoursGrid: '2,4',
-    lastCandleSecondsGrid: '900,1800,2700',
-    lastCandleRebalanceSecondsGrid: '900,1800,2700,3600,14400',
+    lastCandleSecondsGrid: '15,30,45',
+    lastCandleRebalanceSecondsGrid: '15,30,45,60,240',
   },
   {
     name: 'Scalper',
@@ -368,8 +379,8 @@ const GRID_PRESETS: GridPreset[] = [
     bollingerWindowGrid: '8,10,14',
     bollingerKGrid: '0.8,1.0,1.5',
     bollingerRebalanceHoursGrid: '1,2,4',
-    lastCandleSecondsGrid: '300,600,900',
-    lastCandleRebalanceSecondsGrid: '300,600,900,1800',
+    lastCandleSecondsGrid: '5,10,15',
+    lastCandleRebalanceSecondsGrid: '5,10,15,30',
   },
 ]
 
@@ -413,9 +424,9 @@ export default function Backtests() {
   const [bollingerWindowGrid, setBollingerWindowGrid] = useState('20')
   const [bollingerKGrid, setBollingerKGrid] = useState('1,1.5,2,0.2,5')
   const [bollingerRebalanceHoursGrid, setBollingerRebalanceHoursGrid] = useState('4,8')
-  const [lastCandleSecondsGrid, setLastCandleSecondsGrid] = useState('900,1800,2700,3600')
+  const [lastCandleSecondsGrid, setLastCandleSecondsGrid] = useState('15,30,45,60')
   const [lastCandleRebalanceSecondsGrid, setLastCandleRebalanceSecondsGrid] = useState(
-    '900,1800,2700,3600,14400,43200',
+    '15,30,45,60,240,720',
   )
   const [jobId, setJobId] = useState<string | null>(null)
   const [lastRunCapitalUsd, setLastRunCapitalUsd] = useState<number | null>(8000)
@@ -1076,12 +1087,16 @@ export default function Backtests() {
               </div>
               <div>
                 <div className="font-medium">last_candle_seconds_grid</div>
-                <div className="text-muted-foreground">Rozmiary swiec dla Last Candle (sekundy, snapshot mode).</div>
+                <div className="text-muted-foreground">
+                  Rozmiary swiec dla Last Candle (minuty; UI przelicza na sekundy dla API/CLI).
+                </div>
                 <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={lastCandleSecondsGrid} onChange={(e) => setLastCandleSecondsGrid(e.target.value)} />
               </div>
               <div>
                 <div className="font-medium">last_candle_rebalance_seconds_grid</div>
-                <div className="text-muted-foreground">Interwaly rebalansu Last Candle (sekundy, snapshot mode).</div>
+                <div className="text-muted-foreground">
+                  Interwaly rebalansu Last Candle (minuty; UI przelicza na sekundy dla API/CLI).
+                </div>
                 <input className="mt-1 w-full rounded border bg-background px-2 py-1" value={lastCandleRebalanceSecondsGrid} onChange={(e) => setLastCandleRebalanceSecondsGrid(e.target.value)} />
               </div>
             </div>
@@ -1130,8 +1145,10 @@ export default function Backtests() {
                 bollinger_rebalance_hours_grid: parseCsvPositiveFloats(
                   bollingerRebalanceHoursGrid,
                 ),
-                last_candle_seconds_grid: parseCsvUInt64s(lastCandleSecondsGrid),
-                last_candle_rebalance_seconds_grid: parseCsvUInt64s(
+                last_candle_seconds_grid: parseCsvMinutesToSeconds(
+                  lastCandleSecondsGrid,
+                ),
+                last_candle_rebalance_seconds_grid: parseCsvMinutesToSeconds(
                   lastCandleRebalanceSecondsGrid,
                 ),
               })
@@ -1193,8 +1210,10 @@ export default function Backtests() {
                       bollinger_rebalance_hours_grid: parseCsvPositiveFloats(
                         bollingerRebalanceHoursGrid,
                       ),
-                      last_candle_seconds_grid: parseCsvUInt64s(lastCandleSecondsGrid),
-                      last_candle_rebalance_seconds_grid: parseCsvUInt64s(
+                      last_candle_seconds_grid: parseCsvMinutesToSeconds(
+                        lastCandleSecondsGrid,
+                      ),
+                      last_candle_rebalance_seconds_grid: parseCsvMinutesToSeconds(
                         lastCandleRebalanceSecondsGrid,
                       ),
                     },

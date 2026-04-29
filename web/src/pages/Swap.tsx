@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { ArrowLeftRight, ChevronDown, Copy, ExternalLink, RefreshCcw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import {
   convertSol,
   type ConvertSolDirection,
@@ -462,9 +463,9 @@ export default function Swap() {
                   {apiSignerQ.data.configured &&
                   apiSignerQ.data.lamports != null &&
                   apiSignerQ.data.lamports < apiSignerQ.data.min_swap_lamports ? (
-                    <div className="text-destructive">
+                    <ErrorBanner className="px-2 py-1 text-xs">
                       {locale === 'pl' ? 'Za mało SOL na opłaty swap. Doładuj ten portfel.' : 'Too little SOL for swap fees. Top up this wallet.'}
-                    </div>
+                    </ErrorBanner>
                   ) : null}
                 </div>
               ) : (
@@ -538,8 +539,8 @@ export default function Swap() {
                 {convertDirection === 'wsol_to_native' ? (
                   <span className="text-[11px] text-muted-foreground">
                     {locale === 'pl'
-                      ? 'Tryb bezpieczny: aktualnie WSOL->SOL wspiera pełny unwrap (użyj Maks).'
-                      : 'Safe mode: WSOL->SOL currently supports full unwrap (use Max).'}
+                      ? 'Obsługiwany jest pełny i częściowy unwrap WSOL->SOL.'
+                      : 'Both full and partial WSOL->SOL unwrap are supported.'}
                   </span>
                 ) : null}
               </div>
@@ -552,9 +553,9 @@ export default function Swap() {
                     </div>
                   ) : null}
                   {convertErr ? (
-                    <div className="text-destructive break-words">
+                    <ErrorBanner className="px-2 py-1 text-xs break-words">
                       <span className="font-medium">{locale === 'pl' ? 'Błąd konwersji:' : 'Convert failed:'}</span> {convertErr}
-                    </div>
+                    </ErrorBanner>
                   ) : null}
                 </div>
               ) : null}
@@ -893,9 +894,9 @@ export default function Swap() {
                 </div>
               ) : null}
               {swapErr ? (
-                <div className="text-destructive break-words">
+                <ErrorBanner className="px-2 py-1 text-xs break-words">
                   <span className="font-medium">{locale === 'pl' ? 'Błąd swap:' : 'Swap failed:'}</span> {swapErr}
-                </div>
+                </ErrorBanner>
               ) : null}
             </div>
           ) : null}

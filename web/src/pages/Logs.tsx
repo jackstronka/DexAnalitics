@@ -3,6 +3,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink, ScrollText, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
+import { InlineError } from '@/components/ui/inline-error'
 import {
   getBotIlLedger,
   getBotLedger,
@@ -668,10 +670,12 @@ export default function Logs() {
               {reconciling ? L('Reconciling…', 'Reconciling…') : L('Uruchom reconcile watchdoga', 'Run watchdog reconcile')}
             </Button>
             {reconcileMsg && <span className="text-xs text-emerald-700 dark:text-emerald-400">{reconcileMsg}</span>}
-            {reconcileErr && <span className="text-xs text-destructive">{reconcileErr}</span>}
+            {reconcileErr && <InlineError as="span">{reconcileErr}</InlineError>}
           </div>
           {strandedQ.isLoading && <p className="text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
-          {strandedQ.isError && <p className="text-destructive">{(strandedQ.error as Error).message}</p>}
+          {strandedQ.isError && (
+            <ErrorBanner>{(strandedQ.error as Error).message}</ErrorBanner>
+          )}
           {strandedQ.data && <StrandedRebalancesBox data={strandedQ.data} onFilterSession={(sid) => {
             setLedgerOffset(0)
             setFilter(sid)
@@ -693,7 +697,7 @@ export default function Logs() {
               IL ledger nie jest skonfigurowany: <code className="text-xs break-all">{ilQ.data.path}</code>
             </p>
           ) : lastIncomplete ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs space-y-1">
+            <div className="rounded-md border border-destructive/60 bg-destructive/25 px-3 py-2 text-xs text-destructive-foreground space-y-1">
               <div>
                 <span className="font-medium">{L('timestamp', 'timestamp')}:</span> {String(lastIncomplete.timestamp ?? '—')}
               </div>
@@ -729,7 +733,7 @@ export default function Logs() {
           {pendingQ.isLoading ? (
             <p className="text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>
           ) : pendingQ.isError ? (
-            <p className="text-destructive">{(pendingQ.error as Error).message}</p>
+            <ErrorBanner>{(pendingQ.error as Error).message}</ErrorBanner>
           ) : pendingQ.data ? (
             <PendingOpenBox data={pendingQ.data} />
           ) : null}
@@ -754,7 +758,7 @@ export default function Logs() {
           {walletTransfersQ.isLoading ? (
             <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>
           ) : walletTransfersQ.isError ? (
-            <p className="text-sm text-destructive">{(walletTransfersQ.error as Error).message}</p>
+            <ErrorBanner>{(walletTransfersQ.error as Error).message}</ErrorBanner>
           ) : !walletTransfersQ.data?.transfers?.length ? (
             <p className="text-sm text-muted-foreground">—</p>
           ) : (
@@ -900,7 +904,9 @@ export default function Logs() {
             </div>
           )}
           {ledgerQ.isLoading && <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
-          {ledgerQ.isError && <p className="text-sm text-destructive">{(ledgerQ.error as Error).message}</p>}
+          {ledgerQ.isError && (
+            <ErrorBanner>{(ledgerQ.error as Error).message}</ErrorBanner>
+          )}
           {ledgerDisplayData && (
             <div className="space-y-3">
               <div className="flex flex-wrap gap-2">
@@ -950,7 +956,9 @@ export default function Logs() {
         </CardHeader>
         <CardContent>
           {ilQ.isLoading && <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
-          {ilQ.isError && <p className="text-sm text-destructive">{(ilQ.error as Error).message}</p>}
+          {ilQ.isError && (
+            <ErrorBanner>{(ilQ.error as Error).message}</ErrorBanner>
+          )}
           {ilQ.data && <JsonlTable data={ilQ.data} columnKeys={IL_KEYS} />}
         </CardContent>
       </Card>
@@ -964,7 +972,9 @@ export default function Logs() {
         </CardHeader>
         <CardContent>
           {registryQ.isLoading && <p className="text-sm text-muted-foreground">{L('Ładowanie…', 'Loading…')}</p>}
-          {registryQ.isError && <p className="text-sm text-destructive">{(registryQ.error as Error).message}</p>}
+          {registryQ.isError && (
+            <ErrorBanner>{(registryQ.error as Error).message}</ErrorBanner>
+          )}
           {registryQ.data && <JsonlTable data={registryQ.data} columnKeys={REGISTRY_KEYS} />}
         </CardContent>
       </Card>

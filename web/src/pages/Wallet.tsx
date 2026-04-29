@@ -12,6 +12,8 @@ import {
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
+import { InlineError } from '@/components/ui/inline-error'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import ApiDataHint from '@/components/ApiDataHint'
 import {
@@ -348,11 +350,7 @@ export default function Wallet() {
                 {createWalletM.isPending ? 'Creating…' : 'Create'}
               </Button>
             </div>
-            {createWalletM.isError && (
-              <div className="text-xs text-destructive">
-                {(createWalletM.error as Error).message}
-              </div>
-            )}
+            {createWalletM.isError && <InlineError>{(createWalletM.error as Error).message}</InlineError>}
             {createWalletM.data && (
               <div className="text-xs text-muted-foreground">
                 Created: <strong className="text-foreground">{createWalletM.data.wallet.id}</strong> (
@@ -380,11 +378,7 @@ export default function Wallet() {
                 </Button>
               ))}
             </div>
-            {setActiveSignerM.isError && (
-              <div className="text-xs text-destructive">
-                {(setActiveSignerM.error as Error).message}
-              </div>
-            )}
+            {setActiveSignerM.isError && <InlineError>{(setActiveSignerM.error as Error).message}</InlineError>}
           </div>
           <TooltipProvider delayDuration={200}>
             <div className="rounded-md border px-3 py-2 space-y-3">
@@ -513,24 +507,20 @@ export default function Wallet() {
                 {transferSolM.isPending ? 'Sending…' : 'Send'}
               </Button>
             </div>
-            {!transferLamportsOk && (
-              <div className="text-xs text-destructive">Podaj dodatnią liczbę lamportów.</div>
-            )}
+            {!transferLamportsOk && <InlineError>Podaj dodatnią liczbę lamportów.</InlineError>}
             {transferLamportsOk && !transferWithinMin && (
-              <div className="text-xs text-destructive">
+              <InlineError>
                 Minimum: <span className="font-mono">{transferMin}</span> lamports (
                 <span className="font-mono">{(transferMin / 1_000_000_000).toFixed(9).replace(/0+$/, '').replace(/\.$/, '')}</span> SOL)
-              </div>
+              </InlineError>
             )}
             {transferLamportsOk && transferMax != null && !transferWithinMax && (
-              <div className="text-xs text-destructive">
+              <InlineError>
                 Maximum: <span className="font-mono">{transferMax}</span> lamports (
                 <span className="font-mono">{(transferMax / 1_000_000_000).toFixed(9).replace(/0+$/, '').replace(/\.$/, '')}</span> SOL)
-              </div>
+              </InlineError>
             )}
-            {transferSolM.isError && (
-              <div className="text-xs text-destructive">{(transferSolM.error as Error).message}</div>
-            )}
+            {transferSolM.isError && <InlineError>{(transferSolM.error as Error).message}</InlineError>}
             {transferSolM.data && (
               <div className="text-xs text-muted-foreground break-all">
                 Signature: <span className="font-mono">{transferSolM.data.signature}</span>
@@ -600,9 +590,9 @@ export default function Wallet() {
           <CardContent className="space-y-3">
             {bLoad && <div className="text-muted-foreground text-sm">{t('wallet.loading')}</div>}
             {bErr && (
-              <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <ErrorBanner className="text-xs">
                 Nie udało się pobrać salda z RPC: {(bError as Error)?.message ?? 'unknown error'}
-              </div>
+              </ErrorBanner>
             )}
             {!balances && !bLoad && !bErr && (
               <div className="text-muted-foreground text-sm">Brak danych salda.</div>

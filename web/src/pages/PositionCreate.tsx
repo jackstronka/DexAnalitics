@@ -4,6 +4,8 @@ import { useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
+import { InlineError } from '@/components/ui/inline-error'
 import {
   getMintPricesUsd,
   getOrcaToken,
@@ -1022,6 +1024,47 @@ export default function PositionCreate() {
     return raw
   }
 
+  const translateSwapBeforeOpenError = (rawMsg: string): string | null => {
+    // Orca preflight (Whirlpool) can return a long raw English message like:
+    // "open preflight exact-plan: insufficient native SOL. Runtime simulation requires X lamports; with 1% safety margin require Y. Current native balance Z. Top up SOL or lower Amount."
+    // We normalize the operator-facing parts for PL locale.
+    const m = rawMsg.match(
+      /insufficient native SOL\.\s*Runtime simulation requires (\d+) lamports;\s*with 1% safety margin require (\d+)(?: lamports)?\.\s*Current native balance (\d+)/i,
+    )
+    if (!m) return null
+
+    const requiredLamports = Number(m[1])
+    const requiredSafeLamports = Number(m[2])
+    const haveLamports = Number(m[3])
+    if (![requiredLamports, requiredSafeLamports, haveLamports].every(Number.isFinite)) return null
+
+    const formatLamports = (v: number) => v.toLocaleString()
+    const formatSol = (vLamports: number) =>
+      (vLamports / 1e9).toLocaleString(undefined, {
+        maximumFractionDigits: 6,
+      })
+
+    const haveSol = formatSol(haveLamports)
+    const requiredSol = formatSol(requiredLamports)
+    const requiredSafeSol = formatSol(requiredSafeLamports)
+
+    if (locale === 'pl') {
+      return (
+        `Za mało natywnego SOL do kroku swap-before-open (Orca preflight). ` +
+        `Symulacja wymaga ~${requiredSol} SOL, a z 1% marginesem ~${requiredSafeSol} SOL. ` +
+        `Masz ~${haveSol} SOL (${formatLamports(haveLamports)} lamportów). ` +
+        `Doładuj SOL albo zmniejsz Amount.`
+      )
+    }
+
+    return (
+      `Insufficient native SOL for swap-before-open (Orca preflight). ` +
+      `Simulation requires ~${requiredSol} SOL, or ~${requiredSafeSol} SOL with 1% safety margin. ` +
+      `Current balance is ~${haveSol} SOL (${formatLamports(haveLamports)} lamports). ` +
+      `Top up SOL or lower Amount.`
+    )
+  }
+
   const makeCostSessionId = () => {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
       return crypto.randomUUID()
@@ -1039,6 +1082,16 @@ export default function PositionCreate() {
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
+      const translated = translateSwapBeforeOpenError(msg)
+      if (translated) {
+        setSwapStepError(
+          locale === 'pl'
+            ? `POST /api/v1/positions/swap-before-open: nieudane. ${translated}`
+            : `POST /api/v1/positions/swap-before-open: failed. ${translated}`,
+        )
+        return
+      }
+
       setSwapStepError(`POST /api/v1/positions/swap-before-open failed: ${msg}`)
     },
   })
@@ -1200,9 +1253,7 @@ export default function PositionCreate() {
               {poolQ.isLoading ? (
                 <div className="text-xs text-muted-foreground mt-2">{L('Ładuję metadane puli…', 'Loading pool metadata…')}</div>
               ) : poolQ.error ? (
-                <div className="text-xs text-destructive mt-2">
-                  {(poolQ.error as Error).message}
-                </div>
+                <InlineError className="mt-2">{(poolQ.error as Error).message}</InlineError>
               ) : poolQ.data ? (
                 <div className="text-xs text-muted-foreground mt-2">
                   {poolQ.data.protocol.toUpperCase()} · {tokenA?.symbol ?? '…'}/
@@ -1386,7 +1437,7 @@ export default function PositionCreate() {
                     Ustaw ticki z tych cen
                   </Button>
                   {priceRangeError ? (
-                    <span className="text-xs text-destructive">{priceRangeError}</span>
+                    <InlineError as="span">{priceRangeError}</InlineError>
                   ) : (
                     <span className="text-xs text-muted-foreground">
                       Ticki są wyrównane do tick spacing ({poolQ.data.tick_spacing}). Możesz też edytować ticki
@@ -1517,9 +1568,7 @@ export default function PositionCreate() {
                       <div className="text-xs text-muted-foreground mt-1">{L('Liczę kwoty A/B z krzywej puli…', 'Calculating A/B amounts from pool curve…')}</div>
                     ) : null}
                     {budgetQuoteQ.isError ? (
-                      <div className="text-xs text-destructive mt-1">
-                        {(budgetQuoteQ.error as Error).message}
-                      </div>
+                      <InlineError className="mt-1">{(budgetQuoteQ.error as Error).message}</InlineError>
                     ) : null}
                     {budgetQuoteQ.data ? (
                       <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
@@ -1552,7 +1601,7 @@ export default function PositionCreate() {
                           Edycja Amount → dopasowuję <strong>docelową kwotę USD</strong> i drugą nogę (quote Orca)…
                         </p>
                       ) : null}
-                      {budgetLegSyncError ? <p className="text-destructive">{budgetLegSyncError}</p> : null}
+                      {budgetLegSyncError ? <InlineError as="p">{budgetLegSyncError}</InlineError> : null}
                     </div>
                   ) : null}
                 </div>
@@ -1584,7 +1633,7 @@ export default function PositionCreate() {
                       {effectiveBalancesQ.isLoading ? (
                         <span>…</span>
                       ) : effectiveBalancesQ.isError ? (
-                        <span className="text-destructive">nie udało się odczytać</span>
+                        <InlineError as="span" className="px-1.5 py-0.5">nie udało się odczytać</InlineError>
                       ) : (
                         <>
                           <span className="font-medium text-foreground tabular-nums">
@@ -1648,7 +1697,7 @@ export default function PositionCreate() {
                       {effectiveBalancesQ.isLoading ? (
                         <span>…</span>
                       ) : effectiveBalancesQ.isError ? (
-                        <span className="text-destructive">nie udało się odczytać</span>
+                        <InlineError as="span" className="px-1.5 py-0.5">nie udało się odczytać</InlineError>
                       ) : (
                         <>
                           <span className="font-medium text-foreground tabular-nums">
@@ -1706,14 +1755,14 @@ export default function PositionCreate() {
 
               {(tokenA && amountAUi !== '' && toBaseUnitsU64(Number(amountAUi), tokenA.decimals) === null) ||
               (tokenB && amountBUi !== '' && toBaseUnitsU64(Number(amountBUi), tokenB.decimals) === null) ? (
-                <div className="text-xs text-destructive">
+                <InlineError>
                   Kwota jest nieprawidłowa albo za duża (przekracza limit bezpiecznych liczb JS dla u64).
-                </div>
+                </InlineError>
               ) : null}
 
               {fundingCheck.ready && fundingCheck.blocked && (
-                <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2.5 space-y-2 text-sm">
-                  <p className="font-medium text-destructive">Za mało tokenów na portfelu względem kwot powyżej</p>
+                <ErrorBanner className="py-2.5 space-y-2">
+                  <p className="font-medium">Za mało tokenów na portfelu względem kwot powyżej</p>
                   {fundingCheck.shortA && fundingCheck.shortB ? (
                     <p className="text-muted-foreground">
                       Brakuje{' '}
@@ -1811,7 +1860,7 @@ export default function PositionCreate() {
                       Orca
                     </a>
                   </div>
-                </div>
+                </ErrorBanner>
               )}
 
               {swapBeforeOpenPlan &&
@@ -1910,15 +1959,15 @@ export default function PositionCreate() {
                   </div>
                 ) : null}
                 {swapStepError ? (
-                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive break-words">
+                  <ErrorBanner className="text-xs break-words">
                     {swapStepError}
-                  </div>
+                  </ErrorBanner>
                 ) : null}
               </div>
             )}
 
             {openStepError ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <ErrorBanner className="text-xs">
                 <div className="font-medium">{L('Otwarcie nieudane', 'Open failed')}</div>
                 <div className="break-words">
                   {openStepError.length > 220 ? `${openStepError.slice(0, 220)}…` : openStepError}
@@ -1940,7 +1989,7 @@ export default function PositionCreate() {
                 ) : null}
                 {openStepError.length > 220 ? (
                   <details className="mt-2">
-                    <summary className="cursor-pointer select-none text-[11px] text-destructive/90">
+                    <summary className="cursor-pointer select-none text-[11px] text-destructive-foreground/90">
                       Show details
                     </summary>
                     <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-[11px] text-foreground/80">
@@ -1948,7 +1997,7 @@ export default function PositionCreate() {
                     </pre>
                   </details>
                 ) : null}
-              </div>
+              </ErrorBanner>
             ) : null}
 
             <div className="flex justify-end gap-2 pt-2">

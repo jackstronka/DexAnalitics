@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import { getPools } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
@@ -56,14 +57,14 @@ export default function Pools() {
           {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">{locale === 'pl' ? 'Ładowanie...' : 'Loading...'}</div>
           ) : isError ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
-              <p className="font-medium text-destructive">Nie udało się pobrać pul</p>
+            <ErrorBanner className="px-4 py-3">
+              <p className="font-medium">Nie udało się pobrać pul</p>
               <p className="text-muted-foreground text-xs mt-1">
                 {(error as Error)?.message ?? (locale === 'pl' ? 'Nieznany błąd' : 'Unknown error')} —{' '}
                 {locale === 'pl' ? 'sprawdź, czy API działa i czy Vite proxy ma' : 'check API status and Vite proxy'}{' '}
                 <code className="text-[11px]">API_UPSTREAM</code> na właściwy port.
               </p>
-            </div>
+            </ErrorBanner>
           ) : pools.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground text-sm space-y-2 max-w-lg mx-auto">
               <p>{locale === 'pl' ? 'Brak pul z API Orca.' : 'No pools from Orca API.'}</p>

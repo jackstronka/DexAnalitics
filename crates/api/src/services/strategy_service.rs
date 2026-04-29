@@ -161,13 +161,39 @@ pub async fn wire_executor_allowlist_and_reopen_hook(
             let st = st.clone();
             let sid = sid.clone();
             tokio::spawn(async move {
-                let _ = replace_position_address_in_strategy(
-                    &st,
-                    &sid,
-                    &old.to_string(),
-                    &new.to_string(),
-                )
-                .await;
+                let old_s = old.to_string();
+                let new_s = new.to_string();
+
+                // IMPORTANT: pending-open recovery queue is global and can be claimed by any executor.
+                // Updating links only for the claimant's `strategy_id` can miss the real owner strategy.
+                // Resolve owners by `old` PDA first, then replace links there.
+                let mut touched: Vec<String> = strategy_ids_holding_position_address(&st, &old_s).await;
+                if touched.is_empty() {
+                    touched.push(sid.clone());
+                }
+
+                for target_sid in touched {
+                    if let Err(e) =
+                        replace_position_address_in_strategy(&st, &target_sid, &old_s, &new_s).await
+                    {
+                        warn!(
+                            strategy_id = %target_sid,
+                            old_position = %old_s,
+                            new_position = %new_s,
+                            error = %e,
+                            "reopen_hook: could not replace strategy position address"
+                        );
+                        continue;
+                    }
+                    if let Err(e) = sync_managed_allowlist_from_registry_for_strategy(&st, &target_sid).await
+                    {
+                        warn!(
+                            strategy_id = %target_sid,
+                            error = %e,
+                            "reopen_hook: managed allowlist sync failed after position replacement"
+                        );
+                    }
+                }
             });
         })))
         .await;
@@ -373,6 +399,7 @@ impl StrategyService {
                 StrategyType::StaticRange => StrategyMode::StaticRange,
                 StrategyType::Periodic => StrategyMode::Periodic,
                 StrategyType::Threshold => StrategyMode::Threshold,
+                StrategyType::Bollinger => StrategyMode::Bollinger,
                 StrategyType::OorRecenter => StrategyMode::OorRecenter,
                 StrategyType::IlLimit => StrategyMode::IlLimit,
                 StrategyType::RetouchShift => StrategyMode::RetouchShift,
@@ -406,6 +433,13 @@ impl StrategyService {
             if let Some(threshold) = params.get("rebalance_threshold_pct").and_then(json_f64) {
                 decision_config.threshold_pct = Decimal::from_f64_retain(threshold / 100.0)
                     .unwrap_or(decision_config.threshold_pct);
+            }
+            if let Some(v) = params.get("bollinger_window").and_then(|v| v.as_u64()) {
+                decision_config.bollinger_window_points = v.max(2);
+            }
+            if let Some(v) = params.get("bollinger_k").and_then(json_f64) {
+                decision_config.bollinger_k =
+                    Decimal::from_f64_retain(v).unwrap_or(decision_config.bollinger_k);
             }
             if let Some(v) = params.get("retouch_offset_pct").and_then(json_f64) {
                 decision_config.retouch_offset_pct =

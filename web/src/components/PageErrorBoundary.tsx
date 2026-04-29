@@ -1,6 +1,7 @@
 import { Component, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 
 type Props = {
   title?: string
@@ -34,10 +35,10 @@ export default class PageErrorBoundary extends Component<Props, State> {
 
     return (
       <div className="max-w-3xl mx-auto px-4 py-10 space-y-4">
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3">
-          <div className="font-medium text-destructive">{title}</div>
+        <ErrorBanner className="px-4 py-3">
+          <div className="font-medium text-destructive-foreground">{title}</div>
           <div className="mt-2 text-sm text-muted-foreground break-words font-mono">{msg}</div>
-        </div>
+        </ErrorBanner>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => window.location.reload()}>
             Reload page

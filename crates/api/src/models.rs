@@ -980,6 +980,8 @@ pub enum StrategyType {
     Periodic,
     /// Threshold-based rebalancing.
     Threshold,
+    /// Bollinger Bands strategy (window + k; range from rolling bands).
+    Bollinger,
     /// Rebalance only when out of range (backtest `OorRecenter`).
     OorRecenter,
     /// IL limit strategy.
@@ -1006,6 +1008,13 @@ pub struct StrategyParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub rebalance_threshold_pct: Option<Decimal>,
+    /// Bollinger: rolling window size in points/samples.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bollinger_window: Option<u64>,
+    /// Bollinger: standard deviation multiplier k.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub bollinger_k: Option<Decimal>,
     /// RetouchShift only: shift full retouched band by this percent (e.g. 0.1 => +0.1%).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]

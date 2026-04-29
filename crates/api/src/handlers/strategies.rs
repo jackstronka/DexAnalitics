@@ -756,6 +756,7 @@ async fn start_strategy_executor_core(
             StrategyType::StaticRange => clmm_lp_execution::prelude::StrategyMode::StaticRange,
             StrategyType::Periodic => clmm_lp_execution::prelude::StrategyMode::Periodic,
             StrategyType::Threshold => clmm_lp_execution::prelude::StrategyMode::Threshold,
+            StrategyType::Bollinger => clmm_lp_execution::prelude::StrategyMode::Bollinger,
             StrategyType::OorRecenter => clmm_lp_execution::prelude::StrategyMode::OorRecenter,
             StrategyType::IlLimit => clmm_lp_execution::prelude::StrategyMode::IlLimit,
             StrategyType::RetouchShift => clmm_lp_execution::prelude::StrategyMode::RetouchShift,
@@ -788,6 +789,13 @@ async fn start_strategy_executor_core(
         if let Some(val) = params.get("rebalance_threshold_pct").and_then(json_f64) {
             decision_config.threshold_pct =
                 Decimal::from_f64_retain(val / 100.0).unwrap_or(decision_config.threshold_pct);
+        }
+        if let Some(v) = params.get("bollinger_window").and_then(|v| v.as_u64()) {
+            decision_config.bollinger_window_points = v.max(2);
+        }
+        if let Some(v) = params.get("bollinger_k").and_then(json_f64) {
+            decision_config.bollinger_k =
+                Decimal::from_f64_retain(v).unwrap_or(decision_config.bollinger_k);
         }
         if let Some(val) = params.get("retouch_offset_pct").and_then(json_f64) {
             decision_config.retouch_offset_pct =

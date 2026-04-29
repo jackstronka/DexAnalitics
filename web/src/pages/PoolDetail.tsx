@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import { getPool, getPoolState, getOrcaToken } from '@/lib/api'
 import { formatUSD, formatPercent, shortenAddress } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
@@ -72,8 +73,8 @@ export default function PoolDetail() {
             {L('Wróć do listy', 'Back to list')}
           </Button>
         </Link>
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
-          <p className="font-medium text-destructive">{L('Nie udało się wczytać puli', 'Failed to load pool')}</p>
+        <ErrorBanner className="px-4 py-3">
+          <p className="font-medium">{L('Nie udało się wczytać puli', 'Failed to load pool')}</p>
           <p className="text-muted-foreground text-xs mt-1 font-mono break-all">
             {(poolErr as Error)?.message ?? L('Nieznany błąd', 'Unknown error')}
           </p>
@@ -83,7 +84,7 @@ export default function PoolDetail() {
               'Check whether API is running and this address exists in backend (Orca REST / proxy).',
             )}
           </p>
-        </div>
+        </ErrorBanner>
       </div>
     )
   }

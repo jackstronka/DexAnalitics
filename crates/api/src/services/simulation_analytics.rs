@@ -98,6 +98,11 @@ pub async fn run_dashboard_simulation(
             let s = ThresholdRebalance::new(threshold_pct, range_width_pct);
             simulate_with_strategy(&config, &mut gbm, &mut volume_model, &liquidity_model, &s)
         }
+        StrategyType::Bollinger => {
+            // Synthetic simulator has no candle history/bands; use periodic surrogate.
+            let s = PeriodicRebalance::new(periodic_interval, range_width_pct);
+            simulate_with_strategy(&config, &mut gbm, &mut volume_model, &liquidity_model, &s)
+        }
         StrategyType::OorRecenter => {
             let s = ThresholdRebalance::new(Decimal::ONE, range_width_pct)
                 .rebalance_on_out_of_range(true);

@@ -4,9 +4,9 @@ import { useNavigate, Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useToast } from '@/hooks/use-toast'
-import { cn } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
 import {
   STRATEGY_COPY,
@@ -63,6 +63,8 @@ export default function StrategyEdit() {
   const [minRebalanceIntervalMinutes, setMinRebalanceIntervalMinutes] = useState<number | ''>('')
   const [retouchOffsetPct, setRetouchOffsetPct] = useState<number | ''>('')
   const [candleMinutes, setCandleMinutes] = useState<number | ''>('')
+  const [bollingerWindow, setBollingerWindow] = useState<number | ''>(20)
+  const [bollingerK, setBollingerK] = useState<number | ''>(2)
   const [rangeWidthPct, setRangeWidthPct] = useState<number | ''>('')
   const [dryRun, setDryRun] = useState(true)
   const [autoExecute, setAutoExecute] = useState(false)
@@ -96,6 +98,8 @@ export default function StrategyEdit() {
       ),
     )
     setRetouchOffsetPct(numOrEmpty(p.retouch_offset_pct))
+    setBollingerWindow(numOrEmpty(p.bollinger_window))
+    setBollingerK(numOrEmpty(p.bollinger_k))
     setPeriodicRequiresOutOfRange(Boolean(p.periodic_requires_out_of_range))
     setAutoStart(p.auto_start === undefined ? true : Boolean(p.auto_start))
     // Default to old behavior when absent.
@@ -124,6 +128,7 @@ export default function StrategyEdit() {
         setRebalanceThresholdPct('')
         break
       case 'threshold':
+      case 'bollinger':
       case 'oor_recenter':
       case 'retouch_shift':
       case 'last_candle':
@@ -139,6 +144,10 @@ export default function StrategyEdit() {
     }
     if (strategyType !== 'retouch_shift') {
       setRetouchOffsetPct('')
+    }
+    if (strategyType !== 'bollinger') {
+      setBollingerWindow(20)
+      setBollingerK(2)
     }
   }, [strategyType])
 
@@ -198,6 +207,8 @@ export default function StrategyEdit() {
       minRebalanceIntervalMinutes,
       retouchOffsetPct,
       candleMinutes,
+      bollingerWindow,
+      bollingerK,
       periodicRequiresOutOfRange,
       rebalanceOnRangeExitImmediately,
       autoStart,
@@ -246,8 +257,6 @@ export default function StrategyEdit() {
     }
     return TOOLTIPS.minIntervalOther
   }, [strategyType])
-
-  const inputDisabled = 'disabled:cursor-not-allowed disabled:opacity-60'
 
   if (isLoading || !id) {
     return <div className="text-center py-8 text-muted-foreground">{L('Ładowanie...', 'Loading...')}</div>
@@ -309,6 +318,7 @@ export default function StrategyEdit() {
                   <option value="static_range">{L('Statyczna', 'Static')}</option>
                   <option value="periodic">{L('Okresowa', 'Periodic')}</option>
                   <option value="threshold">Threshold</option>
+                  <option value="bollinger">Bollinger</option>
                   <option value="il_limit">IL Limit</option>
                   <option value="oor_recenter">{L('OOR recenter', 'OOR recenter')}</option>
                   <option value="retouch_shift">{L('Retouch shift', 'Retouch shift')}</option>
@@ -326,45 +336,41 @@ export default function StrategyEdit() {
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
+                {enabled.rangeWidth ? (
                 <div>
                   <FieldLabel
                     htmlFor="edit-range-width"
-                    label={enabled.rangeWidth ? L('Range Width % (wymagane)', 'Range Width % (required)') : L('Range Width % (n/d dla typu)', 'Range Width % (n/a for this type)')}
+                    label={L('Range Width % (wymagane)', 'Range Width % (required)')}
                     tooltip={TOOLTIPS.rangeWidth}
                   />
                   <input
                     id="edit-range-width"
                     type="number"
                     step="0.1"
-                    min={enabled.rangeWidth ? 0.01 : undefined}
-                    max={enabled.rangeWidth ? 100 : undefined}
-                    disabled={!enabled.rangeWidth}
-                    required={enabled.rangeWidth}
-                    className={cn(
-                      'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-                      inputDisabled,
-                    )}
+                    min={0.01}
+                    max={100}
+                    required
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={rangeWidthPct}
                     onChange={(e) => setRangeWidthPct(readOptionalNumber(e.target.value))}
-                    placeholder={enabled.rangeWidth ? L('np. 1.0', 'e.g. 1.0') : '—'}
+                    placeholder={L('np. 1.0', 'e.g. 1.0')}
                   />
                 </div>
+                ) : null}
+                {enabled.maxIl ? (
                 <div>
                   <FieldLabel htmlFor="edit-max-il" label={L('Max IL % (opcjonalnie)', 'Max IL % (optional)')} tooltip={TOOLTIPS.maxIl} />
                   <input
                     id="edit-max-il"
                     type="number"
                     step="0.1"
-                    disabled={!enabled.maxIl}
-                    className={cn(
-                      'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-                      inputDisabled,
-                    )}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={maxIlPct}
                     onChange={(e) => setMaxIlPct(readOptionalNumber(e.target.value))}
                     placeholder={L('np. 2.0', 'e.g. 2.0')}
                   />
                 </div>
+                ) : null}
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
@@ -406,6 +412,51 @@ export default function StrategyEdit() {
                     <p className="mt-1 text-xs text-muted-foreground">{L('Przykłady: 15, 30, 60.', 'Examples: 15, 30, 60.')}</p>
                   </div>
                 ) : null}
+                {strategyType === 'bollinger' ? (
+                  <>
+                    <div>
+                      <FieldLabel
+                        htmlFor="edit-bollinger-window"
+                        label={L('Bollinger window (punkty)', 'Bollinger window (points)')}
+                        tooltip={TOOLTIPS.bollingerWindow}
+                      />
+                      <input
+                        id="edit-bollinger-window"
+                        type="number"
+                        step="1"
+                        min={2}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={bollingerWindow}
+                        onChange={(e) => setBollingerWindow(readOptionalNumber(e.target.value))}
+                        placeholder={L('np. 20', 'e.g. 20')}
+                      />
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {L('Start: 20-30. Punkt = jedna próbka live z pętli strategii (nie snapshot 5m/10m).', 'Start: 20-30. One point = one live sample from strategy loop (not backtest 5m/10m snapshots).')}
+                      </p>
+                    </div>
+                    <div>
+                      <FieldLabel
+                        htmlFor="edit-bollinger-k"
+                        label="Bollinger k"
+                        tooltip={TOOLTIPS.bollingerK}
+                      />
+                      <input
+                        id="edit-bollinger-k"
+                        type="number"
+                        step="0.1"
+                        min={0.1}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={bollingerK}
+                        onChange={(e) => setBollingerK(readOptionalNumber(e.target.value))}
+                        placeholder={L('np. 2.0', 'e.g. 2.0')}
+                      />
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {L('Start: 2.0 (agresywniej 1.5, spokojniej 2.5).', 'Start: 2.0 (more aggressive 1.5, more conservative 2.5).')}
+                      </p>
+                    </div>
+                  </>
+                ) : null}
+                {enabled.rebalanceThreshold ? (
                 <div>
                   <FieldLabel
                     htmlFor="edit-rebalance-threshold"
@@ -420,16 +471,14 @@ export default function StrategyEdit() {
                     id="edit-rebalance-threshold"
                     type="number"
                     step="0.1"
-                    disabled={!enabled.rebalanceThreshold}
-                    className={cn(
-                      'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-                      inputDisabled,
-                    )}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={rebalanceThresholdPct}
                     onChange={(e) => setRebalanceThresholdPct(readOptionalNumber(e.target.value))}
                     placeholder={L('np. 5.0', 'e.g. 5.0')}
                   />
                 </div>
+                ) : null}
+                {enabled.minInterval ? (
                 <div>
                   <FieldLabel
                     htmlFor="edit-min-interval"
@@ -441,11 +490,7 @@ export default function StrategyEdit() {
                     type="number"
                     step="1"
                     min={strategyType === 'periodic' ? 1 : 0}
-                    disabled={!enabled.minInterval}
-                    className={cn(
-                      'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-                      inputDisabled,
-                    )}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={minRebalanceIntervalMinutes}
                     onChange={(e) =>
                       setMinRebalanceIntervalMinutes(readOptionalNumber(e.target.value))
@@ -454,6 +499,7 @@ export default function StrategyEdit() {
                   />
                   <p className="mt-1 text-xs text-muted-foreground">{L('Przykłady: 15 = 15m, 60 = 1h, 240 = 4h.', 'Examples: 15 = 15m, 60 = 1h, 240 = 4h.')}</p>
                 </div>
+                ) : null}
               </div>
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-3">
@@ -540,6 +586,7 @@ export default function StrategyEdit() {
                     </div>
                   )}
 
+                  {strategyType === 'periodic' ? (
                   <div className="flex items-start gap-2">
                     <input
                       id="edit-periodic-requires-oor"
@@ -547,9 +594,8 @@ export default function StrategyEdit() {
                       checked={periodicRequiresOutOfRange}
                       onChange={(e) => setPeriodicRequiresOutOfRange(e.target.checked)}
                       className="mt-0.5 rounded border-input"
-                      disabled={strategyType !== 'periodic'}
                     />
-                    <div className={cn('flex-1', strategyType !== 'periodic' && 'opacity-60')}>
+                    <div className="flex-1">
                       <FieldLabel
                         htmlFor="edit-periodic-requires-oor"
                         label="Wymagaj OOR w chwili wyzwolenia"
@@ -557,13 +603,14 @@ export default function StrategyEdit() {
                       />
                     </div>
                   </div>
+                  ) : null}
                 </div>
               </div>
 
               {mutation.isError && (
-                <p className="text-sm text-destructive" role="alert">
+                <ErrorBanner role="alert">
                   {(mutation.error as Error)?.message ?? L('Zapis nieudany.', 'Save failed.')}
-                </p>
+                </ErrorBanner>
               )}
 
               <div className="flex justify-end gap-2 pt-2">

@@ -28,6 +28,57 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260429-03 — Swap: partial WSOL->SOL unwrap failed + mixed-language raw errors + low dark-mode contrast
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-29  
+fixed_in: local  
+keywords: swap, wsol, sol, unwrap, partial, i18n, error-message, dark-theme, contrast
+
+- **Symptom:** In PL locale, `Swap -> Convert WSOL <-> SOL` displayed English raw backend error (`partial unwrap is not supported...`) and conversion failed for non-Max WSOL->SOL amounts. Error readability on dark theme remained poor in multiple pages (`text-destructive` on very dark backgrounds).
+- **Root cause:** Backend unwrap path supported only full WSOL ATA close and explicitly rejected partial amounts. Frontend error path rendered raw API messages without normalization/localization. Dark theme destructive token was too dark for widespread `text-destructive` usage and many pages used weak `bg-destructive/5..10`.
+- **Fix:** Added partial unwrap support in Orca executor (`close -> re-wrap remainder` flow), added API-side frontend message normalization for known SOL/WSOL failures in `messageFromErrorBody`, updated Swap UI copy (partial supported) and error banners, and increased dark-theme destructive token contrast globally.
+- **Guards/tests:** `npx tsc --noEmit` (web), `cargo check -p clmm-lp-protocols -p clmm-lp-api`, `cargo test -p clmm-lp-protocols test_compute_unwrap_rewrap_amount -- --nocapture`.
+- **Paths:** `crates/protocols/src/orca/executor.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/index.css`
+
+---
+
+### BUG-20260429-02 — `snapshot-run-curated-all` omitted Meteora vault fields needed for auto `lp_share`
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-04-29  
+fixed_in: local  
+keywords: backtests, snapshot-run-curated-all, meteora, lp_share, vault_amount_a, vault_amount_b, token-2022, snapshot-only
+
+- **Symptom:** Meteora rows in Backtests FULL often failed with `Meteora snapshot-only: set --lp-share ... include vault_amount_a/vault_amount_b`, even after fresh snapshot cycles.
+- **Root cause:** Meteora branch inside `snapshot-run-curated-all` serialized `vault_amount_a/vault_amount_b` as optional fields and skipped them when decode returned `None`; decode path used strict SPL unpack only, so Token-2022/extended account layouts frequently produced missing vault amounts.
+- **Fix:** In `snapshot-run-curated-all`, aligned Meteora vault decode behavior with curated collector: added token-account fallback decoder (extension-friendly), made `vault_amount_a/vault_amount_b` always present (`u64`) with explicit `vault_amount_source` (`rpc_token_account` or `missing_fallback_zero`).
+- **Guards/tests:** `cargo check -p clmm-lp-cli` (targeted compile guard for CLI snapshot path).
+- **Paths:** `crates/cli/src/main.rs`
+
+---
+
+### BUG-20260429-01 — Strategy Create forced `dry_run=true` with no visible toggle
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-29  
+fixed_in: local  
+keywords: strategies, create, dry_run, ui, strategy-create, auto-execute
+
+- **Symptom:** Przy tworzeniu strategii użytkownik nie widział opcji `Dry run`; nowa strategia była zawsze zapisywana z `dry_run=true`, więc trzeba było wejść w edycję i ręcznie odznaczać.
+- **Root cause:** `StrategyCreate` wysyłał payload z hardcoded `dry_run: true` i `auto_execute: false`, bez sekcji checkboxów znanej z `StrategyEdit`.
+- **Fix:** Dodano kontrolki `Dry run` i `Auto-execute` do formularza tworzenia; payload korzysta teraz z wartości z UI zamiast stałych.
+- **Guards/tests:** `npx tsc --noEmit` (web) + lint na dotkniętych plikach.
+- **Paths:** `web/src/pages/StrategyCreate.tsx`
+
+---
+
 ### BUG-20260427-05 — Mixed PL/EN labels and tiny helper text reduced UI readability
 
 status: fixed  
@@ -551,8 +602,11 @@ keywords: positions-ui, position-detail, monitored-positions, linked-strategy, r
 - **Symptom (2026-04-27, regression):** Dla pozycji z linked strategią sekcja `PositionDetail -> Diagnostics` pokazywała strategię poprawnie, ale `Positions -> Monitored positions (API)` wracało do `Not linked`.
 - **Root cause (2026-04-27, regression):** W `Positions` status był nadal liczony jako przecięcie dwóch źródeł (`diagnostics.linked_strategies` AND `GET /strategies` mapowane po `position_addresses`). Gdy diagnostics miało link, a cache/config `/strategies` chwilowo nie zawierało tego PDA, UI pokazywał false-negative `Not linked`.
 - **Fix (follow-up 4):** `Positions` renderuje status linku bezpośrednio z `position-diagnostics` (source-of-truth); `GET /strategies` służy tylko do wzbogacenia opisu parametrami, z fallbackiem do danych z diagnostics gdy szczegóły strategii nie są dostępne.
+- **Symptom (2026-04-29, regression):** Po pending-open recovery nowy aktywny PDA potrafił pozostać `Not linked`, mimo że strategia była running; jednocześnie stary close/open session mógł dalej wisieć jako pending/stranded.
+- **Root cause (2026-04-29, regression):** Pending-open queue jest globalna i item może zostać obsłużony przez dowolny executor. `reopen_hook` aktualizował wcześniej tylko `strategy_id` executora, który akurat podniósł item, zamiast strategii faktycznie trzymającej `old_position` w `position_addresses`.
+- **Fix (follow-up 5):** `reopen_hook` rozwiązuje teraz właścicieli po `old_position` (`strategy_ids_holding_position_address`) i wykonuje replace `old -> new` dla każdej pasującej strategii, a następnie synchronizuje managed allowlist tych strategii. Fallback do pierwotnego `strategy_id` zostaje tylko gdy nie znaleziono właściciela.
 - **Guards/tests:** Weryfikacja ręczna na tej samej pozycji: `Position Info` i `Monitored positions (API)` pokazują spójny status linku.
-- **Paths:** `web/src/pages/Positions.tsx`, `web/src/pages/PositionDetail.tsx`
+- **Paths:** `web/src/pages/Positions.tsx`, `web/src/pages/PositionDetail.tsx`, `crates/api/src/services/strategy_service.rs`
 
 ---
 

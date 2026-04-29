@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
 import {
   getBacktestJob,
@@ -588,9 +589,9 @@ export default function ClosedPositionDetail() {
               <p className="text-[11px] text-muted-foreground leading-snug">{streamLineage.note}</p>
             ) : null}
             {lineageQ.isError ? (
-              <p className="text-sm text-destructive">
+              <ErrorBanner>
                 {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
-              </p>
+              </ErrorBanner>
             ) : null}
             {streamLineage.chain.length > 1 ? (
               <div className="text-xs text-muted-foreground font-mono break-all">
@@ -746,9 +747,9 @@ export default function ClosedPositionDetail() {
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
             {lineageQ.isError ? (
-              <span className="text-destructive">
+              <ErrorBanner as="span" className="inline-block px-2 py-1 text-xs">
                 {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
-              </span>
+              </ErrorBanner>
             ) : (
               'No lineage response.'
             )}
@@ -886,9 +887,9 @@ export default function ClosedPositionDetail() {
         </CardHeader>
         <CardContent className="space-y-3">
           {runBacktestM.isError && (runBacktestM.error as Error)?.message !== 'Cancelled' ? (
-            <div className="text-sm text-destructive">
+            <ErrorBanner>
               {(runBacktestM.error as Error)?.message ?? L('Backtest nieudany', 'Backtest failed')}
-            </div>
+            </ErrorBanner>
           ) : null}
           {backtestJobId ? (
             <div className="text-sm text-muted-foreground">

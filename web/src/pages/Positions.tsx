@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ErrorBanner } from '@/components/ui/error-banner'
 import ApiDataHint from '@/components/ApiDataHint'
 import {
   getPositionAgentChatUi,
@@ -550,9 +551,7 @@ export default function Positions() {
           {strandedQ.isLoading ? (
             <div className="text-center py-6 text-muted-foreground">{t('positions.loading')}</div>
           ) : strandedQ.error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {(strandedQ.error as Error).message}
-            </div>
+            <ErrorBanner>{(strandedQ.error as Error).message}</ErrorBanner>
           ) : pendingReopenItems.length === 0 ? (
             <div className="text-muted-foreground text-sm">{t('positions.pendingEmpty')}</div>
           ) : (
@@ -671,9 +670,7 @@ export default function Positions() {
               {locale === 'pl' ? 'Ładowanie RPC…' : 'Loading RPC…'}
             </div>
           ) : chainQ.error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {(chainQ.error as Error).message}
-            </div>
+            <ErrorBanner>{(chainQ.error as Error).message}</ErrorBanner>
           ) : !appliedOwner.trim() ? (
             <div className="text-muted-foreground text-sm">Podaj owner i kliknij „Load on-chain”.</div>
           ) : (
