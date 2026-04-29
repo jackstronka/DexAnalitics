@@ -2046,6 +2046,9 @@ pub struct MetricsResponse {
     /// Event bus metrics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_bus: Option<EventBusMetricsResponse>,
+    /// Wallet WS monitor metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_ws: Option<WalletWsMetricsResponse>,
 }
 
 /// Event bus operational metrics.
@@ -2056,6 +2059,19 @@ pub struct EventBusMetricsResponse {
     pub duplicates: u64,
     pub failed: u64,
     pub dlq_size: usize,
+}
+
+/// Wallet WS monitor metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletWsMetricsResponse {
+    /// Owners with active WS monitor workers.
+    pub owners_monitored: u32,
+    /// WS events received from account/program/log subscriptions.
+    pub events_total: u64,
+    /// Number of reconnect loops started after WS worker errors.
+    pub reconnects_total: u64,
+    /// Number of failed WS-triggered cache refreshes.
+    pub refresh_failures_total: u64,
 }
 
 // ============================================================================
@@ -2705,6 +2721,54 @@ pub struct WalletBalancesResponse {
     pub token_2022_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletBalanceConfidence {
+    Verified,
+    Projected,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletEffectiveBalancesResponse {
+    pub owner: String,
+    pub as_of_utc: String,
+    /// True when response comes from stale cache or warmup placeholder.
+    pub is_stale: bool,
+    /// Cache age in milliseconds for stale responses.
+    pub stale_age_ms: u64,
+    pub confidence: WalletBalanceConfidence,
+    pub pending_ops_count: u64,
+    pub native_onchain_lamports: u64,
+    pub native_effective_lamports: u64,
+    pub wsol_onchain_raw: u64,
+    pub wsol_effective_raw: u64,
+    /// Compatibility fields for existing Wallet/Swap UI.
+    pub rpc_url: String,
+    pub lamports: u64,
+    pub sol: String,
+    pub tokens: Vec<WalletTokenBalance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_accounts_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_legacy_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_2022_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_legacy_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_2022_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletWsStatusResponse {
+    pub owners_monitored: u32,
+    pub owners: Vec<String>,
+    pub events_total: u64,
+    pub reconnects_total: u64,
+    pub refresh_failures_total: u64,
+}
+
 /// `GET /wallets/api-signer` — API signing wallet (from KEYPAIR_PATH / SOLANA_KEYPAIR_PATH) and its SOL balance.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiSignerWalletResponse {
@@ -2745,6 +2809,38 @@ pub struct ConvertSolRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletReconciliationStatus {
+    PendingConfirmation,
+    ConfirmedUnreconciled,
+    Reconciled,
+    Mismatch,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletConvertOpResponse {
+    pub op_id: String,
+    pub owner_pubkey: String,
+    pub direction: ConvertSolDirection,
+    pub amount_raw: u64,
+    pub reconciliation_status: WalletReconciliationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub attempts: u32,
+    pub created_at_utc: String,
+    pub updated_at_utc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_at_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_native_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_wsol_raw: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ConvertSolResponse {
     pub message: String,
     /// Backward-compatible primary signature (equals unwrap/wrap signature when present).
@@ -2762,6 +2858,13 @@ pub struct ConvertSolResponse {
     pub confirmed: bool,
     /// True when WSOL->SOL used close + remainder re-wrap path.
     pub partial: bool,
+    pub op_id: String,
+    pub reconciliation_status: WalletReconciliationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_at_utc: Option<String>,
     pub direction: ConvertSolDirection,
     pub amount_raw: u64,
     pub owner_pubkey: String,
@@ -2769,6 +2872,20 @@ pub struct ConvertSolResponse {
     pub post_native_lamports: u64,
     /// Post-conversion WSOL ATA amount (raw lamports) observed by API.
     pub post_wsol_raw: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletOpsStatsResponse {
+    pub total: u64,
+    pub reconciled: u64,
+    pub confirmed_unreconciled: u64,
+    pub mismatch: u64,
+    pub failed: u64,
+    pub pending_confirmation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mismatch_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_seconds_to_reconcile: Option<f64>,
 }
 
 // ============================================================================

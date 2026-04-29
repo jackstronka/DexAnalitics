@@ -46,8 +46,11 @@ keywords: swap, wsol, sol, unwrap, partial, i18n, error-message, dark-theme, con
 - **Root cause (follow-up 2):** `native_to_wsol` path called `submit_wsol_wrap_with_signature_if_needed(req.amount_raw)` where argument means target WSOL ATA amount, not delta to wrap.
 - **Fix (follow-up):** Convert API now reports confirmed outcome metadata (`confirmed`, `partial`, step signatures fields) and Swap UI renders final confirmed status + step signatures with short post-conversion balance refetch loop and partial-RPC warning when token read is degraded.
 - **Fix (follow-up 2):** Added delta wrap path in Whirlpool executor (`submit_wsol_wrap_with_signature_delta`) and switched API `native_to_wsol` conversion to wrap exactly requested amount; response now includes post-conversion balances (`post_native_lamports`, `post_wsol_raw`) for deterministic UI confirmation.
+- **Fix (follow-up 3):** Added operation ledger + reconciliation for `convert-sol` (`op_id`, `reconciliation_status`) with background verifier and status endpoints (`/wallets/ops`, `/wallets/ops/{op_id}`), so UI can distinguish `confirmed_unreconciled` vs `reconciled`/`mismatch` under RPC instability.
+- **Fix (follow-up 4):** Added adaptive hedging + token-bucket budget for idempotent wallet reads, extended reconciliation diagnostics (`reason_code`, `attempts`, `last_verified_at_utc`), and new aggregate telemetry endpoint (`/wallets/ops/stats`) to monitor mismatch/unreconciled pressure.
 - **Guards/tests:** `npx tsc --noEmit` (web), `cargo check -p clmm-lp-protocols -p clmm-lp-api`, `cargo test -p clmm-lp-protocols test_compute_unwrap_rewrap_amount -- --nocapture`.
-- **Paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/index.css`
+- **Guards/tests (follow-up 3/4):** `cargo test -p clmm-lp-api wallets::tests:: -- --nocapture`, `cargo check -p clmm-lp-api`, `npx tsc --noEmit`.
+- **Paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `crates/api/src/server.rs`, `crates/api/src/routes.rs`, `crates/api/src/state.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/pages/Wallet.tsx`, `web/src/index.css`
 
 ---
 
@@ -119,8 +122,19 @@ keywords: wallet, balances, token-2022, spl, getTokenAccountsByOwner, rpc, web
 - **Fix (follow-up):** API zwraca teraz status diagnostyczny obu odczytów (`token_legacy_ok`, `token_2022_ok`, `token_*_error`, `token_accounts_total`), a Wallet UI pokazuje ostrzeżenie „lista może być niepełna” z konkretnym statusem/błędem RPC.
 - **Symptom (new):** Użytkownik widzi `http 403 Forbidden` z `solana.publicnode.com` (`blocked parameter: params.1.programId`) dla `getTokenAccountsByOwner` oraz sporadyczne błędy sieciowe; oba odczyty mogą być `legacy=false | token-2022=false`, mimo że saldo SOL działa.
 - **Root cause (new):** Część darmowych RPC blokuje wywołania `getTokenAccountsByOwner` z filtrem `programId` (legacy/Token-2022). Obecna diagnostyka zwracała tylko ostatni błąd z listy endpointów, co zaciemniało który endpoint i dlaczego nie zadziałał.
+- **Symptom (newer):** Mimo skonfigurowanych fallbacków API nadal często zwraca `tokens=[]` (`legacy=false`, `token-2022=false`) — oba odczyty kończą timeoutem.
+- **Root cause (newer):** `wallets/balances` uruchamiało pojedynczy read per program-id z twardym timeoutem; retry/failover mogły nie zdążyć przejść sensownej liczby endpointów w oknie czasu.
+- **Fix (newer):** Dodano fanout first-success-wins per program-id (`CLMM_WALLET_BALANCES_FANOUT`, domyślnie 3): API odpytuje kilka endpointów równolegle i bierze pierwszy sukces. W błędach zwracana jest telemetria prób endpointów.
+- **Symptom (latest):** `Wallet` naprzemiennie pokazuje pełną listę tokenów i chwilowe `tokens=[]` (`confidence=degraded`) mimo aktywnego virtual-wallet/WS path; użytkownik obserwuje „flapping” co kilka odświeżeń.
+- **Root cause (latest):** Odczyt baseline token accounts nadal był „edge-triggered” na bieżącej jakości public RPC. Przy chwilowym `403/timeout` oba programy mogły zwrócić fail i endpoint nie utrzymywał ostatniego poprawnego snapshotu tokenów; dodatkowo fanout próbował penalizowane endpointy ponownie bez krótkoterminowej pamięci błędów.
+- **Fix (latest):** Dodano owner-scoped fallback `last-good token snapshot` w `effective-balances` (używany gdy oba odczyty token programs fail i bieżąca lista jest pusta) oraz mechanizm penalizacji endpointów token-account (`CLMM_WALLET_TOKEN_ENDPOINT_PENALTY_SECS`) dla błędów `403/429/timeout`, aby fanout czasowo omijał niestabilne RPC.
+- **Symptom (latest-2):** `GET /wallets/effective-balances` w UI potrafiło timeoutować po 15s na zimnym starcie ownera (`cache miss`), mimo że endpoint miał być szybkim read-model path.
+- **Root cause (latest-2):** Przy `cache miss` handler wykonywał synchroniczne `compute_effective_balances` (pełny on-chain read) zamiast natychmiastowego zwrotu i tła.
+- **Fix (latest-2):** Wymuszono hard fast-return na `cache miss`: endpoint zwraca od razu placeholder `degraded` (`is_stale=true`) i uruchamia refresh wyłącznie w tle; stale cache zwracane z metadanymi (`is_stale`, `stale_age_ms`).
+- **Guards/tests (latest):** testy jednostkowe dla penalizacji endpointów (`penalize_token_endpoint_marks_and_filters`, `penalize_token_endpoint_ignores_non_penalty_errors`) + `cargo check -p clmm-lp-api`.
+- **Guards/tests (latest-2):** `cargo check -p clmm-lp-api`, `npm run build`, lint diagnostics dla zmienionych plików API/Web.
 - **Guards/tests:** Dodano regresyjny unit test `merge_wallet_token_rows_sums_same_mint`.
-- **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`
+- **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`, `.env.example`
 
 ---
 

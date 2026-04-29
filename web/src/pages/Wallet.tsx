@@ -21,13 +21,15 @@ import {
   getPortfolioAnalytics,
   getPositions,
   getJupiterPricesUsd,
-  getWalletBalances,
+  getWalletEffectiveBalances,
   getWallets,
   getActiveSigner,
   createWallet,
   setActiveSigner,
   transferSol,
   getWalletTransfers,
+  getWalletConvertOps,
+  getWalletWsStatus,
   getOrcaToken,
 } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
@@ -176,10 +178,38 @@ export default function Wallet() {
 
   const balancesQuery = useQuery({
     queryKey: ['wallet-balances', ownerPk ?? ''],
-    queryFn: () => getWalletBalances(ownerPk!),
+    queryFn: () => getWalletEffectiveBalances(ownerPk!),
     enabled: !!ownerPk,
     staleTime: 20_000,
+    refetchInterval: 10_000,
   })
+  const recentConvertOpsQ = useQuery({
+    queryKey: ['wallet-convert-ops', ownerPk ?? ''],
+    queryFn: () => getWalletConvertOps({ owner: ownerPk ?? undefined, limit: 8 }),
+    enabled: !!ownerPk,
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  })
+  const walletWsStatusQ = useQuery({
+    queryKey: ['wallet-ws-status'],
+    queryFn: getWalletWsStatus,
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  })
+  const wsDiag = walletWsStatusQ.data
+  const wsHealth: 'healthy' | 'degraded' | 'critical' = !wsDiag
+    ? 'degraded'
+    : wsDiag.refresh_failures_total > 0
+      ? 'critical'
+      : wsDiag.reconnects_total > 0
+        ? 'degraded'
+        : 'healthy'
+  const wsHealthClass =
+    wsHealth === 'healthy'
+      ? 'border-green-500/40 bg-green-500/10 text-green-200'
+      : wsHealth === 'degraded'
+        ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+        : 'border-red-500/40 bg-red-500/10 text-red-200'
   // React Query may keep previous data briefly during owner switches; only render balances/warnings
   // when the payload matches the currently selected owner.
   const balancesRaw = balancesQuery.data
@@ -666,6 +696,18 @@ export default function Wallet() {
                     )}
                   </div>
                 )}
+                {balances?.confidence && (
+                  <div className="text-[11px] text-muted-foreground">
+                    confidence: <span className="font-mono">{balances.confidence}</span>
+                    {typeof balances.pending_ops_count === 'number' ? ` · pending ops: ${balances.pending_ops_count}` : ''}
+                    {balances.is_stale ? ` · stale: ${(balances.stale_age_ms / 1000).toFixed(1)}s` : ''}
+                  </div>
+                )}
+                {balances?.is_stale && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                    Ostatni znany stan (stale). Trwa odświeżanie danych w tle.
+                  </div>
+                )}
 
                 {balances.tokens.length === 0 ? (
                   <div className="text-muted-foreground text-xs space-y-1">
@@ -772,6 +814,116 @@ export default function Wallet() {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('wallet.title')}: Ostatnie operacje konwersji</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {recentConvertOpsQ.isLoading ? (
+            <div className="text-sm text-muted-foreground">Ładowanie…</div>
+          ) : recentConvertOpsQ.isError ? (
+            <InlineError as="div">Nie udało się pobrać operacji konwersji.</InlineError>
+          ) : (recentConvertOpsQ.data?.length ?? 0) === 0 ? (
+            <div className="text-sm text-muted-foreground">Brak operacji.</div>
+          ) : (
+            <div className="space-y-2">
+              {recentConvertOpsQ.data!.map((op) => (
+                <div key={op.op_id} className="rounded-md border border-border/70 p-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono">{op.op_id.slice(0, 12)}…</span>
+                    <span className="text-muted-foreground">{op.direction}</span>
+                    <span className="text-muted-foreground">
+                      {op.amount_raw / 1e9} {op.direction === 'native_to_wsol' ? 'SOL' : 'WSOL'}
+                    </span>
+                    <span className="rounded border border-border px-1.5 py-0.5 font-mono">
+                      {op.reconciliation_status}
+                    </span>
+                  </div>
+                  {op.reason_code ? (
+                    <div className="mt-1 text-muted-foreground">
+                      reason: <span className="font-mono">{op.reason_code}</span> · attempts: {op.attempts}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            {t('wallet.title')}: Diagnostyka WS
+            <span className={`rounded border px-2 py-0.5 text-[11px] uppercase tracking-wide ${wsHealthClass}`}>
+              {wsHealth}
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {walletWsStatusQ.isLoading ? (
+            <div className="text-sm text-muted-foreground">Ładowanie…</div>
+          ) : walletWsStatusQ.isError ? (
+            <InlineError as="div">Nie udało się pobrać statusu subskrypcji WS.</InlineError>
+          ) : (
+            <div className="space-y-3 text-xs">
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-md border border-border/70 p-2">
+                  <div className="text-muted-foreground">Owners monitored</div>
+                  <div className="font-mono text-sm">
+                    {walletWsStatusQ.data?.owners_monitored ?? 0}
+                  </div>
+                </div>
+                <div
+                  className={`rounded-md border p-2 ${
+                    (walletWsStatusQ.data?.events_total ?? 0) > 0
+                      ? 'border-green-500/40 bg-green-500/10'
+                      : 'border-amber-500/40 bg-amber-500/10'
+                  }`}
+                >
+                  <div className="text-muted-foreground">Events total</div>
+                  <div className="font-mono text-sm">{walletWsStatusQ.data?.events_total ?? 0}</div>
+                </div>
+                <div
+                  className={`rounded-md border p-2 ${
+                    (walletWsStatusQ.data?.reconnects_total ?? 0) === 0
+                      ? 'border-green-500/40 bg-green-500/10'
+                      : 'border-amber-500/40 bg-amber-500/10'
+                  }`}
+                >
+                  <div className="text-muted-foreground">Reconnects total</div>
+                  <div className="font-mono text-sm">{walletWsStatusQ.data?.reconnects_total ?? 0}</div>
+                </div>
+                <div
+                  className={`rounded-md border p-2 ${
+                    (walletWsStatusQ.data?.refresh_failures_total ?? 0) === 0
+                      ? 'border-green-500/40 bg-green-500/10'
+                      : 'border-red-500/40 bg-red-500/10'
+                  }`}
+                >
+                  <div className="text-muted-foreground">Refresh failures</div>
+                  <div className="font-mono text-sm">{walletWsStatusQ.data?.refresh_failures_total ?? 0}</div>
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-muted-foreground">Tracked owners</div>
+                {(walletWsStatusQ.data?.owners?.length ?? 0) === 0 ? (
+                  <div className="text-muted-foreground">Brak aktywnych ownerów.</div>
+                ) : (
+                  <div className="space-y-1">
+                    {walletWsStatusQ.data?.owners.map((owner) => (
+                      <div key={owner} className="font-mono break-all rounded border border-border/60 px-2 py-1">
+                        {owner}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>

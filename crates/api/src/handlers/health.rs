@@ -3,7 +3,7 @@
 use crate::error::ApiResult;
 use crate::models::{
     CircuitBreakerStatus, ComponentHealth, EventBusMetricsResponse, HealthResponse,
-    MetricsResponse, ServiceStatus,
+    MetricsResponse, ServiceStatus, WalletWsMetricsResponse,
 };
 use crate::state::AppState;
 use axum::{Json, extract::State};
@@ -135,6 +135,7 @@ pub async fn readiness(State(state): State<AppState>) -> Result<&'static str, &'
 pub async fn metrics(State(state): State<AppState>) -> ApiResult<Json<MetricsResponse>> {
     let positions = state.monitor.get_positions().await;
     let strategies = state.strategies.read().await;
+    let owners_monitored = state.wallet_effective_ws_started.read().await.len() as u32;
 
     let response = MetricsResponse {
         request_count: REQUEST_COUNT.load(std::sync::atomic::Ordering::Relaxed),
@@ -152,6 +153,18 @@ pub async fn metrics(State(state): State<AppState>) -> ApiResult<Json<MetricsRes
                 failed: stats.failed,
                 dlq_size: stats.dlq_size,
             }
+        }),
+        wallet_ws: Some(WalletWsMetricsResponse {
+            owners_monitored,
+            events_total: state
+                .wallet_ws_events_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            reconnects_total: state
+                .wallet_ws_reconnects_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            refresh_failures_total: state
+                .wallet_ws_refresh_failures_total
+                .load(std::sync::atomic::Ordering::Relaxed),
         }),
     };
 

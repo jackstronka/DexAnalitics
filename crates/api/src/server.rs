@@ -107,6 +107,60 @@ fn spawn_position_agent_background_worker() {
     });
 }
 
+fn spawn_wallet_reconcile_background_worker(state: AppState) {
+    let secs = crate::handlers::wallets::wallet_reconcile_interval_secs();
+    info!(
+        interval_secs = secs,
+        env = "CLMM_WALLET_RECONCILE_INTERVAL_SECS",
+        "Wallet convert reconciler background worker enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(secs)).await;
+            match crate::handlers::wallets::reconcile_wallet_convert_ops_tick(&state).await {
+                Ok(updated) if updated > 0 => {
+                    info!(updated_ops = updated, "wallet convert reconciler tick updated operations");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "wallet convert reconciler tick failed");
+                }
+            }
+        }
+    });
+}
+
+fn wallet_effective_resync_interval_secs() -> u64 {
+    std::env::var("CLMM_WALLET_EFFECTIVE_RESYNC_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(60)
+}
+
+fn spawn_wallet_effective_resync_worker(state: AppState) {
+    let secs = wallet_effective_resync_interval_secs();
+    info!(
+        interval_secs = secs,
+        env = "CLMM_WALLET_EFFECTIVE_RESYNC_SECS",
+        "Wallet effective balances periodic resync enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(secs)).await;
+            let owners = {
+                let cache = state.wallet_effective_cache.read().await;
+                cache.keys().cloned().collect::<Vec<_>>()
+            };
+            for owner in owners {
+                if let Err(e) = crate::handlers::wallets::refresh_wallet_effective_owner(&state, &owner).await {
+                    tracing::warn!(owner = %owner, error = %e, "wallet effective balance resync failed");
+                }
+            }
+        }
+    });
+}
+
 async fn maybe_autostart_strategies(state: &AppState) {
     if !env_autostart_strategies_on_boot() {
         return;
@@ -267,6 +321,8 @@ impl ApiServer {
         maybe_autostart_strategies(&self.state).await;
         spawn_stranded_reconcile_watchdog();
         spawn_position_agent_background_worker();
+        spawn_wallet_reconcile_background_worker(self.state.clone());
+        spawn_wallet_effective_resync_worker(self.state.clone());
 
         let router = self.build_router();
 
@@ -292,6 +348,8 @@ impl ApiServer {
         maybe_autostart_strategies(&self.state).await;
         spawn_stranded_reconcile_watchdog();
         spawn_position_agent_background_worker();
+        spawn_wallet_reconcile_background_worker(self.state.clone());
+        spawn_wallet_effective_resync_worker(self.state.clone());
 
         let router = self.build_router();
 

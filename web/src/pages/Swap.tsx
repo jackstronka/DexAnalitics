@@ -14,7 +14,8 @@ import {
   getJupiterPricesUsd,
   getPool,
   getSwapCostEstimate,
-  getWalletBalances,
+  getWalletConvertOp,
+  getWalletEffectiveBalances,
   getWallets,
   getOrcaToken,
   swapBeforeOpen,
@@ -74,7 +75,7 @@ export default function Swap() {
 
   const balancesQ = useQuery({
     queryKey: ['wallet-balances', ownerPk ?? ''],
-    queryFn: () => getWalletBalances(ownerPk!),
+    queryFn: () => getWalletEffectiveBalances(ownerPk!),
     enabled: !!ownerPk,
     staleTime: 20_000,
   })
@@ -247,7 +248,7 @@ export default function Swap() {
 
   const apiSignerBalancesQ = useQuery({
     queryKey: ['wallet-balances', apiSignerQ.data?.pubkey ?? ''],
-    queryFn: () => getWalletBalances(apiSignerQ.data!.pubkey!),
+    queryFn: () => getWalletEffectiveBalances(apiSignerQ.data!.pubkey!),
     enabled: provider === 'orca' && !!apiSignerQ.data?.pubkey,
     staleTime: 10_000,
     refetchInterval: 15_000,
@@ -284,6 +285,17 @@ export default function Swap() {
       const msg = err instanceof Error ? err.message : String(err)
       setConvertErr(msg)
     },
+  })
+
+  const convertOpQ = useQuery({
+    queryKey: ['wallet-convert-op', convertResult?.op_id ?? ''],
+    queryFn: () => getWalletConvertOp(convertResult!.op_id),
+    enabled: !!convertResult?.op_id,
+    refetchInterval: (q) => {
+      const status = q.state.data?.reconciliation_status
+      return status === 'reconciled' || status === 'mismatch' || status === 'failed' ? false : 2000
+    },
+    staleTime: 0,
   })
 
   const tokenLabel = (mint: string) => {
@@ -325,6 +337,7 @@ export default function Swap() {
   const signerBalancesPartial =
     apiSignerBalancesQ.data != null &&
     (apiSignerBalancesQ.data.token_legacy_ok === false || apiSignerBalancesQ.data.token_2022_ok === false)
+  const signerBalancesStale = apiSignerBalancesQ.data?.is_stale === true
   const convertAmountRaw = useMemo(() => {
     if (convertAmountUi === '' || !Number.isFinite(Number(convertAmountUi)) || Number(convertAmountUi) <= 0) {
       return null
@@ -559,6 +572,14 @@ export default function Swap() {
                 <div className="rounded-lg border border-border bg-background/60 p-2 text-xs space-y-1">
                   {convertResult ? (
                     <div>
+                      {(() => {
+                        const liveStatus = convertOpQ.data
+                        const reconStatus = liveStatus?.reconciliation_status ?? convertResult.reconciliation_status
+                        const reasonCode = liveStatus?.reason_code ?? convertResult.reason_code
+                        const attempts = liveStatus?.attempts ?? convertResult.attempts
+                        const lastVerified = liveStatus?.last_verified_at_utc ?? convertResult.last_verified_at_utc
+                        return (
+                          <>
                       <span className="font-medium">{locale === 'pl' ? 'Konwersja potwierdzona:' : 'Conversion confirmed:'}</span>{' '}
                       <span>{convertResult.message}</span>
                       {convertResult.signature ? (
@@ -587,6 +608,33 @@ export default function Swap() {
                         </div>
                       ) : null}
                       <div className="mt-1 text-muted-foreground">
+                        <span className="font-medium">{locale === 'pl' ? 'Status tx:' : 'Tx status:'}</span>{' '}
+                        {convertResult.confirmed ? (locale === 'pl' ? 'potwierdzona' : 'confirmed') : (locale === 'pl' ? 'oczekuje' : 'pending')}
+                      </div>
+                      <div className="text-muted-foreground">
+                        <span className="font-medium">{locale === 'pl' ? 'Status reconciliacji:' : 'Reconciliation status:'}</span>{' '}
+                        <span className="font-mono">{reconStatus}</span>
+                        <span className="ml-1 text-[11px]">({locale === 'pl' ? 'op' : 'op'}: {convertResult.op_id})</span>
+                      </div>
+                      {reasonCode ? (
+                        <div className="text-muted-foreground">
+                          <span className="font-medium">{locale === 'pl' ? 'Powód:' : 'Reason:'}</span>{' '}
+                          <span className="font-mono">{reasonCode}</span>{' '}
+                          <span className="text-[11px]">({locale === 'pl' ? 'próby' : 'attempts'}: {attempts})</span>
+                        </div>
+                      ) : null}
+                      {lastVerified ? (
+                        <div className="text-muted-foreground">
+                          <span className="font-medium">{locale === 'pl' ? 'Ostatnia weryfikacja:' : 'Last verified:'}</span>{' '}
+                          {new Date(lastVerified).toLocaleString()}
+                        </div>
+                      ) : null}
+                      <div className="text-muted-foreground">
+                        <span className="font-medium">{locale === 'pl' ? 'Jakość odczytu on-chain:' : 'On-chain read quality:'}</span>{' '}
+                        {signerBalancesPartial ? (locale === 'pl' ? 'niepełna' : 'unverified') : (locale === 'pl' ? 'pełna' : 'verified')}
+                      </div>
+                      {!signerBalancesPartial ? (
+                      <div className="mt-1 text-muted-foreground">
                         {locale === 'pl' ? 'Saldo po konwersji:' : 'Post-conversion balances:'}{' '}
                         <span className="font-mono tabular-nums">
                           SOL {formatUi(convertResult.post_native_lamports / 1e9, 9)}
@@ -596,6 +644,16 @@ export default function Swap() {
                           WSOL {formatUi(convertResult.post_wsol_raw / 1e9, 9)}
                         </span>
                       </div>
+                      ) : (
+                        <InlineError as="div" className="mt-1">
+                          {locale === 'pl'
+                            ? 'Saldo końcowe ukryte: odczyt RPC jest niepełny (unverified).'
+                            : 'Final balances hidden: RPC read is partial (unverified).'}
+                        </InlineError>
+                      )}
+                          </>
+                        )
+                      })()}
                     </div>
                   ) : null}
                   {convertErr ? (
@@ -608,6 +666,13 @@ export default function Swap() {
                       {locale === 'pl'
                         ? 'Uwaga: odczyt tokenów z RPC jest częściowy (legacy/token-2022). Widoczne saldo może być chwilowo niepełne.'
                         : 'Warning: token RPC read is partial (legacy/token-2022). Displayed balance may be temporarily incomplete.'}
+                    </InlineError>
+                  ) : null}
+                  {signerBalancesStale ? (
+                    <InlineError as="div" className="mt-1">
+                      {locale === 'pl'
+                        ? `Uwaga: widzisz ostatni znany stan sald (stale ${((apiSignerBalancesQ.data?.stale_age_ms ?? 0) / 1000).toFixed(1)}s). Odswiezanie trwa w tle.`
+                        : `Warning: showing last known balances (stale ${((apiSignerBalancesQ.data?.stale_age_ms ?? 0) / 1000).toFixed(1)}s). Background refresh is in progress.`}
                     </InlineError>
                   ) : null}
                 </div>

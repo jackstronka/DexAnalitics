@@ -1456,6 +1456,20 @@ export interface WalletBalancesResponse {
   token_2022_error?: string | null
 }
 
+export type WalletBalanceConfidence = 'verified' | 'projected' | 'degraded'
+
+export interface WalletEffectiveBalancesResponse extends WalletBalancesResponse {
+  as_of_utc: string
+  is_stale: boolean
+  stale_age_ms: number
+  confidence: WalletBalanceConfidence
+  pending_ops_count: number
+  native_onchain_lamports: number
+  native_effective_lamports: number
+  wsol_onchain_raw: number
+  wsol_effective_raw: number
+}
+
 export interface ApiSignerWalletResponse {
   configured: boolean
   pubkey?: string | null
@@ -1484,11 +1498,61 @@ export interface ConvertSolResponse {
   rewrap_signature?: string | null
   confirmed: boolean
   partial: boolean
+  op_id: string
+  reconciliation_status:
+    | 'pending_confirmation'
+    | 'confirmed_unreconciled'
+    | 'reconciled'
+    | 'mismatch'
+    | 'failed'
+  reason_code?: string | null
+  attempts: number
+  last_verified_at_utc?: string | null
   direction: ConvertSolDirection
   amount_raw: number
   owner_pubkey: string
   post_native_lamports: number
   post_wsol_raw: number
+}
+
+export interface WalletConvertOpResponse {
+  op_id: string
+  owner_pubkey: string
+  direction: ConvertSolDirection
+  amount_raw: number
+  reconciliation_status:
+    | 'pending_confirmation'
+    | 'confirmed_unreconciled'
+    | 'reconciled'
+    | 'mismatch'
+    | 'failed'
+  reason_code?: string | null
+  attempts: number
+  created_at_utc: string
+  updated_at_utc: string
+  last_verified_at_utc?: string | null
+  last_error?: string | null
+  post_native_lamports?: number | null
+  post_wsol_raw?: number | null
+}
+
+export interface WalletOpsStatsResponse {
+  total: number
+  reconciled: number
+  confirmed_unreconciled: number
+  mismatch: number
+  failed: number
+  pending_confirmation: number
+  mismatch_ratio?: number | null
+  avg_seconds_to_reconcile?: number | null
+}
+
+export interface WalletWsStatusResponse {
+  owners_monitored: number
+  owners: string[]
+  events_total: number
+  reconnects_total: number
+  refresh_failures_total: number
 }
 
 export const getWallets = () => fetchJson<WalletsListResponse>('/wallets')
@@ -1503,6 +1567,11 @@ export const getWalletBalances = (owner: string) =>
     `/wallets/balances?${new URLSearchParams({ owner: owner.trim() })}`,
     35_000,
   )
+export const getWalletEffectiveBalances = (owner: string) =>
+  fetchJsonWithTimeout<WalletEffectiveBalancesResponse>(
+    `/wallets/effective-balances?${new URLSearchParams({ owner: owner.trim() })}`,
+    15_000,
+  )
 
 export const getApiSignerWallet = () => fetchJson<ApiSignerWalletResponse>('/wallets/api-signer')
 export const getActiveSigner = () => fetchJson<ActiveSignerResponse>('/wallets/active-signer')
@@ -1516,6 +1585,25 @@ export const convertSol = (body: ConvertSolRequest) =>
     method: 'POST',
     body: JSON.stringify(body),
   })
+export const getWalletConvertOp = (opId: string) =>
+  fetchJson<WalletConvertOpResponse>(`/wallets/ops/${encodeURIComponent(opId)}`)
+export const getWalletConvertOps = (params?: {
+  owner?: string
+  status?: string
+  reason_code?: string
+  updated_after?: string
+  limit?: number
+}) =>
+  fetchJson<WalletConvertOpResponse[]>(
+    `/wallets/ops?${new URLSearchParams(
+      Object.entries(params ?? {}).reduce<Record<string, string>>((acc, [k, v]) => {
+        if (v !== undefined && v !== null) acc[k] = String(v)
+        return acc
+      }, {}),
+    )}`,
+  )
+export const getWalletOpsStats = () => fetchJson<WalletOpsStatsResponse>('/wallets/ops/stats')
+export const getWalletWsStatus = () => fetchJson<WalletWsStatusResponse>('/wallets/ws-status')
 export const transferSol = (body: WalletTransferRequest) =>
   fetchJsonLong<WalletTransferResponse>('/wallets/transfer', {
     method: 'POST',

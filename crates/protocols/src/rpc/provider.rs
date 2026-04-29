@@ -119,6 +119,16 @@ impl RpcProvider {
         endpoints.get(idx).unwrap_or(&endpoints[0]).to_string()
     }
 
+    /// Returns all configured RPC endpoints in provider priority order.
+    #[must_use]
+    pub fn all_endpoints(&self) -> Vec<String> {
+        self.config
+            .all_endpoints()
+            .into_iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
     /// Gets an RPC client for the current endpoint.
     async fn get_client(&self) -> RpcClient {
         let endpoint = self.current_endpoint().await;

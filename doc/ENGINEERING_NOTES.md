@@ -1,3 +1,82 @@
+## 2026-04-29 — Propagate effective-balance stale semantics beyond Wallet page
+
+keywords: web, wallet, swap, position-create, effective-balances, stale, rpc, non-blocking
+
+- **What:** Switched `PositionCreate` signer-balance read from `/wallets/balances` to `/wallets/effective-balances` to align preflight balance checks with virtual-wallet fast path.
+- **What:** Added stale-state operator hints in `PositionCreate` and `Swap` when effective balances are served from stale cache (`is_stale=true`, `stale_age_ms`).
+- **Why:** Token reads are consumed in multiple UX flows, not only `/wallet`; stale/non-blocking semantics must be consistent across open/swap checks to avoid mixed behavior.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `web/src/pages/Swap.tsx`
+
+## 2026-04-29 — Effective balances hard fast-return on cache miss
+
+keywords: wallets, effective-balances, fast-path, cache-miss, stale, non-blocking, warmup, ui
+
+- **What:** Changed `GET /wallets/effective-balances` to never block on on-chain reads when owner cache is missing. Endpoint now returns immediate warmup placeholder (`confidence=degraded`, `is_stale=true`) and schedules refresh in background.
+- **What:** Added stale metadata fields (`is_stale`, `stale_age_ms`) to `WalletEffectiveBalancesResponse`; stale cache responses are now explicitly marked.
+- **What:** Updated Wallet UI to display stale status (`stale: Xs`) and a clear “refresh in progress” notice instead of ambiguous timeout-like behavior.
+- **Why:** Ensures endpoint remains “fast by definition” and decouples UX latency from slow/flaky public RPC during cold-start owner reads.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`, `doc/BUGS.md`
+
+## 2026-04-29 — Wallet anti-flapping hardening: last-good token snapshot + RPC endpoint penalty
+
+keywords: wallets, effective-balances, token-accounts, rpc, fallback, last-good, fanout, penalty, degraded
+
+- **What:** Added `last-good token snapshot` fallback for `effective-balances`: when both token-program reads fail and fresh token list is empty, API reuses cached token rows from the last successful owner snapshot instead of dropping to `tokens=[]`.
+- **What:** Added token-account endpoint penalty memory for `getTokenAccountsByOwner` fanout. Endpoints returning `403/429/timeout` are temporarily deprioritized for `CLMM_WALLET_TOKEN_ENDPOINT_PENALTY_SECS` (default `90`).
+- **What:** Added regression unit tests for endpoint penalization behavior and documented new env knob in `.env.example`.
+- **Why:** Stabilizes wallet UX under public RPC flapping (intermittent 403/timeouts) without hiding degraded read quality.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `.env.example`, `doc/BUGS.md`
+
+## 2026-04-29 — Wallet effective balances: WS trigger worker with reconnect
+
+keywords: wallets, effective-balances, websocket, logs-subscribe, reconnect, resync, read-model
+
+- **What:** Added owner-scoped WS trigger worker started on first `effective-balances` read. Worker listens via `accountSubscribe(owner)` + `programSubscribe(Tokenkeg/Token2022, owner memcmp)` with `logsSubscribe(mentions=<owner>)` fallback trigger, reconnects on failures, and forces read-model refresh on each event.
+- **What:** Added dedupe guard in API state to avoid duplicate WS workers per owner (`wallet_effective_ws_started`).
+- **What:** Added WS operational telemetry (`events_total`, `reconnects_total`, `refresh_failures_total`) exposed in `GET /metrics` and owner-level diagnostics endpoint `GET /wallets/ws-status`.
+- **What:** Added quick operator checklist `doc/WALLET_WS_RUNBOOK.md`.
+- **Why:** Removes dependence on slow refresh timers and pushes read-model updates close to transaction finalization, while keeping periodic resync as safety net.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/handlers/health.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/api/src/state.rs`, `doc/WALLET_WS_RUNBOOK.md`
+
+## 2026-04-29 — Virtual wallet fast path (`/wallets/effective-balances`) with stale-while-revalidate
+
+keywords: wallets, effective-balances, virtual-wallet, projected, verified, degraded, cache, stale-while-revalidate, swap, wallet-ui
+
+- **What:** Added `GET /wallets/effective-balances` as primary fast read path for wallet UI. Endpoint returns owner-scoped effective state (on-chain baseline + pending convert-op deltas) with confidence level (`verified|projected|degraded`).
+- **What:** Added owner-scoped read-model cache in API state and stale-while-revalidate behavior: return cached effective state immediately, refresh in background when stale.
+- **What:** Added periodic background resync for owners present in effective cache (`CLMM_WALLET_EFFECTIVE_RESYNC_SECS`) and cache TTL control (`CLMM_WALLET_EFFECTIVE_CACHE_TTL_SECS`).
+- **What:** Migrated `Wallet` and `Swap` views to consume effective balances instead of waiting for full synchronous `/wallets/balances` round-trip.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/state.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/api/src/server.rs`, `web/src/lib/api.ts`, `web/src/pages/Wallet.tsx`, `web/src/pages/Swap.tsx`, `.env.example`
+
+## 2026-04-29 — Etap 5 wallet hardening: adaptive hedging, reconcile diagnostics, ops stats
+
+keywords: wallets, convert-sol, hedging, fanout, token-bucket, reconciliation, reason-code, attempts, swap, wallet-ui
+
+- **What:** Added adaptive hedging for idempotent wallet reads (`getBalance`, `getTokenAccountsByOwner`) with dynamic delay (p95 rolling latency), bounded attempts, and token-bucket budget guard.
+- **What:** Extended wallet conversion operation schema with reconciliation diagnostics (`reason_code`, `attempts`, `last_verified_at_utc`) and upgraded reconciler status classification.
+- **What:** Added operational stats endpoint `GET /wallets/ops/stats` and extended `GET /wallets/ops` filters (`reason_code`, `updated_after`).
+- **What:** Swap now polls operation state by `op_id` with backoff until terminal status; Wallet view now shows recent conversion ops with status badges and diagnostics.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/pages/Wallet.tsx`, `.env.example`
+
+## 2026-04-29 — Wallet convert operational ledger + background reconciliation (MVP)
+
+keywords: wallets, convert-sol, reconciliation, op-id, status, background-worker, wsol, sol, rpc-quality
+
+- **What:** Added lightweight wallet conversion operation ledger persisted to JSONL (`CLMM_WALLET_OPS_STORE_PATH`) and enriched `ConvertSolResponse` with `op_id` + `reconciliation_status`.
+- **What:** Added background reconciler tick (`CLMM_WALLET_RECONCILE_INTERVAL_SECS`) that revisits `confirmed_unreconciled` operations and transitions them to `reconciled` or `mismatch` using observed WSOL deltas and timeout guard (`CLMM_WALLET_RECONCILE_TIMEOUT_SECS`).
+- **What:** Exposed operation status endpoints: `GET /wallets/ops` and `GET /wallets/ops/{op_id}`; updated Swap UI to show tx status, reconciliation status, and read quality with hidden final balances when read quality is unverified.
+- **Ops guidance:** treat `reconciled` as reliable post-state; treat `confirmed_unreconciled` as tx-confirmed but still awaiting stable on-chain read; treat `mismatch` as actionable discrepancy needing RPC/log review.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/server.rs`, `crates/api/src/routes.rs`, `crates/api/src/state.rs`, `crates/api/src/openapi.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `.env.example`
+
+## 2026-04-29 — Wallet balances fanout reads for token accounts (first-success-wins)
+
+keywords: wallets, balances, rpc, fallback, fanout, token-accounts, token-2022, reliability
+
+- **What:** `/wallets/balances` now resolves token accounts with fanout per token program (`legacy`, `token-2022`) instead of a single read path. Multiple RPC endpoints are queried concurrently (bounded by `CLMM_WALLET_BALANCES_FANOUT`), and the first successful result wins.
+- **What:** Error diagnostics now include attempted endpoints for failed fanout reads, making RPC quality issues actionable.
+- **Why:** Existing fallback+retry was still vulnerable to hard per-request deadlines on slower public RPCs; fanout reduces "tokens empty but SOL present" cases without requiring blanket timeout increases.
+- **paths:** `crates/protocols/src/rpc/provider.rs`, `crates/api/src/handlers/wallets.rs`, `doc/BUGS.md`
+
 ## 2026-04-29 — SOL<->WSOL conversion semantics fix (delta wrap + post-state confirmation)
 
 keywords: swap, wallets, sol, wsol, conversion, delta, target-balance, post-state, api

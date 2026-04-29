@@ -14,7 +14,7 @@ import {
   getSwapCostEstimate,
   getStrategies,
   getApiSignerWallet,
-  getWalletBalances,
+  getWalletEffectiveBalances,
   getWallets,
   openPosition,
   quoteOpenBudget,
@@ -336,7 +336,7 @@ export default function PositionCreate() {
   const usesApiSignerBalances = !!apiSignerQ.data?.configured && !!apiSignerQ.data?.pubkey
   const effectiveBalancesQ = useQuery({
     queryKey: ['wallet-balances', effectiveOwnerPk ?? ''],
-    queryFn: () => getWalletBalances(effectiveOwnerPk!),
+    queryFn: () => getWalletEffectiveBalances(effectiveOwnerPk!),
     enabled: !!effectiveOwnerPk,
     staleTime: 20_000,
   })
@@ -1621,6 +1621,11 @@ export default function PositionCreate() {
                   wysyła transakcje open/swap.
                 </p>
               ) : null}
+              {!!effectiveBalancesQ.data?.is_stale && (
+                <InlineError as="div" className="text-xs">
+                  Uzywany jest ostatni znany stan portfela (stale {Math.max(0, (effectiveBalancesQ.data.stale_age_ms / 1000)).toFixed(1)}s), odswiezanie trwa w tle.
+                </InlineError>
+              )}
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div>

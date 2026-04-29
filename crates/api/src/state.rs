@@ -6,17 +6,18 @@ use crate::events::{
     EVENT_ALERT_RAISED, EVENT_POSITION_UPDATED, EventBus, EventEnvelope, InProcessEventBus,
     publish_with_retry,
 };
+use crate::models::WalletEffectiveBalancesResponse;
 use clmm_lp_data::repositories::Database;
 use clmm_lp_execution::prelude::{
     CircuitBreaker, LifecycleTracker, PositionMonitor, StrategyExecutor, TransactionManager,
 };
 use clmm_lp_protocols::prelude::{RpcConfig, RpcProvider};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 #[derive(Debug, Clone)]
 pub struct PhantomNonceEntry {
@@ -61,6 +62,26 @@ pub struct AppState {
     pub ledger_ingest_last_at: Arc<RwLock<Option<Instant>>>,
     /// Optional active signer wallet id selected via API (`/wallets/active-signer`).
     pub active_signer_wallet_id: Arc<RwLock<Option<String>>>,
+    /// Serialize wallet operation store reads/writes.
+    pub wallet_ops_lock: Arc<Mutex<()>>,
+    /// Owner-scoped fast read-model for effective wallet balances.
+    pub wallet_effective_cache: Arc<RwLock<HashMap<String, CachedWalletEffective>>>,
+    /// Guards against duplicate background refresh for the same owner.
+    pub wallet_effective_refreshing: Arc<RwLock<HashSet<String>>>,
+    /// Guards against duplicate WS monitor workers for the same owner.
+    pub wallet_effective_ws_started: Arc<RwLock<HashSet<String>>>,
+    /// Wallet WS events received (account/program/logs).
+    pub wallet_ws_events_total: Arc<AtomicU64>,
+    /// Wallet WS reconnect attempts.
+    pub wallet_ws_reconnects_total: Arc<AtomicU64>,
+    /// Wallet WS-triggered refresh failures.
+    pub wallet_ws_refresh_failures_total: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedWalletEffective {
+    pub response: WalletEffectiveBalancesResponse,
+    pub updated_at: Instant,
 }
 
 impl AppState {
@@ -148,6 +169,13 @@ impl AppState {
             event_bus,
             ledger_ingest_last_at: Arc::new(RwLock::new(None)),
             active_signer_wallet_id: Arc::new(RwLock::new(None)),
+            wallet_ops_lock: Arc::new(Mutex::new(())),
+            wallet_effective_cache: Arc::new(RwLock::new(HashMap::new())),
+            wallet_effective_refreshing: Arc::new(RwLock::new(HashSet::new())),
+            wallet_effective_ws_started: Arc::new(RwLock::new(HashSet::new())),
+            wallet_ws_events_total: Arc::new(AtomicU64::new(0)),
+            wallet_ws_reconnects_total: Arc::new(AtomicU64::new(0)),
+            wallet_ws_refresh_failures_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
