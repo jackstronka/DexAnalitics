@@ -284,6 +284,12 @@ impl WhirlpoolExecutor {
         Ok(current_wsol.saturating_sub(amount_wsol_lamports))
     }
 
+    fn compute_wrap_target_from_delta(current_wsol: u64, amount_wsol_lamports: u64) -> Result<u64> {
+        current_wsol
+            .checked_add(amount_wsol_lamports)
+            .ok_or_else(|| anyhow::anyhow!("wsol wrap failed: target overflow"))
+    }
+
     /// Fail fast with a clear message if the **signing wallet** cannot cover raw deposit caps.
     async fn preflight_open_liquidity_balances(
         &self,
@@ -607,6 +613,24 @@ impl WhirlpoolExecutor {
             anyhow::bail!("wsol wrap failed: {msg}");
         }
         Ok(Some(res.signature))
+    }
+
+    /// Wrap exactly `amount_wsol_lamports` from native SOL into WSOL ATA (delta mode).
+    pub async fn submit_wsol_wrap_with_signature_delta(
+        &self,
+        amount_wsol_lamports: u64,
+        payer: &Keypair,
+    ) -> Result<Option<Signature>> {
+        if amount_wsol_lamports == 0 {
+            return Ok(None);
+        }
+        let owner = payer.pubkey();
+        let mint = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let ata = get_associated_token_address(&owner, &mint);
+        let current_wsol = self.read_spl_token_amount_opt(&ata).await?;
+        let target = Self::compute_wrap_target_from_delta(current_wsol, amount_wsol_lamports)?;
+        self.submit_wsol_wrap_with_signature_if_needed(target, payer)
+            .await
     }
 
     /// Convert WSOL -> native SOL.
@@ -1145,5 +1169,20 @@ mod tests {
         assert!(msg.contains("insufficient WSOL balance"));
         assert!(msg.contains("have 30000000 raw"));
         assert!(msg.contains("need 50000000 raw"));
+    }
+
+    #[test]
+    fn test_compute_wrap_target_from_delta() {
+        let current = 200_000_000u64;
+        let delta = 50_000_000u64;
+        let target = WhirlpoolExecutor::compute_wrap_target_from_delta(current, delta).unwrap();
+        assert_eq!(target, 250_000_000u64);
+    }
+
+    #[test]
+    fn test_compute_wrap_target_from_delta_overflow() {
+        let err = WhirlpoolExecutor::compute_wrap_target_from_delta(u64::MAX, 1)
+            .expect_err("expected overflow error");
+        assert!(err.to_string().contains("target overflow"));
     }
 }

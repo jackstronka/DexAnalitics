@@ -5,8 +5,10 @@ import { ArrowLeftRight, ChevronDown, Copy, ExternalLink, RefreshCcw } from 'luc
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
+import { InlineError } from '@/components/ui/inline-error'
 import {
   convertSol,
+  type ConvertSolResponse,
   type ConvertSolDirection,
   getApiSignerWallet,
   getJupiterPricesUsd,
@@ -107,7 +109,7 @@ export default function Swap() {
   const [swapErr, setSwapErr] = useState<string | null>(null)
   const [convertDirection, setConvertDirection] = useState<ConvertSolDirection>('wsol_to_native')
   const [convertAmountUi, setConvertAmountUi] = useState<number | ''>('')
-  const [convertSig, setConvertSig] = useState<string | null>(null)
+  const [convertResult, setConvertResult] = useState<ConvertSolResponse | null>(null)
   const [convertErr, setConvertErr] = useState<string | null>(null)
 
   const inputMetaQ = useQuery({
@@ -266,11 +268,17 @@ export default function Swap() {
 
   const convertMutation = useMutation({
     mutationFn: convertSol,
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setConvertErr(null)
-      setConvertSig(data.signature ?? null)
-      queryClient.invalidateQueries({ queryKey: ['wallet-balances', apiSignerQ.data?.pubkey ?? ''] })
-      queryClient.invalidateQueries({ queryKey: ['api-signer-wallet'] })
+      setConvertResult(data)
+      const owner = apiSignerQ.data?.pubkey ?? ''
+      await queryClient.invalidateQueries({ queryKey: ['wallet-balances', owner] })
+      await queryClient.invalidateQueries({ queryKey: ['api-signer-wallet'] })
+      // Balance visibility can lag right after chained txs (partial unwrap close+rewrap).
+      await new Promise((r) => setTimeout(r, 800))
+      await queryClient.refetchQueries({ queryKey: ['wallet-balances', owner], type: 'active' })
+      await new Promise((r) => setTimeout(r, 800))
+      await queryClient.refetchQueries({ queryKey: ['wallet-balances', owner], type: 'active' })
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
@@ -314,6 +322,9 @@ export default function Swap() {
   }, [apiSignerBalancesQ.data?.tokens])
   const convertSourceBalanceUi =
     convertDirection === 'native_to_wsol' ? apiSignerNativeUi : apiSignerWsolUi
+  const signerBalancesPartial =
+    apiSignerBalancesQ.data != null &&
+    (apiSignerBalancesQ.data.token_legacy_ok === false || apiSignerBalancesQ.data.token_2022_ok === false)
   const convertAmountRaw = useMemo(() => {
     if (convertAmountUi === '' || !Number.isFinite(Number(convertAmountUi)) || Number(convertAmountUi) <= 0) {
       return null
@@ -527,7 +538,7 @@ export default function Swap() {
                   disabled={!canConvert}
                   onClick={() => {
                     setConvertErr(null)
-                    setConvertSig(null)
+                    setConvertResult(null)
                     convertMutation.mutate({
                       direction: convertDirection,
                       amount_raw: convertAmountRaw ?? 0,
@@ -544,18 +555,60 @@ export default function Swap() {
                   </span>
                 ) : null}
               </div>
-              {(convertSig || convertErr) ? (
+              {(convertResult || convertErr) ? (
                 <div className="rounded-lg border border-border bg-background/60 p-2 text-xs space-y-1">
-                  {convertSig ? (
+                  {convertResult ? (
                     <div>
-                      <span className="font-medium">{locale === 'pl' ? 'Konwersja wysłana:' : 'Convert submitted:'}</span>{' '}
-                      <span className="font-mono break-all">{convertSig}</span>
+                      <span className="font-medium">{locale === 'pl' ? 'Konwersja potwierdzona:' : 'Conversion confirmed:'}</span>{' '}
+                      <span>{convertResult.message}</span>
+                      {convertResult.signature ? (
+                        <div className="mt-1">
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Sygnatura główna:' : 'Primary signature:'}</span>{' '}
+                          <span className="font-mono break-all">{convertResult.signature}</span>
+                        </div>
+                      ) : null}
+                      {convertResult.unwrap_signature ? (
+                        <div>
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Unwrap tx:' : 'Unwrap tx:'}</span>{' '}
+                          <span className="font-mono break-all">{convertResult.unwrap_signature}</span>
+                        </div>
+                      ) : null}
+                      {convertResult.wrap_signature ? (
+                        <div>
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Wrap tx:' : 'Wrap tx:'}</span>{' '}
+                          <span className="font-mono break-all">{convertResult.wrap_signature}</span>
+                        </div>
+                      ) : null}
+                      {convertResult.partial ? (
+                        <div className="text-muted-foreground mt-1">
+                          {locale === 'pl'
+                            ? 'Tryb częściowy: backend potwierdził cały flow close + odtworzenie reszty WSOL.'
+                            : 'Partial mode: backend confirmed complete close + WSOL remainder restore flow.'}
+                        </div>
+                      ) : null}
+                      <div className="mt-1 text-muted-foreground">
+                        {locale === 'pl' ? 'Saldo po konwersji:' : 'Post-conversion balances:'}{' '}
+                        <span className="font-mono tabular-nums">
+                          SOL {formatUi(convertResult.post_native_lamports / 1e9, 9)}
+                        </span>{' '}
+                        ·{' '}
+                        <span className="font-mono tabular-nums">
+                          WSOL {formatUi(convertResult.post_wsol_raw / 1e9, 9)}
+                        </span>
+                      </div>
                     </div>
                   ) : null}
                   {convertErr ? (
                     <ErrorBanner className="px-2 py-1 text-xs break-words">
                       <span className="font-medium">{locale === 'pl' ? 'Błąd konwersji:' : 'Convert failed:'}</span> {convertErr}
                     </ErrorBanner>
+                  ) : null}
+                  {signerBalancesPartial ? (
+                    <InlineError as="div" className="mt-1">
+                      {locale === 'pl'
+                        ? 'Uwaga: odczyt tokenów z RPC jest częściowy (legacy/token-2022). Widoczne saldo może być chwilowo niepełne.'
+                        : 'Warning: token RPC read is partial (legacy/token-2022). Displayed balance may be temporarily incomplete.'}
+                    </InlineError>
                   ) : null}
                 </div>
               ) : null}

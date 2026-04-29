@@ -1479,9 +1479,16 @@ export interface ConvertSolRequest {
 export interface ConvertSolResponse {
   message: string
   signature?: string | null
+  wrap_signature?: string | null
+  unwrap_signature?: string | null
+  rewrap_signature?: string | null
+  confirmed: boolean
+  partial: boolean
   direction: ConvertSolDirection
   amount_raw: number
   owner_pubkey: string
+  post_native_lamports: number
+  post_wsol_raw: number
 }
 
 export const getWallets = () => fetchJson<WalletsListResponse>('/wallets')

@@ -2747,10 +2747,28 @@ pub struct ConvertSolRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ConvertSolResponse {
     pub message: String,
+    /// Backward-compatible primary signature (equals unwrap/wrap signature when present).
     pub signature: Option<String>,
+    /// Signature of wrap tx (SOL -> WSOL) when submitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_signature: Option<String>,
+    /// Signature of unwrap tx (WSOL ATA close) when submitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unwrap_signature: Option<String>,
+    /// Signature of remainder re-wrap tx for partial unwrap (when submitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rewrap_signature: Option<String>,
+    /// True when request completed and all required on-chain steps succeeded.
+    pub confirmed: bool,
+    /// True when WSOL->SOL used close + remainder re-wrap path.
+    pub partial: bool,
     pub direction: ConvertSolDirection,
     pub amount_raw: u64,
     pub owner_pubkey: String,
+    /// Post-conversion native SOL balance (lamports) observed by API.
+    pub post_native_lamports: u64,
+    /// Post-conversion WSOL ATA amount (raw lamports) observed by API.
+    pub post_wsol_raw: u64,
 }
 
 // ============================================================================

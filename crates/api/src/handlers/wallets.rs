@@ -878,7 +878,7 @@ pub async fn get_api_signer_wallet(
     tag = "Wallets",
     request_body = ConvertSolRequest,
     responses(
-        (status = 200, description = "SOL conversion submitted", body = ConvertSolResponse),
+        (status = 200, description = "SOL conversion confirmed", body = ConvertSolResponse),
         (status = 400, description = "Invalid request / insufficient source balance"),
         (status = 500, description = "RPC or execution error")
     )
@@ -899,7 +899,8 @@ pub async fn convert_sol(
         })?;
     let owner = signer.pubkey();
     let exec = WhirlpoolExecutor::new(state.provider.clone());
-    let signature = match req.direction {
+    let (signature, wrap_signature, unwrap_signature, rewrap_signature, partial, message) =
+        match req.direction {
         ConvertSolDirection::NativeToWsol => {
             let native = state
                 .provider
@@ -912,10 +913,24 @@ pub async fn convert_sol(
                     req.amount_raw
                 )));
             }
-            exec.submit_wsol_wrap_with_signature_if_needed(req.amount_raw, signer.keypair())
+            let wrap_sig = exec
+                .submit_wsol_wrap_with_signature_delta(req.amount_raw, signer.keypair())
                 .await
                 .map_err(|e| ApiError::bad_request(format!("native_to_wsol failed: {e}")))?
-                .map(|s| s.to_string())
+                .map(|s| s.to_string());
+            let msg = if wrap_sig.is_some() {
+                "SOL conversion confirmed".to_string()
+            } else {
+                "SOL->WSOL no-op".to_string()
+            };
+            (
+                wrap_sig.clone(),
+                wrap_sig,
+                None,
+                None,
+                false,
+                msg,
+            )
         }
         ConvertSolDirection::WsolToNative => {
             let wsol = exec
@@ -928,20 +943,46 @@ pub async fn convert_sol(
                     req.amount_raw
                 )));
             }
+            let partial = req.amount_raw < wsol;
             let sig = exec
                 .submit_wsol_unwrap_with_signature(req.amount_raw, signer.keypair())
                 .await
                 .map_err(|e| ApiError::bad_request(format!("wsol_to_native failed: {e}")))?;
-            Some(sig.to_string())
+            let unwrap_sig = sig.to_string();
+            // For partial unwrap close+rewrap path, unwrap tx signature is still useful as primary.
+            (
+                Some(unwrap_sig.clone()),
+                None,
+                Some(unwrap_sig),
+                None,
+                partial,
+                "SOL conversion confirmed".to_string(),
+            )
         }
     };
+    let post_native_lamports = state
+        .provider
+        .get_balance(&owner)
+        .await
+        .map_err(|e| ApiError::internal(format!("read post native SOL balance: {e}")))?;
+    let post_wsol_raw = exec
+        .read_wsol_balance_raw(&owner)
+        .await
+        .map_err(|e| ApiError::internal(format!("read post WSOL balance: {e}")))?;
 
     Ok(Json(ConvertSolResponse {
-        message: "SOL conversion submitted".to_string(),
+        message,
         signature,
+        wrap_signature,
+        unwrap_signature,
+        rewrap_signature,
+        confirmed: true,
+        partial,
         direction: req.direction,
         amount_raw: req.amount_raw,
         owner_pubkey: owner.to_string(),
+        post_native_lamports,
+        post_wsol_raw,
     }))
 }
 

@@ -40,8 +40,14 @@ keywords: swap, wsol, sol, unwrap, partial, i18n, error-message, dark-theme, con
 - **Symptom:** In PL locale, `Swap -> Convert WSOL <-> SOL` displayed English raw backend error (`partial unwrap is not supported...`) and conversion failed for non-Max WSOL->SOL amounts. Error readability on dark theme remained poor in multiple pages (`text-destructive` on very dark backgrounds).
 - **Root cause:** Backend unwrap path supported only full WSOL ATA close and explicitly rejected partial amounts. Frontend error path rendered raw API messages without normalization/localization. Dark theme destructive token was too dark for widespread `text-destructive` usage and many pages used weak `bg-destructive/5..10`.
 - **Fix:** Added partial unwrap support in Orca executor (`close -> re-wrap remainder` flow), added API-side frontend message normalization for known SOL/WSOL failures in `messageFromErrorBody`, updated Swap UI copy (partial supported) and error banners, and increased dark-theme destructive token contrast globally.
+- **Symptom (follow-up):** On Swap screen user saw only "Konwersja wysłana", and source WSOL temporarily appeared as `0` after partial unwrap despite not using Max, making final outcome unclear.
+- **Symptom (follow-up 2):** `SOL -> WSOL` behaved like "set WSOL target balance" instead of converting the entered amount delta, which could make conversion appear incorrect versus user expectation.
+- **Root cause (follow-up):** API convert response exposed only a single "submitted" signature/message while partial unwrap uses multi-step execution semantics; UI had no explicit final confirmation state and no delayed balance refresh for chained tx visibility.
+- **Root cause (follow-up 2):** `native_to_wsol` path called `submit_wsol_wrap_with_signature_if_needed(req.amount_raw)` where argument means target WSOL ATA amount, not delta to wrap.
+- **Fix (follow-up):** Convert API now reports confirmed outcome metadata (`confirmed`, `partial`, step signatures fields) and Swap UI renders final confirmed status + step signatures with short post-conversion balance refetch loop and partial-RPC warning when token read is degraded.
+- **Fix (follow-up 2):** Added delta wrap path in Whirlpool executor (`submit_wsol_wrap_with_signature_delta`) and switched API `native_to_wsol` conversion to wrap exactly requested amount; response now includes post-conversion balances (`post_native_lamports`, `post_wsol_raw`) for deterministic UI confirmation.
 - **Guards/tests:** `npx tsc --noEmit` (web), `cargo check -p clmm-lp-protocols -p clmm-lp-api`, `cargo test -p clmm-lp-protocols test_compute_unwrap_rewrap_amount -- --nocapture`.
-- **Paths:** `crates/protocols/src/orca/executor.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/index.css`
+- **Paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `web/src/index.css`
 
 ---
 

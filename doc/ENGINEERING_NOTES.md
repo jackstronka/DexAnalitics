@@ -1,3 +1,21 @@
+## 2026-04-29 — SOL<->WSOL conversion semantics fix (delta wrap + post-state confirmation)
+
+keywords: swap, wallets, sol, wsol, conversion, delta, target-balance, post-state, api
+
+- **What:** Fixed `native_to_wsol` conversion semantics to wrap exact requested amount (delta), not "ensure target WSOL balance".
+- **What:** Added post-conversion balance fields to convert response (`post_native_lamports`, `post_wsol_raw`) and surfaced them in Swap UI for deterministic confirmation after each conversion.
+- **Why:** User-facing behavior must match entered amount semantics in both directions (`SOL -> WSOL`, `WSOL -> SOL`) and remove ambiguity when RPC/indexing visibility is delayed.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `doc/BUGS.md`
+
+## 2026-04-29 — Swap convert outcome visibility (confirmed state + multi-step metadata)
+
+keywords: swap, wallets, convert-sol, wsol, sol, partial-unwrap, api-response, ui-confirmation, rpc-degraded
+
+- **What:** Extended `ConvertSolResponse` with explicit outcome metadata (`confirmed`, `partial`, `wrap_signature`, `unwrap_signature`, `rewrap_signature`) while keeping legacy `signature`.
+- **What:** Updated `Swap` conversion panel to show final confirmed state (not only submitted signature), include available step signatures, and run short post-success balance refetch loop for better chained-tx visibility.
+- **What:** Added UI warning when wallet token balances are partial (`token_legacy_ok`/`token_2022_ok` degraded), to prevent false interpretation of temporary `0 WSOL`.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/wallets.rs`, `web/src/lib/api.ts`, `web/src/pages/Swap.tsx`, `doc/BUGS.md`
+
 ## 2026-04-29 — WSOL partial unwrap regression guards + translator hardening
 
 keywords: swap, wsol, unwrap, partial, tests, i18n, error-normalization, safeguards
