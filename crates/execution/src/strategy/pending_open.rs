@@ -223,7 +223,11 @@ mod tests {
     fn defer_rate_limit_false_without_last_attempt() {
         let item = sample_item(None, 0);
         let now = chrono::Utc::now();
-        assert!(!should_defer_pending_open_rate_limit_with(&item, now, Some(60)));
+        assert!(!should_defer_pending_open_rate_limit_with(
+            &item,
+            now,
+            Some(60)
+        ));
     }
 
     #[test]
@@ -232,7 +236,11 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-05-11T10:00:30Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        assert!(should_defer_pending_open_rate_limit_with(&item, now, Some(60)));
+        assert!(should_defer_pending_open_rate_limit_with(
+            &item,
+            now,
+            Some(60)
+        ));
     }
 
     #[test]
@@ -241,6 +249,10 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-05-11T10:01:01Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        assert!(!should_defer_pending_open_rate_limit_with(&item, now, Some(60)));
+        assert!(!should_defer_pending_open_rate_limit_with(
+            &item,
+            now,
+            Some(60)
+        ));
     }
 }

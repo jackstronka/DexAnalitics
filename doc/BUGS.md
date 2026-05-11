@@ -28,6 +28,24 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260511-01 — CI `make lint` fails on strict clippy after rebalance recovery commit
+
+status: fixed  
+severity: medium  
+reported_by: monitoring  
+first_seen: 2026-05-11  
+fixed_in: local  
+keywords: ci, github-actions, make-lint, clippy, collapsible_if, too_many_arguments, manual_range_contains, manual_clamp, clmm-lp-execution
+
+- **Symptom:** GitHub Actions `Lint` failed for commit `f99bd64` with `Process completed with exit code 2`; `clmm-lp-execution` was rejected by `-D warnings`.
+- **Symptom (local full lint):** After the first clippy fixes, full workspace lint also surfaced `manual_range_contains` in a rebalance unit test and `redundant_locals` in `uncollected_fees_cache`.
+- **Root cause:** The rebalance/pending-open recovery changes introduced strict clippy violations: nested `if`, two helper functions above the argument threshold, manual range/clamp patterns, and a redundant local captured into spawned tasks.
+- **Fix:** Collapsed the pending-open stale-session check, grouped SOL-first wallet inputs into a helper struct, replaced manual range/clamp patterns with clippy-compliant forms, and removed the redundant task-capture local.
+- **Guards/tests:** `cargo clippy -p clmm-lp-execution -- -D warnings`; `cargo clippy --all-targets --all-features -- -D warnings`
+- **Paths:** `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/uncollected_fees_cache.rs`
+
+---
+
 ### BUG-20260510-01 — `no_close_unless_reopen_feasible` stuck: `target_usd=0` when wallet SPL empty (funds only in LP)
 
 status: fixed  

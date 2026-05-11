@@ -469,14 +469,20 @@ fn build_stranded_rebalances(
             .unwrap_or(false);
         it.note = if it.in_pending_open_queue {
             Some("Already queued for pending-open recovery.".to_string())
-        } else if !it.rebalance_incomplete_logged && it.intended_tick_lower.is_some() && it.intended_tick_upper.is_some() {
+        } else if !it.rebalance_incomplete_logged
+            && it.intended_tick_lower.is_some()
+            && it.intended_tick_upper.is_some()
+        {
             Some(
                 "Missing IL rebalance_incomplete row; using lifecycle replan ticks as fallback for auto-enqueue."
                     .to_string(),
             )
         } else if !it.rebalance_incomplete_logged {
             Some("Missing IL rebalance_incomplete row; watchdog can report but cannot infer intended ticks.".to_string())
-        } else if !hints_from_il && it.intended_tick_lower.is_some() && it.intended_tick_upper.is_some() {
+        } else if !hints_from_il
+            && it.intended_tick_lower.is_some()
+            && it.intended_tick_upper.is_some()
+        {
             Some(
                 "Using lifecycle-derived intended ticks (fallback) for pending-open auto-enqueue."
                     .to_string(),
@@ -1106,22 +1112,25 @@ mod tests {
     #[test]
     fn fallback_replanned_ticks_enable_auto_enqueue_without_il_row() {
         let sid = "sess-watchdog-fallback";
-        let lifecycle = vec![serde_json::json!({
-            "source": "orca_bot",
-            "rebalance_session_id": sid,
-            "event": "bot_close_position",
-            "position_pubkey": "oldNftX",
-            "pool_address": "poolX",
-        }), serde_json::json!({
-            "source": "orca_bot",
-            "rebalance_session_id": sid,
-            "event": "bot_recover_open_replanned",
-            "details": {
-                "new_tick_lower": -24732,
-                "new_tick_upper": -24528,
-                "reason": "RangeExit"
-            }
-        })];
+        let lifecycle = vec![
+            serde_json::json!({
+                "source": "orca_bot",
+                "rebalance_session_id": sid,
+                "event": "bot_close_position",
+                "position_pubkey": "oldNftX",
+                "pool_address": "poolX",
+            }),
+            serde_json::json!({
+                "source": "orca_bot",
+                "rebalance_session_id": sid,
+                "event": "bot_recover_open_replanned",
+                "details": {
+                    "new_tick_lower": -24732,
+                    "new_tick_upper": -24528,
+                    "reason": "RangeExit"
+                }
+            }),
+        ];
         let il = vec![];
         let pending = LocalPendingOpenStore::default();
         let items = build_stranded_rebalances(&lifecycle, &il, &pending);

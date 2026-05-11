@@ -1930,7 +1930,8 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
         let has_authoritative_pair = (is_collect || is_close)
             && r.lp_collected_token_a_raw.is_some()
             && r.lp_collected_token_b_raw.is_some()
-            && (r.lp_collected_token_a_raw.unwrap_or(0) > 0 || r.lp_collected_token_b_raw.unwrap_or(0) > 0);
+            && (r.lp_collected_token_a_raw.unwrap_or(0) > 0
+                || r.lp_collected_token_b_raw.unwrap_or(0) > 0);
         let mut raw_a_ui: Option<Decimal> = None;
         let mut raw_b_ui: Option<Decimal> = None;
 
@@ -1983,7 +1984,8 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
         }
         // On close, `fee_payer_token_deltas` contains principal+fees. If we do NOT have authoritative
         // fee_owed legs, we can isolate fee leg only when we also have close principal amounts.
-        if is_close && !has_authoritative_pair
+        if is_close
+            && !has_authoritative_pair
             && let Some(details) = r.details.as_ref().and_then(serde_json::Value::as_object)
         {
             let close_raw_a = details

@@ -7,12 +7,12 @@ use crate::events::{
     publish_with_retry,
 };
 use crate::models::WalletEffectiveBalancesResponse;
-use rust_decimal::Decimal;
 use clmm_lp_data::repositories::Database;
 use clmm_lp_execution::prelude::{
     CircuitBreaker, LifecycleTracker, PositionMonitor, StrategyExecutor, TransactionManager,
 };
 use clmm_lp_protocols::prelude::{RpcConfig, RpcProvider};
+use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;

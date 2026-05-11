@@ -1,7 +1,7 @@
 use crate::services::position_executor::load_wallet_from_env;
 use crate::state::{AppState, CachedUncollectedFees};
-use clmm_lp_protocols::orca::executor::WhirlpoolExecutor;
 use anyhow::Context;
+use clmm_lp_protocols::orca::executor::WhirlpoolExecutor;
 use rust_decimal::Decimal;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
@@ -32,10 +32,7 @@ fn max_parallel() -> usize {
 pub async fn refresh_uncollected_fees_cache_tick(state: &AppState) -> usize {
     // If there's no signer wallet configured, we can still compute quotes, but Orca SDK
     // likes having a payer for ATA derivations in some paths; keep it optional.
-    let payer_pubkey = load_wallet_from_env()
-        .ok()
-        .flatten()
-        .map(|w| w.pubkey());
+    let payer_pubkey = load_wallet_from_env().ok().flatten().map(|w| w.pubkey());
 
     let positions = state.monitor.get_positions().await;
     if positions.is_empty() {
@@ -52,7 +49,6 @@ pub async fn refresh_uncollected_fees_cache_tick(state: &AppState) -> usize {
         let exec = exec.clone();
         let provider = state.provider.clone();
         let sem = sem.clone();
-        let payer_pubkey = payer_pubkey;
         let addr = p.address.to_string();
         let pool = p.pool;
         let permit_fut = sem.acquire_owned();
@@ -61,8 +57,12 @@ pub async fn refresh_uncollected_fees_cache_tick(state: &AppState) -> usize {
             let pk = Pubkey::from_str(addr.trim()).ok()?;
             let pool_reader = clmm_lp_protocols::prelude::WhirlpoolReader::new(provider.clone());
             let ps = pool_reader.get_pool_state(&pool.to_string()).await.ok()?;
-            let dec_a = fetch_mint_decimals(provider.as_ref(), &ps.token_mint_a).await.ok()?;
-            let dec_b = fetch_mint_decimals(provider.as_ref(), &ps.token_mint_b).await.ok()?;
+            let dec_a = fetch_mint_decimals(provider.as_ref(), &ps.token_mint_a)
+                .await
+                .ok()?;
+            let dec_b = fetch_mint_decimals(provider.as_ref(), &ps.token_mint_b)
+                .await
+                .ok()?;
             let (raw_a, raw_b) = exec.collect_fees_quote(&pk, payer_pubkey).await.ok()?;
             let a_ui = decimal_ui_from_raw_u64(raw_a, dec_a);
             let b_ui = decimal_ui_from_raw_u64(raw_b, dec_b);
@@ -72,7 +72,14 @@ pub async fn refresh_uncollected_fees_cache_tick(state: &AppState) -> usize {
 
     for t in tasks {
         if let Ok(Some((addr, a_ui, b_ui))) = t.await {
-            out.insert(addr, CachedUncollectedFees { amount_a: a_ui, amount_b: b_ui, updated_at: now });
+            out.insert(
+                addr,
+                CachedUncollectedFees {
+                    amount_a: a_ui,
+                    amount_b: b_ui,
+                    updated_at: now,
+                },
+            );
         }
     }
 
@@ -96,7 +103,10 @@ async fn fetch_mint_decimals(
     provider: &clmm_lp_protocols::prelude::RpcProvider,
     mint: &Pubkey,
 ) -> anyhow::Result<u8> {
-    let account = provider.get_account(mint).await.context("fetch mint account")?;
+    let account = provider
+        .get_account(mint)
+        .await
+        .context("fetch mint account")?;
     let mint_state = Mint::unpack(&account.data).context("unpack SPL Mint")?;
     Ok(mint_state.decimals)
 }
@@ -108,4 +118,3 @@ fn decimal_ui_from_raw_u64(raw: u64, decimals: u8) -> Decimal {
     let denom = Decimal::from(10u64.pow(decimals as u32));
     Decimal::from(raw) / denom
 }
-

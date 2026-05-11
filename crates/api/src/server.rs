@@ -179,11 +179,16 @@ fn spawn_uncollected_fees_cache_worker(state: AppState) {
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(secs)).await;
-            match crate::services::uncollected_fees_cache::refresh_uncollected_fees_cache_tick(&state)
-                .await
+            match crate::services::uncollected_fees_cache::refresh_uncollected_fees_cache_tick(
+                &state,
+            )
+            .await
             {
                 cached if cached > 0 => {
-                    info!(cached_positions = cached, "uncollected fees cache tick completed");
+                    info!(
+                        cached_positions = cached,
+                        "uncollected fees cache tick completed"
+                    );
                 }
                 _ => {}
             }

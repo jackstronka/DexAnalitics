@@ -737,17 +737,18 @@ impl StrategyExecutor {
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
+                .filter(|sid| {
+                    clmm_lp_protocols::ledger::tx_lifecycle::session_has_bot_open_position(sid)
+                })
             {
-                if clmm_lp_protocols::ledger::tx_lifecycle::session_has_bot_open_position(sid) {
-                    info!(
-                        rebalance_session_id = sid,
-                        closed_position = %item.closed_position_nft,
-                        "pending_open: pruning stale queue item because session already has bot_open_position"
-                    );
-                    let mut claims = pending_open_claims().lock().await;
-                    claims.remove(&claim_key);
-                    continue;
-                }
+                info!(
+                    rebalance_session_id = sid,
+                    closed_position = %item.closed_position_nft,
+                    "pending_open: pruning stale queue item because session already has bot_open_position"
+                );
+                let mut claims = pending_open_claims().lock().await;
+                claims.remove(&claim_key);
+                continue;
             }
 
             if pending_open::should_defer_pending_open_rate_limit(&item, chrono::Utc::now()) {
@@ -1180,8 +1181,12 @@ impl StrategyExecutor {
         if hi <= lo {
             hi = lo + spacing.max(1);
         }
-        let (lo2, hi2) =
-            expand_spacing_aligned_range_to_include_current_tick(lo, hi, pool.tick_current, spacing);
+        let (lo2, hi2) = expand_spacing_aligned_range_to_include_current_tick(
+            lo,
+            hi,
+            pool.tick_current,
+            spacing,
+        );
         tracing::debug!(
             position = %position,
             candle_seconds = candle_seconds,
@@ -1282,7 +1287,12 @@ impl StrategyExecutor {
         if hi <= lo {
             hi = lo + spacing.max(1);
         }
-        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(lo, hi, pool.tick_current, spacing);
+        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(
+            lo,
+            hi,
+            pool.tick_current,
+            spacing,
+        );
         Some((lo, hi))
     }
 
@@ -1826,13 +1836,15 @@ mod clamp_tests {
     #[test]
     fn expand_tick_range_includes_current_when_price_above_band() {
         // Band below current tick (spacing 4): expand upper edge until tick_current < hi.
-        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(-24800, -24700, -24680, 4);
+        let (lo, hi) =
+            expand_spacing_aligned_range_to_include_current_tick(-24800, -24700, -24680, 4);
         assert!(lo <= -24680 && -24680 < hi, "lo={lo} hi={hi}");
     }
 
     #[test]
     fn expand_tick_range_noop_when_already_contains_current() {
-        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(-25000, -24000, -24500, 4);
+        let (lo, hi) =
+            expand_spacing_aligned_range_to_include_current_tick(-25000, -24000, -24500, 4);
         assert_eq!(lo, -25000);
         assert_eq!(hi, -24000);
     }

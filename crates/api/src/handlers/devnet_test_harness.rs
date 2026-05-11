@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clmm_lp_domain::prelude::PositionTruthMode;
-use clmm_lp_execution::prelude::{
-    DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode,
-};
+use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
 use clmm_lp_protocols::prelude::{RpcProvider, WhirlpoolReader, WhirlpoolState};
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
@@ -15,9 +13,8 @@ use tokio::time::sleep;
 
 /// Default Orca devnet SOL/devUSDC whirlpool (see `devnet_e2e_tests.rs` comments).
 pub fn devnet_pool_address_string() -> String {
-    std::env::var("DEVNET_POOL_ADDRESS").unwrap_or_else(|_| {
-        "3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt".to_string()
-    })
+    std::env::var("DEVNET_POOL_ADDRESS")
+        .unwrap_or_else(|_| "3KBZiL2g8C7tiJ32hTv5v3KM7aK9htpqTw4cTXz1HvPt".to_string())
 }
 
 pub fn devnet_open_amounts_ticks() -> (u64, u64, i32, i32) {
@@ -49,7 +46,11 @@ pub fn oob_ticks_below_band(pool: &WhirlpoolState) -> (i32, i32) {
     (tick_lower, tick_upper)
 }
 
-pub async fn wait_position_account(provider: &RpcProvider, position: &Pubkey, attempts: usize) -> bool {
+pub async fn wait_position_account(
+    provider: &RpcProvider,
+    position: &Pubkey,
+    attempts: usize,
+) -> bool {
     for _ in 0..attempts {
         if provider.get_account(position).await.is_ok() {
             return true;
@@ -95,10 +96,7 @@ pub fn executor_config_devnet_aggressive() -> ExecutorConfig {
     }
 }
 
-pub async fn fetch_devnet_pool_state(
-    provider: Arc<RpcProvider>,
-    pool_s: &str,
-) -> WhirlpoolState {
+pub async fn fetch_devnet_pool_state(provider: Arc<RpcProvider>, pool_s: &str) -> WhirlpoolState {
     WhirlpoolReader::new(provider)
         .get_pool_state(pool_s)
         .await
@@ -114,9 +112,10 @@ pub async fn lifecycle_has_rebalanced(
     let n = timeout_secs.max(1) as usize;
     for _ in 0..n {
         let events = exec.lifecycle().get_events(&position).await;
-        if events.iter().any(|e| {
-            e.event_type == clmm_lp_execution::lifecycle::LifecycleEventType::Rebalanced
-        }) {
+        if events
+            .iter()
+            .any(|e| e.event_type == clmm_lp_execution::lifecycle::LifecycleEventType::Rebalanced)
+        {
             return true;
         }
         sleep(Duration::from_secs(1)).await;

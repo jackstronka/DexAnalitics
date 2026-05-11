@@ -307,7 +307,10 @@ impl WhirlpoolExecutor {
         let harvested = harvest_position_instructions(&rpc, parsed.position_mint, payer_pubkey)
             .await
             .map_err(|e| anyhow::anyhow!("orca harvest_position_instructions failed: {e}"))?;
-        Ok((harvested.fees_quote.fee_owed_a, harvested.fees_quote.fee_owed_b))
+        Ok((
+            harvested.fees_quote.fee_owed_a,
+            harvested.fees_quote.fee_owed_b,
+        ))
     }
 
     async fn read_spl_token_amount_opt(&self, ata: &Pubkey) -> Result<u64> {
@@ -678,7 +681,11 @@ impl WhirlpoolExecutor {
         Ok(parsed.amount)
     }
 
-    async fn ensure_wsol_ata_topup_only(&self, needed_amount: u64, payer: &Keypair) -> Result<Vec<Instruction>> {
+    async fn ensure_wsol_ata_topup_only(
+        &self,
+        needed_amount: u64,
+        payer: &Keypair,
+    ) -> Result<Vec<Instruction>> {
         if needed_amount == 0 {
             return Ok(Vec::new());
         }
@@ -765,7 +772,7 @@ impl WhirlpoolExecutor {
         if ixs.is_empty() {
             return Ok(None);
         }
-        let res = match self.send_transaction_with_signers(&ixs, payer, &[]) .await {
+        let res = match self.send_transaction_with_signers(&ixs, payer, &[]).await {
             Ok(res) => res,
             Err(e) => {
                 let msg = e.to_string();
@@ -777,7 +784,9 @@ impl WhirlpoolExecutor {
                     error = %msg,
                     "wsol wrap: ATA create reported IllegalOwner; retrying with topup-only path after ATA validation"
                 );
-                let fallback_ixs = self.ensure_wsol_ata_topup_only(needed_wsol_lamports, payer).await?;
+                let fallback_ixs = self
+                    .ensure_wsol_ata_topup_only(needed_wsol_lamports, payer)
+                    .await?;
                 if fallback_ixs.is_empty() {
                     return Ok(None);
                 }

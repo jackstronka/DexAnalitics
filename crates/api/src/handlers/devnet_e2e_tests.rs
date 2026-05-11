@@ -1099,21 +1099,12 @@ async fn devnet_strategy_workflow_core(
     ));
     exec.set_wallet(wallet.clone());
     exec.set_decision_config(devh::decision_config_for_devnet_strategy(mode));
-    exec
-        .set_pending_open_recovery_path(Some(pending_path))
+    exec.set_pending_open_recovery_path(Some(pending_path))
         .await;
 
     let position = exec
         .execute_open_position(
-            &pool,
-            tick_lower,
-            tick_upper,
-            amount_a,
-            amount_b,
-            200,
-            false,
-            None,
-            None,
+            &pool, tick_lower, tick_upper, amount_a, amount_b, 200, false, None, None,
         )
         .await
         .expect("execute_open_position");
@@ -1204,4 +1195,3 @@ async fn devnet_strategy_workflow_last_candle() {
 async fn devnet_strategy_workflow_last_candle_periodic() {
     devnet_strategy_workflow_core(StrategyMode::LastCandlePeriodic, false, 120, true).await;
 }
-
