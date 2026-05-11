@@ -1,3 +1,397 @@
+## 2026-05-11 — Functional spec §2.4: parallel bot processes must not share one pending-open JSON (claim is per-process)
+
+keywords: documentation, functional-spec, pending-open, CLMM_PENDING_OPEN_RECOVERY_PATH, multi-process, strategy-compare
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.4** (shared queue) + **Appendix A.1** row — explicit warning: `process_pending_open_recoveries` claim is **in-process only**; two OS processes writing the same `CLMM_PENDING_OPEN_RECOVERY_PATH` can corrupt JSON; strategy A/B runs should use **separate recovery paths** (and typically isolated data dirs); A8 phase 2 does not replace cross-process file safety.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Functional spec Appendix A.1: implementation status (core done; A8 faza 2 / optional backlog)
+
+keywords: documentation, functional-spec, Appendix-A, implementation-status, pending-open, rebalance, A8-phase-2
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **Appendix A.1** summarizes what remains unimplemented or out-of-scope vs §2–§2.5 + §6.1 (A8 phase 2, optional A1 ledger re-read, separate worker, non-3A reservation, principal-only mode, spec sections 1/4/5/7 draft) and states **core A1–A7 phase-1 is implemented**.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Functional spec §2.3: operator notes for `CLMM_PENDING_OPEN_MIN_INTERVAL_SECS`
+
+keywords: documentation, functional-spec, pending-open, CLMM_PENDING_OPEN_MIN_INTERVAL_SECS, operator
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.3** — new **Operator** subsection: when to set min interval, typical 60–300s, how `last_attempt_at` / `attempts` interact with skipped passes, distinction from max attempts / alerts.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Pending-open: `CLMM_PENDING_OPEN_MIN_INTERVAL_SECS` rate-limit (Appendix A7 faza 2)
+
+keywords: clmm-lp-execution, pending-open, process_pending_open_recoveries, CLMM_PENDING_OPEN_MIN_INTERVAL_SECS, evaluate_all, rate-limit
+
+- **What:** `pending_open.rs` adds `pending_open_min_interval_secs()` and `should_defer_pending_open_rate_limit`; `executor.rs` `process_pending_open_recoveries` skips a pass (no `attempts` bump, no `last_attempt_at` update) when wall time since last attempt is below the configured minimum. Unit tests cover defer logic via `should_defer_pending_open_rate_limit_with`.
+- **paths:** `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `doc/FUNCTIONAL_SPECIFICATION.md` (§2.3, Appendix A7)
+
+## 2026-05-11 — Rebalance: A2 preflight uses principal+fees_owed; §2.2 wallet refresh before swap-mix
+
+keywords: clmm-lp-execution, rebalance, no_close_unless_reopen_feasible, preflight, fees_owed, wallet_notional, CLMM_REOPEN_WALLET_REFRESH_ATTEMPTS, CLMM_REOPEN_WALLET_REFRESH_GAP_MS, CLMM_REOPEN_WALLET_NOTIONAL_EPSILON, bot_reopen_wallet_below_target, wallet_below_target_after_refresh, FUNCTIONAL_SPECIFICATION
+
+- **What:** `rebalance.rs` — preflight `prev_end_value_usd` now uses on-chain `PositionReader::get_position` + `calculate_token_amounts` + **`fees_owed_a/b`** (aligned with §6.1 returned estimate). Before `ensure_swap_mix_for_rebalance_open`, **`wallet_notional_refresh_until_reopen_target_met`** compares `W` vs `T*(1-ε)` with configurable refresh count/gap/epsilon; on failure returns error containing `wallet_below_target_after_refresh` → pending-open path. `executor.rs` **`classify_pending_open_stuck_reason`** recognizes that substring.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `doc/FUNCTIONAL_SPECIFICATION.md` (§2.2 observability, Appendix A A2/A4)
+
+## 2026-05-11 — Rebalance reopen sizing: returned_raw (close+fees), no wallet clamp to target_usd (Appendix A A1/A4/A5)
+
+keywords: clmm-lp-execution, rebalance, reopen, target_usd, swap-mix, pending-open, lp_collected_token, FUNCTIONAL_SPECIFICATION, Appendix-A
+
+- **What:** `crates/execution/src/strategy/rebalance.rs` — after rotation `close_position`, open path uses **`returned_*_raw` = pre-close principal read + `lp_collected_*` from close tx**; `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` replace silent `min(prev_end, 0.995*wallet)` when `prev_end > 0` (wallet-cap fallback only when returned notional unknown). Lifecycle reader **`close_amounts_from_lifecycle_row`** now sums **`lp_collected_token_*`** into returned raws for recovery. `close_position` returns `(lp_a, lp_b)` for the rotate path. Tests updated.
+- **Why:** Align execution with **§6.1** and **§2.2 / §2.5** (no ciche downsizing z powodu zawyżonego/clamped targetu przy podejrzanie małym `W`).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/FUNCTIONAL_SPECIFICATION.md` (Appendix A status)
+
+## 2026-05-11 — Functional spec §2.1: trade-off policy 3A (no hard reservation) vs locks
+
+keywords: documentation, functional-spec, policy-3A, pending-open, wallet-contention, reservation, escrow
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.1** now states explicitly that **3A** is a **product trade-off**: no per-session token lock/reservation (unlike common financial-queue patterns); rationale = simpler runtime + shared wallet + pending-open/alerts/§2.2 mitigations; cost = real cross-session wallet contention; hard isolation deferred to a future optional feature.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Functional spec §2.5: świeże ceny USD przy każdej próbie pending-open (raw z close zamrożone)
+
+keywords: documentation, functional-spec, pending-open, USD-valuation, repricing, returned_raw, T-vs-W, deposit-quote
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.5** (punkt 6) normuje: `returned_{a,b}_raw` z sesji bez zmian między retry; `T` / `returned_usd_from_close` w USD i `W` liczone **przy każdej próbie** z aktualnych `p_a/p_b`; quote open / swap-mix / stan puli świeże; opcjonalnie dwa pola telemetrii (USD @close vs @attempt) — decyzje od świeżego `T`.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Dokumentacja: IL w USD, fees (z/bez), mapa kodu vs łańcuch PDAs
+
+keywords: impermanent loss, IL, HODL, USD, fees, stream-pnl, position_stream_pnl, lineage, calculate_il_concentrated, segment, PnLTracker, LVR, external literature
+
+- **What:** Nowy przewodnik `doc/IMPERMANENT_LOSS_USD_AND_FEES.md` — definicje wariantów IL (czysty vs LP+fees), rozdział od net PnL / opłat sieci, mapa implementacji i linki do BUGów stream PnL; dopisano §7 z linkami zewnętrznymi (v2 wzór, LP vs HODL, v3/arxiv, segment vs jedna baza, fees osobno, LVR).
+- **Why:** Ujednolicenie celu „manual open → bot → manual close” z tym, co faktycznie liczy API/backtest/monitor, oraz jedno miejsce porównań z konwencjami rynkowymi / literaturą.
+- **paths:** `doc/IMPERMANENT_LOSS_USD_AND_FEES.md`, `doc/README.md`
+
+## 2026-05-11 — Functional spec §2.4: cross-strategy / shared pending-open queue (budget from session ledger)
+
+keywords: documentation, functional-spec, pending-open, rebalance_session_id, cross-strategy, PendingOpenItem
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.4** documents **point 5**: `T` from same `rebalance_session_id` close row (§6.1), shared `CLMM_PENDING_OPEN_RECOVERY_PATH` queue + executor claim, no `strategy_id` on item today; optional phase-2 explicit strategy handoff fields.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`
+
+## 2026-05-11 — Functional spec §2.3: pending-open retry cadence (evaluate_all + optional rate-limit)
+
+keywords: documentation, functional-spec, pending-open, evaluate_all, process_pending_open_recoveries
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.3** documents **point 4**: phase-1 cadence tied to `evaluate_all` / `process_pending_open_recoveries`; optional phase-2 `CLMM_PENDING_OPEN_MIN_INTERVAL_SECS` and dedicated worker only if needed. Appendix **A7** tracks implementation status.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Functional spec §2.2: stale wallet read vs deficit (no silent downsize → pending-open)
+
+keywords: documentation, functional-spec, pending-open, wallet-notional, returned_usd_from_close, stuck_reason
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§2.2** defines post-close comparison `W` vs target `T`, refresh retries, pending-open path instead of clamp-down, and optional `wallet_deficit_persistent` classification after sustained failure + operator context.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Functional spec §6.1: normative USD-from-close (close_amount + lp_collected, fallbacks)
+
+keywords: documentation, functional-spec, reopen, close_amount, lp_collected_token, fee_payer_token_deltas
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **§6.1** defines ledger-first `returned_{a,b}_raw`, USD valuation rules, fee=0 case, and degraded `lp_collected=0/0` fallback chain (pool-mint `fee_payer_token_deltas` then principal-only + diagnostic).
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — Functional spec appendix A: gap checklist vs `rebalance.rs` audit (A+C)
+
+keywords: documentation, functional-spec, rebalance, prev_end_value_usd, target_usd, gap-analysis
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` **Appendix A** lists spec-vs-code gaps from a read-through of `crates/execution/src/strategy/rebalance.rs` (principal-only `read_close_amounts_best_effort` / preflight `amount_*_before_calc` vs normative “close return + fees” USD; `target_usd_from_prev_end_clamped` vs stale-read policy; lifecycle recover close amounts without `lp_collected_*` sum).
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`, `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-05-11 — Functional spec: policy 3A (shared wallet) + periodic pending-open retries
+
+keywords: documentation, functional-spec, pending-open, wallet-contention, evaluate_all, CLMM_PENDING_OPEN_MAX_ATTEMPTS
+
+- **What:** `doc/FUNCTIONAL_SPECIFICATION.md` section **2.1** documents **3A** (no hard budget reservation) and that pending-open reopen must be **retried periodically** (tied to executor `evaluate_all` pass ordering + env attempt/alert limits).
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`
+
+## 2026-05-11 — `doc/FUNCTIONAL_SPECIFICATION.md`: single normative doc for feature behavior
+
+keywords: documentation, functional-spec, operator, PROJECT_OVERVIEW, README
+
+- **What:** Added `doc/FUNCTIONAL_SPECIFICATION.md` (draft skeleton + subsection template) as the agreed place to describe **how** features should behave; linked from `doc/README.md`, `doc/PROJECT_OVERVIEW.md`.
+- **Why:** Architecture/runbooks/BUGS/ENGINEERING_NOTES each answer different questions; operators need one document to refine semantics before or alongside code.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`, `doc/README.md`, `doc/PROJECT_OVERVIEW.md`
+
+## 2026-05-10 — Close+reopen preflight: `target_usd` when wallet SPL is empty (value in LP)
+
+keywords: clmm-lp-execution, rebalance, reopen_preflight, no_close_unless_reopen_feasible, target_usd, bot_reopen_preflight_failed
+
+- **What:** `no_close_unless_reopen_feasible` preflight now sizes `target_usd` via `target_usd_for_close_reopen_preflight`, using an estimated **post-close** spendable notional `wallet_notional + prev_end_value_usd` instead of clamping only to pre-close ATAs.
+- **Why:** Empty ATAs while liquidity remains in the position produced `target_usd = 0` and blocked every close+reopen (`bot_reopen_preflight_failed`).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+## 2026-05-07 — Cache “fee niezebrane” to keep `/positions` fast
+
+keywords: clmm-lp-api, positions, orca, fees, cache, performance
+
+- Moved Orca `CollectFeesQuote` off the hot `/api/v1/positions` request path to an in-memory cache refreshed by a background worker.
+- `/positions` now returns **cached “fee niezebrane”** (claimable now) when available, falling back to the fast on-chain `fee_owed_*` read-model otherwise.
+
+**paths:** `crates/api/src/services/uncollected_fees_cache.rs`, `crates/api/src/server.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_valuation.rs`
+
+## 2026-05-06 — API WS: exclude `/api/v1/ws/*` from request timeouts
+
+keywords: clmm-lp-api, websocket, ws, timeoutlayer, tower-http, dashboard, vite
+
+- **What:** WebSocket routes (`/api/v1/ws/positions`, `/api/v1/ws/alerts`) are now mounted on a router without `TimeoutLayer`; REST routes keep the existing per-router timeouts.
+- **Why:** `TimeoutLayer` cancels upgraded WS requests and resets sockets after the timeout, which surfaced as Vite dev proxy `ECONNRESET` spam and browser `code=1006` disconnects.
+- **paths:** `crates/api/src/routes.rs`, `doc/BUGS.md`
+
+## 2026-05-06 — Dev WS disconnect forensics: Vite proxy + browser close-code logging
+
+keywords: web, vite, websocket, ws-proxy, debug, clmm-lp-api, dashboard
+
+- **What:** Added best-effort logging around WebSocket disconnects in dev:
+  - Vite WS proxy logs to `tools/logs/vite-ws-proxy.log` (proxy req/error/open/close).
+  - Browser WS client logs to `localStorage["ws_debug_log_v1"]` (open/close with close `code/reason/wasClean`).
+- **Why:** Makes intermittent `ECONNRESET/ECONNABORTED` issues diagnosable after-the-fact via timestamp correlation.
+- **Disable:** `VITE_WS_PROXY_LOG=0` and/or `VITE_WS_CLIENT_LOG=0` in `web/.env.local` (restart Vite).
+- **paths:** `web/vite.config.ts`, `web/src/lib/websocket.ts`
+
+## 2026-05-06 — Dev WS stability: prevent reconnect churn on intentional disconnect
+
+keywords: web, websocket, vite, ws-proxy, strictmode, dashboard, clmm-lp-api
+
+- **What:** WebSocket client now avoids duplicate connections while `CONNECTING` and disables auto-reconnect after an intentional `disconnect()` (e.g. dev StrictMode mount/cleanup/mount).
+- **Why:** Reduces dev WS connection churn that surfaces as Vite `ECONNRESET` proxy spam and upstream “reset without closing handshake”.
+- **paths:** `web/src/lib/websocket.ts`, `doc/BUGS.md`
+
+## 2026-05-06 — `LastCandlePeriodic`: respect user interval (gate uses `periodic_interval_minutes`)
+
+keywords: clmm-lp-execution, decision-engine, last_candle_periodic, LastCandlePeriodic, strategies, cooldown
+
+- **What:** `StrategyMode::LastCandlePeriodic` now uses `DecisionConfig.periodic_interval_minutes` as its time gate (aligns with `Periodic` and uses the defensive clamp for `0`).
+- **Why:** Prevents rebalance loops that ignore the user-configured minute interval and fire every executor eval tick.
+- **paths:** `crates/execution/src/strategy/decision.rs`, `crates/api/src/services/strategy_service.rs`, `doc/BUGS.md`
+
+## 2026-05-06 — Rebalance open sizing: count native SOL on WSOL leg (avoid dust reopen)
+
+keywords: clmm-lp-execution, rebalance, reopen, wsol, native-sol, sol-first, open_position, token_max, dust
+
+- **What:** `open_new_range_with_wallet_mix` now treats spendable **native SOL** as available balance/cap on the **WSOL** pool leg (SOL-first), matching swap-mix and upstream Whirlpool bot behavior.
+- **Why:** Prevents `close -> open` cycles from opening near-zero (“dust”) positions when WSOL SPL balance/ATA is `0` but the wallet holds native SOL.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+## 2026-05-06 — Pending-open/reopen: SOL-first operational native SOL top-up before open
+
+keywords: clmm-lp-execution, pending-open, reopen, insufficient-native-sol, sol-first, wsol, usdc, open_position, preflight
+
+- **What:** Reopen/pending-open open loop now intercepts `open preflight exact-plan: insufficient native SOL` and performs a one-shot wallet-funded top-up of **native SOL** before retrying open.
+- **How:** Prefer WSOL→native SOL unwrap; if still short, swap minimal **stable pool leg → WSOL** in the same Whirlpool and unwrap to native SOL; then retry `open_position`.
+- **Stable mint:** Uses the non-WSOL mint from the pool (mainnet USDC, devnet `BRjp…` devUSDC, …) or override `CLMM_STABLE_MINT_FOR_SOL_TOPUP`.
+- **Why:** Preflight checks native lamports *before* sending the open tx; without a pre-open top-up, recoveries can get stuck forever after close even with ample wallet value in WSOL/stable.
+- **What (devnet E2E):** Added `crates/api/src/handlers/devnet_test_harness.rs` + ignored per-strategy workflow tests; `tools/devnet_wallet_setup.ps1`; `tools/run_devnet_smokes.ps1` supports `-WalletSetup` and `-ReportPath`.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/handlers/devnet_e2e_tests.rs`, `crates/api/src/handlers/devnet_test_harness.rs`, `tools/run_devnet_smokes.ps1`, `tools/devnet_wallet_setup.ps1`, `doc/BUGS.md`
+
+## 2026-05-06 — Fees collected regression fix: persist `lp_collected_token_*_raw` on close rows
+
+keywords: clmm-lp-execution, clmm-lp-protocols, ledger, close_position, fee_owed, lp_collected_token_raw, position_stream_lineage, Fees-zebrane
+
+- **What:** `RebalanceExecutor::close_position` now forwards `ExecutionResult.collect_fee_owed_{a,b}_raw` into lifecycle ledger append for `close_position`, so `bot_close_position` rows include `lp_collected_token_{a,b}_raw`.
+- **Why:** Without these fields, `Fees zebrane` in UI becomes `—/0` for newly closed positions because the API prioritizes authoritative fee snapshots over heuristic principal subtraction.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/executor.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-06 — Fees zebrane: close uses Orca `feesQuote` (post-update), not pre-close `fee_owed`
+
+keywords: clmm-lp-protocols, orca, whirlpool, close_position, feesQuote, update_fees_and_rewards, fee_owed, lp_collected_token_raw, position_stream_lineage, Fees-zebrane, solscan
+
+- **What:** `orca::executor::close_position` now records collected fees using `close_position_instructions(...).fees_quote.fee_owed_{a,b}` (Orca SDK quote) instead of reading `position.fee_owed_{a,b}` from the account before close.
+- **Why:** `fee_owed_*` can be stale/zero unless `update_fees_and_rewards` runs; the SDK/solscan “Claim fees” reflects the post-update quote. This fixes ledger rows where `lp_collected_token_*_raw` was `0/0` even though close claimed non-zero fees.
+- **What (API guard):** `position_stream_lineage` treats close rows with `lp_collected_token_*_raw=0/0` as non-authoritative and falls back to close-subtraction (principal isolation) to prevent principal being displayed as fees.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-06 — RPC: pin send+confirm to one endpoint (avoid `BlockhashNotFound`)
+
+keywords: clmm-lp-protocols, rpc, send_and_confirm, blockhash, blockhashnotfound, endpoint-rotation, publicnode
+
+- **What:** `RpcProvider::send_and_confirm_transaction` now pins a whole send+confirm attempt to `current_endpoint()` and only rotates endpoints **between** attempts.
+- **Why:** The tx is already signed with a recent blockhash fetched via the provider. Fanning out the signed tx to a different endpoint fleet caused `BlockhashNotFound` in practice (swap-mix after close), leaving reopen stuck.
+- **paths:** `crates/protocols/src/rpc/provider.rs`, `doc/BUGS.md`
+
+## 2026-05-06 — Watchdog: infer pending-open ticks from close `planned_new_tick_*`
+
+keywords: clmm-lp-api, stranded-rebalance-watchdog, pending-open, reconcile, planned_new_tick_lower, planned_new_tick_upper, bot_close_position
+
+- **What:** Stranded-rebalance watchdog now extracts tick hints not only from `bot_recover_open_replanned.details` but also from `bot_close_position.details.planned_new_tick_lower/upper`.
+- **Why:** Some stranded sessions have no IL `rebalance_incomplete` row, but do have the rotation plan ticks on the close row; without this, `/stranded-rebalances/reconcile` cannot auto-enqueue pending-open items.
+- **paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`, `doc/BUGS.md`
+
+## 2026-05-07 — UI “Fee (niezebrane)”: compute claimable fees via Orca quote (not stale `fee_owed_*`)
+
+keywords: clmm-lp-api, clmm-lp-protocols, positions, monitored-positions, uncollected-fees, fee_owed, update_fees_and_rewards, CollectFeesQuote, feesQuote
+
+- **What:** Monitored positions now compute “fees (uncollected)” using Orca SDK quote (`harvest_position_instructions(...).fees_quote`) rather than reading `position.fee_owed_*` from the account.
+- **Why:** Whirlpool `fee_owed_*` can be stale/zero unless fee checkpoints are updated; the SDK quote path reflects the claimable amount shown by Orca/Solscan. Fallback remains the raw account read when quote fails.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `crates/api/src/services/position_valuation.rs`
+
+## 2026-05-05 — WSOL pre-wrap hardening: idempotent ATA create + `IllegalOwner` fallback
+
+keywords: clmm-lp-protocols, orca-executor, wsol, ata, create-associated-token-account-idempotent, illegalowner, pending-open, rebalance
+
+- **What:** WSOL pre-wrap now uses `create_associated_token_account_idempotent` to avoid read/create races when ATA appears between fetch and send.
+- **What:** On ATA `IllegalOwner` during wrap send, executor now validates the derived WSOL ATA (program owner, mint, token owner) and retries with topup-only (`transfer` + `sync_native`) path that skips ATA create.
+- **Why:** Prevents reopen deadlocks where swap-mix keeps retrying but open never starts due to ATA-create failures in pre-wrap.
+- **What:** Added focused regression tests for ATA-`IllegalOwner` error-shape classification.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `doc/BUGS.md`
+
+## 2026-05-05 — Fees collected correctness: persist `fee_owed` on close; avoid principal-as-fees fallbacks
+
+keywords: clmm-lp-protocols, clmm-lp-api, stream-lineage, fees_collected_usd, fee_owed, bot_close_position, collect_fees, Logs-rebalances, PositionDetail
+
+- **What:** `close_position` now attaches `lp_collected_token_{a,b}_raw` using on-chain `fee_owed_{a,b}` snapshot read before close; lifecycle ledger records these fields for `close_position` like `collect_fees`.
+- **What:** `position_stream_lineage` counts close rows as fees only when authoritative `lp_collected_*` is present; otherwise it requires `close_amount_*` to subtract principal, and skips close rows when neither signal is available (prevents overcount).
+- **What:** UI `Logs / rebalances` labels updated from `LP zebrane` to `Fees zebrane` and multiplier renamed to neutral `× events`.
+- **Why:** Align `Fees zebrane` with official Whirlpool definition (position `fee_owed_a/b`), not fee payer token deltas which include principal.
+- **paths:** `crates/protocols/src/orca/executor.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-05-05 — Swap-mix reliability: prefer native SOL→WSOL wrap when WSOL leg is empty
+
+keywords: clmm-lp-execution, swap-mix, pending-open, wsol, native-sol, wrap, quote_deposit_budget_in_range
+
+- **What:** Swap-mix now pre-wraps native SOL into WSOL ATA when token A is WSOL and the wallet has spendable native SOL but WSOL SPL is empty (`wa<=MIN_SWAP`) and `deficit_a>0`.
+- **What:** Swap-mix now targets 1–2 swap tx per attempt (adaptive epsilon + second-swap “stagnation push” via higher buffer) and sizes swaps from the **surplus** leg (`have - need`) instead of the full balance, reducing ping-pong / overspend.
+- **Why:** Prevents wasteful USDC→WSOL swap loops and `swap mix: exhausted rounds` failures in pending-open recovery when native SOL could satisfy the WSOL leg directly.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-05-05 — Closed lineage `Fees zebrane`: unify collect + close realized fees in one column
+
+keywords: clmm-lp-api, stream-lineage, fees_collected_usd, bot_collect_fees, bot_close_position, close_amount_raw, ClosedPositionDetail
+
+- **What:** `fees_collected_*` aggregation in `position_stream_lineage` now includes both `bot_collect_fees` and `bot_close_position` rows (best-effort) instead of collect-only.
+- **What:** For close rows, principal token return is subtracted using `close_amount_a_raw` / `close_amount_b_raw` (lifecycle `details` / DB `raw_json`) so the remainder approximates realized fee legs.
+- **What:** Closed-position UI copy now uses `Fees zebrane` and neutral `× events` counter (not `LP zebrane` / `× collect`), matching merged semantics.
+- **Why:** Operators expect one fees column regardless of whether fees were realized via manual/bot collect or at close.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/lib/api.ts`
+
+## 2026-05-05 — Stranded reopen reliability: default IL ledger path in API executor + lifecycle fallback hints in watchdog
+
+keywords: clmm-lp-api, strategy-service, stranded-rebalance-watchdog, il_ledger_path, rebalance_incomplete, pending-open-recovery, bot_recover_open_replanned
+
+- **What:** `start_strategy_executor_core` now sets IL ledger path even when strategy params omit `il_ledger_path` (priority: params -> `CLMM_IL_LEDGER_PATH` -> `data/ledger/il-ledger.jsonl`) and ensures parent dir best-effort.
+- **Why:** UI-created strategies often had no IL path, so `record_rebalance_incomplete` never persisted and watchdog could not infer intended ticks from IL ledger.
+- **What:** Watchdog now extracts fallback intended ticks from lifecycle `bot_recover_open_replanned.details` (`new_tick_*` / `intended_tick_*`) when IL `rebalance_incomplete` row is missing, enabling auto-enqueue with explicit fallback note.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/services/stranded_rebalance_watchdog.rs`
+
+## 2026-05-04 — Bot Bollinger / last-candle ticks: expand band to include live `tick_current` (parity with PositionCreate)
+
+keywords: clmm-lp-execution, StrategyExecutor, bollinger, last_candle, tick_current, expand_spacing_aligned_range_to_include_current_tick, out_of_range
+
+- **What:** After spacing alignment, `record_price_and_compute_bollinger_ticks` and `record_price_and_compute_last_closed_candle_ticks` call `expand_spacing_aligned_range_to_include_current_tick` so `tick_lower <= pool.tick_current < tick_upper`, matching `expandAlignedTickRangeToIncludeCurrent` in `web/src/lib/whirlpoolTicks.ts`.
+- **Why:** Rolling price windows can sit off the live tick; without expansion the bot opens LP immediately out of range.
+- **paths:** `crates/execution/src/strategy/executor.rs`
+
+## 2026-05-04 — PositionCreate: allow open when swap-before-open confirmed despite `is_stale` effective balances
+
+keywords: web, position-create, swap-before-open, effective-balances, is_stale, handleSubmit
+
+- **What:** `handleSubmit` no longer returns on `effectiveBalancesQ.data.is_stale` when `swapBeforeOpen` is on and `swapSignature` is set (confirmed swap tx); stale error copy is PL/EN via `L(...)`.
+- **Why:** Projection can lag ~30s after invalidate; blocking open after a successful on-chain swap forced a dead-end unrelated to funding.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-05-04 — Rebalance open after swap-mix: refetch pool tick/√P each attempt (not post-close snapshot)
+
+keywords: clmm-lp-execution, rebalance, open_new_range_with_wallet_mix, swap-mix, WhirlpoolReader, quote_deposit_budget_in_range, tick_current, sqrt_price
+
+- **What:** The open retry loop now calls `WhirlpoolReader::get_pool_state` at the start of each attempt and uses that state for SPL reads, synthetic price, and `quote_deposit_budget_in_range` (previously reused the `pool_state` taken right after close while swap-mix had been updating from fresh reads).
+- **Why:** Stale tick/√P after swaps mis-sized caps and could block reopen despite successful mix; aligns open quotes with the same freshness model as swap-mix rounds.
+- **What:** Open ledger `details` gain `open_quote_pool_tick_current` and `open_quote_pool_sqrt_price` from the refetched snapshot.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-05-04 — Swap-mix diagnostics: attach `rebalance_session_id` like swap txs
+
+keywords: clmm-lp-execution, rebalance, swap-mix, ledger, try_append_bot_diagnostic_row, rebalance_session_id
+
+- **What:** `ensure_swap_mix_for_rebalance_open` passed `None` into `try_append_bot_diagnostic_row` for `bot_swap_mix_*` / `bot_swap_exact_in_*` diagnostics while `execute_swap_exact_in` used `ledger_session_id` — UI grouped planning rows under `_no_session` next to real swaps in the UUID session.
+- **Why:** Same session correlation for operators and Closed detail timeline.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-05-04 — PositionCreate USD open: submit caps from live `budgetQuoteQ` (no stale caps vs ticks)
+
+keywords: web, position-create, quote-open-budget, token_max, budgetSubmitRaw, open-position
+
+- **What:** Removed `budgetSubmitRaw` state; `fundingCheck` and `handleSubmit` use `budgetQuoteQ.data.token_max_*` from the active React Query key (ticks + `totalUsd`). Submit blocks while `budgetQuoteQ.isFetching` and when `in_range` is false.
+- **Why:** After tick auto-sync (e.g. Bollinger expand), caps in state could lag behind the last successful quote for **previous** ticks — POST could open a smaller position than the on-screen 10 USD target implied.
+- **What:** Amber hint when `estimated_value_usd < 0.92 * totalUsd` to surface discrete-liquidity / narrow-range shortfalls.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-05-04 — Bollinger ticks: expand to include live pool tick (USD quote + swap hints)
+
+keywords: web, position-create, bollinger, tick-range, quote-open-budget, swap-before-open, whirlpoolTicks
+
+- **What:** After `alignPriceRatioToTicks` from Bollinger bands, `expandAlignedTickRangeToIncludeCurrent` widens the aligned `[tickLower, tickUpper)` by `tick_spacing` steps until `current_tick` satisfies in-range convention (`tl <= t < tu`), so `budgetQuoteEnabled` and Amount fields populate.
+- **Why:** Historical band from snapshots often missed the live tick → orange out-of-range warning, no USD quote, no `fundingCheck` / Orca swap proposal (user thought Bollinger “broke” swap).
+- **paths:** `web/src/lib/whirlpoolTicks.ts`, `web/src/pages/PositionCreate.tsx`
+
+## 2026-05-04 — Rebalance swap-mix: SOL-first native SOL (either pool leg WSOL + pre-wrap B)
+
+keywords: clmm-lp-execution, rebalance, swap-mix, wsol, sol-first, native-lamports, ensure_swap_mix_for_rebalance_open
+
+- **What:** `ensure_swap_mix_for_rebalance_open` no longer bails on `wa==0 && wb==0` when the pool has a WSOL leg and spendable native lamports remain; `wallet_notional` / `target_usd` use `swap_mix_wallet_ui_sol_first` so native SOL counts like the dashboard model.
+- **What:** Pre-wrap (`submit_wsol_wrap_if_needed`) before in-pool swap applies when **WSOL is token A** (A→B, deficit B) **or token B** (B→A, deficit A), with shared reserve constant `SWAP_MIX_NATIVE_SOL_RESERVE_LAMPORTS`.
+- **Why:** Bot could not start swap-mix with only native SOL (SPL zeros); WSOL-on-B pools never hit the old A-only wrap gate.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-05-04 — PositionCreate: WSOL mint leg shows native SOL + block open on stale balances
+
+keywords: web, position-create, wsol, sol-first, effective-balances, formatBalanceLine, is-stale
+
+- **What:** For pool leg mint WSOL (`So111…`), „Stan portfela” uses `balances.sol` (native SOL) instead of the SPL WSOL token row alone (often 0 while native SOL is non-zero).
+- **What:** Optional note `SPL WSOL na koncie: …` only when the WSOL token account balance is positive.
+- **What:** `handleSubmit` returns early when effective balances are `is_stale` so open is not sent on placeholder/warmup numbers.
+- **What (copy):** Stale banner text no longer mentions WSOL/auto-wrap — SOL-first UX treats native balance as primary; banner only explains staleness + fresh read for validation/open.
+- **What (funding UX):** `fundingCheck` no longer returns `ready: false` for every `is_stale`; only when stale **and** native SOL and all SPL rows read as ~0 (warmup placeholder). Otherwise deficit + Jupiter / Orca swap hints show again while submit remains stale-gated.
+- **What (swap-before-open):** `swapBeforeOpenPlan` capped in-pool swap input using SPL-only `getAvailableUiAmount` for the WSOL mint leg, so `amount_in` was often 0 while native SOL existed; cap now uses `fundingCheck.effectiveHaveA` / `effectiveHaveB` (SOL-first) like funding math.
+- **Why:** Aligns the open form with Wallet + SOL-first funding; removes misleading `0 SOL` when the user holds native SOL only.
+- **paths:** `web/src/pages/PositionCreate.tsx`
+
+## 2026-04-30 — Pending-open recovery: auto-prune stale reopened sessions + explicit 6012 reason
+
+keywords: clmm-lp-execution, clmm-lp-api, pending-open, stranded-rebalances, rebalance-session, reopen, watchdog, 6012
+
+- **What:** `StrategyExecutor::process_pending_open_recoveries` now prunes queue entries when `rebalance_session_id` already has lifecycle `bot_open_position` (`session_has_bot_open_position`), preventing duplicate retry loops (`session_already_has_open_row`).
+- **What:** `classify_pending_open_stuck_reason` now maps Whirlpool `Custom(6012)` / `0x177c` to `open_position_6012` (instead of generic `unknown`), and includes a regression test.
+- **What (follow-up):** Recovery-open no longer falls back to `(1,1)` close amounts when lifecycle close legs are missing. It logs a warning and uses `(0,0)`, which routes target sizing to wallet-cap fallback instead of micro-notional.
+- **What (follow-up 2):** `swap_exact_in` SOL-first auto-unwrap now runs only when swap input leg is WSOL (`specified_mint == WSOL`). WSOL bought during swap-mix for immediate open/reopen is no longer auto-unwrapped away.
+- **What:** Stranded watchdog hides synthetic `pending-only` rows for pending items whose `rebalance_session_id` is already reopened, so UI no longer shows stale "waiting for reopen" ghosts.
+- **Why:** Keeps pending queue aligned with lifecycle source-of-truth and improves operator signal quality for real reopen blockers.
+- **paths:** `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/executor.rs`, `crates/api/src/services/stranded_rebalance_watchdog.rs`, `doc/BUGS.md`
+
+## 2026-04-30 — PositionCreate UX: expose signer-vs-selected wallet and manual stale refresh
+
+keywords: web, position-create, api-signer, wallet-balances, stale, refresh, ux
+
+- **What:** Added informational selected-wallet balance preview when `ownerPk` differs from API signer (`effectiveOwnerPk`) so users can see why open validation may differ from Wallet page.
+- **What:** Added `Wymuś odświeżenie` action in stale banner to invalidate/refetch effective balances (and selected-owner balance preview when present).
+- **Why:** Reduce false mental model (`mam SOL, czemu open pokazuje 0?`) and unblock users during prolonged stale windows.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
+## 2026-04-30 — Data snapshots: derive `price_ab` from `tick_current` fallback
+
+keywords: clmm-lp-api, data-snapshots, bollinger, tick-to-price, position-create, snapshots
+
+- **What:** `GET /data/snapshots` now fills `price_ab` from `tick_current` when explicit `price_ab` is absent in JSONL rows.
+- **Why:** Snapshot collectors commonly persist `tick_current` only; frontend Bollinger range needs stable `price_ab` series and should not require a separate candle/price collector.
+- **paths:** `crates/api/src/handlers/data.rs`, `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
+## 2026-04-30 — PositionCreate: Bollinger strategy now sets open range from live bands
+
+keywords: web, position-create, bollinger, snapshots, data-snapshots, ticks, strategy
+
+- **What:** `PositionCreate` now computes Bollinger range for `strategy_type=bollinger` directly in the form (recent `price_ab` snapshots for selected pool, `window` + `k` from strategy params, `mean±k*sigma`, aligned to pool `tick_spacing`).
+- **What:** Added `getDataSnapshots` API client in `web/src/lib/api.ts` and strategy hint text in UI explaining whether Bollinger band range is ready or waiting for enough samples.
+- **Why:** Aligns open-form UX with user expectation that selecting Bollinger immediately proposes band-derived bounds, not only static width around current price.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`, `doc/BUGS.md`
+
+## 2026-04-30 — PositionCreate SOL-first funding for WSOL leg (use native SOL, not pre-existing WSOL)
+
+keywords: web, position-create, sol-first, wsol, funding-check, open-position, wallet-ux
+
+- **What:** Updated `PositionCreate` funding validation so WSOL leg coverage can come from native SOL via pre-wrap (`native - min_open_lamports - ATA rent`) instead of requiring current WSOL token balance.
+- **What:** Kept operational SOL guard separate (`shortOperationalSol`) to continue blocking only when total native SOL is genuinely insufficient for leg + open buffer.
+- **Why:** Aligns frontend gating with executor behavior (`ensure_wsol_ata_funded` before open + auto-unwrap after success) and common SOL-first wallet UX.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
 ## 2026-04-30 — Orca positions-by-owner: try all configured Solana RPC endpoints
 
 keywords: clmm-lp-api, orca, fetch_positions_for_owner, SOLANA_RPC_URL, SOLANA_RPC_FALLBACK_URLS, public-rpc, 403

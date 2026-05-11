@@ -488,7 +488,40 @@ export default function Positions() {
                       </td>
                       <td className="py-4 text-right text-green-500">
                         <div className="space-y-0.5">
-                          <div>{formatUsdUncollectedFees(position.pnl.fees_earned_usd)}</div>
+                          <div>
+                            {(() => {
+                              const f = position.uncollected_fees
+                              if (!f) return '—'
+                              const a = parseFloat(String(f.amount_a))
+                              const b = parseFloat(String(f.amount_b))
+                              const labelA = (position.token_a_label ?? f.token_a_label ?? '').toUpperCase()
+                              const labelB = (position.token_b_label ?? f.token_b_label ?? '').toUpperCase()
+                              const priceA =
+                                typeof position.token_price_a_usd === 'number'
+                                  ? position.token_price_a_usd
+                                  : labelA.includes('USDC')
+                                    ? 1
+                                    : NaN
+                              const priceB =
+                                typeof position.token_price_b_usd === 'number'
+                                  ? position.token_price_b_usd
+                                  : labelB.includes('USDC')
+                                    ? 1
+                                    : NaN
+
+                              let usd = 0
+                              let ok = false
+                              if (Number.isFinite(a) && Number.isFinite(priceA)) {
+                                usd += a * priceA
+                                ok = true
+                              }
+                              if (Number.isFinite(b) && Number.isFinite(priceB)) {
+                                usd += b * priceB
+                                ok = true
+                              }
+                              return ok ? formatUsdUncollectedFees(usd) : '—'
+                            })()}
+                          </div>
                           <div className="text-[10px] text-muted-foreground">
                             {locale === 'pl' ? 'źródło:' : 'source:'}{' '}
                             {position.valuation_source === 'live_valuation'
@@ -503,10 +536,6 @@ export default function Positions() {
                               {formatNumber(position.uncollected_fees.amount_a, 6)} ·{' '}
                               {position.uncollected_fees.token_b_label}:{' '}
                               {formatNumber(position.uncollected_fees.amount_b, 6)}
-                              <div className="mt-0.5">
-                                raw A {position.pnl.fees_earned_a.toLocaleString()} · raw B{' '}
-                                {position.pnl.fees_earned_b.toLocaleString()}
-                              </div>
                             </div>
                           ) : null}
                         </div>

@@ -4,10 +4,11 @@ use crate::error::{ApiError, ApiResult};
 use crate::models::{
     ActiveSignerResponse, ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateWalletRequest, CreateWalletResponse, SetActiveSignerRequest,
-    WalletBalanceConfidence, WalletBalancesResponse, WalletConvertOpResponse, WalletEffectiveBalancesResponse,
-    WalletEntry, WalletOpsStatsResponse, WalletReconciliationStatus, WalletReplicationStatus, WalletTokenBalance,
-    WalletReconcileItem, WalletReconcileResponse, WalletTransferLogEntry, WalletTransferRequest, WalletWsStatusResponse,
-    WalletTransferResponse, WalletTransfersListResponse, WalletsListResponse,
+    WalletBalanceConfidence, WalletBalancesResponse, WalletConvertOpResponse,
+    WalletEffectiveBalancesResponse, WalletEntry, WalletOpsStatsResponse, WalletReconcileItem,
+    WalletReconcileResponse, WalletReconciliationStatus, WalletReplicationStatus,
+    WalletTokenBalance, WalletTransferLogEntry, WalletTransferRequest, WalletTransferResponse,
+    WalletTransfersListResponse, WalletWsStatusResponse, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::state::AppState;
@@ -18,10 +19,10 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::pubsub_client::PubsubClient;
 use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcTransactionLogsConfig};
 use solana_client::rpc_filter::{Memcmp, RpcFilterType};
-use solana_client::rpc_response::Response as RpcResponseEnvelope;
-use solana_client::rpc_response::RpcLogsResponse;
 use solana_client::rpc_request::TokenAccountsFilter;
+use solana_client::rpc_response::Response as RpcResponseEnvelope;
 use solana_client::rpc_response::RpcKeyedAccount;
+use solana_client::rpc_response::RpcLogsResponse;
 use solana_sdk::{
     pubkey::Pubkey, signature::Keypair, signature::read_keypair_file, signer::Signer,
     transaction::Transaction,
@@ -32,8 +33,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex as StdMutex, OnceLock};
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -107,7 +108,11 @@ fn resolve_wallet_stores(state: &AppState) -> WalletStores {
                 .filter(|s| !s.trim().is_empty())
                 .map(PathBuf::from)
         })
-        .or_else(|| std::env::var("CLMM_WALLETS_DIR_PRIMARY").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("CLMM_WALLETS_DIR_PRIMARY")
+                .ok()
+                .map(PathBuf::from)
+        })
         .or_else(|| std::env::var("CLMM_WALLETS_DIR").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("wallets"));
     let secondary = state
@@ -116,7 +121,11 @@ fn resolve_wallet_stores(state: &AppState) -> WalletStores {
         .as_ref()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var("CLMM_WALLETS_DIR_SECONDARY").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("CLMM_WALLETS_DIR_SECONDARY")
+                .ok()
+                .map(PathBuf::from)
+        })
         .filter(|p| p != &primary);
     WalletStores { primary, secondary }
 }
@@ -133,11 +142,7 @@ fn wallet_fingerprint_bytes(bytes: &[u8]) -> String {
     B64.encode(h.to_bytes())
 }
 
-fn scan_wallet_dir(
-    dir: &PathBuf,
-    out: &mut BTreeMap<String, WalletReplicaPair>,
-    is_primary: bool,
-) {
+fn scan_wallet_dir(dir: &PathBuf, out: &mut BTreeMap<String, WalletReplicaPair>, is_primary: bool) {
     if !dir.exists() {
         return;
     }
@@ -213,17 +218,26 @@ fn create_wallet_entry(
     })
 }
 
-fn load_wallet_keypair_from_stores(stores: &WalletStores, wallet_id: &str) -> Result<Keypair, ApiError> {
+fn load_wallet_keypair_from_stores(
+    stores: &WalletStores,
+    wallet_id: &str,
+) -> Result<Keypair, ApiError> {
     let p1 = wallet_file_path(&stores.primary, wallet_id);
     if p1.exists() {
-        return read_keypair_file(&p1)
-            .map_err(|e| ApiError::bad_request(format!("wallet `{wallet_id}` read failed from primary: {e}")));
+        return read_keypair_file(&p1).map_err(|e| {
+            ApiError::bad_request(format!(
+                "wallet `{wallet_id}` read failed from primary: {e}"
+            ))
+        });
     }
     if let Some(sec) = &stores.secondary {
         let p2 = wallet_file_path(sec, wallet_id);
         if p2.exists() {
-            return read_keypair_file(&p2)
-                .map_err(|e| ApiError::bad_request(format!("wallet `{wallet_id}` read failed from secondary: {e}")));
+            return read_keypair_file(&p2).map_err(|e| {
+                ApiError::bad_request(format!(
+                    "wallet `{wallet_id}` read failed from secondary: {e}"
+                ))
+            });
         }
     }
     Err(ApiError::bad_request(format!(
@@ -240,22 +254,16 @@ fn load_signer_wallet_for_api(
         let stores = resolve_wallet_stores(state);
         let p1 = wallet_file_path(&stores.primary, wallet_id);
         if p1.exists() {
-            return clmm_lp_execution::prelude::Wallet::from_file(
-                &p1,
-                "api-active-wallet",
-            )
-            .map(|w| Some(std::sync::Arc::new(w)))
-            .map_err(|e| ApiError::internal(format!("active signer load failed: {e}")));
+            return clmm_lp_execution::prelude::Wallet::from_file(&p1, "api-active-wallet")
+                .map(|w| Some(std::sync::Arc::new(w)))
+                .map_err(|e| ApiError::internal(format!("active signer load failed: {e}")));
         }
         if let Some(sec) = stores.secondary {
             let p2 = wallet_file_path(&sec, wallet_id);
             if p2.exists() {
-                return clmm_lp_execution::prelude::Wallet::from_file(
-                    &p2,
-                    "api-active-wallet",
-                )
-                .map(|w| Some(std::sync::Arc::new(w)))
-                .map_err(|e| ApiError::internal(format!("active signer load failed: {e}")));
+                return clmm_lp_execution::prelude::Wallet::from_file(&p2, "api-active-wallet")
+                    .map(|w| Some(std::sync::Arc::new(w)))
+                    .map_err(|e| ApiError::internal(format!("active signer load failed: {e}")));
             }
         }
     }
@@ -292,7 +300,12 @@ fn parse_env_allowlist_csv(var: &str) -> HashSet<String> {
 fn hedge_config_from_env() -> HedgeConfig {
     let enabled = std::env::var("CLMM_WALLET_HEDGE_ENABLE")
         .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(true);
     let max_attempts = std::env::var("CLMM_WALLET_HEDGE_MAX_ATTEMPTS")
         .ok()
@@ -336,7 +349,8 @@ fn penalize_token_endpoint(endpoint: &str, error_text: &str) {
     if !should_penalize_token_endpoint(error_text) {
         return;
     }
-    let lock = TOKEN_ENDPOINT_PENALTIES.get_or_init(|| StdMutex::new(EndpointPenaltyRegistry::default()));
+    let lock =
+        TOKEN_ENDPOINT_PENALTIES.get_or_init(|| StdMutex::new(EndpointPenaltyRegistry::default()));
     if let Ok(mut guard) = lock.lock() {
         let ttl = Duration::from_secs(token_endpoint_penalty_secs());
         guard
@@ -346,7 +360,8 @@ fn penalize_token_endpoint(endpoint: &str, error_text: &str) {
 }
 
 fn filter_penalized_token_endpoints(endpoints: &[String]) -> Vec<String> {
-    let lock = TOKEN_ENDPOINT_PENALTIES.get_or_init(|| StdMutex::new(EndpointPenaltyRegistry::default()));
+    let lock =
+        TOKEN_ENDPOINT_PENALTIES.get_or_init(|| StdMutex::new(EndpointPenaltyRegistry::default()));
     let mut out = endpoints.to_vec();
     if let Ok(mut guard) = lock.lock() {
         let now = Instant::now();
@@ -499,8 +514,10 @@ fn now_utc_iso() -> String {
 
 fn is_reconciled(row: &WalletConvertOpRow, current_wsol_raw: u64, tolerance_raw: u64) -> bool {
     match row.direction {
-        ConvertSolDirection::NativeToWsol => current_wsol_raw.saturating_add(tolerance_raw)
-            >= row.pre_wsol_raw.saturating_add(row.amount_raw),
+        ConvertSolDirection::NativeToWsol => {
+            current_wsol_raw.saturating_add(tolerance_raw)
+                >= row.pre_wsol_raw.saturating_add(row.amount_raw)
+        }
         ConvertSolDirection::WsolToNative => {
             let expected_max = row
                 .pre_wsol_raw
@@ -562,7 +579,10 @@ pub async fn reconcile_wallet_convert_ops_tick(state: &AppState) -> anyhow::Resu
         };
         let elapsed_too_long = chrono::DateTime::parse_from_rfc3339(&row.created_at_utc)
             .ok()
-            .map(|dt| now.signed_duration_since(dt.with_timezone(&chrono::Utc)).num_seconds())
+            .map(|dt| {
+                now.signed_duration_since(dt.with_timezone(&chrono::Utc))
+                    .num_seconds()
+            })
             .unwrap_or_default()
             >= timeout_secs as i64;
         let native = match state.provider.get_balance(&owner).await {
@@ -791,9 +811,15 @@ pub async fn create_wallet(
     }
     let wallet = create_wallet_entry(
         wallet_id.clone(),
-        Some((keypair.pubkey().to_string(), wallet_fingerprint_bytes(&bytes))),
+        Some((
+            keypair.pubkey().to_string(),
+            wallet_fingerprint_bytes(&bytes),
+        )),
         if secondary_written {
-            Some((keypair.pubkey().to_string(), wallet_fingerprint_bytes(&bytes)))
+            Some((
+                keypair.pubkey().to_string(),
+                wallet_fingerprint_bytes(&bytes),
+            ))
         } else {
             None
         },
@@ -901,8 +927,8 @@ pub async fn transfer_sol_between_wallets(
             "lamports exceeds configured max ({max_lamports})"
         )));
     }
-    let to_pubkey =
-        Pubkey::from_str(req.to_pubkey.trim()).map_err(|_| ApiError::bad_request("invalid to_pubkey"))?;
+    let to_pubkey = Pubkey::from_str(req.to_pubkey.trim())
+        .map_err(|_| ApiError::bad_request("invalid to_pubkey"))?;
     let stores = resolve_wallet_stores(&state);
     let source_wallet_id = req.from_wallet_id.trim().to_string();
     let allowed_sources = parse_env_allowlist_csv("CLMM_WALLET_TRANSFER_SOURCE_ALLOWLIST");
@@ -911,7 +937,8 @@ pub async fn transfer_sol_between_wallets(
             "source wallet is not in CLMM_WALLET_TRANSFER_SOURCE_ALLOWLIST".to_string(),
         ));
     }
-    let mut allowed_recipients: HashSet<String> = parse_env_allowlist_csv("CLMM_WALLET_TRANSFER_ALLOWLIST");
+    let mut allowed_recipients: HashSet<String> =
+        parse_env_allowlist_csv("CLMM_WALLET_TRANSFER_ALLOWLIST");
     for w in wallet_entries_from_stores(&stores) {
         allowed_recipients.insert(w.pubkey);
     }
@@ -941,8 +968,7 @@ pub async fn transfer_sol_between_wallets(
         .get_latest_blockhash()
         .await
         .map_err(|e| ApiError::internal(format!("latest blockhash failed: {e}")))?;
-    let tx =
-        Transaction::new_signed_with_payer(&[ix], Some(&from_pubkey), &[&from_kp], recent);
+    let tx = Transaction::new_signed_with_payer(&[ix], Some(&from_pubkey), &[&from_kp], recent);
     let sig = state
         .provider
         .send_and_confirm_transaction(&tx)
@@ -1054,7 +1080,11 @@ fn append_tokens_from_keyed_accounts(
         };
         let parsed = data_v.get("parsed").unwrap_or(&serde_json::Value::Null);
         let info = parsed.get("info").unwrap_or(&serde_json::Value::Null);
-        let mint = info.get("mint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mint = info
+            .get("mint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if mint.is_empty() {
             continue;
         }
@@ -1063,7 +1093,12 @@ fn append_tokens_from_keyed_accounts(
             .get("uiAmountString")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .or_else(|| token_amount.get("uiAmount").and_then(|v| v.as_f64()).map(|x| x.to_string()))
+            .or_else(|| {
+                token_amount
+                    .get("uiAmount")
+                    .and_then(|v| v.as_f64())
+                    .map(|x| x.to_string())
+            })
             .unwrap_or_else(|| "0".to_string());
         out.push(WalletTokenBalance { mint, ui_amount });
     }
@@ -1284,7 +1319,8 @@ async fn get_native_balance_hedged(
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         let started = Instant::now();
                         let client = RpcClient::new_with_timeout(endpoint.clone(), timeout);
-                        let res = tokio::time::timeout(timeout, client.get_balance(&owner_pk)).await;
+                        let res =
+                            tokio::time::timeout(timeout, client.get_balance(&owner_pk)).await;
                         let elapsed = started.elapsed().as_millis() as u64;
                         match res {
                             Ok(Ok(v)) => (endpoint, Ok(v), elapsed),
@@ -1337,7 +1373,10 @@ pub async fn get_wallet_balances(
     Ok(Json(out))
 }
 
-async fn fetch_wallet_balances_chain(state: &AppState, owner_pk: Pubkey) -> ApiResult<WalletBalancesResponse> {
+async fn fetch_wallet_balances_chain(
+    state: &AppState,
+    owner_pk: Pubkey,
+) -> ApiResult<WalletBalancesResponse> {
     let rpc_url_used = state.provider.current_endpoint().await;
     let rpc_endpoints = state.provider.all_endpoints();
     let token_timeout_ms = std::env::var("CLMM_WALLET_BALANCES_TOKEN_TIMEOUT_MS")
@@ -1365,8 +1404,13 @@ async fn fetch_wallet_balances_chain(state: &AppState, owner_pk: Pubkey) -> ApiR
         fanout,
         token_deadline,
     );
-    let tok2022_fut =
-        get_token_accounts_by_owner_fanout(owner_pk, t22_pid, rpc_endpoints, fanout, token_deadline);
+    let tok2022_fut = get_token_accounts_by_owner_fanout(
+        owner_pk,
+        t22_pid,
+        rpc_endpoints,
+        fanout,
+        token_deadline,
+    );
     let (balance_outcome, legacy_outcome, tok2022_outcome) =
         tokio::join!(bal_fut, legacy_fut, tok2022_fut);
 
@@ -1374,9 +1418,13 @@ async fn fetch_wallet_balances_chain(state: &AppState, owner_pk: Pubkey) -> ApiR
     if balance_outcome.budget_limited {
         native_attempt_errors.push("degraded_budget_limited".to_string());
     }
-    let lamports = balance_outcome
-        .result
-        .map_err(|e| ApiError::internal(format_attempts_error("getBalance", &e, &native_attempt_errors)))?;
+    let lamports = balance_outcome.result.map_err(|e| {
+        ApiError::internal(format_attempts_error(
+            "getBalance",
+            &e,
+            &native_attempt_errors,
+        ))
+    })?;
     let sol = format!("{:.9}", (lamports as f64) / 1e9);
 
     let mut legacy_attempt_errors = legacy_outcome.attempts;
@@ -1462,11 +1510,11 @@ async fn ensure_wallet_ws_owner_worker(state: AppState, owner: String) {
                 let token_2022_program = Pubkey::from_str(TOKEN_2022_PROGRAM_ID)
                     .map_err(|e| anyhow::anyhow!("invalid token2022 program id: {e}"))?;
                 let logs_cfg = RpcTransactionLogsConfig { commitment: None };
-                let filter = solana_client::rpc_config::RpcTransactionLogsFilter::Mentions(vec![owner_for_log.clone()]);
-                let owner_filter = RpcFilterType::Memcmp(Memcmp::new_raw_bytes(
-                    32,
-                    owner_pk.to_bytes().to_vec(),
-                ));
+                let filter = solana_client::rpc_config::RpcTransactionLogsFilter::Mentions(vec![
+                    owner_for_log.clone(),
+                ]);
+                let owner_filter =
+                    RpcFilterType::Memcmp(Memcmp::new_raw_bytes(32, owner_pk.to_bytes().to_vec()));
                 let token_program_cfg = RpcProgramAccountsConfig {
                     filters: Some(vec![owner_filter.clone()]),
                     account_config: Default::default(),
@@ -1499,10 +1547,16 @@ async fn ensure_wallet_ws_owner_worker(state: AppState, owner: String) {
                     if owner_receiver.recv_timeout(Duration::from_secs(30)).is_ok() {
                         changed = true;
                     }
-                    if token_receiver.recv_timeout(Duration::from_millis(200)).is_ok() {
+                    if token_receiver
+                        .recv_timeout(Duration::from_millis(200))
+                        .is_ok()
+                    {
                         changed = true;
                     }
-                    if token_2022_receiver.recv_timeout(Duration::from_millis(200)).is_ok() {
+                    if token_2022_receiver
+                        .recv_timeout(Duration::from_millis(200))
+                        .is_ok()
+                    {
                         changed = true;
                     }
                     let logs_msg: Result<RpcResponseEnvelope<RpcLogsResponse>, _> =
@@ -1514,11 +1568,12 @@ async fn ensure_wallet_ws_owner_worker(state: AppState, owner: String) {
                         state_for_block
                             .wallet_ws_events_total
                             .fetch_add(1, Ordering::Relaxed);
-                        if handle.block_on(refresh_wallet_effective_owner(
-                            &state_for_block,
-                            &owner_for_log,
-                        ))
-                        .is_err()
+                        if handle
+                            .block_on(refresh_wallet_effective_owner(
+                                &state_for_block,
+                                &owner_for_log,
+                            ))
+                            .is_err()
                         {
                             state_for_block
                                 .wallet_ws_refresh_failures_total
@@ -1557,7 +1612,9 @@ pub async fn get_wallet_ws_status(
         owners,
         events_total: state.wallet_ws_events_total.load(Ordering::Relaxed),
         reconnects_total: state.wallet_ws_reconnects_total.load(Ordering::Relaxed),
-        refresh_failures_total: state.wallet_ws_refresh_failures_total.load(Ordering::Relaxed),
+        refresh_failures_total: state
+            .wallet_ws_refresh_failures_total
+            .load(Ordering::Relaxed),
     }))
 }
 
@@ -1677,7 +1734,10 @@ async fn spawn_effective_refresh_if_needed(state: AppState, owner: String, owner
     });
 }
 
-async fn build_warmup_placeholder(state: &AppState, owner: &str) -> WalletEffectiveBalancesResponse {
+async fn build_warmup_placeholder(
+    state: &AppState,
+    owner: &str,
+) -> WalletEffectiveBalancesResponse {
     let rpc_url = state.provider.current_endpoint().await;
     WalletEffectiveBalancesResponse {
         owner: owner.to_string(),
@@ -1792,7 +1852,8 @@ pub async fn get_wallet_effective_balances(
 }
 
 pub async fn refresh_wallet_effective_owner(state: &AppState, owner: &str) -> anyhow::Result<()> {
-    let owner_pk = Pubkey::from_str(owner).map_err(|e| anyhow::anyhow!("invalid owner pubkey: {e}"))?;
+    let owner_pk =
+        Pubkey::from_str(owner).map_err(|e| anyhow::anyhow!("invalid owner pubkey: {e}"))?;
     let resp = compute_effective_balances(state, owner_pk)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1912,56 +1973,49 @@ pub async fn convert_sol(
         .map_err(|e| ApiError::internal(format!("read pre WSOL balance: {e}")))?;
     let (signature, wrap_signature, unwrap_signature, rewrap_signature, partial, message) =
         match req.direction {
-        ConvertSolDirection::NativeToWsol => {
-            if pre_native_lamports < req.amount_raw {
-                return Err(ApiError::bad_request(format!(
-                    "insufficient native SOL balance (have {pre_native_lamports} raw, need {} raw)",
-                    req.amount_raw
-                )));
+            ConvertSolDirection::NativeToWsol => {
+                if pre_native_lamports < req.amount_raw {
+                    return Err(ApiError::bad_request(format!(
+                        "insufficient native SOL balance (have {pre_native_lamports} raw, need {} raw)",
+                        req.amount_raw
+                    )));
+                }
+                let wrap_sig = exec
+                    .submit_wsol_wrap_with_signature_delta(req.amount_raw, signer.keypair())
+                    .await
+                    .map_err(|e| ApiError::bad_request(format!("native_to_wsol failed: {e}")))?
+                    .map(|s| s.to_string());
+                let msg = if wrap_sig.is_some() {
+                    "SOL conversion confirmed".to_string()
+                } else {
+                    "SOL->WSOL no-op".to_string()
+                };
+                (wrap_sig.clone(), wrap_sig, None, None, false, msg)
             }
-            let wrap_sig = exec
-                .submit_wsol_wrap_with_signature_delta(req.amount_raw, signer.keypair())
-                .await
-                .map_err(|e| ApiError::bad_request(format!("native_to_wsol failed: {e}")))?
-                .map(|s| s.to_string());
-            let msg = if wrap_sig.is_some() {
-                "SOL conversion confirmed".to_string()
-            } else {
-                "SOL->WSOL no-op".to_string()
-            };
-            (
-                wrap_sig.clone(),
-                wrap_sig,
-                None,
-                None,
-                false,
-                msg,
-            )
-        }
-        ConvertSolDirection::WsolToNative => {
-            if pre_wsol_raw < req.amount_raw {
-                return Err(ApiError::bad_request(format!(
-                    "insufficient WSOL balance (have {pre_wsol_raw} raw, need {} raw)",
-                    req.amount_raw
-                )));
+            ConvertSolDirection::WsolToNative => {
+                if pre_wsol_raw < req.amount_raw {
+                    return Err(ApiError::bad_request(format!(
+                        "insufficient WSOL balance (have {pre_wsol_raw} raw, need {} raw)",
+                        req.amount_raw
+                    )));
+                }
+                let partial = req.amount_raw < pre_wsol_raw;
+                let sig = exec
+                    .submit_wsol_unwrap_with_signature(req.amount_raw, signer.keypair())
+                    .await
+                    .map_err(|e| ApiError::bad_request(format!("wsol_to_native failed: {e}")))?;
+                let unwrap_sig = sig.to_string();
+                // For partial unwrap close+rewrap path, unwrap tx signature is still useful as primary.
+                (
+                    Some(unwrap_sig.clone()),
+                    None,
+                    Some(unwrap_sig),
+                    None,
+                    partial,
+                    "SOL conversion confirmed".to_string(),
+                )
             }
-            let partial = req.amount_raw < pre_wsol_raw;
-            let sig = exec
-                .submit_wsol_unwrap_with_signature(req.amount_raw, signer.keypair())
-                .await
-                .map_err(|e| ApiError::bad_request(format!("wsol_to_native failed: {e}")))?;
-            let unwrap_sig = sig.to_string();
-            // For partial unwrap close+rewrap path, unwrap tx signature is still useful as primary.
-            (
-                Some(unwrap_sig.clone()),
-                None,
-                Some(unwrap_sig),
-                None,
-                partial,
-                "SOL conversion confirmed".to_string(),
-            )
-        }
-    };
+        };
     let post_native_lamports = state
         .provider
         .get_balance(&owner)
@@ -2006,11 +2060,16 @@ pub async fn convert_sol(
         direction: req.direction.clone(),
         amount_raw: req.amount_raw,
         reconciliation_status: reconciliation_status.clone(),
-        reason_code: Some(if matches!(reconciliation_status, WalletReconciliationStatus::Reconciled) {
-            "post_read_matched".to_string()
-        } else {
-            "awaiting_reconcile".to_string()
-        }),
+        reason_code: Some(
+            if matches!(
+                reconciliation_status,
+                WalletReconciliationStatus::Reconciled
+            ) {
+                "post_read_matched".to_string()
+            } else {
+                "awaiting_reconcile".to_string()
+            },
+        ),
         attempts: 1,
         created_at_utc: now_utc_iso(),
         updated_at_utc: now_utc_iso(),

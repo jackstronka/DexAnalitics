@@ -72,6 +72,29 @@ Odpal przed pierwszym live i po istotnych zmianach tx/lifecycle:
 cargo test -p clmm-lp-api devnet_ -- --ignored
 ```
 
+Alternatywa (PowerShell, z opcjonalnym airdrop + raportem JSON):
+
+```powershell
+.\tools\run_devnet_smokes.ps1 -KeypairPath $env:KEYPAIR_PATH -WalletSetup `
+  -ReportPath .\data\reports\devnet_smokes_last.json
+```
+
+Uruchomienie **w tle** (osobny proces, log + raport):
+
+```powershell
+.\tools\run_devnet_matrix_background.ps1 -WalletSetup -Tag "matrix"
+```
+
+Gdzie szukać wyników:
+- log: `data/reports/devnet-bg/<timestamp>/matrix_smokes.log`
+- raport: `data/reports/devnet-bg/<timestamp>/matrix_smokes_report.json`
+
+Podgląd logu na żywo:
+
+```powershell
+Get-Content -Path .\data\reports\devnet-bg\<timestamp>\matrix_smokes.log -Wait
+```
+
 Minimalne kryterium przejscia:
 - [ ] testy devnet lifecycle / unsigned flow przechodza stabilnie,
 - [ ] brak krytycznych bledow policy/simulate/send.

@@ -205,7 +205,9 @@ pub fn default_strategies(
                 }
             } else {
                 // Step-based last-candle (regular candle path).
-                if let (Some(candles), Some(rebals)) = (last_candle_steps, last_candle_rebalance_steps) {
+                if let (Some(candles), Some(rebals)) =
+                    (last_candle_steps, last_candle_rebalance_steps)
+                {
                     for &candle_steps in candles {
                         for &rebalance_steps in rebals {
                             if candle_steps > 0 && rebalance_steps > 0 {
@@ -357,10 +359,20 @@ mod tests {
         let include = vec!["static".to_string(), "il_limit".to_string()];
         let filtered = filter_strategies_by_families(v, Some(&include));
         assert!(filtered.contains(&StratConfig::Static));
-        assert!(filtered.iter().any(|s| matches!(s, StratConfig::IlLimit { .. })));
-        assert!(!filtered
-            .iter()
-            .any(|s| matches!(s, StratConfig::Threshold { .. })));
-        assert!(!filtered.iter().any(|s| matches!(s, StratConfig::Bollinger { .. })));
+        assert!(
+            filtered
+                .iter()
+                .any(|s| matches!(s, StratConfig::IlLimit { .. }))
+        );
+        assert!(
+            !filtered
+                .iter()
+                .any(|s| matches!(s, StratConfig::Threshold { .. }))
+        );
+        assert!(
+            !filtered
+                .iter()
+                .any(|s| matches!(s, StratConfig::Bollinger { .. }))
+        );
     }
 }

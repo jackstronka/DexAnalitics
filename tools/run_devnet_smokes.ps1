@@ -6,11 +6,16 @@ param(
   [int]$DevnetTickLower = -128,
   [int]$DevnetTickUpper = 128,
   [long]$DevnetOpenAmountA = 1000000,
-  [long]$DevnetOpenAmountB = 1000
+  [long]$DevnetOpenAmountB = 1000,
+  [switch]$WalletSetup = $false,
+  [string]$ReportPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 function Info([string]$msg) { Write-Host ("[devnet-smokes] " + $msg) }
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $repoRoot
 
 if ([string]::IsNullOrWhiteSpace($KeypairPath)) {
   if ($env:KEYPAIR_PATH) { $KeypairPath = $env:KEYPAIR_PATH }
@@ -37,9 +42,30 @@ Info ("Keypair: " + $env:KEYPAIR_PATH)
 Info ("Pool: " + $env:DEVNET_POOL_ADDRESS + " ticks=[" + $env:DEVNET_TICK_LOWER + "," + $env:DEVNET_TICK_UPPER + "]")
 Info ("Open caps: amount_a=" + $env:DEVNET_OPEN_AMOUNT_A + " amount_b=" + $env:DEVNET_OPEN_AMOUNT_B)
 
+if ($WalletSetup) {
+  Info "Running devnet_wallet_setup.ps1 (airdrop + optional env hints)..."
+  & (Join-Path $PSScriptRoot "devnet_wallet_setup.ps1") -KeypairPath $KeypairPath -SolanaRpcUrl $SolanaRpcUrl -Pool $DevnetPoolAddress
+}
+
 & cargo test -p clmm-lp-api devnet_ -- --ignored
-if ($LASTEXITCODE -ne 0) {
-  throw ("devnet smokes failed (exit=" + $LASTEXITCODE + ")")
+$exitCode = $LASTEXITCODE
+
+if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+  $parent = Split-Path -Parent $ReportPath
+  if (-not [string]::IsNullOrWhiteSpace($parent)) {
+    $null = New-Item -ItemType Directory -Force -Path $parent
+  }
+  @{
+    timestamp = (Get-Date).ToUniversalTime().ToString("o")
+    exit_code = $exitCode
+    pool      = $DevnetPoolAddress
+    rpc       = $SolanaRpcUrl
+  } | ConvertTo-Json | Set-Content -Path $ReportPath -Encoding UTF8
+  Info ("Wrote report: " + $ReportPath)
+}
+
+if ($exitCode -ne 0) {
+  throw ("devnet smokes failed (exit=" + $exitCode + ")")
 }
 
 Info "devnet smokes OK"

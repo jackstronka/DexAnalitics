@@ -96,7 +96,10 @@ fn spawn_position_agent_background_worker() {
             sleep(Duration::from_secs(secs)).await;
             match crate::services::position_agent_service::run_periodic_scan_tick() {
                 Ok(scanned) if scanned > 0 => {
-                    info!(scanned_positions = scanned, "position agent background scan tick completed");
+                    info!(
+                        scanned_positions = scanned,
+                        "position agent background scan tick completed"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -119,7 +122,10 @@ fn spawn_wallet_reconcile_background_worker(state: AppState) {
             sleep(Duration::from_secs(secs)).await;
             match crate::handlers::wallets::reconcile_wallet_convert_ops_tick(&state).await {
                 Ok(updated) if updated > 0 => {
-                    info!(updated_ops = updated, "wallet convert reconciler tick updated operations");
+                    info!(
+                        updated_ops = updated,
+                        "wallet convert reconciler tick updated operations"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -153,9 +159,33 @@ fn spawn_wallet_effective_resync_worker(state: AppState) {
                 cache.keys().cloned().collect::<Vec<_>>()
             };
             for owner in owners {
-                if let Err(e) = crate::handlers::wallets::refresh_wallet_effective_owner(&state, &owner).await {
+                if let Err(e) =
+                    crate::handlers::wallets::refresh_wallet_effective_owner(&state, &owner).await
+                {
                     tracing::warn!(owner = %owner, error = %e, "wallet effective balance resync failed");
                 }
+            }
+        }
+    });
+}
+
+fn spawn_uncollected_fees_cache_worker(state: AppState) {
+    let secs = crate::services::uncollected_fees_cache::uncollected_fees_refresh_interval_secs();
+    info!(
+        interval_secs = secs,
+        env = "CLMM_UNCOLLECTED_FEES_REFRESH_SECS",
+        "Uncollected fees cache background refresh enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(secs)).await;
+            match crate::services::uncollected_fees_cache::refresh_uncollected_fees_cache_tick(&state)
+                .await
+            {
+                cached if cached > 0 => {
+                    info!(cached_positions = cached, "uncollected fees cache tick completed");
+                }
+                _ => {}
             }
         }
     });
@@ -323,6 +353,7 @@ impl ApiServer {
         spawn_position_agent_background_worker();
         spawn_wallet_reconcile_background_worker(self.state.clone());
         spawn_wallet_effective_resync_worker(self.state.clone());
+        spawn_uncollected_fees_cache_worker(self.state.clone());
 
         let router = self.build_router();
 
@@ -350,6 +381,7 @@ impl ApiServer {
         spawn_position_agent_background_worker();
         spawn_wallet_reconcile_background_worker(self.state.clone());
         spawn_wallet_effective_resync_worker(self.state.clone());
+        spawn_uncollected_fees_cache_worker(self.state.clone());
 
         let router = self.build_router();
 

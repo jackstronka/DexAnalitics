@@ -267,9 +267,7 @@ pub async fn get_position_experiment_config(
             }
             let pool_state =
                 clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone())
-                    .get_pool_state(
-                        pool_address.as_deref().unwrap_or(""),
-                    )
+                    .get_pool_state(pool_address.as_deref().unwrap_or(""))
                     .await;
             // If pool not in details (it often isn't), fall back to resolving by reading last closed list? Keep best-effort.
             let (mint_a, mint_b) = if let Ok(ps) = pool_state {
@@ -440,7 +438,7 @@ pub async fn list_positions(
             }
         };
 
-        let uncollected_fees = match valuation.as_ref() {
+        let base_uncollected_fees = match valuation.as_ref() {
             Some(v) => Some(UncollectedFeesInfo {
                 token_a_label: v.token_a_label.clone(),
                 token_b_label: v.token_b_label.clone(),
@@ -475,6 +473,28 @@ pub async fn list_positions(
                 Some(v.range_price.quote.clone()),
             ),
             None => (None, None, None),
+        };
+
+        // Prefer cached "claimable now" uncollected fees (background refreshed).
+        let cached_uncollected = {
+            let g = state.uncollected_fees_cache.read().await;
+            g.get(&p.address.to_string()).cloned()
+        };
+        let uncollected_fees = match cached_uncollected {
+            Some(c) => {
+                // Labels come from valuation if available; otherwise fall back to whatever we already computed.
+                let (a_label, b_label) = match valuation.as_ref() {
+                    Some(v) => (v.token_a_label.clone(), v.token_b_label.clone()),
+                    None => ("A".to_string(), "B".to_string()),
+                };
+                Some(UncollectedFeesInfo {
+                    token_a_label: a_label,
+                    token_b_label: b_label,
+                    amount_a: c.amount_a,
+                    amount_b: c.amount_b,
+                })
+            }
+            None => base_uncollected_fees,
         };
 
         responses.push(PositionResponse {

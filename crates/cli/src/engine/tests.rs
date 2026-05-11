@@ -149,10 +149,7 @@ mod tests {
     #[test]
     fn periodic_hourly_respects_wall_clock_on_irregular_steps() {
         let mut steps = Vec::new();
-        for (i, ts) in [0_u64, 60, 120, 180, 240, 3600, 7200]
-            .iter()
-            .enumerate()
-        {
+        for (i, ts) in [0_u64, 60, 120, 180, 240, 3600, 7200].iter().enumerate() {
             let mut s = step(dec!(20), dec!(100));
             s.step_volume_usd = Decimal::ZERO;
             s.start_timestamp = *ts;

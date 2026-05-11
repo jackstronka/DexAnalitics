@@ -24,7 +24,7 @@ use solana_sdk::{
 };
 use solana_system_interface::instruction as system_instruction;
 use spl_associated_token_account::get_associated_token_address;
-use spl_associated_token_account::instruction::create_associated_token_account;
+use spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 use spl_token::state::Account as SplTokenAccount;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -97,7 +97,12 @@ fn open_native_sol_pad_lamports() -> u64 {
 fn sol_first_auto_unwrap_enabled() -> bool {
     std::env::var("CLMM_SOL_FIRST_AUTO_UNWRAP")
         .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "y"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -116,6 +121,11 @@ fn parse_insufficient_lamports_from_log_line(line: &str) -> Option<(u64, u64)> {
     let have = have_s.trim().parse::<u64>().ok()?;
     let need = need_part.trim().parse::<u64>().ok()?;
     Some((have, need))
+}
+
+fn is_ata_illegal_owner_error(msg: &str) -> bool {
+    msg.contains("IllegalOwner")
+        && (msg.contains(ASSOCIATED_TOKEN_PROGRAM_ID) || msg.contains("ATokenGP"))
 }
 
 /// Associated token program ID.
@@ -265,6 +275,39 @@ impl WhirlpoolExecutor {
     /// Creates a new WhirlpoolExecutor.
     pub fn new(provider: Arc<RpcProvider>) -> Self {
         Self { provider }
+    }
+
+    /// Compute **uncollected / claimable** fees quote (no transaction).
+    ///
+    /// Uses Orca SDK quote path (internally refreshes fee checkpoints client-side) and returns
+    /// the amounts that would be collected for both pool legs if a collect tx was sent now.
+    pub async fn collect_fees_quote(
+        &self,
+        position: &Pubkey,
+        payer_pubkey: Option<Pubkey>,
+    ) -> Result<(u64, u64)> {
+        let endpoint = self.provider.current_endpoint().await;
+        let config = if endpoint.contains("devnet") {
+            WhirlpoolsConfigInput::SolanaDevnet
+        } else {
+            WhirlpoolsConfigInput::SolanaMainnet
+        };
+        set_whirlpools_config_address(config)
+            .map_err(|e| anyhow::anyhow!("orca set_whirlpools_config_address failed: {e}"))?;
+        let rpc = RpcClient::new(endpoint);
+
+        let acct = self
+            .provider
+            .get_account(position)
+            .await
+            .context("fetch position account")?;
+        let parsed = crate::orca::position_reader::WhirlpoolPosition::try_from_slice(&acct.data)
+            .context("parse WhirlpoolPosition (borsh)")?;
+
+        let harvested = harvest_position_instructions(&rpc, parsed.position_mint, payer_pubkey)
+            .await
+            .map_err(|e| anyhow::anyhow!("orca harvest_position_instructions failed: {e}"))?;
+        Ok((harvested.fees_quote.fee_owed_a, harvested.fees_quote.fee_owed_b))
     }
 
     async fn read_spl_token_amount_opt(&self, ata: &Pubkey) -> Result<u64> {
@@ -567,7 +610,8 @@ impl WhirlpoolExecutor {
         let mut ixs: Vec<Instruction> = Vec::new();
 
         if acct_opt.is_none() {
-            ixs.push(create_associated_token_account(
+            // Idempotent create avoids race failures when ATA appears between read and send.
+            ixs.push(create_associated_token_account_idempotent(
                 &payer.pubkey(),
                 &owner,
                 &mint,
@@ -595,6 +639,68 @@ impl WhirlpoolExecutor {
         Ok(ixs)
     }
 
+    async fn read_and_validate_wsol_ata_amount(&self, owner: &Pubkey) -> Result<u64> {
+        let mint = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let ata = get_associated_token_address(owner, &mint);
+        let acct_opt = self
+            .provider
+            .get_multiple_accounts(&[ata])
+            .await
+            .context("fetch WSOL ATA account for validation")?
+            .into_iter()
+            .next()
+            .flatten();
+        let Some(acct) = acct_opt else {
+            anyhow::bail!("WSOL ATA missing after ATA create attempt");
+        };
+        if acct.owner != spl_token::id() {
+            anyhow::bail!(
+                "WSOL ATA has unexpected owner program {} (expected {})",
+                acct.owner,
+                spl_token::id()
+            );
+        }
+        let parsed = SplTokenAccount::unpack(&acct.data).context("unpack WSOL ATA")?;
+        if parsed.mint != mint {
+            anyhow::bail!(
+                "WSOL ATA mint mismatch: got {}, expected {}",
+                parsed.mint,
+                mint
+            );
+        }
+        if parsed.owner != *owner {
+            anyhow::bail!(
+                "WSOL ATA token owner mismatch: got {}, expected {}",
+                parsed.owner,
+                owner
+            );
+        }
+        Ok(parsed.amount)
+    }
+
+    async fn ensure_wsol_ata_topup_only(&self, needed_amount: u64, payer: &Keypair) -> Result<Vec<Instruction>> {
+        if needed_amount == 0 {
+            return Ok(Vec::new());
+        }
+        let target_amount = wsol_deposit_target_with_buffer(needed_amount);
+        if target_amount == 0 {
+            return Ok(Vec::new());
+        }
+        let mint = Pubkey::from_str(WSOL_MINT).expect("valid WSOL mint");
+        let owner = payer.pubkey();
+        let ata = get_associated_token_address(&owner, &mint);
+        let current_amount = self.read_and_validate_wsol_ata_amount(&owner).await?;
+        if current_amount >= target_amount {
+            return Ok(Vec::new());
+        }
+        let topup = target_amount - current_amount;
+        Ok(vec![
+            system_instruction::transfer(&owner, &ata, topup),
+            spl_token::instruction::sync_native(&spl_token::id(), &ata)
+                .context("build sync_native")?,
+        ])
+    }
+
     async fn maybe_auto_unwrap_wsol_to_native(
         &self,
         payer: &Keypair,
@@ -604,12 +710,18 @@ impl WhirlpoolExecutor {
             return Ok(());
         }
         let keep_min = sol_first_keep_wsol_min_raw();
-        let current = self.read_wsol_balance_raw(&payer.pubkey()).await.unwrap_or(0);
+        let current = self
+            .read_wsol_balance_raw(&payer.pubkey())
+            .await
+            .unwrap_or(0);
         if current <= keep_min {
             return Ok(());
         }
         let unwrap_raw = current.saturating_sub(keep_min);
-        match self.submit_wsol_unwrap_with_signature(unwrap_raw, payer).await {
+        match self
+            .submit_wsol_unwrap_with_signature(unwrap_raw, payer)
+            .await
+        {
             Ok(unwrap_sig) => {
                 info!(
                     context,
@@ -653,10 +765,27 @@ impl WhirlpoolExecutor {
         if ixs.is_empty() {
             return Ok(None);
         }
-        let res = self
-            .send_transaction_with_signers(&ixs, payer, &[])
-            .await
-            .map_err(|e| anyhow::anyhow!("wsol wrap send: {e}"))?;
+        let res = match self.send_transaction_with_signers(&ixs, payer, &[]) .await {
+            Ok(res) => res,
+            Err(e) => {
+                let msg = e.to_string();
+                let looks_like_ata_illegal_owner = is_ata_illegal_owner_error(&msg);
+                if !looks_like_ata_illegal_owner {
+                    return Err(anyhow::anyhow!("wsol wrap send: {msg}"));
+                }
+                warn!(
+                    error = %msg,
+                    "wsol wrap: ATA create reported IllegalOwner; retrying with topup-only path after ATA validation"
+                );
+                let fallback_ixs = self.ensure_wsol_ata_topup_only(needed_wsol_lamports, payer).await?;
+                if fallback_ixs.is_empty() {
+                    return Ok(None);
+                }
+                self.send_transaction_with_signers(&fallback_ixs, payer, &[])
+                    .await
+                    .map_err(|e2| anyhow::anyhow!("wsol wrap send (fallback): {e2}"))?
+            }
+        };
         if !res.success {
             let msg = res
                 .error
@@ -824,9 +953,14 @@ impl WhirlpoolExecutor {
                 .await?;
 
             if res.success {
-                let _ = self
-                    .maybe_auto_unwrap_wsol_to_native(payer, "swap_exact_in")
-                    .await;
+                // SOL-first cleanup after swap should not immediately unwrap WSOL that was
+                // just bought for a subsequent LP open/reopen mix step.
+                // Unwrap only when WSOL was the input leg (we sold WSOL), not when we bought it.
+                if specified_mint == wsol {
+                    let _ = self
+                        .maybe_auto_unwrap_wsol_to_native(payer, "swap_exact_in_sell_wsol")
+                        .await;
+                }
                 return Ok(res);
             }
 
@@ -1035,6 +1169,17 @@ impl WhirlpoolExecutor {
                 )
                 .await?;
 
+            // Record authoritative fee legs from position state read before close.
+            // Record authoritative fee legs from Orca `feesQuote` produced by the SDK while building
+            // the close instructions (internally requires `update_fees_and_rewards`).
+            //
+            // IMPORTANT: Reading `position.fee_owed_*` directly from the account **before** close
+            // can be stale (often 0) unless `update_fees_and_rewards` has been executed. Solscan
+            // and the Orca SDK report "Claim fees" based on this quote/update path.
+            let mut res = res;
+            res.collect_fee_owed_a_raw = Some(closed.fees_quote.fee_owed_a);
+            res.collect_fee_owed_b_raw = Some(closed.fees_quote.fee_owed_b);
+
             if res.success {
                 let _ = self
                     .maybe_auto_unwrap_wsol_to_native(payer, "close_position")
@@ -1241,5 +1386,17 @@ mod tests {
         let err = WhirlpoolExecutor::compute_wrap_target_from_delta(u64::MAX, 1)
             .expect_err("expected overflow error");
         assert!(err.to_string().contains("target overflow"));
+    }
+
+    #[test]
+    fn test_is_ata_illegal_owner_error_matches_expected_shape() {
+        let msg = "InstructionError(0, IllegalOwner) | ix_program=0:ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+        assert!(is_ata_illegal_owner_error(msg));
+    }
+
+    #[test]
+    fn test_is_ata_illegal_owner_error_ignores_other_failures() {
+        let msg = "InstructionError(0, Custom(1)) | ix_program=0:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        assert!(!is_ata_illegal_owner_error(msg));
     }
 }

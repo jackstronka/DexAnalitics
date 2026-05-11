@@ -227,8 +227,8 @@ export default function ClosedPositionDetail() {
             <CardTitle className="text-base">{L('Koszty i prowizje — ten adres', 'Costs and fees — this address')}</CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Tylko PDA tej strony. <span className="text-foreground/90">Sieć</span> = opłaty Solany za każdą transakcję
-              (open, collect, close…). <span className="text-foreground/90">LP zebrane</span> = prowizje puli z evenciów{' '}
-              <code className="text-[11px]">bot_collect_fees</code>.
+              (open, collect, close…). <span className="text-foreground/90">Fees zebrane</span> = prowizje puli
+              best-effort z eventów collect + close.
             </p>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
@@ -243,12 +243,12 @@ export default function ClosedPositionDetail() {
                   </div>
                 </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Prowizje LP zebrane', 'LP fees collected')}</div>
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Fees zebrane', 'Fees collected')}</div>
                   <div className="font-mono text-lg mt-0.5">
                     {formatUsdCollectedOrDash(entryNode.fees_collected_usd, entryNode.collect_events)}
                     <span className="text-muted-foreground text-sm font-sans">
                       {' '}
-                      · {entryNode.collect_events ?? 0}× collect
+                      · {entryNode.collect_events ?? 0}× events
                     </span>
                   </div>
                   {(entryNode.fees_collected_token_a_ui != null ||
@@ -360,12 +360,12 @@ export default function ClosedPositionDetail() {
                   ) : null}
                 </div>
                 <div className="rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Prowizje LP zebrane — suma', 'LP fees collected — total')}</div>
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide">{L('Fees zebrane — suma', 'Fees collected — total')}</div>
                   <div className="font-mono text-lg mt-0.5">
                     {formatUsdCollectedOrDash(chainCost.fees_collected_usd_total, chainCost.collect_events_total)}
                     <span className="text-muted-foreground text-sm font-sans">
                       {' '}
-                      · {chainCost.collect_events_total}× collect (łącznie)
+                      · {chainCost.collect_events_total}× events (łącznie)
                     </span>
                   </div>
                   {(chainCost.fees_collected_token_a_ui_total != null ||
@@ -577,11 +577,9 @@ export default function ClosedPositionDetail() {
               <code className="text-[11px]">bot_*</code>; oba są łączone.
             </p>
             <p className="text-[11px] text-muted-foreground font-normal leading-snug">
-              Kolumna <span className="font-medium">LP zebrane</span>: Orca przy{' '}
-              <code className="text-[10px]">collect_fees</code> przenosi oba tokeny puli, ale w{' '}
-              <code className="text-[10px]">fee_payer_token_deltas</code> (meta RPC) często widać tylko jeden mint SPL
-              (np. whETH) — wpis WSOL bywa pominięty albo poniżej progu, więc w UI może zostać tylko jedna noga mimo że
-              on-chain są dwie strumienie opłat.
+              Kolumna <span className="font-medium">Fees zebrane</span> to best-effort suma prowizji z eventów collect + close.
+              Dla części transakcji Orca/RPC w <code className="text-[10px]">fee_payer_token_deltas</code> bywa widoczna tylko jedna
+              noga mintu, więc breakdown tokenowy może być niepełny.
             </p>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -611,7 +609,7 @@ export default function ClosedPositionDetail() {
                       <th className="px-2 py-1 text-left">end value</th>
                       <th className="px-2 py-1 text-left">principal Δ</th>
                       <th className="px-2 py-1 text-left">Sieć (tx)</th>
-                      <th className="px-2 py-1 text-left">LP zebrane</th>
+                      <th className="px-2 py-1 text-left">Fees zebrane</th>
                       <th className="px-2 py-1 text-left">net PnL</th>
                     </tr>
                   </thead>
@@ -676,7 +674,7 @@ export default function ClosedPositionDetail() {
                             return (
                               <>
                                 <span>{formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)}</span>
-                                <span className="text-muted-foreground"> · {collects}×</span>
+                                <span className="text-muted-foreground"> · {collects}× events</span>
                                 {showLegRows ? (
                                   <div className="text-muted-foreground mt-1 leading-tight">
                                     {n.token_a_label ? (

@@ -158,6 +158,7 @@ if ($apiUp) {
 # Start Vite in this window (no kill-port, no touching API ports)
 Set-Location $WebDir
 $env:API_UPSTREAM = "http://127.0.0.1:8081"
+$env:VITE_WS_UPSTREAM = $env:API_UPSTREAM
 
 # If the API enforces X-API-Key, expose it to Vite as a client env var.
 # Vite only forwards env vars prefixed with VITE_ to the frontend.

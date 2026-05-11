@@ -80,7 +80,9 @@ pub enum StratConfig {
     },
     /// Shift only the exiting edge (keep width in A/B), one retouch per OOR episode.
     /// `retouch_offset_pct` shifts the full new band relative to OOR price (0.001 = +0.1%).
-    RetouchShift { retouch_offset_pct: f64 },
+    RetouchShift {
+        retouch_offset_pct: f64,
+    },
     /// Bollinger: last `window` closes (A/B), bands `SMA ± k·σ`; rebalance every `rebalance_steps` steps.
     Bollinger {
         window: u32,
@@ -345,29 +347,30 @@ fn run_single_internal(
 
     let half = width_pct / 2.0;
     let center_ab = first.price_ab.value.to_f64().unwrap_or(1.0);
-    let (lower_ab, upper_ab) = if let (StratConfig::Static, Some((lo_usd, hi_usd))) =
-        (strat, static_manual_bounds_usd)
-    {
-        let lo_ab = Decimal::from_f64(lo_usd)
-            .unwrap_or(Decimal::ZERO)
-            / first.quote_usd.max(Decimal::from_f64(1e-12).unwrap_or(Decimal::ONE));
-        let hi_ab = Decimal::from_f64(hi_usd)
-            .unwrap_or(Decimal::ZERO)
-            / first.quote_usd.max(Decimal::from_f64(1e-12).unwrap_or(Decimal::ONE));
-        if lo_ab > Decimal::ZERO && hi_ab > lo_ab {
-            (lo_ab, hi_ab)
+    let (lower_ab, upper_ab) =
+        if let (StratConfig::Static, Some((lo_usd, hi_usd))) = (strat, static_manual_bounds_usd) {
+            let lo_ab = Decimal::from_f64(lo_usd).unwrap_or(Decimal::ZERO)
+                / first
+                    .quote_usd
+                    .max(Decimal::from_f64(1e-12).unwrap_or(Decimal::ONE));
+            let hi_ab = Decimal::from_f64(hi_usd).unwrap_or(Decimal::ZERO)
+                / first
+                    .quote_usd
+                    .max(Decimal::from_f64(1e-12).unwrap_or(Decimal::ONE));
+            if lo_ab > Decimal::ZERO && hi_ab > lo_ab {
+                (lo_ab, hi_ab)
+            } else {
+                (
+                    Decimal::from_f64(center_ab * (1.0 - half)).unwrap(),
+                    Decimal::from_f64(center_ab * (1.0 + half)).unwrap(),
+                )
+            }
         } else {
             (
                 Decimal::from_f64(center_ab * (1.0 - half)).unwrap(),
                 Decimal::from_f64(center_ab * (1.0 + half)).unwrap(),
             )
-        }
-    } else {
-        (
-            Decimal::from_f64(center_ab * (1.0 - half)).unwrap(),
-            Decimal::from_f64(center_ab * (1.0 + half)).unwrap(),
-        )
-    };
+        };
 
     // For reporting only, return bounds in USD using entry quote USD.
     let entry_quote_usd = first.quote_usd;
@@ -640,9 +643,7 @@ fn run_single_internal(
             StratConfig::Periodic(interval_hours) => {
                 secs_since_rebalance >= interval_hours.saturating_mul(3600)
             }
-            StratConfig::PeriodicSteps(interval_steps) => {
-                steps_since_rebalance >= interval_steps
-            }
+            StratConfig::PeriodicSteps(interval_steps) => steps_since_rebalance >= interval_steps,
             StratConfig::IlLimit {
                 max_il_pct,
                 close_il_pct,
@@ -654,9 +655,7 @@ fn run_single_internal(
                     false
                 } else {
                     let max_il = Decimal::from_f64(max_il_pct).unwrap_or(Decimal::ZERO);
-                    let close_il = close_il_pct
-                        .and_then(Decimal::from_f64)
-                        .unwrap_or(max_il);
+                    let close_il = close_il_pct.and_then(Decimal::from_f64).unwrap_or(max_il);
                     il_like_now_pct.abs() >= max_il || il_like_now_pct.abs() >= close_il
                 }
             }
@@ -686,14 +685,12 @@ fn run_single_internal(
             // Re-deploy current position value minus tx cost; fees are NOT compounded here.
             let capital_usd_now = (position_value_usd - tx_cost_dec).max(Decimal::ZERO);
             let (new_lower_ab, new_upper_ab) = match strat {
-                StratConfig::RetouchShift { retouch_offset_pct } => {
-                    calculate_retouch_range_ab(
-                        current_lower_ab,
-                        current_upper_ab,
-                        price_ab,
-                        retouch_offset_pct,
-                    )
-                }
+                StratConfig::RetouchShift { retouch_offset_pct } => calculate_retouch_range_ab(
+                    current_lower_ab,
+                    current_upper_ab,
+                    price_ab,
+                    retouch_offset_pct,
+                ),
                 StratConfig::Bollinger { window, k, .. } => {
                     let w = window as usize;
                     let start = i + 1 - w;

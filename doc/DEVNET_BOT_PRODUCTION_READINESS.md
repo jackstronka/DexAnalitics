@@ -19,6 +19,10 @@ Przejsc z "devnet smoke / symulacja" do "produkcyjnego bota na devnecie":
   Brak `KEYPAIR_PATH`/`SOLANA_KEYPAIR_PATH`, brak `SOLANA_RPC_URL`, brak krytycznych env -> twardy fail (bez cichego przechodzenia).
 - Weryfikacja na `devnet_ -- --ignored` (bieżący kod): testy `devnet_*lifecycle_keypair_smoke` oraz `devnet_*unsigned_tx*` failują z powodu braku `KEYPAIR_PATH` / `SOLANA_KEYPAIR_PATH` (to jest oczekiwane po naszym hardeningu).
 
+- Wygodny runner (PowerShell) do uruchamiania devnet E2E lokalnie:
+  - foreground: `.\tools\run_devnet_smokes.ps1`
+  - background (log + raport): `.\tools\run_devnet_matrix_background.ps1`
+
 - [ ] **Walidacja skutkow on-chain po lifecycle**  
   E2E po kazdym kroku sprawdza efekt on-chain (position/liquidity/token balances/fees), nie tylko status wywolania.
 

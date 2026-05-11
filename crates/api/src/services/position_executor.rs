@@ -120,13 +120,16 @@ fn resolve_wallet_file_from_state(state: &AppState, wallet_id: &str) -> Option<S
     None
 }
 
-fn load_wallet_from_active_signer_or_env(state: &AppState) -> Result<Option<Arc<Wallet>>, ApiError> {
+fn load_wallet_from_active_signer_or_env(
+    state: &AppState,
+) -> Result<Option<Arc<Wallet>>, ApiError> {
     if let Ok(guard) = state.active_signer_wallet_id.try_read()
         && let Some(wallet_id) = guard.as_ref()
         && let Some(path) = resolve_wallet_file_from_state(state, wallet_id)
     {
-        let w = Wallet::from_file(&path, "api-active-wallet")
-            .map_err(|e| ApiError::internal(format!("Failed to load active signer `{wallet_id}`: {e}")))?;
+        let w = Wallet::from_file(&path, "api-active-wallet").map_err(|e| {
+            ApiError::internal(format!("Failed to load active signer `{wallet_id}`: {e}"))
+        })?;
         return Ok(Some(Arc::new(w)));
     }
     load_wallet_from_env()

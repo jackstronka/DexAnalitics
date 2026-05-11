@@ -301,7 +301,9 @@ struct LedgerRowSchemaCaps {
     has_lp_collected_raw: bool,
 }
 
-async fn load_ledger_row_schema_caps(db: &clmm_lp_data::repositories::Database) -> anyhow::Result<LedgerRowSchemaCaps> {
+async fn load_ledger_row_schema_caps(
+    db: &clmm_lp_data::repositories::Database,
+) -> anyhow::Result<LedgerRowSchemaCaps> {
     let rows = sqlx::query(
         r#"
         SELECT column_name

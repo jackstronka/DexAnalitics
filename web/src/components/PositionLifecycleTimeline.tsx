@@ -269,7 +269,7 @@ export function PositionLifecycleTimeline(props: {
               </span>
             </div>
             <div>
-              <span className="text-muted-foreground">LP zebrane (~USD)</span>{' '}
+              <span className="text-muted-foreground">Fees zebrane (~USD)</span>{' '}
               <span className="font-mono tabular-nums block text-emerald-600 dark:text-emerald-400">
                 {formatUsdFixed(activeTotals.lpUsd, 4)}
               </span>

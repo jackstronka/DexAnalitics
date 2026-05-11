@@ -2,7 +2,8 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    AgentChatMessage, AgentPositionSession, AgentScanResponse, AgentWorkerSettings, AgentWorkerStatus,
+    AgentChatMessage, AgentPositionSession, AgentScanResponse, AgentWorkerSettings,
+    AgentWorkerStatus,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,11 +68,13 @@ fn load_state() -> ApiResult<StoredAgentState> {
     if !path.exists() {
         return Ok(StoredAgentState::new());
     }
-    let txt = fs::read_to_string(&path).map_err(|e| ApiError::internal(format!("read agent state: {e}")))?;
+    let txt = fs::read_to_string(&path)
+        .map_err(|e| ApiError::internal(format!("read agent state: {e}")))?;
     if txt.trim().is_empty() {
         return Ok(StoredAgentState::new());
     }
-    serde_json::from_str(&txt).map_err(|e| ApiError::internal(format!("parse agent state json: {e}")))
+    serde_json::from_str(&txt)
+        .map_err(|e| ApiError::internal(format!("parse agent state json: {e}")))
 }
 
 fn save_state(state: &StoredAgentState) -> ApiResult<()> {
@@ -98,7 +101,8 @@ fn append_event_log(line: &str) -> ApiResult<()> {
         .append(true)
         .open(&path)
         .map_err(|e| ApiError::internal(format!("open agent events jsonl: {e}")))?;
-    writeln!(f, "{line}").map_err(|e| ApiError::internal(format!("append agent events jsonl: {e}")))?;
+    writeln!(f, "{line}")
+        .map_err(|e| ApiError::internal(format!("append agent events jsonl: {e}")))?;
     Ok(())
 }
 
@@ -111,14 +115,15 @@ pub fn load_worker_settings() -> ApiResult<AgentWorkerSettings> {
     if !path.exists() {
         return Ok(AgentWorkerSettings::default());
     }
-    let txt =
-        fs::read_to_string(&path).map_err(|e| ApiError::internal(format!("read worker settings: {e}")))?;
+    let txt = fs::read_to_string(&path)
+        .map_err(|e| ApiError::internal(format!("read worker settings: {e}")))?;
     if txt.trim().is_empty() {
         return Ok(AgentWorkerSettings::default());
     }
     let mut settings: AgentWorkerSettings = serde_json::from_str(&txt)
         .map_err(|e| ApiError::internal(format!("parse worker settings json: {e}")))?;
-    settings.default_position_scan_interval_hours = settings.default_position_scan_interval_hours.max(1);
+    settings.default_position_scan_interval_hours =
+        settings.default_position_scan_interval_hours.max(1);
     settings.cross_pair_scan_interval_hours = settings.cross_pair_scan_interval_hours.max(1);
     Ok(settings)
 }
@@ -128,7 +133,8 @@ pub fn save_worker_settings(settings: &AgentWorkerSettings) -> ApiResult<()> {
     ensure_parent_dir(&path)?;
     let body = serde_json::to_string_pretty(settings)
         .map_err(|e| ApiError::internal(format!("serialize worker settings: {e}")))?;
-    fs::write(&path, body).map_err(|e| ApiError::internal(format!("write worker settings: {e}")))?;
+    fs::write(&path, body)
+        .map_err(|e| ApiError::internal(format!("write worker settings: {e}")))?;
     Ok(())
 }
 
@@ -143,8 +149,8 @@ pub fn load_worker_status() -> ApiResult<AgentWorkerStatus> {
             last_error: None,
         });
     }
-    let txt =
-        fs::read_to_string(&path).map_err(|e| ApiError::internal(format!("read worker status: {e}")))?;
+    let txt = fs::read_to_string(&path)
+        .map_err(|e| ApiError::internal(format!("read worker status: {e}")))?;
     if txt.trim().is_empty() {
         return Ok(AgentWorkerStatus {
             last_tick_ts_utc: None,
@@ -154,7 +160,8 @@ pub fn load_worker_status() -> ApiResult<AgentWorkerStatus> {
             last_error: None,
         });
     }
-    serde_json::from_str(&txt).map_err(|e| ApiError::internal(format!("parse worker status json: {e}")))
+    serde_json::from_str(&txt)
+        .map_err(|e| ApiError::internal(format!("parse worker status json: {e}")))
 }
 
 fn save_worker_status(status: &AgentWorkerStatus) -> ApiResult<()> {
@@ -181,7 +188,9 @@ pub fn get_or_create_session(
             return Ok(existing);
         }
         let started = now_rfc3339();
-        let default_interval = load_worker_settings()?.default_position_scan_interval_hours.max(1);
+        let default_interval = load_worker_settings()?
+            .default_position_scan_interval_hours
+            .max(1);
         let interval = scan_interval_hours.unwrap_or(default_interval).max(1);
         let next_scan = (Utc::now() + Duration::hours(interval as i64)).to_rfc3339();
         let session = AgentPositionSession {
@@ -198,7 +207,9 @@ pub fn get_or_create_session(
     })
 }
 
-pub fn list_chat(position_address: &str) -> ApiResult<(Option<AgentPositionSession>, Vec<AgentChatMessage>)> {
+pub fn list_chat(
+    position_address: &str,
+) -> ApiResult<(Option<AgentPositionSession>, Vec<AgentChatMessage>)> {
     with_state_lock(|| {
         let state = load_state()?;
         let session = state
@@ -256,7 +267,9 @@ pub fn touch_scan(position_address: &str) -> ApiResult<AgentPositionSession> {
             }
         }
         let Some(updated) = found else {
-            return Err(ApiError::not_found("Agent session not found for this position"));
+            return Err(ApiError::not_found(
+                "Agent session not found for this position",
+            ));
         };
         save_state(&state)?;
         Ok(updated)
@@ -333,7 +346,9 @@ pub fn run_periodic_scan_tick() -> ApiResult<usize> {
         Ok(scanned) => {
             status.last_error = None;
             status.scanned_positions_last_tick = scanned as u64;
-            status.scanned_positions_total = status.scanned_positions_total.saturating_add(scanned as u64);
+            status.scanned_positions_total = status
+                .scanned_positions_total
+                .saturating_add(scanned as u64);
             save_worker_status(&status)?;
             Ok(scanned)
         }
@@ -352,7 +367,8 @@ fn _read_last_events(limit: usize) -> ApiResult<Vec<String>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let f = fs::File::open(path).map_err(|e| ApiError::internal(format!("open agent events: {e}")))?;
+    let f =
+        fs::File::open(path).map_err(|e| ApiError::internal(format!("open agent events: {e}")))?;
     let reader = BufReader::new(f);
     let mut lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     if lines.len() > limit {

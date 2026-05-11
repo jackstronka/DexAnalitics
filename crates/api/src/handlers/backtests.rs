@@ -14,21 +14,21 @@ use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
+use chrono::{DateTime, Utc};
 use clmm_lp_data::repositories::Database;
 use clmm_lp_domain::math::price_tick::tick_to_price;
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
-use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::str::FromStr;
-use std::sync::{LazyLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
@@ -80,8 +80,11 @@ impl ReadinessConfig {
                 .clamp(0.0, 100.0),
             recommended_gap_multiplier: env_u64("BACKTEST_READINESS_RECOMMENDED_GAP_MULTIPLIER", 2)
                 .max(1),
-            recommended_fallback_ratio: env_f64("BACKTEST_READINESS_RECOMMENDED_FALLBACK_RATIO", 0.7)
-                .clamp(0.0, 1.0),
+            recommended_fallback_ratio: env_f64(
+                "BACKTEST_READINESS_RECOMMENDED_FALLBACK_RATIO",
+                0.7,
+            )
+            .clamp(0.0, 1.0),
         }
     }
 }
@@ -398,7 +401,17 @@ fn evaluate_snapshot_readiness(
         timestamps.retain(|t| *t <= end);
     }
     if timestamps.is_empty() {
-        return Ok((0, None, None, None, None, None, 0, 0, Some("No timestamp rows".to_string())));
+        return Ok((
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some("No timestamp rows".to_string()),
+        ));
     }
 
     // For explicit [from,to] analysis range, evaluate strict quality on the whole requested
@@ -410,26 +423,21 @@ fn evaluate_snapshot_readiness(
             .num_minutes()
             .max(0) as u64;
         let requested_hours = requested_minutes / 60;
-        let expected_rows =
-            ((requested_minutes as f64) / cadence_minutes as f64).round().max(1.0) + 1.0;
+        let expected_rows = ((requested_minutes as f64) / cadence_minutes as f64)
+            .round()
+            .max(1.0)
+            + 1.0;
 
         let first = timestamps.first().cloned();
         let last = timestamps.last().cloned();
         let mut max_gap_min = 0.0_f64;
         if let Some(f) = first {
-            max_gap_min = max_gap_min.max(
-                f.signed_duration_since(range_start)
-                    .num_minutes()
-                    .max(0) as f64,
-            );
+            max_gap_min =
+                max_gap_min.max(f.signed_duration_since(range_start).num_minutes().max(0) as f64);
         }
         if let Some(l) = last {
-            max_gap_min = max_gap_min.max(
-                range_end
-                    .signed_duration_since(l)
-                    .num_minutes()
-                    .max(0) as f64,
-            );
+            max_gap_min =
+                max_gap_min.max(range_end.signed_duration_since(l).num_minutes().max(0) as f64);
         }
         for i in 1..timestamps.len() {
             let delta = timestamps[i]
@@ -474,7 +482,9 @@ fn evaluate_snapshot_readiness(
     let mut oldest_cont_idx = timestamps.len() - 1;
     let mut max_gap_min = 0.0_f64;
     for i in (1..timestamps.len()).rev() {
-        let delta = timestamps[i].signed_duration_since(timestamps[i - 1]).num_minutes();
+        let delta = timestamps[i]
+            .signed_duration_since(timestamps[i - 1])
+            .num_minutes();
         if delta as f64 > max_gap_min {
             max_gap_min = delta as f64;
         }
@@ -542,7 +552,10 @@ fn classify_readiness_status(
         .latest_ts_utc
         .as_deref()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| now.signed_duration_since(dt.with_timezone(&Utc)).num_seconds());
+        .map(|dt| {
+            now.signed_duration_since(dt.with_timezone(&Utc))
+                .num_seconds()
+        });
 
     if row.rows == 0 {
         return (
@@ -565,7 +578,11 @@ fn classify_readiness_status(
     if has_custom_range {
         if row.max_backtest_hours_hard > 0 {
             if row.max_backtest_hours_recommended > 0 {
-                return ("ok".to_string(), Some("range_ok".to_string()), latest_age_secs);
+                return (
+                    "ok".to_string(),
+                    Some("range_ok".to_string()),
+                    latest_age_secs,
+                );
             }
             return (
                 "degraded".to_string(),
@@ -580,8 +597,14 @@ fn classify_readiness_status(
         );
     }
 
-    let stale_threshold_secs = if row.cadence_minutes <= 5 { 12 * 60 } else { 20 * 60 };
-    if let Some(age) = latest_age_secs && age > stale_threshold_secs {
+    let stale_threshold_secs = if row.cadence_minutes <= 5 {
+        12 * 60
+    } else {
+        20 * 60
+    };
+    if let Some(age) = latest_age_secs
+        && age > stale_threshold_secs
+    {
         return (
             "degraded".to_string(),
             Some("stale_latest_snapshot".to_string()),
@@ -608,9 +631,7 @@ fn classify_readiness_status(
     ("ok".to_string(), None, latest_age_secs)
 }
 
-fn aggregate_readiness_status(
-    rows: &[BacktestDataReadinessRow],
-) -> (String, u64, u64, u64, u64) {
+fn aggregate_readiness_status(rows: &[BacktestDataReadinessRow]) -> (String, u64, u64, u64, u64) {
     let mut ok_count = 0_u64;
     let mut degraded_count = 0_u64;
     let mut recovering_count = 0_u64;
@@ -1033,7 +1054,11 @@ fn strategy_catalog() -> Vec<BacktestStrategyCatalogEntry> {
         BacktestStrategyCatalogEntry {
             id: "bollinger".to_string(),
             label: "Bollinger".to_string(),
-            parameters: vec!["window".to_string(), "k".to_string(), "rebalance_steps".to_string()],
+            parameters: vec![
+                "window".to_string(),
+                "k".to_string(),
+                "rebalance_steps".to_string(),
+            ],
         },
         BacktestStrategyCatalogEntry {
             id: "last_candle".to_string(),
@@ -1084,8 +1109,7 @@ fn parse_optimize_table(stdout: &str) -> Vec<BacktestFullMetricRow> {
             Some(tir_pct),
         ) = (
             rank, lower_usd, upper_usd, score, fees, rebals, pnl, vs_hodl, tir_pct,
-        )
-        {
+        ) {
             let mid = (lower_usd + upper_usd) / 2.0;
             let width_pct = if mid > 0.0 {
                 ((upper_usd - lower_usd) / mid) * 100.0
@@ -1794,7 +1818,8 @@ pub async fn get_backtest_data_readiness(
 
     let mut pools = curated_backtest_pools();
     if let Some(ids) = req.pool_ids.as_ref() {
-        let want: std::collections::HashSet<String> = ids.iter().map(|s| s.to_ascii_uppercase()).collect();
+        let want: std::collections::HashSet<String> =
+            ids.iter().map(|s| s.to_ascii_uppercase()).collect();
         pools.retain(|p| want.contains(&p.id.to_ascii_uppercase()));
     }
     if pools.is_empty() {
@@ -1835,21 +1860,22 @@ pub async fn get_backtest_data_readiness(
     } else {
         0
     };
-    let mut rows: Vec<BacktestDataReadinessRow> = if !has_custom_range && let Some(db) = state.db.as_ref() {
-        match load_readiness_rows_from_db(db, &selected_pool_ids, &variant_labels, &cfg).await {
-            Ok(Some(db_rows)) => {
-                used_db_source = true;
-                db_rows
+    let mut rows: Vec<BacktestDataReadinessRow> =
+        if !has_custom_range && let Some(db) = state.db.as_ref() {
+            match load_readiness_rows_from_db(db, &selected_pool_ids, &variant_labels, &cfg).await {
+                Ok(Some(db_rows)) => {
+                    used_db_source = true;
+                    db_rows
+                }
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    warn!(error = %e, "readiness DB lookup failed; using on-demand fallback");
+                    Vec::new()
+                }
             }
-            Ok(None) => Vec::new(),
-            Err(e) => {
-                warn!(error = %e, "readiness DB lookup failed; using on-demand fallback");
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
+        } else {
+            Vec::new()
+        };
 
     if rows.is_empty() {
         for variant in variants {
@@ -1890,7 +1916,7 @@ pub async fn get_backtest_data_readiness(
                         range_start_utc,
                         range_end_utc,
                     )
-                        .map_err(ApiError::internal)?;
+                    .map_err(ApiError::internal)?;
                 rows.push(BacktestDataReadinessRow {
                     pool_id: pool.id.to_string(),
                     pool_label: pool.label.to_string(),
@@ -1913,7 +1939,8 @@ pub async fn get_backtest_data_readiness(
                 });
             }
         }
-        if !has_custom_range && let Some(db) = state.db.as_ref()
+        if !has_custom_range
+            && let Some(db) = state.db.as_ref()
             && let Err(e) = upsert_readiness_rows_best_effort(db, &rows).await
         {
             warn!(error = %e, "readiness DB upsert failed after on-demand fallback");
@@ -1931,7 +1958,8 @@ pub async fn get_backtest_data_readiness(
         .len() as u64;
     let now = Utc::now();
     for row in &mut rows {
-        let (status, reason, latest_age_secs) = classify_readiness_status(row, has_custom_range, now);
+        let (status, reason, latest_age_secs) =
+            classify_readiness_status(row, has_custom_range, now);
         row.status = status;
         row.status_reason = reason;
         row.latest_age_secs = latest_age_secs;
@@ -2019,11 +2047,14 @@ pub async fn start_backtest_full(
 
     let mut pools = curated_backtest_pools();
     if let Some(ids) = req.pool_ids.as_ref() {
-        let want: std::collections::HashSet<String> = ids.iter().map(|s| s.to_ascii_uppercase()).collect();
+        let want: std::collections::HashSet<String> =
+            ids.iter().map(|s| s.to_ascii_uppercase()).collect();
         pools.retain(|p| want.contains(&p.id.to_ascii_uppercase()));
     }
     if pools.is_empty() {
-        return Err(ApiError::bad_request("No pools selected for full backtest run"));
+        return Err(ApiError::bad_request(
+            "No pools selected for full backtest run",
+        ));
     }
     let snapshot_variants = parse_snapshot_variants(req.snapshot_variants.as_ref())?;
 
@@ -2043,11 +2074,16 @@ pub async fn start_backtest_full(
     }
 
     let repo_root = state.config.repo_root.clone();
-    let include_ids = req
-        .include_strategy_ids
-        .unwrap_or_else(|| strategy_catalog().into_iter().map(|s| s.id).collect::<Vec<_>>());
-    let include_ids: std::collections::HashSet<String> =
-        include_ids.into_iter().map(|s| s.to_ascii_lowercase()).collect();
+    let include_ids = req.include_strategy_ids.unwrap_or_else(|| {
+        strategy_catalog()
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>()
+    });
+    let include_ids: std::collections::HashSet<String> = include_ids
+        .into_iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
     let include_indicators = req.include_indicator_strategies;
     let objective = req.objective.unwrap_or_else(|| "vs-hodl".to_string());
     let lp_share = req.lp_share;
@@ -2083,7 +2119,12 @@ pub async fn start_backtest_full(
                 "Provide both static_manual_lower and static_manual_upper",
             ));
         };
-        if !lower.is_finite() || !upper.is_finite() || lower <= 0.0 || upper <= 0.0 || lower >= upper {
+        if !lower.is_finite()
+            || !upper.is_finite()
+            || lower <= 0.0
+            || upper <= 0.0
+            || lower >= upper
+        {
             return Err(ApiError::bad_request(
                 "static_manual_lower/static_manual_upper must be finite, >0 and lower<upper",
             ));
@@ -2158,15 +2199,16 @@ pub async fn start_backtest_full(
         }
 
         let help_text = cli_backtest_optimize_help_text(&cli_path);
-        let threshold_oor_flag_accepts_value = help_text
-            .contains("--threshold-rebalance-on-range-exit-immediately <");
+        let threshold_oor_flag_accepts_value =
+            help_text.contains("--threshold-rebalance-on-range-exit-immediately <");
         let snapshot_jsonl_suffix_requested = snapshot_variants.iter().any(|v| v.suffix.is_some());
         let snapshot_jsonl_suffix_supported = help_text.contains("snapshot-jsonl-suffix");
         let threshold_grid_requested = threshold_grid_pct
             .as_ref()
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        let threshold_min_rebalance_hours_requested = threshold_min_rebalance_interval_hours.is_some();
+        let threshold_min_rebalance_hours_requested =
+            threshold_min_rebalance_interval_hours.is_some();
         let threshold_oor_immediate_requested =
             threshold_rebalance_on_range_exit_immediately.is_some();
         let periodic_grid_requested = periodic_grid_steps
@@ -2180,7 +2222,10 @@ pub async fn start_backtest_full(
             .as_ref()
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        let bollinger_k_grid_requested = bollinger_k_grid.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        let bollinger_k_grid_requested = bollinger_k_grid
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         let bollinger_rebalance_steps_grid_requested = bollinger_rebalance_steps_grid
             .as_ref()
             .map(|v| !v.is_empty())
@@ -2227,7 +2272,10 @@ pub async fn start_backtest_full(
                 "--last-candle-rebalance-steps-grid",
                 last_candle_rebalance_steps_grid_requested,
             ),
-            ("--last-candle-seconds-grid", last_candle_seconds_grid_requested),
+            (
+                "--last-candle-seconds-grid",
+                last_candle_seconds_grid_requested,
+            ),
             (
                 "--last-candle-rebalance-seconds-grid",
                 last_candle_rebalance_seconds_grid_requested,
@@ -2324,177 +2372,188 @@ pub async fn start_backtest_full(
                         cmd.arg("--snapshot-jsonl-suffix").arg(suffix);
                     }
                     cmd.arg("--hours").arg(h.to_string());
-                if let Some(dev_pct) = static_deviation_pct.or(oor_recenter_deviation_pct) {
-                    let width_pct = 2.0 * dev_pct;
-                    cmd.arg("--min-range-pct").arg(width_pct.to_string());
-                    cmd.arg("--max-range-pct").arg(width_pct.to_string());
-                    cmd.arg("--range-steps").arg("1");
-                } else {
-                    cmd.arg("--min-range-pct").arg("1");
-                    cmd.arg("--max-range-pct").arg("15");
-                    cmd.arg("--range-steps").arg("10");
-                }
-                if let (Some(lower), Some(upper)) = (static_manual_lower, static_manual_upper) {
-                    cmd.arg("--static-manual-lower").arg(lower.to_string());
-                    cmd.arg("--static-manual-upper").arg(upper.to_string());
-                }
-                cmd.arg("--objective").arg(&objective);
-                cmd.arg("--capital").arg(capital_usd.to_string());
-                cmd.arg("--full-ranking");
-                if supports_include_strategy_families && !include_ids.is_empty() {
-                    let mut ids: Vec<String> = include_ids.iter().cloned().collect();
-                    ids.sort_unstable();
-                    cmd.arg("--include-strategy-families").arg(ids.join(","));
-                }
-                if include_indicators {
-                    cmd.arg("--indicator-strategies");
-                }
-                if let Some(v) = threshold_grid_pct.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--threshold-grid-pct").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = threshold_min_rebalance_interval_hours {
-                    cmd.arg("--threshold-min-rebalance-interval-hours")
-                        .arg(v.to_string());
-                }
-                if let Some(v) = threshold_rebalance_on_range_exit_immediately {
-                    if threshold_oor_flag_accepts_value {
-                        cmd.arg("--threshold-rebalance-on-range-exit-immediately")
-                            .arg(v.to_string());
-                    } else if v {
-                        // Backward compatibility for older CLI binaries where this is a switch-only flag.
-                        cmd.arg("--threshold-rebalance-on-range-exit-immediately");
+                    if let Some(dev_pct) = static_deviation_pct.or(oor_recenter_deviation_pct) {
+                        let width_pct = 2.0 * dev_pct;
+                        cmd.arg("--min-range-pct").arg(width_pct.to_string());
+                        cmd.arg("--max-range-pct").arg(width_pct.to_string());
+                        cmd.arg("--range-steps").arg("1");
                     } else {
-                        // Older CLI cannot express explicit false for this option.
-                        // We skip the flag to avoid parse errors and let CLI defaults apply.
-                        warn!(
-                            "backtests/full: CLI at {} does not accept explicit false for --threshold-rebalance-on-range-exit-immediately; using CLI default",
-                            cli_path.display()
+                        cmd.arg("--min-range-pct").arg("1");
+                        cmd.arg("--max-range-pct").arg("15");
+                        cmd.arg("--range-steps").arg("10");
+                    }
+                    if let (Some(lower), Some(upper)) = (static_manual_lower, static_manual_upper) {
+                        cmd.arg("--static-manual-lower").arg(lower.to_string());
+                        cmd.arg("--static-manual-upper").arg(upper.to_string());
+                    }
+                    cmd.arg("--objective").arg(&objective);
+                    cmd.arg("--capital").arg(capital_usd.to_string());
+                    cmd.arg("--full-ranking");
+                    if supports_include_strategy_families && !include_ids.is_empty() {
+                        let mut ids: Vec<String> = include_ids.iter().cloned().collect();
+                        ids.sort_unstable();
+                        cmd.arg("--include-strategy-families").arg(ids.join(","));
+                    }
+                    if include_indicators {
+                        cmd.arg("--indicator-strategies");
+                    }
+                    if let Some(v) = threshold_grid_pct.as_ref().filter(|v| !v.is_empty()) {
+                        cmd.arg("--threshold-grid-pct").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
                         );
                     }
-                }
-                if let Some(v) = periodic_grid_steps.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--periodic-grid-steps").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = retouch_offset_pct {
-                    cmd.arg("--retouch-offset-pct").arg(v.to_string());
-                }
-                if let Some(v) = bollinger_window_grid.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--bollinger-window-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = bollinger_k_grid.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--bollinger-k-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = bollinger_rebalance_steps_for_variant
-                    .as_ref()
-                    .filter(|v| !v.is_empty())
-                {
-                    cmd.arg("--bollinger-rebalance-steps-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = last_candle_steps_grid.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--last-candle-steps-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = last_candle_rebalance_steps_grid.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--last-candle-rebalance-steps-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = last_candle_seconds_grid.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--last-candle-seconds-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(v) = last_candle_rebalance_seconds_grid.as_ref().filter(|v| !v.is_empty()) {
-                    cmd.arg("--last-candle-rebalance-seconds-grid").arg(
-                        v.iter()
-                            .map(|x| x.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                if let Some(share) = lp_share {
-                    cmd.arg("--lp-share").arg(share.to_string());
-                }
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-                match cmd.output().await {
-                    Ok(out) => {
-                        if !out.status.success() {
+                    if let Some(v) = threshold_min_rebalance_interval_hours {
+                        cmd.arg("--threshold-min-rebalance-interval-hours")
+                            .arg(v.to_string());
+                    }
+                    if let Some(v) = threshold_rebalance_on_range_exit_immediately {
+                        if threshold_oor_flag_accepts_value {
+                            cmd.arg("--threshold-rebalance-on-range-exit-immediately")
+                                .arg(v.to_string());
+                        } else if v {
+                            // Backward compatibility for older CLI binaries where this is a switch-only flag.
+                            cmd.arg("--threshold-rebalance-on-range-exit-immediately");
+                        } else {
+                            // Older CLI cannot express explicit false for this option.
+                            // We skip the flag to avoid parse errors and let CLI defaults apply.
+                            warn!(
+                                "backtests/full: CLI at {} does not accept explicit false for --threshold-rebalance-on-range-exit-immediately; using CLI default",
+                                cli_path.display()
+                            );
+                        }
+                    }
+                    if let Some(v) = periodic_grid_steps.as_ref().filter(|v| !v.is_empty()) {
+                        cmd.arg("--periodic-grid-steps").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = retouch_offset_pct {
+                        cmd.arg("--retouch-offset-pct").arg(v.to_string());
+                    }
+                    if let Some(v) = bollinger_window_grid.as_ref().filter(|v| !v.is_empty()) {
+                        cmd.arg("--bollinger-window-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = bollinger_k_grid.as_ref().filter(|v| !v.is_empty()) {
+                        cmd.arg("--bollinger-k-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = bollinger_rebalance_steps_for_variant
+                        .as_ref()
+                        .filter(|v| !v.is_empty())
+                    {
+                        cmd.arg("--bollinger-rebalance-steps-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = last_candle_steps_grid.as_ref().filter(|v| !v.is_empty()) {
+                        cmd.arg("--last-candle-steps-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = last_candle_rebalance_steps_grid
+                        .as_ref()
+                        .filter(|v| !v.is_empty())
+                    {
+                        cmd.arg("--last-candle-rebalance-steps-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = last_candle_seconds_grid.as_ref().filter(|v| !v.is_empty()) {
+                        cmd.arg("--last-candle-seconds-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(v) = last_candle_rebalance_seconds_grid
+                        .as_ref()
+                        .filter(|v| !v.is_empty())
+                    {
+                        cmd.arg("--last-candle-rebalance-seconds-grid").arg(
+                            v.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+                    }
+                    if let Some(share) = lp_share {
+                        cmd.arg("--lp-share").arg(share.to_string());
+                    }
+                    cmd.stdout(Stdio::piped());
+                    cmd.stderr(Stdio::piped());
+                    match cmd.output().await {
+                        Ok(out) => {
+                            if !out.status.success() {
+                                errors.push(format!(
+                                    "{} {} {}h: exit {:?}: {}",
+                                    variant.label,
+                                    pool.id,
+                                    h,
+                                    out.status.code(),
+                                    String::from_utf8_lossy(&out.stderr)
+                                ));
+                                continue;
+                            }
+                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                            let mut metrics = parse_optimize_table(&stdout);
+                            if let Some(target) = target_vs_hodl_usd {
+                                metrics.retain(|m| m.vs_hodl >= target);
+                            }
+                            all_results.push(BacktestFullWindowResult {
+                                pool_id: pool.id.to_string(),
+                                pool_label: pool.label.to_string(),
+                                pool_address: pool.pool_address.to_string(),
+                                protocol: pool.protocol.to_string(),
+                                snapshot_variant: variant.label.to_string(),
+                                window_hours: *h,
+                                metrics,
+                                note: None,
+                            });
+                        }
+                        Err(e) => {
                             errors.push(format!(
-                                "{} {} {}h: exit {:?}: {}",
-                                variant.label,
-                                pool.id,
-                                h,
-                                out.status.code(),
-                                String::from_utf8_lossy(&out.stderr)
+                                "{} {} {}h: spawn error: {}",
+                                variant.label, pool.id, h, e
                             ));
-                            continue;
                         }
-                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                        let mut metrics = parse_optimize_table(&stdout);
-                        if let Some(target) = target_vs_hodl_usd {
-                            metrics.retain(|m| m.vs_hodl >= target);
-                        }
-                        all_results.push(BacktestFullWindowResult {
-                            pool_id: pool.id.to_string(),
-                            pool_label: pool.label.to_string(),
-                            pool_address: pool.pool_address.to_string(),
-                            protocol: pool.protocol.to_string(),
-                            snapshot_variant: variant.label.to_string(),
-                            window_hours: *h,
-                            metrics,
-                            note: None,
-                        });
-                    }
-                    Err(e) => {
-                        errors.push(format!(
-                            "{} {} {}h: spawn error: {}",
-                            variant.label, pool.id, h, e
-                        ));
                     }
                 }
-            }
             }
         }
 
         let mut w = FULL_JOBS.write().await;
         if let Some(mut cur) = w.get(&job_id).cloned() {
-            cur.status = if errors.is_empty() { "succeeded" } else { "partial" }.to_string();
+            cur.status = if errors.is_empty() {
+                "succeeded"
+            } else {
+                "partial"
+            }
+            .to_string();
             cur.results = Some(all_results);
             cur.stderr = if errors.is_empty() {
                 None
@@ -2521,7 +2580,9 @@ pub async fn start_backtest_full(
     params(("id" = String, Path, description = "Full backtest matrix job id")),
     responses((status = 200, description = "Full backtest job", body = BacktestFullJobResponse))
 )]
-pub async fn get_backtest_full_job(Path(id): Path<String>) -> ApiResult<Json<BacktestFullJobResponse>> {
+pub async fn get_backtest_full_job(
+    Path(id): Path<String>,
+) -> ApiResult<Json<BacktestFullJobResponse>> {
     let r = FULL_JOBS.read().await;
     let j = r
         .get(id.trim())
@@ -2547,10 +2608,7 @@ fn pick_auto_tune_winner(results: &[BacktestFullWindowResult]) -> Option<Backtes
                 rebalances: m.rebalances,
                 tir_pct: m.tir_pct,
             };
-            let replace = best
-                .as_ref()
-                .map(|b| cand.score > b.score)
-                .unwrap_or(true);
+            let replace = best.as_ref().map(|b| cand.score > b.score).unwrap_or(true);
             if replace {
                 best = Some(cand);
             }
@@ -2813,7 +2871,10 @@ pub async fn apply_backtest_auto_tune_to_strategy(
         "static_range"
     };
 
-    cfg_obj.insert("strategy_type".to_string(), serde_json::json!(strategy_type));
+    cfg_obj.insert(
+        "strategy_type".to_string(),
+        serde_json::json!(strategy_type),
+    );
     cfg_obj.insert("parameters".to_string(), params);
     strategy.updated_at = chrono::Utc::now();
     let snapshot = strategies.clone();
@@ -2840,7 +2901,8 @@ mod tests {
 
     #[test]
     fn parse_snapshot_variants_defaults_and_deduplicates() {
-        let default_variants = parse_snapshot_variants(None).expect("default variants should parse");
+        let default_variants =
+            parse_snapshot_variants(None).expect("default variants should parse");
         assert_eq!(default_variants.len(), 1);
         assert_eq!(default_variants[0].label, "10m");
         assert_eq!(default_variants[0].cadence_minutes, 10);

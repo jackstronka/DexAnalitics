@@ -61,7 +61,7 @@ export function formatUsdField(
 }
 
 /**
- * Stream-lineage "LP zebrane" main USD fragment: sub-cent fees use extra decimals; when there were
+ * Stream-lineage "Fees zebrane" main USD fragment: sub-cent fees use extra decimals; when there were
  * collects but USD is 0 (missing mint prices / rounding), keep "—" for the USD figure — callers add token rows + note.
  */
 export function formatLineageFeesCollectedUsdMain(

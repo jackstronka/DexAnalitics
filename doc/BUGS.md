@@ -28,6 +28,358 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260510-01 — `no_close_unless_reopen_feasible` stuck: `target_usd=0` when wallet SPL empty (funds only in LP)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-10  
+fixed_in: local  
+keywords: rebalance, reopen_preflight, bot_reopen_preflight_failed, no_close_unless_reopen_feasible, target_usd, wallet_notional, prev_end_value_usd, OOR, close+reopen, clmm-lp-execution
+
+- **Symptom:** Positions stay open OOR; lifecycle repeats `bot_reopen_widen_ticks` then `bot_reopen_preflight_failed` with `wa`/`wb` = 0, `wallet_notional` = 0, `prev_end_value_usd` > 0, `target_usd` = 0 — no `bot_close_position`.
+- **Root cause:** Reopen preflight (before close) used `target_usd_from_prev_end_clamped(prev_end, wallet_notional)` with **pre-close** SPL balances. All value in LP → empty ATAs → clamp to 0 → `quote_deposit_budget_in_range` rejects (`target_usd` must be > 0).
+- **Fix:** Preflight uses `target_usd_for_close_reopen_preflight`: budget caps against estimated **post-close** spendable `wallet_notional + prev_end_value_usd` (same synthetic prices), then `min` with `prev_end_value_usd` and 0.995 margin.
+- **Guards/tests:** `cargo test -p clmm-lp-execution preflight_target_usd --lib`
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`
+
+---
+
+### BUG-20260506-03 — Vite WS proxy errors (`ECONNABORTED` / `ECONNRESET`) despite healthy API
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-06  
+fixed_in: local  
+keywords: web, vite, websocket, ws-proxy, ECONNABORTED, ECONNRESET, dashboard, api-v1, proxy-rewrite
+
+- **Symptom:** Vite dev server prints repeated WebSocket proxy errors:
+  - `[vite] ws proxy error: Error: write ECONNABORTED`
+  - `[vite] ws proxy error: Error: read ECONNRESET`
+  even while the dashboard loads and the API is reachable.
+- **Evidence:** API `GET /api/v1/health` returns HTTP 200 on `127.0.0.1:8081`; WS upgrade to `/api/v1/ws/positions` returns HTTP 101 (Switching Protocols).
+- **Root cause:** Multi-factor:
+  - API applied `tower_http::timeout::TimeoutLayer` to the versioned base router under `/api/v1`, which also wrapped `/api/v1/ws/*`. The timeout cancels the upgraded request task and resets the underlying socket after ~\(timeout\) seconds, surfacing as `ECONNRESET` in the Vite proxy and `code=1006` (abnormal closure) in the browser.
+  - Client reconnect loop was triggered even on intentional `disconnect()` (e.g., dev StrictMode mount/cleanup/mount), causing extra churn and making the resets look “constant”.
+- **Fix:**
+  - Align WS routing: Vite dev proxy rewrites `/ws/*` → `/api/v1/ws/*` to match versioned API routes.
+  - Add forensics logging to correlate disconnects after-the-fact (see below).
+  - WebSocket client: avoid duplicate connections while `CONNECTING` and disable auto-reconnect after intentional `disconnect()` (prevents churn).
+  - API: exclude `/api/v1/ws/*` routes from timeout layers by composing versioned routers via separate `nest("/api/v1", ...)` boundaries; keep timeouts on REST routes only.
+- **Guards/tests:** N/A (dev-only proxy behavior; diagnosed via logs + manual reproduction).
+- **Forensics (added):**
+  - Vite WS proxy logs: `tools/logs/vite-ws-proxy.log` (proxy req/error/open/close)
+  - Browser WS logs: `localStorage["ws_debug_log_v1"]` (close `code/reason/wasClean`)
+  - Disable: `VITE_WS_PROXY_LOG=0` and/or `VITE_WS_CLIENT_LOG=0` in `web/.env.local` (restart Vite)
+- **Paths:** `web/vite.config.ts`, `web/src/lib/websocket.ts`, `crates/api/src/routes.rs`
+
+---
+
+### BUG-20260506-02 — `LastCandlePeriodic` ignored user interval (rebalance every eval tick)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-06  
+fixed_in: local  
+keywords: last_candle_periodic, LastCandlePeriodic, min_rebalance_interval_minutes, periodic_interval_minutes, cooldown, rebalance-loop, strategies, decision-engine
+
+- **Symptom:** Strategy type `Last candle (periodic)` rebalanced much more frequently than the user-configured interval (e.g. rebalance after ~4 minutes even though UI/strategy parameters were set to 45 minutes). Observed cadence matched executor eval tick (~5m).
+- **Root cause:** `StrategyMode::LastCandlePeriodic` gated on `DecisionConfig.min_rebalance_interval_minutes`, but periodic-like interval clamping and semantics are expressed via `DecisionConfig.periodic_interval_minutes`. When the min interval was effectively `0` (or stale), the periodic gate was bypassed.
+- **Fix:** `LastCandlePeriodic` now uses `periodic_interval_minutes` for its time gate (same as `Periodic`). Added regression test to ensure it does not rebalance before the periodic interval even if `min_rebalance_interval_minutes=0`.
+- **Guards/tests:** `cargo test -p clmm-lp-execution strategy::decision --lib`
+- **Paths:** `crates/execution/src/strategy/decision.rs`
+
+---
+
+### BUG-20260506-01 — Pending-open/reopen stuck on `insufficient native SOL` despite WSOL/USDC in wallet
+
+status: fixed  
+severity: critical  
+reported_by: user  
+first_seen: 2026-05-06  
+fixed_in: local  
+keywords: pending-open, reopen, insufficient-native-sol, sol-first, wsol, usdc, open_position, preflight, rebalance
+
+- **Symptom:** After bot closes a position and enqueues pending-open recovery, reopen repeatedly fails with `open preflight exact-plan: insufficient native SOL ...` even though the wallet has funds in WSOL and/or USDC. Operator sees closed positions stuck in “awaiting reopen”.
+- **Root cause:** SOL-first WSOL auto-unwrap only ran **after** successful txs; the pending-open open attempt fails **before** any unwrap/swap can run (native SOL is checked in preflight), so the system never converts available WSOL/USDC into native SOL for rent/fees.
+- **Fix:** In reopen/pending-open open loop (`open_new_range_with_wallet_mix`), detect the preflight error and perform a one-shot **operational native SOL top-up** before retrying open: unwrap WSOL→native SOL if present; if still short, swap minimal **stable (pool leg) → WSOL** in-pool and unwrap to native SOL (stable mint = other leg vs WSOL, or `CLMM_STABLE_MINT_FOR_SOL_TOPUP`). Then retry `open_position`.
+- **Guards/tests:** `cargo test -p clmm-lp-execution --lib`; `cargo test -p clmm-lp-api --lib` (includes ignored devnet matrix tests `devnet_strategy_workflow_*`).
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`
+
+---
+
+### BUG-20260505-04 — Fees zebrane overstated: close rows lacked `fee_owed` snapshot; principal leaked into fees
+
+status: regressed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-05  
+fixed_in: local  
+keywords: fees, collect_fees, close_position, fee_owed, lp_collected_token_raw, position_stream_lineage, logs-rebalances, PositionDetail
+
+- **Symptom:** In `Logs / rebalances` (Position Detail), the `LP zebrane`/fees column showed values that did not match actual LP fees; could appear inflated because close principal was counted as fees.
+- **Symptom (2026-05-06 regression):** `Fees zebrane` shows `—/0` for positions closed today; lifecycle `bot_close_position` rows miss `lp_collected_token_{a,b}_raw`, so API cannot compute authoritative fees from close events.
+- **Symptom (2026-05-06):** Some positions show **large USDC “Fees zebrane”** that actually equals the **principal+fees** returned on close (`fee_payer_token_deltas`), while lifecycle `lp_collected_token_{a,b}_raw` exists but is **`0/0`**. Solscan shows non-zero “Claim fees” for the same close tx.
+- **Root cause:** Lifecycle `bot_close_position` rows did not carry an authoritative `fee_owed_a/b` snapshot, and historical data often lacked `details.close_amount_*_raw`, so API fallback subtraction could not remove principal from `fee_payer_token_deltas`.
+- **Root cause (added):** `position.fee_owed_{a,b}` read **before** close can be stale/zero unless Whirlpool `update_fees_and_rewards` has been applied; close instructions compute fees via update+quote (as shown by Solscan / Orca SDK `feesQuote`), so persisting the pre-close account fields produced `0/0` even when “Claim fees” was non-zero.
+- **Fix:** Persist close fees using Orca SDK quote (`close_position_instructions(...).fees_quote.fee_owed_{a,b}`) rather than pre-close `position.fee_owed_{a,b}`. API treats `lp_collected_token_*_raw=0/0` on close as **non-authoritative** and falls back to close-subtraction (principal isolation) to avoid counting principal as fees.
+- **Fix (UI):** Renamed `LP zebrane` → `Fees zebrane` and renamed the multiplier from `collects` to neutral `events`.
+- **Guards/tests:** `cargo test -p clmm-lp-execution --lib`; `cargo check -p clmm-lp-protocols`; `cargo check -p clmm-lp-api`; `npx tsc --noEmit` in `web/`.
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/executor.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLifecycleTimeline.tsx`
+
+---
+
+### BUG-20260506-03 — Reopen swap fails with `BlockhashNotFound` due to endpoint mismatch (blockhash vs send)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-06  
+fixed_in: local  
+keywords: rpc, blockhashnotfound, send_and_confirm, current_endpoint, endpoint-rotation, swap_exact_in_failed, reopen, pending-open, publicnode
+
+- **Symptom:** After `bot_close_position`, bot starts swap-mix and fails on first swap with `simulation_err=UiTransactionError(BlockhashNotFound)`, leaving position stuck closed without a successful reopen/open. Lifecycle row shows `rpc_url` on one endpoint, while error string shows `send_transaction failed (endpoint=...)` on another.
+- **Root cause:** Transaction is signed with a recent blockhash fetched via provider, but `send_and_confirm_transaction` iterated over `all_endpoints()` (fan-out) and could send the signed tx to a different RPC fleet that did not recognize the blockhash yet, resulting in `BlockhashNotFound`.
+- **Fix:** Pin send+confirm to `current_endpoint()` for the whole attempt; rotate endpoint only **between** attempts (provider-level), avoiding cross-endpoint blockhash/send mismatch.
+- **Guards/tests:** `cargo check -p clmm-lp-protocols -p clmm-lp-execution`
+- **Paths:** `crates/protocols/src/rpc/provider.rs`, `crates/protocols/src/orca/executor.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+---
+
+### BUG-20260506-04 — Watchdog cannot auto-enqueue stranded sessions when only `planned_new_tick_*` exists
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-06  
+fixed_in: local  
+keywords: stranded-rebalance-watchdog, pending-open, reconcile, planned_new_tick_lower, planned_new_tick_upper, bot_close_position, intended_ticks
+
+- **Symptom:** `POST /bot-activity/stranded-rebalances/reconcile` reports stranded sessions (close seen, open missing) but returns `can_auto_enqueue=false` with note “Missing IL rebalance_incomplete row; watchdog can report but cannot infer intended ticks.” even though lifecycle `bot_close_position.details` contains `planned_new_tick_lower/upper`.
+- **Root cause:** Watchdog only extracted fallback ticks from `bot_recover_open_replanned.details` (`new_tick_*` / `intended_tick_*`) and ignored the common close-row rotation plan keys `planned_new_tick_lower/upper`.
+- **Fix:** Watchdog now accepts `planned_new_tick_lower/upper` as valid tick hints and considers `bot_close_position` rows for fallback hint extraction.
+- **Guards/tests:** `cargo check -p clmm-lp-api`
+- **Paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`
+
+---
+
+### BUG-20260505-05 — Pending-open swap-mix fails when WSOL deficit can be covered by native SOL (wrap not preferred)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-05  
+fixed_in: local  
+keywords: swap-mix, pending-open, wsol, native-sol, wrap, quote_deposit_budget_in_range, rebalance
+
+- **Symptom:** Pending-open recovery repeated with `swap mix: exhausted 10 rounds without matching deposit quote` while wallet had sufficient **native SOL** to cover the WSOL leg; bot performed unnecessary USDC→WSOL swaps.
+- **Evidence:** Swap-mix diagnostics showed `wa=0` (WSOL SPL), but `wa_ui>0` and `wallet_notional` large (native SOL present), `deficit_a>0` on WSOL leg, and `leg=B_to_A` swaps executed.
+- **Root cause:** Swap-mix preferred in-pool swaps when `wa==0` even if token A is WSOL and the wallet had spendable native SOL; the pre-wrap path covered WSOL-on-B and some other branches but missed WSOL-on-A deficit.
+- **Fix:** In swap-mix, when token A is WSOL and `deficit_a>0` with `wa<=MIN_SWAP` and spendable native SOL exists, pre-wrap native SOL into WSOL ATA and retry quote before swapping the other leg.
+- **Guards/tests:** `cargo check -p clmm-lp-execution`; `cargo test -p clmm-lp-execution swap_mix_sol_first`.
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`
+
+---
+
+### BUG-20260505-03 — WSOL pre-wrap failed with ATA `IllegalOwner`, blocking reopen and causing repeated swap attempts
+
+status: fixed  
+severity: critical  
+reported_by: user  
+first_seen: 2026-05-05  
+fixed_in: local  
+keywords: wsol, ata, illegalowner, createidempotent, pending-open, rebalance, swap-mix, reopen
+
+- **Symptom:** Rebalance sessions showed repeated `bot_swap_mix_*` / `bot_swap_exact_in_*` attempts with no successful reopen for the same closed position; pending-open queue kept retrying.
+- **Symptom (session evidence):** `pending-open-recovery.json` contained `last_error: swap-mix wsol pre-wrap ... InstructionError(0, IllegalOwner)` with ATA program in instruction index 0.
+- **Root cause:** WSOL pre-wrap path used non-idempotent ATA create semantics in a race-prone read-then-create flow; when ATA appeared between read/send (or RPC lagged), wrap tx could fail with ATA `IllegalOwner` before open attempt.
+- **Fix:** Switched WSOL ATA creation to `create_associated_token_account_idempotent`. Added fallback path on ATA `IllegalOwner`: re-validate ATA (`program owner`, mint, token owner), then retry topup-only transfer + `sync_native` without ATA create.
+- **Guards/tests:** Added unit tests `test_is_ata_illegal_owner_error_matches_expected_shape` and `test_is_ata_illegal_owner_error_ignores_other_failures`; verified with `cargo check -p clmm-lp-protocols`.
+- **Paths:** `crates/protocols/src/orca/executor.rs`
+
+---
+
+### BUG-20260505-02 — `LP zebrane` counted only `bot_collect_fees`, not total realized fees (collect + close)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-05  
+fixed_in: local  
+keywords: stream-lineage, fees_collected_usd, bot_collect_fees, bot_close_position, close_amount_raw, ClosedPositionDetail
+
+- **Symptom:** In chain history, first positions showed `LP zebrane = 0` while operator expected fees realized at close to be included; only manual collect on the last position appeared.
+- **Root cause:** API fee aggregation in `position_stream_lineage` filtered strictly to `event='bot_collect_fees'`; close rows were excluded even though they carry fee-bearing deltas.
+- **Fix:** `fees_collected_*` now aggregates fee legs from **collect + close** rows. For close rows, principal leg is removed by subtracting `details.close_amount_{a,b}_raw` (or DB `raw_json`) from positive pool-leg deltas, leaving best-effort fee remainder.
+- **Fix (UI copy):** Renamed table/card wording from `LP zebrane` to `Fees zebrane`; event counter caption is neutral (`× events`) instead of `× collect`.
+- **Guards/tests:** `cargo check -p clmm-lp-api`; `npx tsc --noEmit`.
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/lib/api.ts`
+
+### BUG-20260505-01 — API strategies without `il_ledger_path` miss `rebalance_incomplete` rows; watchdog cannot auto-enqueue
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-05  
+fixed_in: local  
+keywords: api, strategy_executor, il_ledger_path, rebalance_incomplete, stranded-rebalances, pending-open-recovery, bot_recover_open_replanned
+
+- **Symptom:** `stranded-rebalances` showed `close_seen=true`, `open_seen=false`, repeated swap/replan events, but `rebalance_incomplete_logged=false` and `can_auto_enqueue=false` (`Missing IL rebalance_incomplete row...`) for running API strategies.
+- **Root cause:** API `start_strategy_executor_core` set IL ledger path only from optional `strategy.parameters.il_ledger_path`; UI-created strategies usually omit this field, so `LifecycleTracker::record_rebalance_incomplete` had nowhere to append.
+- **Root cause (follow-up):** Watchdog inferred intended ticks only from IL `rebalance_incomplete` rows; when IL row was missing but lifecycle had `bot_recover_open_replanned.details.new_tick_*`, it still refused auto-enqueue.
+- **Fix:** API now defaults IL ledger path to `CLMM_IL_LEDGER_PATH` or `data/ledger/il-ledger.jsonl` and creates parent dirs best-effort. Watchdog adds lifecycle fallback hints from `bot_recover_open_replanned.details` (`new_tick_*` / `intended_tick_*`) and can auto-enqueue with fallback note.
+- **Guards/tests:** `cargo test -p clmm-lp-api stranded_rebalance_watchdog`; `cargo check -p clmm-lp-api`.
+- **Paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/services/stranded_rebalance_watchdog.rs`
+
+### BUG-20260504-08 — Bollinger / last-candle bot: new range can exclude live `tick_current` → position immediately OOR
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: bollinger, last_candle, StrategyExecutor, record_price_and_compute_bollinger_ticks, tick_current, out_of_range, whirlpoolTicks
+
+- **Symptom:** Opened ~10 USD target but notional lower; position shows `out_of_range` right after open while live price sits just outside a tight Bollinger band derived from rolling samples.
+- **Root cause:** `web/src/lib/whirlpoolTicks.ts` expands aligned ticks to include `current_tick` before USD quote / open; `record_price_and_compute_bollinger_ticks` and `record_price_and_compute_last_closed_candle_ticks` in `executor.rs` did not — historical band can lag a fast move.
+- **Fix:** Shared `expand_spacing_aligned_range_to_include_current_tick` after spacing alignment; unit tests for expand behavior.
+- **Guards/tests:** `cargo test -p clmm-lp-execution expand_tick_range`.
+- **Paths:** `crates/execution/src/strategy/executor.rs`
+
+### BUG-20260504-07 — PositionCreate: open blocked on stale balances right after confirmed swap-before-open
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: position-create, swap-before-open, effective-balances, is_stale, handleSubmit, open-position
+
+- **Symptom:** Green “Swap potwierdzony” then red “Otwarcie nieudane” / stale-balance message (~30s stale) despite user attempting open; UI told them to force-refresh even after on-chain swap succeeded.
+- **Root cause:** `handleSubmit` rejected whenever `effectiveBalancesQ.data.is_stale`; post-swap invalidation can still return `is_stale` from projection/fast-return while chain state is already updated.
+- **Fix:** If `swapBeforeOpen` and a non-empty `swapSignature` exist, do not block open on `is_stale` (swap is authoritative for that step); keep the guard for all other flows. Bilingual stale error via `L(...)`.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/pages/PositionCreate.tsx`
+
+### BUG-20260504-06 — Rebalance: many swap-mix txs but no reopen (stale pool tick/√P for open quote)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: rebalance, swap-mix, reopen, open_position, quote_deposit_budget_in_range, tick_current, sqrt_price, pool_state, WhirlpoolReader
+
+- **Symptom:** Session showed multiple successful in-pool swaps / swap-mix rounds under a rebalance UUID but no `bot_open_position` (or open failed after retries) while mix had converged.
+- **Root cause:** `ensure_swap_mix_for_rebalance_open` refetches `WhirlpoolState` every mix round; `open_new_range_with_wallet_mix` used the **post-close** `pool_state` snapshot for `quote_deposit_budget_in_range` (`tick_current`, `sqrt_price`) and synthetic price — after swaps, on-chain √P/tick diverged from that snapshot → wrong deposit caps vs chain.
+- **Fix:** Before each open attempt, refetch pool state via `WhirlpoolReader::get_pool_state` and use that for mints, price, tick, √P in the open loop; ledger `details` include `open_quote_pool_tick_current` / `open_quote_pool_sqrt_price` for ops.
+- **Guards/tests:** `cargo check -p clmm-lp-execution`.
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`
+
+### BUG-20260504-05 — Swap-mix ledger diagnostics missing rebalance_session_id (`_no_session` in UI)
+
+status: fixed  
+severity: low  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: rebalance, swap-mix, ledger, rebalance_session_id, closed-position, diagnostics
+
+- **Symptom:** Closed position timeline showed `bot_swap_mix_round` / `bot_swap_exact_in_attempt` under `_no_session` while `bot_swap_exact_in` txs grouped under a UUID session (e.g. after close without reopen).
+- **Root cause:** `try_append_bot_diagnostic_row(..., None, ...)` in `ensure_swap_mix_for_rebalance_open`; real swaps already carried `ledger_session_id`.
+- **Fix:** Pass `ledger_session_id.clone()` for all swap-mix diagnostic rows (including `bot_swap_mix_failed`).
+- **Guards/tests:** `cargo check -p clmm-lp-execution`.
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`
+
+### BUG-20260504-04 — USD budget open: ~10 USD target but position ~half notional (stale caps vs ticks)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: position-create, quote-open-budget, token_max, budgetSubmitRaw, open-position, bollinger
+
+- **Symptom:** Manual open with “~10 USD” budget; on-chain / UI position value ~\$5.6 (example PDA `CDrYCk3CDfUzxM4QCkMaY61pdLBKhXBU4kLjTPH7fuVR`).
+- **Root cause:** `budgetSubmitRaw` could stay aligned with an **older** `quote-open-budget` response while `tick_lower` / `tick_upper` auto-synced (e.g. Bollinger band + expand) — POST sent **smaller** `token_max_*` than the quote shown for the latest range.
+- **Fix:** Drive submit + funding caps from current `budgetQuoteQ.data` only; block submit while quote refetching; reject `in_range=false`; warn when `estimated_value_usd` is well below typed USD.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/pages/PositionCreate.tsx`
+
+### BUG-20260504-03 — Bollinger on PositionCreate: no USD quote / no swap hint (ticks off live price)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: position-create, bollinger, tick-range, out-of-range, quote-open-budget, swap-before-open, whirlpoolTicks
+
+- **Symptom:** With Bollinger strategy + USD budget mode, orange “cena poza zakresem”, empty Amount fields, no in-app swap proposal despite balances.
+- **Root cause:** Bollinger ticks from snapshot history did not always contain `current_tick`; `budgetQuoteEnabled` stayed false → no amounts → `fundingCheck` never ready.
+- **Fix:** `expandAlignedTickRangeToIncludeCurrent` after band alignment; clearer out-of-range copy linking empty Amount to missing swap hints.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/lib/whirlpoolTicks.ts`, `web/src/pages/PositionCreate.tsx`
+
+### BUG-20260504-02 — Bot swap-mix ignored native-only SOL (SPL zeros) and WSOL-on-B wrap gap
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: clmm-lp-execution, rebalance, swap-mix, wsol, sol-first, native-lamports, swap_before_open
+
+- **Symptom:** With only native SOL (no SPL WSOL/USDC), rebalance swap-mix bailed early or never pre-wrapped; WSOL as pool token B lacked the A-leg-only wrap path.
+- **Root cause:** `wa==0 && wb==0` hard error; `wallet_notional` ignored native; `can_wrap_native_sol_for_wsol_leg` only when `token_mint_a == WSOL`.
+- **Fix:** Allow SPL-zero continue when pool has WSOL + spendable lamports; SOL-first UI amounts for notional; symmetric pre-wrap for WSOL on A or B; unit tests `swap_mix_sol_first_tests`.
+- **Guards/tests:** `cargo test -p clmm-lp-execution swap_mix_sol_first`.
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`
+
+### BUG-20260504-01 — PositionCreate showed 0 SOL for WSOL leg despite native SOL
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-04  
+fixed_in: local  
+keywords: position-create, wsol, sol-first, native-sol, wallet-line, effective-balances, formatBalanceLine, is-stale
+
+- **Symptom:** On `/positions/new`, the SOL side of the pool displayed `0` (or only SPL WSOL) while Portfel showed ~0.726 native SOL; label read like SOL but reflected empty WSOL ATA.
+- **Root cause:** `formatBalanceLine` only read `balances.tokens` for the WSOL mint; native SOL lives in `balances.sol`.
+- **Fix:** For WSOL mint, display `balances.sol` as primary; if SPL WSOL > 0, append note with SPL amount. Block position submit while `is_stale` on effective balances.
+- **Symptom (2026-05-04, follow-up):** With `is_stale` true but non-zero cached SOL, deficit/Jupiter hints for missing USDC disappeared (user: SOL-only, ~10 USD open).
+- **Root cause (2026-05-04, follow-up):** `fundingCheck` returned `ready: false` for any stale read, hiding the whole funding banner.
+- **Fix (2026-05-04, follow-up):** Only suppress funding when stale **and** balances look like all-zero warmup; otherwise compute deficits; small banner note when stale.
+- **Symptom (2026-05-04, follow-up 2):** In-app „swap w puli Orca przed open” (checkbox + `swap_before_open` API) not offered when SOL leg was native-only (WSOL SPL = 0).
+- **Root cause (2026-05-04, follow-up 2):** `swapBeforeOpenPlan` used `getAvailableUiAmount(WSOL)` for max input → 0 raw.
+- **Fix (2026-05-04, follow-up 2):** Use `fundingCheck.effectiveHaveA` / `effectiveHaveB` for swap-in cap (aligned with SOL-first funding).
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/pages/PositionCreate.tsx`
+
+### BUG-20260430-03 — PositionCreate Bollinger did not auto-set range from Bollinger bands
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-04-30  
+fixed_in: local  
+keywords: position-create, bollinger, range, ticks, snapshots, strategy, ui
+
+- **Symptom:** On `/positions/new`, choosing strategy `Bollinger` still used static width around current tick (`range_width_pct`) instead of deriving bounds from current Bollinger bands.
+- **Root cause:** `PositionCreate` only read `parameters.range_width_pct` for strategy auto-sync; Bollinger band calculation existed in executor runtime (for rebalance decisions) but not in open-form UX.
+- **Fix:** Added frontend Bollinger auto-range in `PositionCreate`: fetches recent pool snapshots (`GET /data/snapshots`), computes `mean ± k*sigma` over `bollinger_window` prices, aligns to pool `tick_spacing`, and uses those ticks for auto-sync when `strategy_type=bollinger`.
+- **Symptom (2026-04-30, follow-up):** UI still reported `Brak wystarczających danych` despite active 5m/10m snapshots and healthy data coverage for the pool.
+- **Root cause (2026-04-30, follow-up):** `GET /data/snapshots` returned `price_ab` as optional, but many snapshot rows only had `tick_current`; frontend Bollinger used `price_ab` only and discarded valid rows.
+- **Fix (2026-04-30, follow-up):** API snapshots handler now derives `price_ab` from `tick_current` via `tick_to_price` when `price_ab` is missing, so Bollinger range can use existing snapshot streams without new collectors.
+- **Symptom (2026-04-30, follow-up 2):** On open form users still saw confusing `0 SOL`/partial balances while their selected wallet had funds, especially during stale windows; flow looked blocked without clear action.
+- **Root cause (2026-04-30, follow-up 2):** Validation uses API signer balances, while user mentally compares selected wallet balances; stale read state lacked explicit recover action on form.
+- **Fix (2026-04-30, follow-up 2):** `PositionCreate` now displays selected-wallet quick balance (informational) when it differs from API signer and adds `Wymuś odświeżenie` action in stale banner to invalidate/refetch relevant wallet balance queries.
+- **Guards/tests:** `npm run build` in `web/` passes.
+- **Paths:** `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`
+
 ### BUG-20260430-02 — Positions page: `fetch_positions_for_owner` 403 from PublicNode → internal error
 
 status: fixed  
@@ -368,10 +720,11 @@ keywords: rebalance, recover-open, dust, open-target-usd, close-amounts, lifecyc
 
 - **Symptom:** Rotation chain could jump from normal values (e.g. ~$2.4) to `start/end ~$0.000` and then continue rebalancing on dust PDAs.
 - **Symptom (session evidence):** In the same lineage/session, close rows carried non-zero value, but subsequent `bot_open_position` was sized as near-zero.
+- **Symptom (2026-05-06 evidence):** Po `close -> open` nowa pozycja potrafila otworzyc sie na **ulamek** poprzedniej kwoty (np. leg USDC `open_amount_b_raw` rzedu `136`), gdy po close wallet mial **native SOL**, ale WSOL SPL balance/ATA bylo `0` — open sizing/caps liczyl tylko SPL `wa/wb` i mogl wejsc w dust fallback.
 - **Symptom (follow-up):** In `Position history`, node could still show `start/open ~4 USD` while the same PDA `current_value` was near zero, because continuity rewrote `baseline_value_usd` from previous node end.
 - **Root cause:** Open sizing in rebalance used pre-close calculated `amount_*_before_calc` (which can be stale/tiny in edge flows) instead of authoritative close amounts. Recovery path `recover_open_after_incomplete` hardcoded `amount_a_before_raw=1` and `amount_b_before_raw=1`, forcing `prev_end_value_usd` and `target_usd` toward dust.
 - **Root cause (follow-up):** Session continuity in lineage (`close(old)->open(new)` by `rebalance_session_id`) always overwrote node baseline with `prev_end`, even when node baseline was already computed from open-row data (`open_amount_raw` / caps path).
-- **Fix:** Standard rebalance open now passes `close_amount_a_raw`/`close_amount_b_raw` from `read_close_amounts_best_effort` into `open_new_range_with_wallet_mix`. Recovery open now loads latest matching close amounts from lifecycle close rows (`details.close_amount_*_raw`) by `position_pubkey` and optional `rebalance_session_id`, falling back to legacy `1,1` only when no row is found. In lineage continuity, baseline from session is now applied only when node baseline is missing (`0`), so explicit open-derived baseline is preserved.
+- **Fix:** Standard rebalance open now passes `close_amount_a_raw`/`close_amount_b_raw` from `read_close_amounts_best_effort` into `open_new_range_with_wallet_mix`. Recovery open now loads latest matching close amounts from lifecycle close rows (`details.close_amount_*_raw`) by `position_pubkey` and optional `rebalance_session_id`, falling back to legacy `1,1` only when no row is found. In lineage continuity, baseline from session is now applied only when node baseline is missing (`0`), so explicit open-derived baseline is preserved. Additionally, open sizing/caps now use **SOL-first** logic for the WSOL leg (native SOL counted when WSOL ATA balance is 0), matching swap-mix and upstream Whirlpool bot patterns.
 - **Guards/tests:** Added unit test `close_amounts_from_lifecycle_row_parses_matching_close` and `continuity_from_session_does_not_override_existing_baseline`; verified with `cargo check -p clmm-lp-execution`, `cargo check -p clmm-lp-api`, and (2026-04-27 follow-up) `cargo test -p clmm-lp-api --no-run` after fixing stale `DecisionConfig.periodic_interval_hours` -> `periodic_interval_minutes` in `devnet_e2e_tests`.
 - **Paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`
 
@@ -930,6 +1283,9 @@ keywords: position-create, swap-suggestion, operational-sol, rent, fees, jupiter
 - **Fix:** Na podstawie historycznych openów z `data/ledger/orca_position_lifecycle.jsonl` (13 próbek: p50 ~10.08M, p95 ~10.48M, max ~11.07M lamportów) ustawiono domyślny `CLMM_MIN_OPEN_SOL_LAMPORTS` na `12_000_000` (0.012 SOL) jako bufor operacyjny. Wyższe wymagania SOL wynikające z notionalu nogi WSOL są walidowane oddzielnie.
 - **Fix:** `WhirlpoolExecutor` używa teraz wspólnego bufora `open_native_sol_pad_lamports()` (env `CLMM_MIN_OPEN_SOL_LAMPORTS`, default `12_000_000`) zamiast sztywnego `2_500_000` w preflight WSOL/open; ten sam bufor jest też używany przy clampowaniu swapu WSOL.
 - **Fix:** Usunięto blokujący heurystyczny bail native-SOL na etapie `preflight_open_liquidity_balances` dla nóg WSOL. Zamiast tego przed wysyłką tx wykonywana jest symulacja finalnego planu instrukcji (`simulate_transaction`) i parsowany jest rzeczywisty log runtime `Transfer: insufficient lamports X, need Y`; guard używa teraz `need` z symulacji + margines 1% (`ceil(need*1.01)`).
+- **Symptom (2026-04-30, follow-up):** Na `PositionCreate` dla pary SOL/USDC UI nadal blokował `Open Position` komunikatem `Za mało tokenów...`, mimo że portfel miał wystarczający native SOL i brak WSOL był oczekiwany w modelu SOL-first.
+- **Root cause (2026-04-30, follow-up):** Deficyt nóg A/B był liczony wyłącznie z bieżącego SPL token balance (`haveA/haveB`), więc noga WSOL wymagała pre-posiadania WSOL ATA zamiast uwzględnić wrap z native SOL przed open.
+- **Fix (2026-04-30, follow-up):** `fundingCheck` w `PositionCreate` liczy teraz efektywne pokrycie nogi WSOL z native SOL (`native - min_open - ATA rent`) i dopiero to porównuje do `need*`; blokada token-deficit nie wymaga już dodatniego WSOL token balance, pozostaje osobny guard `shortOperationalSol`.
 - **Guards/tests:** `npx tsc --noEmit` w `web/` przechodzi. TODO: test UI regresyjny dla scenariusza „A/B OK, ale operacyjny SOL za niski”.
 - **Guards/tests:** `cargo check -p clmm-lp-protocols` przechodzi po zmianie prechecka na exact-plan + 1% margin.
 - **Paths:** `web/src/pages/PositionCreate.tsx`, `crates/protocols/src/orca/executor.rs`
@@ -970,9 +1326,21 @@ keywords: rebalance, close_without_open, swap_mix, recovery, strategy
 - **Fix:** Do wdrożenia: twardy marker `rebalance_incomplete` + trwały `pending-open` recovery gdy close zakończony, a open nie doszedł do skutku; UI powinno pokazywać taki status zamiast "po prostu closed".
 - **Fix (2026-04-17, quality):** `pending-open` zapisuje telemetry per item (`last_attempt_at`, `stuck_reason`, `stuck_since`, `last_alert_attempts`) i klasyfikuje `stuck_reason` automatycznie z `last_error` (`tick_out_of_range`, `quote_failed`, `rpc_timeout`, `insufficient_balance`, `unknown`). Dodano próg `CLMM_PENDING_OPEN_ALERT_ATTEMPTS` (default 10): po przekroczeniu emitowany jest alert `Pending Open Stuck` (z deduplikacją per item).
 - **Symptom (2026-04-27, follow-up):** Dla `retouch_shift` finalny range open po recovery mógł odbiegać od pierwotnego planu strategii po kilku minutach opóźnienia (stary plan z momentu close był wykonywany na nowym rynku).
+- **Symptom (2026-04-30, follow-up):** `Closed by bot, waiting for reopen` potrafiło dalej pokazywać sesję mimo że lifecycle miał już `bot_open_position` dla tego samego `rebalance_session_id`; równolegle pending-open wielokrotnie wpadał w guard `session_already_has_open_row`.
 - **Root cause (2026-04-27, follow-up):** `pending-open` nie trzymał metadanych świeżości planu (`planned_at`, `planned_price`) i recovery otwierał na starych `intended_tick_*` bez jawnej polityki stale/drift replan.
+- **Root cause (2026-04-30, follow-up):** Queue `pending-open-recovery` nie była samoczyszcząca dla sesji już otwartych; synthetic `pending-only` rows w watchdogu opierały się na samym stanie kolejki, więc mogły utrwalać „stare duchy” po udanym reopenie.
 - **Fix (2026-04-27, follow-up):** `pending-open` zapisuje teraz `planned_at_utc` i `planned_price_ab`. Recovery dla `RetouchShift` sprawdza TTL (`CLMM_RECOVER_PLAN_TTL_SECS`, default 180s) i drift ceny (`CLMM_RECOVER_PLAN_MAX_DRIFT_PCT`, default 1%). Przy stale/drift replanuje zakres (zachowując szerokość) wokół bieżącego ticka, loguje `bot_recover_open_replanned`, i zapisuje `range_adjustment_reason` do zdarzenia rebalance.
+- **Fix (2026-04-30, follow-up):** Executor przed próbą recovery sprawdza `session_has_bot_open_position(rebalance_session_id)` i automatycznie usuwa z kolejki przeterminowany pending item (bez kolejnych prób). Watchdog snapshot pomija synthetic `pending-only` dla sesji, które mają już `bot_open_position`.
+- **Fix (2026-04-30, follow-up 2):** Klasyfikacja `stuck_reason` rozpoznaje teraz Whirlpool `Custom(6012)`/`0x177c` jako `open_position_6012` zamiast `unknown`, co daje jednoznaczny sygnał operacyjny.
+- **Symptom (2026-04-30, follow-up 3):** Po udanym recovery-open nowa pozycja potrafiła mieć wartość ~`<1 USD` mimo wcześniejszego targetu ~`10 USD`.
+- **Symptom (2026-04-30, follow-up 4):** Po zmianach SOL-first część reopenujących flow traciła skuteczność; po swap-mix bot potrafił nie domknąć sensownego depozytu dla open/reopen.
+- **Root cause (2026-04-30, follow-up 3):** Gdy recovery nie odczytał `close_amount_{a,b}_raw` z lifecycle, stosował fallback `(1,1)`, co dawało skrajnie niski `prev_end_value_usd` i zaniżony `target_usd`.
+- **Root cause (2026-04-30, follow-up 4):** SOL-first auto-unwrap po `swap_exact_in` działał także gdy swap **kupował WSOL** (np. leg B->A w swap-mix), więc świeżo kupiony WSOL mógł być od razu odwijany do native SOL przed kolejnym krokiem open.
+- **Fix (2026-04-30, follow-up 3):** Recovery fallback dla brakujących close amounts zmieniono na `(0,0)` + jawny warning; przy `prev_end<=0` sizing przechodzi na `wallet_cap` (`target_usd_from_prev_end_clamped`) zamiast mikro-notionalu.
+- **Fix (2026-04-30, follow-up 4):** `swap_exact_in` wykonuje auto-unwrap tylko gdy `specified_mint == WSOL` (sprzedaż WSOL). Dla swapów kupujących WSOL cleanup jest pomijany, żeby nie niszczyć miksu tokenów wymaganego przez natychmiastowy open/reopen.
 - **Guards/tests:** test scenariusza: close success + swap rounds + open failure/abort => wpis `rebalance_incomplete` + recovery artifact; dodatkowo testy klasyfikacji `stuck_reason` i progowego alertowania attempts.
+- **Guards/tests (2026-04-30, follow-up 3):** `cargo test -p clmm-lp-execution target_usd_uses_wallet_cap_when_prev_end_unknown_or_zero -- --nocapture`, `cargo check -p clmm-lp-execution`.
+- **Guards/tests (2026-04-30, follow-up 4):** `cargo check -p clmm-lp-protocols`.
 - **Paths:** `data/ledger/orca_position_lifecycle.jsonl`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/lifecycle/events.rs`, `crates/api/src/handlers/positions.rs`
 
 ### BUG-20260410-05 — Collect Fees: brak executora mimo aktywnego środowiska

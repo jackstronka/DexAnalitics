@@ -1762,13 +1762,14 @@ export default function PositionDetail() {
                   <p className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamLineage.note, locale)}</p>
                 ) : null}
                 <p className="text-[11px] text-muted-foreground leading-snug">
-                  <span className="font-medium">LP zebrane:</span> przy <code className="text-[10px]">collect_fees</code> Orca
-                  przenosi oba tokeny puli, ale <code className="text-[10px]">fee_payer_token_deltas</code> z meta RPC często
-                  zawiera tylko jeden mint SPL (np. whETH) — WSOL bywa pominięty. W nawiasie pokazujemy{' '}
+                  <span className="font-medium">{locale === 'pl' ? 'Fees zebrane:' : 'Fees collected:'}</span>{' '}
+                  {locale === 'pl'
+                    ? 'to prowizje puli (LP) przypisane do pozycji. Preferujemy on-chain snapshot `fee_owed_a/b` (collect/close) gdy dostępny; bez niego liczby są best-effort.'
+                    : 'pool (LP) fees attributed to this position. We prefer on-chain `fee_owed_a/b` snapshots (collect/close) when available; otherwise numbers are best-effort.'}{' '}
                   <span title={FEE_BASE_UNITS_TOOLTIP} className="cursor-help border-b border-dotted border-muted-foreground/40">
-                    baz. jedn.
+                    {locale === 'pl' ? 'baz. jedn.' : 'base units'}
                   </span>{' '}
-                  = najmniejsze jednostki on-chain (np. lamporty), nie osobny token „raw”.
+                  = {locale === 'pl' ? 'najmniejsze jednostki on-chain (np. lamporty).' : 'smallest on-chain units (e.g. lamports).'}
                 </p>
 
                 {streamLineage.nodes.length > 0 ? (
@@ -1800,7 +1801,7 @@ export default function PositionDetail() {
                           <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość current' : 'current value'}</th>
                           <th className="px-2 py-1 text-left">{locale === 'pl' ? 'kapitał Δ' : 'principal Δ'}</th>
                           <th className="px-2 py-1 text-left">{locale === 'pl' ? 'Sieć (tx)' : 'Network (tx)'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'LP zebrane' : 'LP collected'}</th>
+                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'Fees zebrane' : 'Fees collected'}</th>
                           <th className="px-2 py-1 text-left">{locale === 'pl' ? 'cashflow' : 'cashflow'}</th>
                           <th className="px-2 py-1 text-left">{locale === 'pl' ? 'net PnL' : 'net PnL'}</th>
                         </tr>
@@ -1880,7 +1881,7 @@ export default function PositionDetail() {
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]">
                               {(() => {
-                                const collects = n.collect_events ?? 0
+                                const events = n.collect_events ?? 0
                                 const usdNum = parseFloat(String(n.fees_collected_usd ?? '').trim() || '0')
                                 const hasTokenVals =
                                   n.fees_collected_token_a_ui != null ||
@@ -1888,11 +1889,11 @@ export default function PositionDetail() {
                                   n.fees_collected_token_a_raw != null ||
                                   n.fees_collected_token_b_raw != null
                                 const showLegRows =
-                                  collects > 0 && (hasTokenVals || n.token_a_label || n.token_b_label)
+                                  events > 0 && (hasTokenVals || n.token_a_label || n.token_b_label)
                                 return (
                                   <>
-                                    <span>{formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)}</span>
-                                    <span className="text-muted-foreground"> · {collects}×</span>
+                                    <span>{formatLineageFeesCollectedUsdMain(n.fees_collected_usd, events)}</span>
+                                    <span className="text-muted-foreground"> · {events}×</span>
                                     {showLegRows ? (
                                       <div className="text-muted-foreground mt-1 leading-tight">
                                         {n.token_a_label ? (
@@ -1919,7 +1920,7 @@ export default function PositionDetail() {
                                         ) : null}
                                       </div>
                                     ) : null}
-                                    {collects > 0 && usdNum === 0 && !hasTokenVals ? (
+                                    {events > 0 && usdNum === 0 && !hasTokenVals ? (
                                       <div className="text-muted-foreground mt-1 leading-tight text-[10px]">
                                         {locale === 'pl'
                                           ? 'Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.'
@@ -2126,12 +2127,12 @@ export default function PositionDetail() {
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
                       <div className="text-xs font-medium text-foreground">
-                        {locale === 'pl' ? 'Rozbicie LP zebrane (per PDA)' : 'LP collected breakdown (per PDA)'}
+                        {locale === 'pl' ? 'Rozbicie Fees zebrane (per PDA)' : 'Fees collected breakdown (per PDA)'}
                       </div>
                       <div className="text-[10px] text-muted-foreground leading-snug">
                         {locale === 'pl'
-                          ? 'Składowe budujące łączną wartość `LP zebrane` dla całego łańcucha.'
-                          : 'Components building total `LP collected` value for the whole chain.'}
+                          ? 'Składowe budujące łączną wartość `Fees zebrane` dla całego łańcucha.'
+                          : 'Components building total `Fees collected` value for the whole chain.'}
                       </div>
                       <div className="space-y-1 text-xs text-muted-foreground">
                         {streamLineage.nodes.map((n) => {
@@ -2145,7 +2146,7 @@ export default function PositionDetail() {
                             <div key={`fee-breakdown-${n.position_address}`} className="space-y-0.5">
                               <div className="font-mono">
                                 {shortenAddress(n.position_address, 6)}:{' '}
-                                {formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)} · {collects}x collect
+                                {formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)} · {collects}×
                               </div>
                               {(n.token_a_label || n.token_b_label) && (hasA || hasB) ? (
                                 <div className="pl-3 font-mono">

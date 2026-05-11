@@ -14,6 +14,7 @@ import {
   getSwapCostEstimate,
   getStrategies,
   getApiSignerWallet,
+  getDataSnapshots,
   getWalletEffectiveBalances,
   getWallets,
   openPosition,
@@ -26,6 +27,7 @@ import {
 import {
   alignPriceRatioToTicks,
   calculateTickRangeFromWidthPct,
+  expandAlignedTickRangeToIncludeCurrent,
   priceRatioToInputString,
   tickToPriceRatio,
   uiPriceFromRawPriceRatio,
@@ -206,13 +208,35 @@ function buildJupiterSwapUrl(inputMint: string, outputMint: string, amountRaw?: 
   return u.toString()
 }
 
-/** SPL token balance for mint (without native SOL fallback). */
+/**
+ * One-line wallet display for a pool leg mint.
+ * For WSOL mint: show **native SOL** (`balances.sol`) as primary — Orca uses wrapped SOL in accounts,
+ * but users and SOL-first funding think in native SOL (Wallet page aligns with this).
+ * Optional note shows SPL WSOL balance when non-zero.
+ */
 function formatBalanceLine(
   mint: string,
   balances: WalletBalancesResponse | undefined,
 ): { amount: string; note?: string } {
   if (!balances) {
     return { amount: '—' }
+  }
+  if (mint === WSOL_MINT) {
+    const native = parseFloat(balances.sol)
+    const amount = Number.isFinite(native)
+      ? native.toLocaleString(undefined, { maximumFractionDigits: 9 })
+      : balances.sol?.trim() || '0'
+    const row = balances.tokens.find((t) => t.mint === mint)
+    let splUi = 0
+    if (row) {
+      const v = parseFloat(row.ui_amount)
+      if (Number.isFinite(v)) splUi = v
+    }
+    if (splUi > BALANCE_EPS) {
+      const splStr = splUi.toLocaleString(undefined, { maximumFractionDigits: 8 })
+      return { amount, note: `SPL WSOL na koncie: ${splStr}` }
+    }
+    return { amount }
   }
   const row = balances.tokens.find((t) => t.mint === mint)
   if (row) {
@@ -350,6 +374,16 @@ export default function PositionCreate() {
     refetchOnMount: 'always',
   })
 
+  // Informational only: selected UI wallet vs API signer can differ.
+  const selectedOwnerBalancesQ = useQuery({
+    queryKey: ['wallet-balances-selected-owner', ownerPk ?? ''],
+    queryFn: () => getWalletEffectiveBalances(ownerPk!),
+    enabled: !!ownerPk && !!effectiveOwnerPk && ownerPk !== effectiveOwnerPk,
+    staleTime: 20_000,
+    refetchInterval: 10_000,
+    refetchOnMount: 'always',
+  })
+
   useEffect(() => {
     if (!effectiveOwnerPk) {
       prevEffectiveOwnerPkRef.current = null
@@ -373,6 +407,70 @@ export default function PositionCreate() {
   )
 
   const strategyRangeWidthPct = selectedStrategy?.parameters.range_width_pct
+  const isBollingerStrategy = selectedStrategy?.strategy_type === 'bollinger'
+  const bollingerWindowPoints = Math.max(2, Math.round(Number(selectedStrategy?.parameters.bollinger_window ?? 20)))
+  const bollingerK = Number(selectedStrategy?.parameters.bollinger_k ?? 2)
+
+  const bollingerSnapshotsQ = useQuery({
+    queryKey: ['data-snapshots-bollinger', poolAddress.trim(), bollingerWindowPoints],
+    queryFn: () =>
+      getDataSnapshots({
+        protocol: 'orca',
+        pool: poolAddress.trim(),
+        limit: Math.max(120, bollingerWindowPoints * 4),
+      }),
+    enabled: isBollingerStrategy && poolAddress.trim().length > 0,
+    staleTime: 20_000,
+    refetchInterval: 30_000,
+  })
+
+  const bollingerTicks = useMemo(() => {
+    if (!isBollingerStrategy || !poolQ.data) return null
+    if (!Number.isFinite(bollingerK) || bollingerK <= 0) return null
+
+    const prices = (bollingerSnapshotsQ.data?.rows ?? [])
+      .map((r) => Number(r.price_ab))
+      .filter((v) => Number.isFinite(v) && v > 0)
+    if (prices.length < bollingerWindowPoints) return null
+
+    const values = prices.slice(-bollingerWindowPoints)
+    const mean = values.reduce((acc, v) => acc + v, 0) / values.length
+    if (!Number.isFinite(mean) || mean <= 0) return null
+    const variance = values.reduce((acc, v) => {
+      const d = v - mean
+      return acc + d * d
+    }, 0) / values.length
+    const sigma = Math.sqrt(variance)
+
+    let loPrice = mean - bollingerK * sigma
+    let hiPrice = mean + bollingerK * sigma
+    if (!Number.isFinite(loPrice) || !Number.isFinite(hiPrice)) return null
+    if (loPrice <= 0) loPrice = Math.max(mean, 1e-12) * 0.999
+    if (hiPrice <= loPrice) hiPrice = loPrice * 1.001
+
+    const aligned = alignPriceRatioToTicks(loPrice, hiPrice, poolQ.data.tick_spacing)
+    if (!aligned) return null
+    const liveTick =
+      typeof poolStateQ.data?.current_tick === 'number' && Number.isFinite(poolStateQ.data.current_tick)
+        ? poolStateQ.data.current_tick
+        : typeof poolQ.data.current_tick === 'number' && Number.isFinite(poolQ.data.current_tick)
+          ? poolQ.data.current_tick
+          : null
+    if (liveTick == null) return aligned
+    return expandAlignedTickRangeToIncludeCurrent(
+      aligned.tickLower,
+      aligned.tickUpper,
+      liveTick,
+      poolQ.data.tick_spacing,
+    )
+  }, [
+    isBollingerStrategy,
+    poolQ.data,
+    poolStateQ.data?.current_tick,
+    bollingerSnapshotsQ.data,
+    bollingerWindowPoints,
+    bollingerK,
+  ])
 
   useEffect(() => {
     setTickAutoSync(true)
@@ -407,7 +505,21 @@ export default function PositionCreate() {
     if (!tickAutoSync) {
       return
     }
-    if (!strategyId.trim() || strategyRangeWidthPct == null || strategyRangeWidthPct <= 0 || !poolQ.data) {
+    if (!strategyId.trim() || !poolQ.data) {
+      return
+    }
+
+    if (isBollingerStrategy) {
+      if (!bollingerTicks) {
+        return
+      }
+      setTickLower(bollingerTicks.tickLower)
+      setTickUpper(bollingerTicks.tickUpper)
+      setSyncPriceInputsFromTicks(true)
+      return
+    }
+
+    if (strategyRangeWidthPct == null || strategyRangeWidthPct <= 0) {
       return
     }
     const tickCurrent = poolStateQ.data?.current_tick ?? poolQ.data.current_tick
@@ -423,10 +535,13 @@ export default function PositionCreate() {
   }, [
     tickAutoSync,
     strategyId,
+    isBollingerStrategy,
+    bollingerTicks,
     strategyRangeWidthPct,
     poolStateQ.data?.current_tick,
     poolQ.data?.current_tick,
     poolQ.data?.tick_spacing,
+    poolQ.data,
   ])
 
   useEffect(() => {
@@ -587,7 +702,6 @@ export default function PositionCreate() {
           setAmountAUi(Number(solved.quote.amount_a_ui.toFixed(8)))
           setAmountBUi(Number(solved.quote.amount_b_ui.toFixed(8)))
         }
-        setBudgetSubmitRaw({ a: solved.quote.token_max_a, b: solved.quote.token_max_b })
       } catch (e: unknown) {
         if (e instanceof DOMException && e.name === 'AbortError') return
         setBudgetLegSyncError(e instanceof Error ? e.message : String(e))
@@ -631,24 +745,20 @@ export default function PositionCreate() {
     }
   }, [mode])
 
-  /** Caps z quote (u64) — submit bez strat float; UI pokazuje amount_*_ui. */
-  const [budgetSubmitRaw, setBudgetSubmitRaw] = useState<{ a: number; b: number } | null>(null)
+  /** Caps z aktualnego `budgetQuoteQ` — źródło prawdy dla submitu (unika rozjazdu po zmianie ticków). */
+  const budgetQuoteCaps = useMemo(() => {
+    if (mode !== 'budget' || !budgetQuoteQ.data) return null
+    return { a: budgetQuoteQ.data.token_max_a, b: budgetQuoteQ.data.token_max_b }
+  }, [mode, budgetQuoteQ.data])
 
   useEffect(() => {
-    if (mode !== 'budget') {
-      setBudgetSubmitRaw(null)
-      return
-    }
+    if (mode !== 'budget') return
     const d = budgetQuoteQ.data
-    if (!d) {
-      setBudgetSubmitRaw(null)
-      return
-    }
+    if (!d) return
     if (Number.isFinite(d.amount_a_ui) && Number.isFinite(d.amount_b_ui)) {
       setAmountAUi(Number(d.amount_a_ui.toFixed(8)))
       setAmountBUi(Number(d.amount_b_ui.toFixed(8)))
     }
-    setBudgetSubmitRaw({ a: d.token_max_a, b: d.token_max_b })
   }, [mode, budgetQuoteQ.data])
 
   /** Wymagane kwoty vs saldo + linki Jupiter (prefill mintów i szacunkowa kwota wejścia). */
@@ -665,6 +775,8 @@ export default function PositionCreate() {
       deficitOperationalSol: 0,
       haveA: null as number | null,
       haveB: null as number | null,
+      effectiveHaveA: null as number | null,
+      effectiveHaveB: null as number | null,
       nativeSol: null as number | null,
       needA: 0,
       needB: 0,
@@ -679,9 +791,20 @@ export default function PositionCreate() {
     if (!effectiveOwnerPk || !tokenA || !tokenB || !effectiveBalancesQ.data) {
       return empty
     }
-    // Warmup / SWR placeholder can expose zeros with is_stale=true — never treat as funding truth.
-    if (effectiveBalancesQ.data.is_stale) {
-      return empty
+    const bal = effectiveBalancesQ.data
+    // Warmup: stale + all balances read as zero is usually SWR/placeholder — do not show fake deficits (BUG-20260430-01).
+    // If we already see non-zero native SOL or any SPL balance, last-good snapshot is useful: show deficit + Jupiter
+    // while submit stays blocked until `!is_stale` (handleSubmit guard).
+    if (bal.is_stale) {
+      const nativeUi = parseFloat(bal.sol)
+      const nativePositive = Number.isFinite(nativeUi) && nativeUi > BALANCE_EPS
+      const anyTokenPositive = bal.tokens.some((t) => {
+        const v = parseFloat(t.ui_amount)
+        return Number.isFinite(v) && v > BALANCE_EPS
+      })
+      if (!nativePositive && !anyTokenPositive) {
+        return empty
+      }
     }
     if (
       amountAUi === '' ||
@@ -695,19 +818,15 @@ export default function PositionCreate() {
     let needB = Number(amountBUi)
     // W trybie USD submit używa capów `token_max_*` z quote, więc walidacja
     // musi opierać się na tych samych wartościach (a nie tylko na amount_*_ui).
-    if (mode === 'budget' && budgetSubmitRaw != null) {
-      needA = budgetSubmitRaw.a / 10 ** tokenA.decimals
-      needB = budgetSubmitRaw.b / 10 ** tokenB.decimals
+    if (mode === 'budget' && budgetQuoteCaps != null) {
+      needA = budgetQuoteCaps.a / 10 ** tokenA.decimals
+      needB = budgetQuoteCaps.b / 10 ** tokenB.decimals
     }
     const haveA = getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data)
     const haveB = getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data)
     if (haveA === null || haveB === null) {
       return empty
     }
-    const shortA = isInsufficientBalance(needA, haveA)
-    const shortB = isInsufficientBalance(needB, haveB)
-    const deficitA = shortA ? Math.max(0, needA - haveA) : 0
-    const deficitB = shortB ? Math.max(0, needB - haveB) : 0
     const nativeSol = parseFloat(effectiveBalancesQ.data.sol)
     const nativeSolUi = Number.isFinite(nativeSol) ? nativeSol : 0
     const minOpenSolUi = (apiSignerQ.data?.min_open_lamports ?? 0) / 1e9
@@ -726,6 +845,16 @@ export default function PositionCreate() {
     const deficitOperationalSol = shortOperationalSol
       ? Math.max(0, requiredNativeForOpenUi - nativeSolUi)
       : 0
+
+    // SOL-first: WSOL leg can be funded from native SOL via pre-wrap before open.
+    const nativeSolAvailableForWrapUi = Math.max(0, nativeSolUi - minOpenSolUi - wsolAtaRentUi)
+    const effectiveHaveA = tokenA.mint === WSOL_MINT ? Math.max(haveA, nativeSolAvailableForWrapUi) : haveA
+    const effectiveHaveB = tokenB.mint === WSOL_MINT ? Math.max(haveB, nativeSolAvailableForWrapUi) : haveB
+
+    const shortA = isInsufficientBalance(needA, effectiveHaveA)
+    const shortB = isInsufficientBalance(needB, effectiveHaveB)
+    const deficitA = shortA ? Math.max(0, needA - effectiveHaveA) : 0
+    const deficitB = shortB ? Math.max(0, needB - effectiveHaveB) : 0
     const px = pricesQ.data?.prices
 
     let jupiterSwapToCoverA: string | null = null
@@ -746,6 +875,8 @@ export default function PositionCreate() {
         deficitOperationalSol,
         haveA,
         haveB,
+        effectiveHaveA,
+        effectiveHaveB,
         nativeSol: nativeSolUi,
         needA,
         needB,
@@ -807,6 +938,8 @@ export default function PositionCreate() {
       deficitOperationalSol,
       haveA,
       haveB,
+      effectiveHaveA,
+      effectiveHaveB,
       nativeSol: nativeSolUi,
       needA,
       needB,
@@ -823,7 +956,7 @@ export default function PositionCreate() {
     tokenA,
     tokenB,
     mode,
-    budgetSubmitRaw,
+    budgetQuoteCaps,
     effectiveBalancesQ.data,
     amountAUi,
     amountBUi,
@@ -904,11 +1037,9 @@ export default function PositionCreate() {
       if (rawEst <= 0) {
         return null
       }
-      const haveA = getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data)
-      if (haveA == null) {
-        return null
-      }
-      const maxRaw = Math.floor(haveA * 10 ** tokenA.decimals * capPct)
+      // Cap swap-in by what user can spend: same SOL-first leg as `fundingCheck` (native SOL, not SPL WSOL-only).
+      const haveAUi = fundingCheck.effectiveHaveA ?? getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data) ?? 0
+      const maxRaw = Math.floor(haveAUi * 10 ** tokenA.decimals * capPct)
       const amount_in = Math.min(Math.floor(rawEst), maxRaw)
       if (amount_in <= 0) {
         return null
@@ -940,11 +1071,8 @@ export default function PositionCreate() {
       if (rawEst <= 0) {
         return null
       }
-      const haveB = getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data)
-      if (haveB == null) {
-        return null
-      }
-      const maxRaw = Math.floor(haveB * 10 ** tokenB.decimals * capPct)
+      const haveBUi = fundingCheck.effectiveHaveB ?? getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data) ?? 0
+      const maxRaw = Math.floor(haveBUi * 10 ** tokenB.decimals * capPct)
       const amount_in = Math.min(Math.floor(rawEst), maxRaw)
       if (amount_in <= 0) {
         return null
@@ -1155,8 +1283,47 @@ export default function PositionCreate() {
       return
     }
 
-    if (mode === 'budget' && budgetSubmitRaw == null) {
-      setOpenStepError('Tryb USD: poczekaj na wyliczenie kwot (quote) zanim wyślesz.')
+    if (mode === 'budget' && budgetQuoteQ.isFetching) {
+      setOpenStepError(
+        L(
+          'Tryb USD: trwa odświeżanie quote — poczekaj chwilę (zmiana ticków / USD) zanim wyślesz open.',
+          'USD mode: quote is refreshing — wait a moment (ticks/USD changed) before submitting open.',
+        ),
+      )
+      return
+    }
+    if (mode === 'budget' && !budgetQuoteQ.data) {
+      setOpenStepError(
+        L(
+          'Tryb USD: brak quote dla tych ticków i kwoty USD — sprawdź in-range i wartość docelową.',
+          'USD mode: no quote for these ticks and USD target — check in-range and target value.',
+        ),
+      )
+      return
+    }
+    if (mode === 'budget' && budgetQuoteQ.data && !budgetQuoteQ.data.in_range) {
+      setOpenStepError(
+        L(
+          'Tryb USD: ostatni quote ma in_range=false — poszerz ticki albo odśwież przed open.',
+          'USD mode: latest quote has in_range=false — widen ticks or refresh before open.',
+        ),
+      )
+      return
+    }
+
+    const effBal = effectiveBalancesQ.data
+    // Effective-balances can stay `is_stale` for tens of seconds after a confirmed on-chain swap
+    // (projection / fast-return). Blocking open in that window is wrong: caps come from the budget
+    // quote + chain already moved at swap signature.
+    const swapChainAuthoritative =
+      swapBeforeOpen && typeof swapSignature === 'string' && swapSignature.trim().length > 0
+    if (effBal?.is_stale && !swapChainAuthoritative) {
+      setOpenStepError(
+        L(
+          'Saldo portfela jest nieaktualne — użyj „Wymuś odświeżenie” i poczekaj na świeże dane zanim wyślesz open.',
+          'Wallet balances are stale — use “Force refresh” and wait for fresh data before submitting open.',
+        ),
+      )
       return
     }
 
@@ -1176,9 +1343,9 @@ export default function PositionCreate() {
 
     let aRaw: number | null
     let bRaw: number | null
-    if (mode === 'budget' && budgetSubmitRaw != null) {
-      aRaw = budgetSubmitRaw.a
-      bRaw = budgetSubmitRaw.b
+    if (mode === 'budget' && budgetQuoteQ.data) {
+      aRaw = budgetQuoteQ.data.token_max_a
+      bRaw = budgetQuoteQ.data.token_max_b
       if (
         !Number.isFinite(aRaw) ||
         !Number.isFinite(bRaw) ||
@@ -1216,6 +1383,22 @@ export default function PositionCreate() {
       cost_session_id: openCostSessionId,
     })
   }
+
+  const selectedOwnerQuickBalanceLine = useMemo(() => {
+    const d = selectedOwnerBalancesQ.data
+    if (!d) return null
+    const sol = parseFloat(d.sol)
+    const solUi = Number.isFinite(sol) ? sol : 0
+    const a = tokenA ? getAvailableUiAmount(tokenA.mint, d) : null
+    const b = tokenB ? getAvailableUiAmount(tokenB.mint, d) : null
+    return {
+      solUi,
+      a,
+      b,
+      isStale: d.is_stale,
+      staleAgeSec: Math.max(0, d.stale_age_ms / 1000),
+    }
+  }, [selectedOwnerBalancesQ.data, tokenA, tokenB])
 
   const handleSwapOnly = () => {
     if (!swapBeforeOpenPlan) return
@@ -1313,7 +1496,22 @@ export default function PositionCreate() {
                 this position is linked and strategy automation starts by default. You can pause
                 automation for this position later on the position detail page.
               </p>
-              {strategyId.trim() && strategyRangeWidthPct != null && strategyRangeWidthPct > 0 ? (
+              {strategyId.trim() && isBollingerStrategy ? (
+                <p className="text-xs text-foreground/90 mt-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
+                  {L(
+                    `Bollinger: ticki z ostatnich ${bollingerWindowPoints} próbek ceny (k=${Number.isFinite(bollingerK) ? bollingerK : 2}).${
+                      bollingerTicks
+                        ? ' Zakres z band; jeśli bieżący tick puli jest poza nim — poszerzamy minimalnie (tick_spacing), żeby quote USD i propozycja swapu przed open działały.'
+                        : ' Brak wystarczających danych — czekam na historię snapshotów dla tej puli.'
+                    }`,
+                    `Bollinger: ticks from the last ${bollingerWindowPoints} price samples (k=${Number.isFinite(bollingerK) ? bollingerK : 2}).${
+                      bollingerTicks
+                        ? ' Range from bands; if the live pool tick sits outside, we minimally expand (tick_spacing) so the USD quote and pre-open swap hints work.'
+                        : ' Not enough samples yet — waiting for pool snapshot history.'
+                    }`,
+                  )}
+                </p>
+              ) : strategyId.trim() && strategyRangeWidthPct != null && strategyRangeWidthPct > 0 ? (
                 <p className="text-xs text-foreground/90 mt-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
                   Strategia ma <strong>Range Width {strategyRangeWidthPct}%</strong> — ticki niżej
                   można wyliczyć wokół <strong>bieżącej ceny z puli</strong> (odświeżane ~co 10 s).
@@ -1555,8 +1753,9 @@ export default function PositionCreate() {
                     {budgetTickRangeInPrice === false ? (
                       <div className="text-xs text-amber-600/90 mt-1 space-y-1">
                         <div>
-                          Cena puli jest poza zakresem ticków — quote USD nie może policzyć kwot A/B. Ustaw zakres tak,
-                          żeby obejmował bieżącą cenę (in-range).
+                          Cena puli jest poza zakresem ticków — quote USD nie może policzyć kwot A/B (puste Amount → brak
+                          walidacji deficytu i propozycji swapu). Ustaw zakres tak, żeby obejmował bieżącą cenę (in-range)
+                          albo użyj przycisku poniżej.
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                           <Button
@@ -1610,6 +1809,17 @@ export default function PositionCreate() {
                             {L('przełącz na Token A/B.', 'switch to Token A/B.')}
                           </div>
                         ) : null}
+                        {budgetQuoteQ.data.in_range &&
+                        typeof totalUsd === 'number' &&
+                        totalUsd > 0 &&
+                        budgetQuoteQ.data.estimated_value_usd < totalUsd * 0.92 ? (
+                          <div className="text-amber-600/90">
+                            {L(
+                              `Szacunek notional (~${formatUSD(budgetQuoteQ.data.estimated_value_usd)}) jest wyraźnie poniżej wpisanych ${formatUSD(totalUsd)} USD (wąski zakres / dyskretna płynność). Submit zawsze bierze capy z tego świeżego quote — nie ze starego stanu po zmianie ticków.`,
+                              `Estimated notional (~${formatUSD(budgetQuoteQ.data.estimated_value_usd)}) is well below your ${formatUSD(totalUsd)} USD target (narrow range / discrete L). Submit always uses caps from this fresh quote, not stale state after tick changes.`,
+                            )}
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -1640,17 +1850,59 @@ export default function PositionCreate() {
                 </p>
               )}
               {poolQ.data && mintA && mintB && usesApiSignerBalances ? (
-                <p className="text-xs text-muted-foreground">
-                  Walidacja sald używa portfela API signer (
-                  <code className="text-[11px]">{shortenAddress(effectiveOwnerPk ?? '', 6)}</code>), bo z niego backend
-                  wysyła transakcje open/swap.
-                </p>
+                <div className="text-xs text-muted-foreground space-y-1">
+                  <p>
+                    Walidacja sald używa portfela API signer (
+                    <code className="text-[11px]">{shortenAddress(effectiveOwnerPk ?? '', 6)}</code>), bo z niego backend
+                    wysyła transakcje open/swap.
+                  </p>
+                  {ownerPk && effectiveOwnerPk && ownerPk !== effectiveOwnerPk ? (
+                    <p>
+                      Wybrany portfel UI (
+                      <code className="text-[11px]">{shortenAddress(ownerPk, 6)}</code>) jest inny niż API signer.
+                      {selectedOwnerQuickBalanceLine ? (
+                        <>
+                          {' '}
+                          Podgląd wybranego portfela: {selectedOwnerQuickBalanceLine.solUi.toFixed(6)} SOL
+                          {tokenA && selectedOwnerQuickBalanceLine.a != null
+                            ? `, ${selectedOwnerQuickBalanceLine.a.toFixed(6)} ${tokenA.symbol}`
+                            : ''}
+                          {tokenB && selectedOwnerQuickBalanceLine.b != null
+                            ? `, ${selectedOwnerQuickBalanceLine.b.toFixed(6)} ${tokenB.symbol}`
+                            : ''}
+                          {selectedOwnerQuickBalanceLine.isStale
+                            ? ` (stale ${selectedOwnerQuickBalanceLine.staleAgeSec.toFixed(1)}s)`
+                            : ''}
+                          .
+                        </>
+                      ) : null}
+                    </p>
+                  ) : null}
+                </div>
               ) : null}
               {!!effectiveBalancesQ.data?.is_stale && (
-                <InlineError as="div" className="text-xs">
-                  Używany jest ostatni znany stan portfela (stale{' '}
-                  {Math.max(0, effectiveBalancesQ.data.stale_age_ms / 1000).toFixed(1)}s), odświeżanie trwa w tle.
-                  Walidacja funduszy względem kwot jest wstrzymana do świeżego odczytu.
+                <InlineError as="div" className="text-xs flex items-center justify-between gap-3">
+                  <span>
+                    {L(
+                      `Saldo jest nieświeże (~${Math.max(0, effectiveBalancesQ.data.stale_age_ms / 1000).toFixed(1)}s). Odświeżanie idzie w tle — open i walidacja używają dopiero świeżych liczb; możesz wymusić odświeżenie.`,
+                      `Balances are stale (~${Math.max(0, effectiveBalancesQ.data.stale_age_ms / 1000).toFixed(1)}s). Refresh runs in the background — open and validation use fresh numbers only; you can force refresh.`,
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 inline-flex items-center rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted/60 disabled:opacity-60"
+                    disabled={effectiveBalancesQ.isFetching}
+                    onClick={() => {
+                      void queryClient.invalidateQueries({ queryKey: ['wallet-balances', effectiveOwnerPk ?? ''] })
+                      void effectiveBalancesQ.refetch()
+                      if (ownerPk && ownerPk !== effectiveOwnerPk) {
+                        void queryClient.invalidateQueries({ queryKey: ['wallet-balances-selected-owner', ownerPk] })
+                        void selectedOwnerBalancesQ.refetch()
+                      }
+                    }}
+                  >
+                    {effectiveBalancesQ.isFetching ? 'Odświeżam…' : 'Wymuś odświeżenie'}
+                  </button>
                 </InlineError>
               )}
 
@@ -1794,7 +2046,15 @@ export default function PositionCreate() {
 
               {fundingCheck.ready && fundingCheck.blocked && (
                 <ErrorBanner className="py-2.5 space-y-2">
-                  <p className="font-medium">Za mało tokenów na portfelu względem kwot powyżej</p>
+                  <p className="font-medium">Za mało środków na portfelu względem kwot powyżej</p>
+                  {effectiveBalancesQ.data?.is_stale ? (
+                    <p className="text-xs text-muted-foreground">
+                      {L(
+                        'Saldo jest nieświeże — liczby poniżej to ostatni znany stan; po „Wymuś odświeżenie” zweryfikuj przed open.',
+                        'Balances are stale — figures below are last-known; force refresh and verify before open.',
+                      )}
+                    </p>
+                  ) : null}
                   {fundingCheck.shortA && fundingCheck.shortB ? (
                     <p className="text-muted-foreground">
                       Brakuje{' '}
@@ -1809,7 +2069,7 @@ export default function PositionCreate() {
                         <p className="text-muted-foreground">
                           Brakuje ok.{' '}
                           <span className="font-mono tabular-nums">{fundingCheck.deficitA.toFixed(8)}</span> {tokenA?.symbol}{' '}
-                          (masz {fundingCheck.haveA?.toLocaleString(undefined, { maximumFractionDigits: 8 })}, potrzeba{' '}
+                          (masz {fundingCheck.effectiveHaveA?.toLocaleString(undefined, { maximumFractionDigits: 8 })}, potrzeba{' '}
                           {Number(amountAUi).toLocaleString(undefined, { maximumFractionDigits: 8 })}). Zswapuj najpierw z{' '}
                           {tokenB?.symbol} → {tokenA?.symbol}, potem otwórz pozycję.
                         </p>
@@ -1818,7 +2078,7 @@ export default function PositionCreate() {
                         <p className="text-muted-foreground">
                           Brakuje ok.{' '}
                           <span className="font-mono tabular-nums">{fundingCheck.deficitB.toFixed(8)}</span> {tokenB?.symbol}{' '}
-                          (masz {fundingCheck.haveB?.toLocaleString(undefined, { maximumFractionDigits: 8 })}, potrzeba{' '}
+                          (masz {fundingCheck.effectiveHaveB?.toLocaleString(undefined, { maximumFractionDigits: 8 })}, potrzeba{' '}
                           {Number(amountBUi).toLocaleString(undefined, { maximumFractionDigits: 8 })}). Zswapuj najpierw z{' '}
                           {tokenA?.symbol} → {tokenB?.symbol}, potem otwórz pozycję.
                         </p>

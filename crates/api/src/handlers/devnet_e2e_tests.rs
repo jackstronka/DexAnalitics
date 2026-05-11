@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::devnet_test_harness as devh;
 use crate::models::BuildUnsignedTxRequest;
 use crate::services::orca_tx_service::{
     ClosePositionTxRequest, CollectFeesTxRequest, DecreaseLiquidityTxRequest,
@@ -1064,3 +1065,143 @@ async fn devnet_submit_invalid_base64_is_rejected() {
     .expect_err("invalid base64 must be rejected");
     assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
 }
+
+/// Full devnet workflow: open → monitor → `StrategyExecutor` loop → optional `Rebalanced` lifecycle row.
+///
+/// `expect_rebalanced`: `StaticRange` should pass with `false` (no rebalance). Modes that need OOR use
+/// `use_oob_ticks = true` (band above current price so `tick_current < tick_lower`).
+async fn devnet_strategy_workflow_core(
+    mode: StrategyMode,
+    use_oob_ticks: bool,
+    timeout_secs: u64,
+    expect_rebalanced: bool,
+) {
+    let wallet = devnet_wallet_from_env();
+    let state = devnet_state();
+    let pool_s = devh::devnet_pool_address_string();
+    let pool = Pubkey::from_str(&pool_s).expect("pool pubkey");
+    let pool_state = devh::fetch_devnet_pool_state(state.provider.clone(), &pool_s).await;
+    let (amount_a, amount_b, def_tl, def_tu) = devh::devnet_open_amounts_ticks();
+    let (tick_lower, tick_upper) = if use_oob_ticks {
+        devh::oob_ticks_below_band(&pool_state)
+    } else {
+        (def_tl, def_tu)
+    };
+
+    let pending_path = devh::devnet_pending_open_recovery_path();
+    let _ = std::fs::remove_file(&pending_path);
+
+    let exec = Arc::new(StrategyExecutor::new(
+        state.provider.clone(),
+        state.monitor.clone(),
+        state.tx_manager.clone(),
+        devh::executor_config_devnet_aggressive(),
+    ));
+    exec.set_wallet(wallet.clone());
+    exec.set_decision_config(devh::decision_config_for_devnet_strategy(mode));
+    exec
+        .set_pending_open_recovery_path(Some(pending_path))
+        .await;
+
+    let position = exec
+        .execute_open_position(
+            &pool,
+            tick_lower,
+            tick_upper,
+            amount_a,
+            amount_b,
+            200,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("execute_open_position");
+
+    assert!(
+        devh::wait_position_account(state.provider.as_ref(), &position, 45).await,
+        "position account should appear on-chain"
+    );
+
+    state
+        .monitor
+        .add_position(&position.to_string())
+        .await
+        .expect("add_position");
+
+    let exec_run = {
+        let e = exec.clone();
+        tokio::spawn(async move { e.start().await })
+    };
+
+    if expect_rebalanced {
+        assert!(
+            devh::lifecycle_has_rebalanced(&exec, position, timeout_secs).await,
+            "expected Rebalanced for mode {mode:?} (oob={use_oob_ticks})"
+        );
+    } else {
+        sleep(Duration::from_secs(12)).await;
+        assert!(
+            !devh::lifecycle_has_rebalanced(&exec, position, 2).await,
+            "StaticRange must not emit Rebalanced"
+        );
+    }
+
+    exec.stop();
+    let _ = tokio::time::timeout(Duration::from_secs(8), exec_run).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_static_range() {
+    devnet_strategy_workflow_core(StrategyMode::StaticRange, false, 30, false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_periodic() {
+    devnet_strategy_workflow_core(StrategyMode::Periodic, false, 120, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_threshold() {
+    devnet_strategy_workflow_core(StrategyMode::Threshold, false, 120, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_bollinger() {
+    devnet_strategy_workflow_core(StrategyMode::Bollinger, false, 180, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_oor_recenter() {
+    devnet_strategy_workflow_core(StrategyMode::OorRecenter, true, 120, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_il_limit() {
+    devnet_strategy_workflow_core(StrategyMode::IlLimit, true, 120, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_retouch_shift() {
+    devnet_strategy_workflow_core(StrategyMode::RetouchShift, true, 120, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_last_candle() {
+    devnet_strategy_workflow_core(StrategyMode::LastCandle, true, 120, true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires funded wallet + live Solana devnet RPC"]
+async fn devnet_strategy_workflow_last_candle_periodic() {
+    devnet_strategy_workflow_core(StrategyMode::LastCandlePeriodic, false, 120, true).await;
+}
+

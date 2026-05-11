@@ -7,6 +7,7 @@ use crate::events::{
     publish_with_retry,
 };
 use crate::models::WalletEffectiveBalancesResponse;
+use rust_decimal::Decimal;
 use clmm_lp_data::repositories::Database;
 use clmm_lp_execution::prelude::{
     CircuitBreaker, LifecycleTracker, PositionMonitor, StrategyExecutor, TransactionManager,
@@ -76,11 +77,20 @@ pub struct AppState {
     pub wallet_ws_reconnects_total: Arc<AtomicU64>,
     /// Wallet WS-triggered refresh failures.
     pub wallet_ws_refresh_failures_total: Arc<AtomicU64>,
+    /// Best-effort cached per-position **uncollected fees** (claimable now).
+    pub uncollected_fees_cache: Arc<RwLock<HashMap<String, CachedUncollectedFees>>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CachedWalletEffective {
     pub response: WalletEffectiveBalancesResponse,
+    pub updated_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedUncollectedFees {
+    pub amount_a: Decimal,
+    pub amount_b: Decimal,
     pub updated_at: Instant,
 }
 
@@ -176,6 +186,7 @@ impl AppState {
             wallet_ws_events_total: Arc::new(AtomicU64::new(0)),
             wallet_ws_reconnects_total: Arc::new(AtomicU64::new(0)),
             wallet_ws_refresh_failures_total: Arc::new(AtomicU64::new(0)),
+            uncollected_fees_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

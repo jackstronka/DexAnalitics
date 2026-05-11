@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
-use std::io::{BufRead, BufReader};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::warn;
@@ -459,7 +459,8 @@ async fn append_rebalance_inner(
         fee_payer_net_lamports_delta: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         fee_payer_token_deltas: Option<serde_json::Value>,
-        /// Pool leg A/B raw amounts harvested (from position `fee_owed_*` before tx), when `operation == collect_fees`.
+        /// Pool leg A/B raw amounts harvested (from position `fee_owed_*` read before tx),
+        /// when `operation == collect_fees` **or** `operation == close_position`.
         #[serde(skip_serializing_if = "Option::is_none")]
         lp_collected_token_a_raw: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,7 +470,7 @@ async fn append_rebalance_inner(
         rpc_url: String,
     }
 
-    let (lp_a, lp_b) = if operation == "collect_fees" {
+    let (lp_a, lp_b) = if operation == "collect_fees" || operation == "close_position" {
         (lp_collected_token_a_raw, lp_collected_token_b_raw)
     } else {
         (None, None)

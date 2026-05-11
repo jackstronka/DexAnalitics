@@ -1,5 +1,9 @@
 # Bociarz LP — Project Overview
 
+## Functional specification (normative behavior)
+
+Expected behavior of features (open/close, rebalance, strategies, guardrails) is maintained in **`doc/FUNCTIONAL_SPECIFICATION.md`**. Use it as the single place to refine “how it should work”; this overview stays architecture- and layout-focused.
+
 ## Decision and Worklog Docs
 
 For bot direction and historical context of recent work, see:

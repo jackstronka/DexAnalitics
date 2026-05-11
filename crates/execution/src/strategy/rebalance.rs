@@ -10,13 +10,15 @@ use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signer;
 use solana_sdk::signature::Signature;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Account as SplTokenAccount;
 use spl_token::state::Mint as SplMint;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -73,6 +75,27 @@ fn swap_mix_deficit_usd_epsilon() -> f64 {
         .unwrap_or(0.25)
 }
 
+/// Adaptive swap-mix epsilon when env override is not set.
+///
+/// Rationale: using a fixed USD epsilon can cause dust loops (too strict) or unnecessary swaps (too loose)
+/// across very different position sizes. We scale gently with `target_usd` and keep safe caps.
+fn swap_mix_deficit_usd_epsilon_for_target(target_usd: f64) -> f64 {
+    // If operator set an explicit epsilon, always respect it.
+    if std::env::var("CLMM_SWAP_MIX_DEFICIT_USD_EPS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .is_some()
+    {
+        return swap_mix_deficit_usd_epsilon();
+    }
+    if !target_usd.is_finite() || target_usd <= 0.0 {
+        return swap_mix_deficit_usd_epsilon();
+    }
+    // ~0.3% of target + small floor, capped.
+    let eps = 0.03_f64 + 0.003_f64 * target_usd;
+    eps.clamp(0.05, 0.50)
+}
+
 /// Max fraction of the surplus leg to spend in **one** `swap_exact_in` during swap-mix.
 ///
 /// Previously hardcoded at 0.92, which often left several % of the leg unused vs the deposit quote,
@@ -98,6 +121,76 @@ fn ui_from_raw(raw: u64, decimals: u8) -> f64 {
     (raw as f64) / 10f64.powi(i32::from(decimals))
 }
 
+/// Native SOL held back for fees/rent before wrap or in-pool swap during swap-mix.
+const SWAP_MIX_NATIVE_SOL_RESERVE_LAMPORTS: u64 = 10_000_000;
+
+#[must_use]
+fn swap_mix_native_spendable_lamports(native_lamports: u64) -> u64 {
+    native_lamports.saturating_sub(SWAP_MIX_NATIVE_SOL_RESERVE_LAMPORTS)
+}
+
+/// SPL balances plus spendable **native** SOL counted on whichever pool leg is WSOL (SOL-first notional).
+fn swap_mix_wallet_ui_sol_first(
+    token_mint_a: &Pubkey,
+    token_mint_b: &Pubkey,
+    wsol_mint_pk: &Pubkey,
+    wa: u64,
+    wb: u64,
+    dec_a: u8,
+    dec_b: u8,
+    spendable_lamports: u64,
+) -> (f64, f64) {
+    let mut a_ui = ui_from_raw(wa, dec_a);
+    let mut b_ui = ui_from_raw(wb, dec_b);
+    let spendable_ui = spendable_lamports as f64 / 1e9;
+    if token_mint_a == wsol_mint_pk {
+        a_ui = a_ui.max(spendable_ui);
+    }
+    if token_mint_b == wsol_mint_pk {
+        b_ui = b_ui.max(spendable_ui);
+    }
+    (a_ui, b_ui)
+}
+
+/// When opening on a WSOL pool leg, treat spendable native SOL as available on that leg.
+///
+/// This matches upstream Whirlpool bot behavior (native SOL vs WSOL ATA) and our swap-mix sizing.
+fn open_wallet_notional_and_caps_sol_first(
+    token_mint_a: &Pubkey,
+    token_mint_b: &Pubkey,
+    wsol_mint_pk: &Pubkey,
+    wa: u64,
+    wb: u64,
+    dec_a: u8,
+    dec_b: u8,
+    spendable_lamports: u64,
+    price_a_usd: f64,
+    price_b_usd: f64,
+) -> (f64, u64, u64) {
+    let (a_ui, b_ui) = swap_mix_wallet_ui_sol_first(
+        token_mint_a,
+        token_mint_b,
+        wsol_mint_pk,
+        wa,
+        wb,
+        dec_a,
+        dec_b,
+        spendable_lamports,
+    );
+    let wallet_notional_usd = a_ui * price_a_usd + b_ui * price_b_usd;
+
+    let mut cap_a = wa;
+    let mut cap_b = wb;
+    if token_mint_a == wsol_mint_pk {
+        cap_a = cap_a.max(spendable_lamports);
+    }
+    if token_mint_b == wsol_mint_pk {
+        cap_b = cap_b.max(spendable_lamports);
+    }
+
+    (wallet_notional_usd, cap_a, cap_b)
+}
+
 fn prev_end_value_usd_from_close_amounts(
     amount_a_raw: u64,
     amount_b_raw: u64,
@@ -118,6 +211,48 @@ fn target_usd_from_prev_end_clamped(prev_end_value_usd: f64, wallet_notional_usd
         return wallet_cap;
     }
     prev_end_value_usd.min(wallet_cap)
+}
+
+/// Post-close reopen `target_usd`: ledger-derived `prev_end_value_usd` minus dust margin **only**.
+///
+/// Spec §2.2 / §2.5 / A4: do **not** clamp to wallet notional here — a low `wallet_notional` may be
+/// stale RPC or cross-session contention; silent downsizing is avoided. When swap-mix cannot
+/// reach the quote, the executor surfaces an error → pending-open recovery.
+///
+/// When `prev_end_value_usd` is unknown/zero (e.g. missing lifecycle row), callers should fall back
+/// to [`target_usd_from_prev_end_clamped`] with `prev_end_value_usd = 0` (wallet-cap sizing).
+fn target_usd_for_reopen_sizing(prev_end_value_usd: f64) -> f64 {
+    if !(prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0) {
+        return 0.0;
+    }
+    (prev_end_value_usd * 0.995).max(0.0)
+}
+
+fn target_usd_for_swap_mix_and_open(prev_end_value_usd: f64, wallet_notional_usd: f64) -> f64 {
+    if prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0 {
+        target_usd_for_reopen_sizing(prev_end_value_usd)
+    } else {
+        target_usd_from_prev_end_clamped(0.0, wallet_notional_usd)
+    }
+}
+
+/// USD budget for [`no_close_unless_reopen_feasible`] deposit quote **before** closing.
+///
+/// SPL balances are read **pre-close**; liquidity is still in the position. Spendable value after a
+/// successful close is approximately `wallet_notional + prev_end_value_usd` at the same synthetic
+/// prices. Do not use [`target_usd_from_prev_end_clamped`] here: it clamps `prev_end` to the
+/// (empty) wallet and yields `target_usd = 0`, blocking every close+reopen.
+fn target_usd_for_close_reopen_preflight(
+    prev_end_value_usd: f64,
+    wallet_notional_before_close: f64,
+) -> f64 {
+    let wallet_cap = (wallet_notional_before_close * 0.995).max(0.0);
+    if !(prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0) {
+        return wallet_cap;
+    }
+    let post_close_spendable_usd = wallet_notional_before_close + prev_end_value_usd;
+    let spendable_cap = (post_close_spendable_usd * 0.995).max(0.0);
+    prev_end_value_usd.min(spendable_cap)
 }
 
 /// Guardrail: when enabled, do not close a position unless a reopen is feasible (preflight quote).
@@ -192,6 +327,32 @@ fn reopen_auto_widen_max_steps() -> u32 {
         .unwrap_or(4)
 }
 
+/// §2.2: balance reads when comparing wallet notional `W` vs reopen target before swap-mix.
+fn reopen_wallet_refresh_attempts() -> u32 {
+    std::env::var("CLMM_REOPEN_WALLET_REFRESH_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| (1..=20).contains(&n))
+        .unwrap_or(3)
+}
+
+fn reopen_wallet_refresh_gap_ms() -> u64 {
+    std::env::var("CLMM_REOPEN_WALLET_REFRESH_GAP_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n <= 10_000)
+        .unwrap_or(350)
+}
+
+/// `ε_wallet` for `W >= T * (1 - ε)` (spec §2.2); default **0.5%**.
+fn reopen_wallet_notional_epsilon() -> f64 {
+    std::env::var("CLMM_REOPEN_WALLET_NOTIONAL_EPSILON")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&e| e >= 0.0 && e < 0.5)
+        .unwrap_or(0.005)
+}
+
 /// Whether to block rebalance when [`RebalanceExecutor::is_profitable`] is false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RebalanceProfitabilityMode {
@@ -248,10 +409,12 @@ fn synthetic_prices_for_deposit_quote(
     const MIN_POSITIVE: f64 = 1e-18;
     const INVERT_IF_LT: f64 = 0.2; // e.g. 0.08 USDC/SOL is almost certainly inverted (SOL/USDC)
 
-    // Stablecoin mint IDs (mainnet).
+    // Stablecoin mint IDs (mainnet + common devnet Nebula proxy).
     const USDC: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
     const USDT: Pubkey = pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
-    let is_stable = |m: &Pubkey| *m == USDC || *m == USDT;
+    const DEVNET_DEV_USDC: Pubkey = pubkey!("BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k");
+    let is_stable =
+        |m: &Pubkey| *m == USDC || *m == USDT || *m == DEVNET_DEV_USDC;
 
     // If B is stablecoin: interpret price as stable_per_A (USD per token A). If it's tiny, assume inverse.
     if is_stable(mint_b) {
@@ -337,6 +500,35 @@ mod synthetic_price_tests {
     }
 }
 
+#[cfg(test)]
+mod swap_mix_sol_first_tests {
+    use super::*;
+
+    #[test]
+    fn wallet_ui_counts_native_when_wsol_is_token_b() {
+        let wsol: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL mint");
+        let usdc = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        let (a_ui, b_ui) =
+            swap_mix_wallet_ui_sol_first(&usdc, &wsol, &wsol, 0, 0, 6, 9, 500_000_000);
+        assert!((a_ui - 0.0).abs() < 1e-12);
+        assert!((b_ui - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn wallet_ui_counts_native_when_wsol_is_token_a() {
+        let wsol: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL mint");
+        let usdc = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        let (a_ui, b_ui) =
+            swap_mix_wallet_ui_sol_first(&wsol, &usdc, &wsol, 0, 0, 9, 6, 400_000_000);
+        assert!((a_ui - 0.4).abs() < 1e-12);
+        assert!((b_ui - 0.0).abs() < 1e-12);
+    }
+}
+
 fn balances_cover_deposit_quote(wa: u64, wb: u64, q: &DepositBudgetQuote) -> bool {
     let tol_a = (q.amount_a / 100).max(1);
     let tol_b = (q.amount_b / 100).max(1);
@@ -383,13 +575,8 @@ fn adapt_recover_open_ticks_if_needed(
         return ((tick_lower, tick_upper), false);
     }
     for step in 1..=reopen_auto_widen_max_steps() {
-        let (lo, hi) = widen_ticks_around_current(
-            tick_current,
-            tick_spacing,
-            tick_lower,
-            tick_upper,
-            step,
-        );
+        let (lo, hi) =
+            widen_ticks_around_current(tick_current, tick_spacing, tick_lower, tick_upper, step);
         if tick_current >= lo && tick_current < hi {
             return ((lo, hi), true);
         }
@@ -415,7 +602,12 @@ fn recover_plan_drift_threshold_pct() -> Decimal {
         .unwrap_or(Decimal::new(1, 2))
 }
 
-fn recenter_ticks_keep_width(tick_current: i32, tick_spacing: u16, tick_lower: i32, tick_upper: i32) -> (i32, i32) {
+fn recenter_ticks_keep_width(
+    tick_current: i32,
+    tick_spacing: u16,
+    tick_lower: i32,
+    tick_upper: i32,
+) -> (i32, i32) {
     let spacing = i32::from(tick_spacing).max(1);
     let width = (tick_upper - tick_lower).abs().max(spacing);
     let half = width / 2;
@@ -630,6 +822,12 @@ impl RebalanceExecutor {
         }
     }
 
+    /// Access RPC provider (for best-effort diagnostics).
+    #[must_use]
+    pub fn provider(&self) -> &Arc<RpcProvider> {
+        &self.provider
+    }
+
     #[inline]
     fn is_dry_run(&self) -> bool {
         self.dry_run.load(Ordering::SeqCst)
@@ -737,6 +935,136 @@ impl RebalanceExecutor {
         il_recovery * Decimal::from(1000) // Convert to USD equivalent
     }
 
+    /// §2.2: After close, compare wallet notional `W` vs full returned USD `T` from `returned_*_raw`;
+    /// re-read SPL/native balances up to [`reopen_wallet_refresh_attempts`] before swap-mix.
+    ///
+    /// Skipped when returned notional is unknown/zero (wallet-cap sizing path). Fails with
+    /// `wallet_below_target_after_refresh` when still `W < T * (1 - ε)` after all reads.
+    async fn wallet_notional_refresh_until_reopen_target_met(
+        &self,
+        pool: &Pubkey,
+        owner: &Pubkey,
+        returned_a_raw: u64,
+        returned_b_raw: u64,
+        log_position: &Pubkey,
+        ledger_session_id: Option<String>,
+    ) -> Result<(), String> {
+        let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL mint");
+        let attempts = reopen_wallet_refresh_attempts();
+        let gap = Duration::from_millis(reopen_wallet_refresh_gap_ms());
+        let eps = reopen_wallet_notional_epsilon();
+        let pool_reader = WhirlpoolReader::new(self.provider.clone());
+        let pool_s = pool.to_string();
+        let mut last_prev_end = 0.0_f64;
+        let mut last_wallet = 0.0_f64;
+        let mut last_threshold = 0.0_f64;
+
+        for attempt in 0..attempts {
+            let pool_live = pool_reader.get_pool_state(&pool_s).await.map_err(|e| {
+                format!("reopen wallet vs target: get_pool_state: {e}")
+            })?;
+            let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_live.token_mint_a)
+                .await
+                .unwrap_or(0);
+            let dec_b = spl_mint_decimals(self.provider.as_ref(), &pool_live.token_mint_b)
+                .await
+                .unwrap_or(0);
+            let wa =
+                spl_token_balance_raw(self.provider.as_ref(), owner, &pool_live.token_mint_a).await;
+            let wb =
+                spl_token_balance_raw(self.provider.as_ref(), owner, &pool_live.token_mint_b).await;
+            let native_lamports = self.provider.get_balance(owner).await.unwrap_or(0);
+            let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
+            let (pa, pb, _) = synthetic_prices_for_deposit_quote(
+                pool_live.price,
+                &pool_live.token_mint_a,
+                &pool_live.token_mint_b,
+                dec_a,
+                dec_b,
+            );
+            let (wallet_notional, _, _) = open_wallet_notional_and_caps_sol_first(
+                &pool_live.token_mint_a,
+                &pool_live.token_mint_b,
+                &wsol_mint_pk,
+                wa,
+                wb,
+                dec_a,
+                dec_b,
+                native_spendable,
+                pa,
+                pb,
+            );
+            let prev_end_usd = prev_end_value_usd_from_close_amounts(
+                returned_a_raw,
+                returned_b_raw,
+                dec_a,
+                dec_b,
+                pa,
+                pb,
+            );
+            if !(prev_end_usd.is_finite() && prev_end_usd > 0.0) {
+                return Ok(());
+            }
+            let threshold = prev_end_usd * (1.0 - eps);
+            last_prev_end = prev_end_usd;
+            last_wallet = wallet_notional;
+            last_threshold = threshold;
+            if wallet_notional >= threshold {
+                if attempt > 0 {
+                    info!(
+                        op = "orca_rebalance",
+                        stage = "reopen_wallet_refresh",
+                        attempt = attempt + 1,
+                        max_attempts = attempts,
+                        wallet_notional,
+                        prev_end_usd,
+                        threshold,
+                        position = %log_position,
+                        "Wallet notional met reopen target after refresh"
+                    );
+                }
+                return Ok(());
+            }
+            warn!(
+                op = "orca_rebalance",
+                stage = "reopen_wallet_refresh",
+                attempt = attempt + 1,
+                max_attempts = attempts,
+                wallet_notional,
+                prev_end_usd,
+                threshold,
+                position = %log_position,
+                "Wallet notional below reopen target (may be stale read or contention)"
+            );
+            clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                self.provider.as_ref(),
+                "bot_reopen_wallet_below_target",
+                "reopen_wallet_check",
+                Some(*pool),
+                Some(*log_position),
+                ledger_session_id.clone(),
+                serde_json::json!({
+                    "attempt": attempt + 1,
+                    "max_attempts": attempts,
+                    "wallet_notional": wallet_notional,
+                    "prev_end_value_usd": prev_end_usd,
+                    "threshold_usd": threshold,
+                    "epsilon": eps,
+                }),
+            )
+            .await;
+            if attempt + 1 < attempts {
+                tokio::time::sleep(gap).await;
+            }
+        }
+
+        Err(format!(
+            "wallet_below_target_after_refresh: wallet_notional={last_wallet:.8} still below threshold={last_threshold:.8} (prev_end_usd={last_prev_end:.8} after {attempts} reads, spec §2.2)"
+        ))
+    }
+
     /// In-pool Orca swaps (ExactIn) until wallet balances match [`quote_deposit_budget_in_range`]
     /// for the new tick range — same building block as API `quote-open-budget` + swap-before-open.
     ///
@@ -760,6 +1088,7 @@ impl RebalanceExecutor {
         let max_rounds = swap_mix_max_rounds();
         let mut swaps: u32 = 0;
         let mut last_round_details: Option<serde_json::Value> = None;
+        let mut prev_deficit_usd: Option<f64> = None;
         const MIN_SWAP: u64 = 1;
 
         info!(
@@ -774,7 +1103,7 @@ impl RebalanceExecutor {
         );
 
         for round in 0..max_rounds {
-            let buffer_pct = swap_mix_amount_in_buffer_pct();
+            let mut buffer_pct = swap_mix_amount_in_buffer_pct();
             let spend_cap = {
                 let base = swap_mix_spend_cap_pct();
                 if round > 0 {
@@ -824,15 +1153,36 @@ impl RebalanceExecutor {
                 .await;
             let wb = spl_token_balance_raw(self.provider.as_ref(), owner, &pool_state.token_mint_b)
                 .await;
+            let native_lamports = self.provider.get_balance(owner).await.unwrap_or(0);
+            let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+                .parse()
+                .expect("WSOL mint");
+            let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
+            let pool_has_wsol =
+                pool_state.token_mint_a == wsol_mint_pk || pool_state.token_mint_b == wsol_mint_pk;
             if wa == 0 && wb == 0 {
-                error!(
+                if !(pool_has_wsol && native_spendable > MIN_SWAP) {
+                    error!(
+                        op = "orca_rebalance",
+                        stage = "swap_mix",
+                        pool = %pool,
+                        round,
+                        native_lamports,
+                        native_spendable,
+                        "swap-mix: both SPL legs zero and no spendable native SOL for WSOL pool"
+                    );
+                    anyhow::bail!(
+                        "wallet has zero SPL for both pool legs and insufficient native SOL (or pool has no WSOL leg); cannot swap-mix"
+                    );
+                }
+                info!(
                     op = "orca_rebalance",
                     stage = "swap_mix",
                     pool = %pool,
                     round,
-                    "swap-mix: wallet has zero of both tokens"
+                    native_spendable,
+                    "swap-mix: both SPL balances zero — continuing on native SOL (SOL-first, WSOL leg)"
                 );
-                anyhow::bail!("wallet has zero of both tokens; cannot swap or open");
             }
             let (pa, pb, price_mode) = synthetic_prices_for_deposit_quote(
                 pool_state.price,
@@ -841,8 +1191,16 @@ impl RebalanceExecutor {
                 dec_a,
                 dec_b,
             );
-            let a_ui = ui_from_raw(wa, dec_a);
-            let b_ui = ui_from_raw(wb, dec_b);
+            let (a_ui, b_ui) = swap_mix_wallet_ui_sol_first(
+                &pool_state.token_mint_a,
+                &pool_state.token_mint_b,
+                &wsol_mint_pk,
+                wa,
+                wb,
+                dec_a,
+                dec_b,
+                native_spendable,
+            );
             let wallet_notional = a_ui * pa + b_ui * pb;
             if !wallet_notional.is_finite() || wallet_notional <= 0.0 {
                 error!(
@@ -866,7 +1224,8 @@ impl RebalanceExecutor {
                 pa,
                 pb,
             );
-            let target_usd = target_usd_from_prev_end_clamped(prev_end_value_usd, wallet_notional);
+            let target_usd =
+                target_usd_for_swap_mix_and_open(prev_end_value_usd, wallet_notional);
             let q = quote_deposit_budget_in_range(
                 tick_lower,
                 tick_upper,
@@ -911,7 +1270,7 @@ impl RebalanceExecutor {
             let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
             let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
             let deficit_usd = (deficit_a_ui * pa + deficit_b_ui * pb).max(0.0);
-            let eps_usd = swap_mix_deficit_usd_epsilon();
+            let eps_usd = swap_mix_deficit_usd_epsilon_for_target(target_usd);
             if deficit_usd.is_finite() && deficit_usd <= eps_usd {
                 info!(
                     op = "orca_rebalance",
@@ -926,18 +1285,125 @@ impl RebalanceExecutor {
                 return Ok(swaps);
             }
 
-            let native_lamports = self.provider.get_balance(owner).await.unwrap_or(0);
-            // Leave ~0.01 SOL for fees / rent when moving native SOL into wSOL ATA.
-            const NATIVE_SOL_RESERVE_LAMPORTS: u64 = 10_000_000;
-            let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
-                .parse()
-                .expect("WSOL mint");
-            let can_wrap_native_sol_for_wsol_leg = pool_state.token_mint_a == wsol_mint_pk
-                && deficit_b > 0
-                && native_lamports > NATIVE_SOL_RESERVE_LAMPORTS.saturating_add(MIN_SWAP);
+            let stagnation_push = if round > 0
+                && swaps == 1
+                && deficit_usd.is_finite()
+                && prev_deficit_usd.is_some_and(|p| p.is_finite() && p > 0.0)
+            {
+                let p = prev_deficit_usd.unwrap_or(deficit_usd);
+                deficit_usd >= p * 0.95
+            } else {
+                false
+            };
+            if stagnation_push {
+                buffer_pct = buffer_pct.max(1.08).min(1.15);
+            }
 
-            if deficit_a > 0 && wb > MIN_SWAP {
+            // Prefer at most 1-2 swap transactions in swap-mix to reduce drift + fees.
+            // Wrapping native SOL into WSOL ATA does not increment `swaps`.
+            if swaps >= 2 {
+                error!(
+                    op = "orca_rebalance",
+                    stage = "swap_mix",
+                    pool = %pool,
+                    round,
+                    swaps_done = swaps,
+                    deficit_usd,
+                    eps_usd,
+                    "swap-mix: remaining deficit after 2 swaps; refusing further swaps in this attempt"
+                );
+                break;
+            }
+
+            let can_wrap_native_sol_for_wsol_leg_a = pool_state.token_mint_a == wsol_mint_pk
+                && deficit_a > 0
+                && native_lamports > SWAP_MIX_NATIVE_SOL_RESERVE_LAMPORTS.saturating_add(MIN_SWAP);
+
+            let can_wrap_native_sol_for_wsol_leg_b = pool_state.token_mint_b == wsol_mint_pk
+                && deficit_a > 0
+                && native_lamports > SWAP_MIX_NATIVE_SOL_RESERVE_LAMPORTS.saturating_add(MIN_SWAP);
+
+            if deficit_a > 0 && (wb > MIN_SWAP || can_wrap_native_sol_for_wsol_leg_b) {
                 // Swap B -> A to cover deficit in A (estimate using synthetic USD prices).
+                // Special case: if token A is WSOL and we have spendable **native** SOL but no WSOL SPL,
+                // prefer wrapping native SOL into the WSOL ATA instead of swapping the other leg.
+                // This prevents wasteful USDC->WSOL swaps when the wallet already holds SOL.
+                if pool_state.token_mint_a == wsol_mint_pk
+                    && wa <= MIN_SWAP
+                    && can_wrap_native_sol_for_wsol_leg_a
+                {
+                    let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
+                    let usd_need = (deficit_a_ui * pa).max(0.0);
+                    let mut fund_a_ui = if pa > 0.0 {
+                        // If A is WSOL, this reduces to ~deficit_a_ui * buffer_pct.
+                        (usd_need / pa) * buffer_pct
+                    } else {
+                        0.0
+                    };
+                    if !fund_a_ui.is_finite() || fund_a_ui <= 0.0 {
+                        fund_a_ui = (swap_mix_native_spendable_lamports(native_lamports) as f64 / 1e9)
+                            * 0.25;
+                    }
+                    let raw_est_wrap = (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as u64;
+                    let wrap_amt =
+                        raw_est_wrap.min(swap_mix_native_spendable_lamports(native_lamports));
+                    if wrap_amt >= MIN_SWAP {
+                        let wallet = self.require_wallet()?;
+                        let orca = WhirlpoolExecutor::new(self.provider.clone());
+                        info!(
+                            op = "orca_rebalance",
+                            stage = "swap_mix",
+                            pool = %pool,
+                            round,
+                            wrap_amt,
+                            native_lamports,
+                            wa_spl = wa,
+                            "swap-mix: pre-wrap native SOL into wSOL ATA (token A is wSOL; SPL wa was 0)"
+                        );
+                        orca.submit_wsol_wrap_if_needed(wrap_amt, wallet.keypair())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("swap-mix wsol pre-wrap (leg A): {e}"))?;
+                        continue;
+                    }
+                }
+                if pool_state.token_mint_b == wsol_mint_pk
+                    && wb <= MIN_SWAP
+                    && can_wrap_native_sol_for_wsol_leg_b
+                {
+                    let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
+                    let usd_need = (deficit_a_ui * pa).max(0.0);
+                    let mut fund_b_ui = if pb > 0.0 {
+                        (usd_need / pb) * buffer_pct
+                    } else {
+                        0.0
+                    };
+                    if !fund_b_ui.is_finite() || fund_b_ui <= 0.0 {
+                        fund_b_ui = (swap_mix_native_spendable_lamports(native_lamports) as f64
+                            / 1e9)
+                            * 0.25;
+                    }
+                    let raw_est_wrap = (fund_b_ui * 10f64.powi(i32::from(dec_b))).round() as u64;
+                    let wrap_amt =
+                        raw_est_wrap.min(swap_mix_native_spendable_lamports(native_lamports));
+                    if wrap_amt >= MIN_SWAP {
+                        let wallet = self.require_wallet()?;
+                        let orca = WhirlpoolExecutor::new(self.provider.clone());
+                        info!(
+                            op = "orca_rebalance",
+                            stage = "swap_mix",
+                            pool = %pool,
+                            round,
+                            wrap_amt,
+                            native_lamports,
+                            wb_spl = wb,
+                            "swap-mix: pre-wrap native SOL into wSOL ATA (SPL wb was 0; leg B is WSOL)"
+                        );
+                        orca.submit_wsol_wrap_if_needed(wrap_amt, wallet.keypair())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("swap-mix wsol pre-wrap (leg B): {e}"))?;
+                        continue;
+                    }
+                }
                 let deficit_a_ui = deficit_a as f64 / 10f64.powi(i32::from(dec_a));
                 let usd_need = (deficit_a_ui * pa).max(0.0);
                 let mut fund_b_ui = if pb > 0.0 {
@@ -949,7 +1415,11 @@ impl RebalanceExecutor {
                     fund_b_ui = (wb as f64 / 10f64.powi(i32::from(dec_b))) * 0.5;
                 }
                 let raw_est = (fund_b_ui * 10f64.powi(i32::from(dec_b))).round() as i128;
-                let max_raw = ((wb as f64) * spend_cap).floor() as i128;
+                // Single-shot sizing: spend from the **surplus** leg (keep enough for the quote),
+                // not from the entire balance. This avoids ping-pong when we deplete the needed leg.
+                let surplus_b = wb.saturating_sub(q.amount_b);
+                let max_raw = ((surplus_b as f64) * spend_cap).floor() as i128;
+                let max_raw_u64 = max_raw.max(0) as u64;
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wb)) as u64;
@@ -978,9 +1448,13 @@ impl RebalanceExecutor {
                     "target_usd": target_usd,
                     "specified_mint": pool_state.token_mint_b.to_string(),
                     "amount_in": amount_in,
+                    "amount_in_raw_est": raw_est,
+                    "max_spend_raw": max_raw_u64,
+                    "surplus_b": surplus_b,
                     "amount_in_ui": amount_in_ui,
                     "amount_in_usd_est": amount_in_usd_est,
                     "slippage_bps": self.config.max_slippage_bps,
+                    "stagnation_push": stagnation_push,
                 }));
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                     self.provider.as_ref(),
@@ -988,12 +1462,15 @@ impl RebalanceExecutor {
                     "swap_mix",
                     Some(*pool),
                     Some(*log_position),
-                    None,
+                    ledger_session_id.clone(),
                     serde_json::json!({
                         "round": round,
                         "max_rounds": max_rounds,
                         "leg": "B_to_A",
                         "amount_in": amount_in,
+                        "amount_in_raw_est": raw_est,
+                        "max_spend_raw": max_raw_u64,
+                        "surplus_b": surplus_b,
                         "amount_in_ui": amount_in_ui,
                         "amount_in_usd_est": amount_in_usd_est,
                         "wa": wa,
@@ -1020,6 +1497,7 @@ impl RebalanceExecutor {
                         "amount_in_est_mode": "deficit_usd",
                         "spend_cap_pct": spend_cap,
                         "amount_in_buffer_pct": buffer_pct,
+                        "stagnation_push": stagnation_push,
                     }),
                 )
                 .await;
@@ -1029,7 +1507,7 @@ impl RebalanceExecutor {
                     "swap_exact_in",
                     Some(*pool),
                     Some(*log_position),
-                    None,
+                    ledger_session_id.clone(),
                     serde_json::json!({
                         "round": round,
                         "leg": "B_to_A",
@@ -1063,7 +1541,7 @@ impl RebalanceExecutor {
                             "swap_exact_in",
                             Some(*pool),
                             Some(*log_position),
-                            None,
+                            ledger_session_id.clone(),
                             serde_json::json!({
                                 "round": round,
                                 "leg": "B_to_A",
@@ -1094,7 +1572,7 @@ impl RebalanceExecutor {
                         "swap_exact_in",
                         Some(*pool),
                         Some(*log_position),
-                        None,
+                        ledger_session_id.clone(),
                         serde_json::json!({
                             "round": round,
                             "leg": "B_to_A",
@@ -1107,13 +1585,14 @@ impl RebalanceExecutor {
                     .await;
                 }
                 swaps += 1;
+                prev_deficit_usd = Some(deficit_usd);
                 continue;
             }
-            if deficit_b > 0 && (wa > MIN_SWAP || can_wrap_native_sol_for_wsol_leg) {
+            if deficit_b > 0 && (wa > MIN_SWAP || can_wrap_native_sol_for_wsol_leg_a) {
                 // Swap A -> B to cover deficit in B (estimate using synthetic USD prices).
                 if pool_state.token_mint_a == wsol_mint_pk
                     && wa <= MIN_SWAP
-                    && can_wrap_native_sol_for_wsol_leg
+                    && can_wrap_native_sol_for_wsol_leg_a
                 {
                     let deficit_b_ui = deficit_b as f64 / 10f64.powi(i32::from(dec_b));
                     let usd_need = (deficit_b_ui * pb).max(0.0);
@@ -1123,14 +1602,13 @@ impl RebalanceExecutor {
                         0.0
                     };
                     if !fund_a_ui.is_finite() || fund_a_ui <= 0.0 {
-                        fund_a_ui = (native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS)
-                            as f64
+                        fund_a_ui = (swap_mix_native_spendable_lamports(native_lamports) as f64
                             / 1e9)
                             * 0.25;
                     }
                     let raw_est_wrap = (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as u64;
-                    let wrap_amt = raw_est_wrap
-                        .min(native_lamports.saturating_sub(NATIVE_SOL_RESERVE_LAMPORTS));
+                    let wrap_amt =
+                        raw_est_wrap.min(swap_mix_native_spendable_lamports(native_lamports));
                     if wrap_amt >= MIN_SWAP {
                         let wallet = self.require_wallet()?;
                         let orca = WhirlpoolExecutor::new(self.provider.clone());
@@ -1161,7 +1639,11 @@ impl RebalanceExecutor {
                     fund_a_ui = (wa as f64 / 10f64.powi(i32::from(dec_a))) * 0.5;
                 }
                 let raw_est = (fund_a_ui * 10f64.powi(i32::from(dec_a))).round() as i128;
-                let max_raw = ((wa as f64) * spend_cap).floor() as i128;
+                // Single-shot sizing: spend from the **surplus** leg (keep enough for the quote),
+                // not from the entire balance.
+                let surplus_a = wa.saturating_sub(q.amount_a);
+                let max_raw = ((surplus_a as f64) * spend_cap).floor() as i128;
+                let max_raw_u64 = max_raw.max(0) as u64;
                 let amount_in = raw_est
                     .clamp(i128::from(MIN_SWAP), max_raw.max(i128::from(MIN_SWAP)))
                     .min(i128::from(wa)) as u64;
@@ -1190,9 +1672,13 @@ impl RebalanceExecutor {
                     "target_usd": target_usd,
                     "specified_mint": pool_state.token_mint_a.to_string(),
                     "amount_in": amount_in,
+                    "amount_in_raw_est": raw_est,
+                    "max_spend_raw": max_raw_u64,
+                    "surplus_a": surplus_a,
                     "amount_in_ui": amount_in_ui,
                     "amount_in_usd_est": amount_in_usd_est,
                     "slippage_bps": self.config.max_slippage_bps,
+                    "stagnation_push": stagnation_push,
                 }));
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                     self.provider.as_ref(),
@@ -1200,12 +1686,15 @@ impl RebalanceExecutor {
                     "swap_mix",
                     Some(*pool),
                     Some(*log_position),
-                    None,
+                    ledger_session_id.clone(),
                     serde_json::json!({
                         "round": round,
                         "max_rounds": max_rounds,
                         "leg": "A_to_B",
                         "amount_in": amount_in,
+                        "amount_in_raw_est": raw_est,
+                        "max_spend_raw": max_raw_u64,
+                        "surplus_a": surplus_a,
                         "amount_in_ui": amount_in_ui,
                         "amount_in_usd_est": amount_in_usd_est,
                         "wa": wa,
@@ -1232,6 +1721,7 @@ impl RebalanceExecutor {
                         "amount_in_est_mode": "deficit_usd",
                         "spend_cap_pct": spend_cap,
                         "amount_in_buffer_pct": buffer_pct,
+                        "stagnation_push": stagnation_push,
                     }),
                 )
                 .await;
@@ -1241,7 +1731,7 @@ impl RebalanceExecutor {
                     "swap_exact_in",
                     Some(*pool),
                     Some(*log_position),
-                    None,
+                    ledger_session_id.clone(),
                     serde_json::json!({
                         "round": round,
                         "leg": "A_to_B",
@@ -1275,7 +1765,7 @@ impl RebalanceExecutor {
                             "swap_exact_in",
                             Some(*pool),
                             Some(*log_position),
-                            None,
+                            ledger_session_id.clone(),
                             serde_json::json!({
                                 "round": round,
                                 "leg": "A_to_B",
@@ -1306,7 +1796,7 @@ impl RebalanceExecutor {
                         "swap_exact_in",
                         Some(*pool),
                         Some(*log_position),
-                        None,
+                        ledger_session_id.clone(),
                         serde_json::json!({
                             "round": round,
                             "leg": "A_to_B",
@@ -1319,6 +1809,7 @@ impl RebalanceExecutor {
                     .await;
                 }
                 swaps += 1;
+                prev_deficit_usd = Some(deficit_usd);
                 continue;
             }
 
@@ -1356,7 +1847,7 @@ impl RebalanceExecutor {
             "swap_mix",
             Some(*pool),
             Some(*log_position),
-            None,
+            ledger_session_id.clone(),
             serde_json::json!({
                 "max_rounds": max_rounds,
                 "swaps_done": swaps,
@@ -1373,6 +1864,10 @@ impl RebalanceExecutor {
     }
 
     /// Swap-mix alignment + `open_position` retries (shared by full rebalance and incomplete recovery).
+    ///
+    /// `amount_a_before_calc` / `amount_b_before_calc` are **returned** pool-leg raws (§6.1):
+    /// principal from close + LP fees collected on that close tx, or the same sum read back from
+    /// `bot_close_position` lifecycle rows for recovery.
     #[allow(clippy::too_many_arguments)]
     async fn open_new_range_with_wallet_mix(
         &self,
@@ -1394,7 +1889,11 @@ impl RebalanceExecutor {
             );
         };
 
-        if let Some(sid) = ledger_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(sid) = ledger_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             if clmm_lp_protocols::ledger::tx_lifecycle::session_has_bot_open_position(sid) {
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                     self.provider.as_ref(),
@@ -1435,6 +1934,23 @@ impl RebalanceExecutor {
             }
         }
 
+        if let Err(e) = self
+            .wallet_notional_refresh_until_reopen_target_met(
+                pool,
+                &owner,
+                amount_a_before_calc,
+                amount_b_before_calc,
+                log_position,
+                ledger_session_id.clone(),
+            )
+            .await
+        {
+            if let Some(sid) = ledger_session_id.as_deref() {
+                release_open_session_reservation(sid, false);
+            }
+            return Err(e);
+        }
+
         let swap_rounds = self
             .ensure_swap_mix_for_rebalance_open(
                 pool,
@@ -1462,27 +1978,73 @@ impl RebalanceExecutor {
         let mut last_open_err: Option<String> = None;
         let mut last_cap_a: u64 = 0;
         let mut last_cap_b: u64 = 0;
+        let mut tried_operational_sol_topup = false;
+
+        // Swap-mix refetches pool state each round; the `pool_state` passed in is typically the
+        // post-close snapshot. Using stale tick/√P for `quote_deposit_budget_in_range` after swaps
+        // can mis-size caps vs on-chain reality and prevent reopen despite successful mix.
+        let pool_reader = WhirlpoolReader::new(self.provider.clone());
+        let pool_addr = pool.to_string();
 
         for attempt in 1..=max_open_attempts {
+            let pool_live = match pool_reader.get_pool_state(&pool_addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg =
+                        format!("fetch pool state for open quote (attempt {attempt}): {e}");
+                    last_open_err = Some(msg);
+                    warn!(
+                        op = "orca_rebalance",
+                        stage = "open_position",
+                        attempt,
+                        max_attempts = max_open_attempts,
+                        error = %e,
+                        "Failed to refetch pool for deposit quote; will retry if attempts remain"
+                    );
+                    if attempt < max_open_attempts {
+                        tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+                    }
+                    continue;
+                }
+            };
+
             let wa =
-                spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_a)
+                spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_live.token_mint_a)
                     .await;
             let wb =
-                spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_b)
+                spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_live.token_mint_b)
                     .await;
+            let native_lamports = self.provider.get_balance(&owner).await.unwrap_or(0);
+            let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
+            let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+                .parse()
+                .expect("WSOL mint");
 
-            let dec_a =
-                spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_a).await.unwrap_or(0);
-            let dec_b =
-                spl_mint_decimals(self.provider.as_ref(), &pool_state.token_mint_b).await.unwrap_or(0);
+            let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_live.token_mint_a)
+                .await
+                .unwrap_or(0);
+            let dec_b = spl_mint_decimals(self.provider.as_ref(), &pool_live.token_mint_b)
+                .await
+                .unwrap_or(0);
             let (pa, pb, _price_mode) = synthetic_prices_for_deposit_quote(
-                pool_state.price,
-                &pool_state.token_mint_a,
-                &pool_state.token_mint_b,
+                pool_live.price,
+                &pool_live.token_mint_a,
+                &pool_live.token_mint_b,
                 dec_a,
                 dec_b,
             );
-            let wallet_notional = ui_from_raw(wa, dec_a) * pa + ui_from_raw(wb, dec_b) * pb;
+            let (wallet_notional, mut cap_a, mut cap_b) = open_wallet_notional_and_caps_sol_first(
+                &pool_live.token_mint_a,
+                &pool_live.token_mint_b,
+                &wsol_mint_pk,
+                wa,
+                wb,
+                dec_a,
+                dec_b,
+                native_spendable,
+                pa,
+                pb,
+            );
             let prev_end_value_usd = prev_end_value_usd_from_close_amounts(
                 amount_a_before_calc,
                 amount_b_before_calc,
@@ -1491,15 +2053,14 @@ impl RebalanceExecutor {
                 pa,
                 pb,
             );
-            let target_usd = target_usd_from_prev_end_clamped(prev_end_value_usd, wallet_notional);
+            let target_usd =
+                target_usd_for_swap_mix_and_open(prev_end_value_usd, wallet_notional);
 
-            let mut cap_a = wa;
-            let mut cap_b = wb;
             let quote_opt = quote_deposit_budget_in_range(
                 new_tick_lower,
                 new_tick_upper,
-                pool_state.tick_current,
-                pool_state.sqrt_price,
+                pool_live.tick_current,
+                pool_live.sqrt_price,
                 dec_a,
                 dec_b,
                 pa,
@@ -1534,8 +2095,8 @@ impl RebalanceExecutor {
                     position = %log_position,
                     cap_a,
                     cap_b,
-                    mint_a = %pool_state.token_mint_a,
-                    mint_b = %pool_state.token_mint_b,
+                    mint_a = %pool_live.token_mint_a,
+                    mint_b = %pool_live.token_mint_b,
                     max_attempts = max_open_attempts,
                     "Open position token caps (swap-mix path)"
                 );
@@ -1570,8 +2131,22 @@ impl RebalanceExecutor {
                             if let Some(prev) = prev_tick_upper {
                                 obj.insert("prev_tick_upper".to_string(), serde_json::json!(prev));
                             }
-                            obj.insert("new_tick_lower".to_string(), serde_json::json!(new_tick_lower));
-                            obj.insert("new_tick_upper".to_string(), serde_json::json!(new_tick_upper));
+                            obj.insert(
+                                "new_tick_lower".to_string(),
+                                serde_json::json!(new_tick_lower),
+                            );
+                            obj.insert(
+                                "new_tick_upper".to_string(),
+                                serde_json::json!(new_tick_upper),
+                            );
+                            obj.insert(
+                                "open_quote_pool_tick_current".to_string(),
+                                serde_json::json!(pool_live.tick_current),
+                            );
+                            obj.insert(
+                                "open_quote_pool_sqrt_price".to_string(),
+                                serde_json::json!(pool_live.sqrt_price.to_string()),
+                            );
                         }
                         if let Some(q) = quote_opt.as_ref()
                             && let Some(obj) = v.as_object_mut()
@@ -1618,7 +2193,8 @@ impl RebalanceExecutor {
                     break;
                 }
                 Err(e) => {
-                    last_open_err = Some(e.to_string());
+                    let err_s = e.to_string();
+                    last_open_err = Some(err_s.clone());
                     warn!(
                         op = "orca_rebalance",
                         stage = "open_position",
@@ -1628,9 +2204,52 @@ impl RebalanceExecutor {
                         cap_b,
                         new_tick_lower,
                         new_tick_upper,
-                        error = %e,
+                        error = %err_s,
                         "open_position failed"
                     );
+
+                    // Pending-open / reopen reliability: if open preflight fails due to insufficient
+                    // **native SOL** (rent/fees), attempt a SOL-first operational top-up from wallet
+                    // assets (prefer WSOL->SOL unwrap, else swap USDC->WSOL then unwrap), then retry.
+                    if !tried_operational_sol_topup
+                        && err_s.contains("open preflight exact-plan: insufficient native SOL")
+                    {
+                        tried_operational_sol_topup = true;
+                        if let Some((required_with_margin, native_balance)) =
+                            Self::parse_open_preflight_required_native_lamports(&err_s)
+                        {
+                            if let Err(topup_err) = self
+                                .ensure_operational_native_sol_for_open(
+                                    pool,
+                                    &pool_live,
+                                    required_with_margin,
+                                    native_balance,
+                                    log_position,
+                                    ledger_session_id.clone(),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    op = "orca_rebalance",
+                                    stage = "open_position",
+                                    attempt,
+                                    required_with_margin,
+                                    native_balance,
+                                    error = %topup_err,
+                                    "open_position operational SOL top-up failed; will continue retry loop"
+                                );
+                            } else {
+                                info!(
+                                    op = "orca_rebalance",
+                                    stage = "open_position",
+                                    attempt,
+                                    required_with_margin,
+                                    native_balance,
+                                    "open_position operational SOL top-up executed; retrying open"
+                                );
+                            }
+                        }
+                    }
                     if attempt < max_open_attempts {
                         tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
                     }
@@ -1671,6 +2290,201 @@ impl RebalanceExecutor {
         }
 
         Ok((new_position, swap_rounds))
+    }
+
+    fn parse_first_u64_after(haystack: &str, marker: &str) -> Option<u64> {
+        let idx = haystack.find(marker)?;
+        let mut j = idx + marker.len();
+        while j < haystack.len() && !haystack.as_bytes()[j].is_ascii_digit() {
+            j += 1;
+        }
+        let start = j;
+        while j < haystack.len() && haystack.as_bytes()[j].is_ascii_digit() {
+            j += 1;
+        }
+        if start == j {
+            return None;
+        }
+        haystack[start..j].parse::<u64>().ok()
+    }
+
+    /// Parse the "exact-plan" open preflight error for required native lamports + current balance.
+    ///
+    /// Example shape (from Orca executor):
+    /// `... require {required_with_margin}. Current native balance {native_balance}. ...`
+    fn parse_open_preflight_required_native_lamports(err: &str) -> Option<(u64, u64)> {
+        let required = Self::parse_first_u64_after(err, "require ")?;
+        let native = Self::parse_first_u64_after(err, "Current native balance ")?;
+        Some((required, native))
+    }
+
+    fn wsol_mint_pk() -> Pubkey {
+        pubkey!("So11111111111111111111111111111111111111112")
+    }
+
+    /// SPL mint to spend (exact-in) to obtain WSOL for operational SOL top-up.
+    ///
+    /// - If `CLMM_STABLE_MINT_FOR_SOL_TOPUP` is set to a valid pubkey, uses that mint.
+    /// - Else, if the pool has a WSOL leg, uses the **other** mint (mainnet USDC, devnet devUSDC, …).
+    fn stable_mint_for_operational_sol_topup(pool_live: &WhirlpoolState) -> Option<Pubkey> {
+        if let Ok(s) = std::env::var("CLMM_STABLE_MINT_FOR_SOL_TOPUP") {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Pubkey::from_str(trimmed).ok();
+            }
+        }
+        let wsol = Self::wsol_mint_pk();
+        if pool_live.token_mint_a == wsol {
+            Some(pool_live.token_mint_b)
+        } else if pool_live.token_mint_b == wsol {
+            Some(pool_live.token_mint_a)
+        } else {
+            None
+        }
+    }
+
+    /// Rough stable-token input (raw) to cover a native SOL deficit, for WSOL/stable pools.
+    fn estimate_stable_raw_for_sol_deficit(
+        pool_live: &WhirlpoolState,
+        stable_dec: u8,
+        sol_needed_ui: f64,
+    ) -> u64 {
+        let wsol = Self::wsol_mint_pk();
+        let price_ab = pool_live.price.to_f64().unwrap_or(0.0);
+        let scale = 10f64.powi(i32::from(stable_dec));
+        // Same heuristic as legacy USDC top-up: SOL/stable pools often report `price_ab ~ 0.087`;
+        // multiply by 1000 for ~stable UI per 1 SOL when stable has 6 decimals (USDC / devUSDC).
+        let stable_per_sol = if (pool_live.token_mint_a == wsol || pool_live.token_mint_b == wsol)
+            && stable_dec == 6
+            && price_ab > 0.0
+        {
+            price_ab * 1000.0
+        } else {
+            price_ab.max(1e-12)
+        };
+        let stable_ui = (sol_needed_ui * stable_per_sol) * 1.05;
+        (stable_ui * scale).ceil() as u64
+    }
+
+    /// Ensure the signing wallet has enough **native SOL** for an `open_position` transaction.
+    ///
+    /// SOL-first policy: we prefer having **native SOL** (operational fees/rent) and keeping WSOL
+    /// transient. If open preflight says native is short, we:
+    /// - unwrap WSOL -> native SOL (if any)
+    /// - else swap a small amount of USDC -> WSOL in-pool, then unwrap to native SOL
+    async fn ensure_operational_native_sol_for_open(
+        &self,
+        pool: &Pubkey,
+        pool_live: &WhirlpoolState,
+        required_with_margin: u64,
+        native_balance: u64,
+        log_position: &Pubkey,
+        ledger_session_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        if native_balance >= required_with_margin {
+            return Ok(());
+        }
+        let deficit = required_with_margin.saturating_sub(native_balance);
+        let wallet = self.require_wallet()?;
+        let payer = wallet.keypair();
+        let orca = WhirlpoolExecutor::new(self.provider.clone());
+
+        let owner = payer.pubkey();
+        let mut native_now = self.provider.get_balance(&owner).await.unwrap_or(native_balance);
+        if native_now >= required_with_margin {
+            return Ok(());
+        }
+
+        // 1) Prefer WSOL -> native SOL (partial unwrap) when WSOL exists.
+        let mut wsol_raw = orca.read_wsol_balance_raw(&owner).await.unwrap_or(0);
+        if wsol_raw > 0 {
+            let want_unwrap = deficit.min(wsol_raw).max(1);
+            let sig = orca
+                .submit_wsol_unwrap_with_signature(want_unwrap, payer)
+                .await
+                .context("unwrap WSOL for operational SOL")?;
+            clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                self.provider.as_ref(),
+                "bot_operational_sol_topup_unwrap_wsol",
+                "operational_sol_topup",
+                Some(*pool),
+                Some(*log_position),
+                ledger_session_id.clone(),
+                serde_json::json!({
+                    "required_with_margin": required_with_margin,
+                    "native_before": native_now,
+                    "unwrap_wsol_raw": want_unwrap,
+                    "signature": sig.to_string()
+                }),
+            )
+            .await;
+            native_now = self.provider.get_balance(&owner).await.unwrap_or(native_now);
+            if native_now >= required_with_margin {
+                return Ok(());
+            }
+        }
+
+        // 2) If still short, swap stable (non-WSOL pool leg) -> WSOL in-pool, then unwrap.
+        // Covers mainnet USDC as well as devnet devUSDC (or any SPL leg paired with WSOL).
+        let wsol = Self::wsol_mint_pk();
+        let stable_mint = Self::stable_mint_for_operational_sol_topup(pool_live).ok_or_else(|| {
+            anyhow::anyhow!(
+                "operational SOL topup: pool has no WSOL leg or could not resolve stable mint (mint_a={}, mint_b={}); set CLMM_STABLE_MINT_FOR_SOL_TOPUP",
+                pool_live.token_mint_a,
+                pool_live.token_mint_b
+            )
+        })?;
+        if stable_mint == wsol {
+            anyhow::bail!("operational SOL topup: stable mint resolved to WSOL (invalid)");
+        }
+        let stable_dec = spl_mint_decimals(self.provider.as_ref(), &stable_mint)
+            .await
+            .unwrap_or(6);
+        let remaining = required_with_margin.saturating_sub(native_now);
+        let sol_needed = (remaining as f64) / 1e9;
+        let stable_in_raw = Self::estimate_stable_raw_for_sol_deficit(pool_live, stable_dec, sol_needed).max(1);
+
+        // Swap exact-in: spend stable, receive WSOL SPL.
+        let _ = self
+            .execute_swap_exact_in(
+                pool,
+                &stable_mint,
+                stable_in_raw,
+                self.config.max_slippage_bps,
+                Some(*log_position),
+                ledger_session_id.clone(),
+            )
+            .await
+            .context("swap stable->WSOL for operational SOL topup")?;
+
+        // Unwrap as much WSOL as we now have, but only if it moves the needle.
+        wsol_raw = orca.read_wsol_balance_raw(&owner).await.unwrap_or(0);
+        if wsol_raw == 0 {
+            anyhow::bail!("operational SOL topup: swap produced 0 WSOL; cannot proceed");
+        }
+        let sig2 = orca
+            .submit_wsol_unwrap_with_signature(wsol_raw, payer)
+            .await
+            .context("unwrap swapped WSOL to native SOL")?;
+        clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+            self.provider.as_ref(),
+            "bot_operational_sol_topup_swap_usdc_then_unwrap",
+            "operational_sol_topup",
+            Some(*pool),
+            Some(*log_position),
+            ledger_session_id.clone(),
+                serde_json::json!({
+                    "required_with_margin": required_with_margin,
+                    "native_before": native_now,
+                    "swap_stable_in_raw": stable_in_raw,
+                    "stable_mint": stable_mint.to_string(),
+                    "unwrap_wsol_raw": wsol_raw,
+                    "unwrap_signature": sig2.to_string()
+                }),
+        )
+        .await;
+
+        Ok(())
     }
 
     /// Executes a rebalance operation.
@@ -1763,7 +2577,9 @@ impl RebalanceExecutor {
         let amount_a_before = params.amount_a_before.or(Some(amount_a_before_calc));
         let amount_b_before = params.amount_b_before.or(Some(amount_b_before_calc));
 
-        // Step 1 (guardrail): ensure reopen is feasible *before* closing, using current wallet balances.
+        // Step 1 (guardrail): ensure reopen is feasible *before* closing. Wallet SPL is pre-close;
+        // budget uses estimated post-close spendable (wallet + position value) — see
+        // `target_usd_for_close_reopen_preflight`.
         // If not feasible, we skip the close so we don't leave the operator with 0 positions.
         let mut planned_tick_lower = params.new_tick_lower;
         let mut planned_tick_upper = params.new_tick_upper;
@@ -1806,15 +2622,31 @@ impl RebalanceExecutor {
             let a_ui = ui_from_raw(wa, dec_a);
             let b_ui = ui_from_raw(wb, dec_b);
             let wallet_notional = a_ui * pa + b_ui * pb;
+            let position_reader = PositionReader::new(self.provider.clone());
+            let (preflight_returned_a, preflight_returned_b) =
+                match position_reader.get_position(&params.position.to_string()).await {
+                    Ok(pos) => {
+                        let (pa_amt, pb_amt) = position_reader.calculate_token_amounts(
+                            &pos,
+                            pool_state.tick_current,
+                            pool_state.sqrt_price,
+                        );
+                        (
+                            pa_amt.saturating_add(pos.fees_owed_a),
+                            pb_amt.saturating_add(pos.fees_owed_b),
+                        )
+                    }
+                    Err(_) => (amount_a_before_calc, amount_b_before_calc),
+                };
             let prev_end_value_usd = prev_end_value_usd_from_close_amounts(
-                amount_a_before_calc,
-                amount_b_before_calc,
+                preflight_returned_a,
+                preflight_returned_b,
                 dec_a,
                 dec_b,
                 pa,
                 pb,
             );
-            let target_usd = target_usd_from_prev_end_clamped(prev_end_value_usd, wallet_notional);
+            let target_usd = target_usd_for_close_reopen_preflight(prev_end_value_usd, wallet_notional);
 
             let mut ok = quote_deposit_budget_in_range(
                 planned_tick_lower,
@@ -1911,7 +2743,7 @@ impl RebalanceExecutor {
                         "pa": pa,
                         "pb": pb,
                         "price_mode": price_mode,
-                        "note": "Guardrail: skip close because reopen quote failed for planned range with current wallet balances."
+                        "note": "Guardrail: skip close because reopen quote failed for planned range (preflight budget = post-close spendable estimate: wallet_notional + prev_end_value_usd)."
                     }),
                 )
                 .await;
@@ -1940,7 +2772,7 @@ impl RebalanceExecutor {
             close_amount_a_raw,
             close_amount_b_raw,
         );
-        if let Err(e) = self
+        let (lp_a_on_close, lp_b_on_close) = match self
             .close_position(
                 &params.position,
                 &params.pool,
@@ -1949,20 +2781,26 @@ impl RebalanceExecutor {
             )
             .await
         {
-            error!(
-                op = "orca_rebalance",
-                stage = "close_position",
-                position = %params.position,
-                pool = %params.pool,
-                reason = ?params.reason,
-                error = %e,
-                "Failed to close position"
-            );
-            result.error = Some(e.to_string());
-            return result;
-        }
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    op = "orca_rebalance",
+                    stage = "close_position",
+                    position = %params.position,
+                    pool = %params.pool,
+                    reason = ?params.reason,
+                    error = %e,
+                    "Failed to close position"
+                );
+                result.error = Some(e.to_string());
+                return result;
+            }
+        };
         result.old_position_closed_on_chain = true;
         result.tx_cost_lamports += 5000;
+
+        let returned_a_raw = close_amount_a_raw.saturating_add(lp_a_on_close);
+        let returned_b_raw = close_amount_b_raw.saturating_add(lp_b_on_close);
 
         // Step 3: Open new position — swap-mix + retries (see [`Self::open_new_range_with_wallet_mix`]).
         let pool_reader = WhirlpoolReader::new(self.provider.clone());
@@ -1992,8 +2830,8 @@ impl RebalanceExecutor {
                 Some(params.current_tick_lower),
                 Some(params.current_tick_upper),
                 &pool_state,
-                close_amount_a_raw,
-                close_amount_b_raw,
+                returned_a_raw,
+                returned_b_raw,
                 &params.position,
                 Some(rebalance_session_id.clone()),
             )
@@ -2241,16 +3079,29 @@ impl RebalanceExecutor {
                 "recover_open adapted stale intended range to include current tick"
             );
             if range_adjustment_reason.is_none() {
-                range_adjustment_reason = Some("recover_open_adapted_to_include_current_tick".to_string());
+                range_adjustment_reason =
+                    Some("recover_open_adapted_to_include_current_tick".to_string());
             }
         }
 
         let (recovered_amount_a_raw, recovered_amount_b_raw) =
-            close_amounts_from_lifecycle_best_effort(
+            match close_amounts_from_lifecycle_best_effort(
                 &p.closed_position_nft,
                 p.rebalance_session_id.as_deref(),
-            )
-            .unwrap_or((1, 1));
+            ) {
+                Some(v) => v,
+                None => {
+                    // Unknown close amounts must not force tiny fallback notional for reopen sizing.
+                    warn!(
+                        op = "orca_rebalance",
+                        stage = "recover_open",
+                        closed_nft = %p.closed_position_nft,
+                        rebalance_session_id = ?p.rebalance_session_id,
+                        "recover_open missing close amounts; using wallet-cap sizing fallback"
+                    );
+                    (0, 0)
+                }
+            };
 
         match self
             .open_new_range_with_wallet_mix(
@@ -2383,8 +3234,10 @@ impl RebalanceExecutor {
             .unwrap_or((0, 0));
         let close_details =
             with_close_amounts_in_details(ledger_details, close_amount_a_raw, close_amount_b_raw);
-        self.close_position(position, pool, ledger_session_id, close_details)
-            .await
+        let _lp_on_close = self
+            .close_position(position, pool, ledger_session_id, close_details)
+            .await?;
+        Ok(())
     }
 
     /// Remove `liquidity_amount` from an existing position (partial exit). `token_min_*` = 0 (max slippage).
@@ -2500,19 +3353,22 @@ impl RebalanceExecutor {
         Ok(())
     }
 
-    /// Closes a position.
+    /// Closes a position. Returns `(lp_collected_token_a_raw, lp_collected_token_b_raw)` from the
+    /// close instruction quote (same values written to lifecycle `lp_collected_token_*` on the row).
     async fn close_position(
         &self,
         position: &Pubkey,
         pool: &Pubkey,
         ledger_session_id: Option<String>,
         ledger_details: Option<serde_json::Value>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<(u64, u64)> {
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
 
         let payer = wallet.keypair();
         let res = orca.close_position(position, pool, payer, None).await?;
+        let lp_a = res.collect_fee_owed_a_raw.unwrap_or(0);
+        let lp_b = res.collect_fee_owed_b_raw.unwrap_or(0);
         self.ensure_execution_success(
             "close_position",
             &res,
@@ -2520,12 +3376,12 @@ impl RebalanceExecutor {
             Some(*position),
             ledger_session_id,
             ledger_details,
-            None,
-            None,
+            res.collect_fee_owed_a_raw,
+            res.collect_fee_owed_b_raw,
         )
         .await?;
         debug!(position = %position, "Close position submitted");
-        Ok(())
+        Ok((lp_a, lp_b))
     }
 
     /// Best-effort authoritative position leg amounts (raw) immediately before close.
@@ -3135,6 +3991,9 @@ fn with_close_amounts_in_details(
     Some(serde_json::Value::Object(obj))
 }
 
+/// `bot_close_position` row → **returned** pool-leg raw amounts (§6.1):
+/// `close_amount_*_raw` + `lp_collected_token_*_raw` (top-level row fields from lifecycle append,
+/// or same keys inside `details` for older rows). Missing fee legs count as 0.
 fn close_amounts_from_lifecycle_row(
     row: &serde_json::Value,
     closed_position: &Pubkey,
@@ -3161,7 +4020,20 @@ fn close_amounts_from_lifecycle_row(
     let details = row.get("details")?.as_object()?;
     let close_amount_a_raw = details.get("close_amount_a_raw")?.as_u64()?;
     let close_amount_b_raw = details.get("close_amount_b_raw")?.as_u64()?;
-    Some((close_amount_a_raw, close_amount_b_raw))
+    let lp_a = row
+        .get("lp_collected_token_a_raw")
+        .and_then(|v| v.as_u64())
+        .or_else(|| details.get("lp_collected_token_a_raw").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let lp_b = row
+        .get("lp_collected_token_b_raw")
+        .and_then(|v| v.as_u64())
+        .or_else(|| details.get("lp_collected_token_b_raw").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    Some((
+        close_amount_a_raw.saturating_add(lp_a),
+        close_amount_b_raw.saturating_add(lp_b),
+    ))
 }
 
 fn close_amounts_from_lifecycle_best_effort(
@@ -3299,19 +4171,69 @@ mod tests {
     }
 
     #[test]
-    fn target_usd_prefers_prev_end_when_wallet_is_larger() {
-        let prev_end = 10.0;
-        let wallet = 100.0;
-        let target = target_usd_from_prev_end_clamped(prev_end, wallet);
-        assert!((target - 10.0).abs() < 1e-9);
+    fn close_amounts_from_lifecycle_row_adds_lp_collected_from_row() {
+        let closed_position = Pubkey::new_unique();
+        let sid = "sid-lp";
+        let row = serde_json::json!({
+            "event": "bot_close_position",
+            "position_pubkey": closed_position.to_string(),
+            "rebalance_session_id": sid,
+            "lp_collected_token_a_raw": 10,
+            "lp_collected_token_b_raw": 20,
+            "details": {
+                "close_amount_a_raw": 100,
+                "close_amount_b_raw": 200
+            }
+        });
+        let parsed =
+            close_amounts_from_lifecycle_row(&row, &closed_position, Some(sid)).expect("parsed");
+        assert_eq!(parsed, (110, 220));
     }
 
     #[test]
-    fn target_usd_clamps_to_wallet_cap_when_wallet_is_smaller() {
+    fn target_usd_reopen_sizing_applies_dust_margin_only() {
+        let t = target_usd_for_reopen_sizing(10.0);
+        assert!((t - 9.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn target_usd_reopen_sizing_does_not_clamp_to_smaller_wallet() {
+        // Spec §2.2 / A4: reopen target is not `min(prev_end, wallet)`.
+        let t = target_usd_for_swap_mix_and_open(10.0, 8.0);
+        assert!((t - 9.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn target_usd_for_swap_mix_falls_back_to_wallet_cap_when_prev_end_zero() {
+        let t = target_usd_for_swap_mix_and_open(0.0, 10.0);
+        assert!((t - (10.0 * 0.995)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn preflight_target_usd_includes_position_value_when_wallet_spl_empty() {
         let prev_end = 10.0;
-        let wallet = 8.0;
-        let target = target_usd_from_prev_end_clamped(prev_end, wallet);
-        assert!((target - (8.0 * 0.995)).abs() < 1e-9);
+        let wallet = 0.0;
+        let target = target_usd_for_close_reopen_preflight(prev_end, wallet);
+        assert!((target - (prev_end * 0.995)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn preflight_target_usd_matches_legacy_clamp_when_wallet_already_covers_prev_end() {
+        let prev_end = 10.0;
+        let wallet = 100.0;
+        let preflight = target_usd_for_close_reopen_preflight(prev_end, wallet);
+        let legacy = target_usd_from_prev_end_clamped(prev_end, wallet);
+        assert!((preflight - legacy).abs() < 1e-9);
+    }
+
+    #[test]
+    fn preflight_target_usd_clamps_when_prev_end_exceeds_post_close_spendable_cap() {
+        let prev_end = 200.0;
+        let wallet = 1.0;
+        let spendable_cap = (wallet + prev_end) * 0.995;
+        let target = target_usd_for_close_reopen_preflight(prev_end, wallet);
+        assert!((target - prev_end.min(spendable_cap)).abs() < 1e-6);
+        assert!(target < prev_end);
     }
 
     #[test]
@@ -3319,6 +4241,43 @@ mod tests {
         // 1.5 * $2 + 3.0 * $1 = $6
         let v = prev_end_value_usd_from_close_amounts(1_500_000, 3_000_000, 6, 6, 2.0, 1.0);
         assert!((v - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn open_wallet_notional_and_caps_counts_native_sol_on_wsol_leg() {
+        let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL mint");
+        let usdc_mint = Pubkey::new_unique();
+
+        // No WSOL ATA balance, but we do have spendable native SOL.
+        let wa_wsol = 0u64;
+        let wb_usdc = 0u64;
+        let dec_a = 9u8; // WSOL
+        let dec_b = 6u8; // USDC
+        let spendable_lamports = 500_000_000u64; // 0.5 SOL
+        let price_a_usd = 100.0;
+        let price_b_usd = 1.0;
+
+        let (wallet_notional, cap_a, cap_b) = open_wallet_notional_and_caps_sol_first(
+            &wsol_mint_pk,
+            &usdc_mint,
+            &wsol_mint_pk,
+            wa_wsol,
+            wb_usdc,
+            dec_a,
+            dec_b,
+            spendable_lamports,
+            price_a_usd,
+            price_b_usd,
+        );
+
+        // Notional must reflect native SOL on the WSOL leg.
+        assert!(wallet_notional > 0.0);
+        assert!((wallet_notional - 50.0).abs() < 1e-6);
+        // Cap on the WSOL leg should allow using native SOL.
+        assert_eq!(cap_a, spendable_lamports);
+        assert_eq!(cap_b, 0);
     }
 
     #[test]
@@ -3341,12 +4300,8 @@ mod tests {
         // stale intended range must be adapted so a retry quote can target a range containing spot.
         let drifted_tick = -24299;
         let intended = (-24264, -24160);
-        let ((lo, hi), changed) = adapt_recover_open_ticks_if_needed(
-            drifted_tick,
-            64,
-            intended.0,
-            intended.1,
-        );
+        let ((lo, hi), changed) =
+            adapt_recover_open_ticks_if_needed(drifted_tick, 64, intended.0, intended.1);
         assert!(changed);
         assert_ne!((lo, hi), intended);
         assert!(lo <= drifted_tick && drifted_tick < hi);
@@ -3387,5 +4342,80 @@ mod tests {
         exec.execute_partial_decrease(&pos, &pool, 123)
             .await
             .expect("dry run should not need wallet");
+    }
+
+    #[test]
+    fn swap_mix_eps_scales_with_target_when_no_env_override() {
+        // Ensure unset override for this unit test.
+        // NOTE: env mutation is `unsafe` on Rust 2024 due to data race potential with other tests.
+        unsafe { std::env::remove_var("CLMM_SWAP_MIX_DEFICIT_USD_EPS") };
+        let small = swap_mix_deficit_usd_epsilon_for_target(10.0);
+        let big = swap_mix_deficit_usd_epsilon_for_target(1000.0);
+        assert!(small >= 0.05 && small <= 0.50);
+        assert!(big >= small);
+        assert!(big <= 0.50);
+    }
+
+    #[test]
+    fn parse_open_preflight_native_lamports_extracts_require_and_balance() {
+        let err = "open preflight exact-plan: insufficient native SOL, require 12000000. Current native balance 500000.";
+        let (req, nat) =
+            RebalanceExecutor::parse_open_preflight_required_native_lamports(err).expect("parse");
+        assert_eq!(req, 12_000_000);
+        assert_eq!(nat, 500_000);
+    }
+
+    #[test]
+    fn stable_mint_for_operational_topup_resolves_non_wsol_leg() {
+        let wsol = pubkey!("So11111111111111111111111111111111111111112");
+        let dev = pubkey!("BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k");
+        let pool = WhirlpoolState {
+            address: String::new(),
+            token_mint_a: wsol,
+            token_mint_b: dev,
+            token_vault_a: Pubkey::default(),
+            token_vault_b: Pubkey::default(),
+            tick_current: 0,
+            tick_spacing: 64,
+            sqrt_price: 1 << 64,
+            price: Decimal::ONE,
+            liquidity: 0,
+            fee_rate_bps: 0,
+            protocol_fee_rate_bps: 0,
+            protocol_fee_owed_a: 0,
+            protocol_fee_owed_b: 0,
+            fee_growth_global_a: 0,
+            fee_growth_global_b: 0,
+        };
+        assert_eq!(
+            RebalanceExecutor::stable_mint_for_operational_sol_topup(&pool).unwrap(),
+            dev
+        );
+    }
+
+    #[test]
+    fn estimate_stable_raw_for_sol_deficit_nonzero() {
+        let wsol = pubkey!("So11111111111111111111111111111111111111112");
+        let dev = pubkey!("BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k");
+        let pool = WhirlpoolState {
+            address: String::new(),
+            token_mint_a: wsol,
+            token_mint_b: dev,
+            token_vault_a: Pubkey::default(),
+            token_vault_b: Pubkey::default(),
+            tick_current: 0,
+            tick_spacing: 64,
+            sqrt_price: 1 << 64,
+            price: Decimal::from_f64_retain(0.087).unwrap(),
+            liquidity: 0,
+            fee_rate_bps: 0,
+            protocol_fee_rate_bps: 0,
+            protocol_fee_owed_a: 0,
+            protocol_fee_owed_b: 0,
+            fee_growth_global_a: 0,
+            fee_growth_global_b: 0,
+        };
+        let raw = RebalanceExecutor::estimate_stable_raw_for_sol_deficit(&pool, 6, 0.01);
+        assert!(raw > 0);
     }
 }

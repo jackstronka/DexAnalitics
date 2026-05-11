@@ -388,19 +388,21 @@ pub async fn uncollected_fees_info_for_position(
         .get_pool_state(&position.pool.to_string())
         .await
         .ok()?;
-    // Refresh `fee_owed_*` from chain so UI doesn't show $0.000 for hours.
-    let fresh = position_reader
-        .get_position(&position.address.to_string())
-        .await
-        .ok()?;
     let dec_a = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_a)
         .await
         .ok()?;
     let dec_b = fetch_mint_decimals(provider.as_ref(), &pool_state.token_mint_b)
         .await
         .ok()?;
-    let fees_a_ui = ui_amount(fresh.fees_owed_a, dec_a);
-    let fees_b_ui = ui_amount(fresh.fees_owed_b, dec_b);
+    // Fast path: use position account `fee_owed_*` refreshed from chain.
+    // (The Orca SDK quote is computed asynchronously in a background cache worker.)
+    let fresh = position_reader
+        .get_position(&position.address.to_string())
+        .await
+        .ok()?;
+    let (raw_a, raw_b) = (fresh.fees_owed_a, fresh.fees_owed_b);
+    let fees_a_ui = ui_amount(raw_a, dec_a);
+    let fees_b_ui = ui_amount(raw_b, dec_b);
     Some(UncollectedFeesInfo {
         token_a_label: token_short_label(&pool_state.token_mint_a),
         token_b_label: token_short_label(&pool_state.token_mint_b),
@@ -555,6 +557,9 @@ pub async fn compute_position_usd_valuation(
 
     let a_ui = ui_amount(amount_a_raw, dec_a);
     let b_ui = ui_amount(amount_b_raw, dec_b);
+
+    // Uncollected fees from position account (refreshed above).
+    // Live claimable quote (post-update) is served from an async cache.
     let fees_a_ui = ui_amount(on_chain_fresh.fees_owed_a, dec_a);
     let fees_b_ui = ui_amount(on_chain_fresh.fees_owed_b, dec_b);
 

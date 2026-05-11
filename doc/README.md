@@ -4,6 +4,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Canonical architecture and data-flow narrative:** [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md).
 
+**Normative behavior (how features should work — one place to refine):** [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md).
+
 **Co robić dalej (kolejka prac):** [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) — sekcja *Od czego zacząć* + fazy A–F i **M** (M1 Meteora TVL, M2 kolejka RPC w enrich).
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
@@ -19,6 +21,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | Document | Purpose |
 | -------- | ------- |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
+| [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | **Normative:** expected behavior per feature (open/close, rebalance, strategies, wallet, fees); refine here first |
 | [`PROJECT_END_TO_END.md`](PROJECT_END_TO_END.md) | End-to-end: ingest danych -> analytics -> decyzje bota -> wykonanie i UI |
 | [`ROADMAP.md`](ROADMAP.md) | Roadmap produktowy: shadow strategies per position, historia przypisań strategia ↔ pozycja |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | Async event bus v2: decision matrix, event contract, rollout |
@@ -65,6 +68,12 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) | Roadmap: priorytet startowy, fazy A–F + **M** (M1/M2), log wykonania |
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora DLMM swap event notes |
 
+## Position economics (IL, HODL, USD)
+
+| Document | Purpose |
+| -------- | ------- |
+| [`IMPERMANENT_LOSS_USD_AND_FEES.md`](IMPERMANENT_LOSS_USD_AND_FEES.md) | IL vs HODL w USD, wariant z/bez fees LP, łańcuch PDAs (lineage), mapa kodu (`stream-pnl`, domain, symulacja), ograniczenia `PnLTracker` |
+
 ## Bot direction and worklog (dated snapshot — 2026-03-23)
 
 These files capture **research decisions and context at a point in time**. They are **not** day-to-day runbooks; prefer `PROJECT_OVERVIEW.md` and runbooks for current procedures.
@@ -97,6 +106,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | async, event bus, kafka, nats, redis, rollout |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |
 | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | bollinger, candle, StratConfig, StrategyMode, backtest, roadmap |
+| [`IMPERMANENT_LOSS_USD_AND_FEES.md`](IMPERMANENT_LOSS_USD_AND_FEES.md) | IL, HODL, USD, fees LP, stream-pnl, lineage, calculate_il_concentrated, segment IL |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | whETH/SOL, fees, grid example |
 | [`BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md`](BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md) | hybrid bot, scoring, contract (snapshot) |
 | [`BOT_HYBRID_DEFINITION_OF_READY_2026-03-23.md`](BOT_HYBRID_DEFINITION_OF_READY_2026-03-23.md) | DoR, Go/No-Go (snapshot) |
@@ -108,6 +118,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`DOCKER.md`](DOCKER.md) | docker compose, web+api, API_UPSTREAM, Docker Desktop, Windows pipe |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | code changes, keywords, changelog, AI-searchable |
 | [`FEES_DATA_PLAN.md`](FEES_DATA_PLAN.md) | fees data |
+| [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | normative feature behavior, operator spec, single source of truth for “should” |
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora, swap event, DLMM |
 | [`ONCHAIN_FEES_PROGRESS.md`](ONCHAIN_FEES_PROGRESS.md) | on-chain fees, progress |
 | [`ONCHAIN_FEES_TRUTH_PLAN.md`](ONCHAIN_FEES_TRUTH_PLAN.md) | on-chain fees, plan |

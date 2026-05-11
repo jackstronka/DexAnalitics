@@ -3439,55 +3439,54 @@ async fn main() -> Result<()> {
                 .map(|w| (w * steps_per_window)..((w + 1) * steps_per_window))
                 .collect();
 
-            let strategies: Vec<StratConfig> = crate::commands::backtest_optimize::filter_strategies_by_families(
-                crate::commands::backtest_optimize::default_strategies(
-                    *static_only,
-                    *indicator_strategies,
-                    snapshots_only,
-                    *il_max_pct,
-                    *il_close_pct,
-                    *il_grace_steps,
-                    threshold_grid_pct.as_deref(),
-                    *threshold_min_rebalance_interval_hours,
-                    *threshold_rebalance_on_range_exit_immediately,
-                    *retouch_offset_pct / 100.0,
-                    periodic_grid_steps.as_deref(),
-                    bollinger_window_grid.as_deref(),
-                    bollinger_k_grid.as_deref(),
-                    bollinger_rebalance_steps_grid.as_deref(),
-                    last_candle_steps_grid.as_deref(),
-                    last_candle_rebalance_steps_grid.as_deref(),
-                    last_candle_seconds_grid.as_deref(),
-                    last_candle_rebalance_seconds_grid.as_deref(),
-                ),
-                include_strategy_families.as_deref(),
-            );
+            let strategies: Vec<StratConfig> =
+                crate::commands::backtest_optimize::filter_strategies_by_families(
+                    crate::commands::backtest_optimize::default_strategies(
+                        *static_only,
+                        *indicator_strategies,
+                        snapshots_only,
+                        *il_max_pct,
+                        *il_close_pct,
+                        *il_grace_steps,
+                        threshold_grid_pct.as_deref(),
+                        *threshold_min_rebalance_interval_hours,
+                        *threshold_rebalance_on_range_exit_immediately,
+                        *retouch_offset_pct / 100.0,
+                        periodic_grid_steps.as_deref(),
+                        bollinger_window_grid.as_deref(),
+                        bollinger_k_grid.as_deref(),
+                        bollinger_rebalance_steps_grid.as_deref(),
+                        last_candle_steps_grid.as_deref(),
+                        last_candle_rebalance_steps_grid.as_deref(),
+                        last_candle_seconds_grid.as_deref(),
+                        last_candle_rebalance_seconds_grid.as_deref(),
+                    ),
+                    include_strategy_families.as_deref(),
+                );
             if strategies.is_empty() {
                 anyhow::bail!(
                     "No strategies left after --include-strategy-families filter. Requested: {:?}",
                     include_strategy_families
                 );
             }
-            let static_manual_bounds_usd: Option<(f64, f64)> =
-                match (static_manual_lower, static_manual_upper) {
-                    (Some(lo), Some(hi)) => {
-                        if !lo.is_finite()
-                            || !hi.is_finite()
-                            || *lo <= 0.0
-                            || *hi <= 0.0
-                            || *lo >= *hi
-                        {
-                            anyhow::bail!(
-                                "--static-manual-lower/--static-manual-upper must be finite, >0 and lower<upper"
-                            );
-                        }
-                        Some((*lo, *hi))
+            let static_manual_bounds_usd: Option<(f64, f64)> = match (
+                static_manual_lower,
+                static_manual_upper,
+            ) {
+                (Some(lo), Some(hi)) => {
+                    if !lo.is_finite() || !hi.is_finite() || *lo <= 0.0 || *hi <= 0.0 || *lo >= *hi
+                    {
+                        anyhow::bail!(
+                            "--static-manual-lower/--static-manual-upper must be finite, >0 and lower<upper"
+                        );
                     }
-                    (None, None) => None,
-                    _ => anyhow::bail!(
-                        "Provide both --static-manual-lower and --static-manual-upper together"
-                    ),
-                };
+                    Some((*lo, *hi))
+                }
+                (None, None) => None,
+                _ => anyhow::bail!(
+                    "Provide both --static-manual-lower and --static-manual-upper together"
+                ),
+            };
 
             let min_frac = (*min_range_pct / 100.0).clamp(0.001, 1.0);
             let max_frac = (*max_range_pct / 100.0).clamp(min_frac + 0.001, 2.0);
@@ -4987,10 +4986,15 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             last_err = Some(e);
                             if attempt < max_attempts {
-                                let msg = last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                                let msg =
+                                    last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
                                 eprintln!(
                                     "⚠️ Orca snapshot attempt {}/{} failed for {}: {}; retrying in {}ms",
-                                    attempt, max_attempts, pool_address, msg, snapshot_retry_backoff_ms
+                                    attempt,
+                                    max_attempts,
+                                    pool_address,
+                                    msg,
+                                    snapshot_retry_backoff_ms
                                 );
                                 tokio::time::sleep(std::time::Duration::from_millis(
                                     *snapshot_retry_backoff_ms,
@@ -5075,94 +5079,97 @@ async fn main() -> Result<()> {
                 for attempt in 1..=max_attempts {
                     attempts = attempt;
                     let result: anyhow::Result<()> = async {
-                    let acct = rpc.get_account_by_address(&pool_address).await?;
-                    let (parsed, parse_ok, parse_error) =
-                        match clmm_lp_protocols::raydium::pool_reader::parse_pool_state(&acct.data)
-                        {
-                            Ok(p) => (Some(p), true, None),
-                            Err(e) => (None, false, Some(e.to_string())),
-                        };
-                    let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
-                        use spl_token::solana_program::program_pack::Pack;
-                        use spl_token::state::Account as SplTokenAccount;
-                        use std::str::FromStr;
-                        let va = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault0).ok();
-                        let vb = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault1).ok();
-                        if let (Some(va), Some(vb)) = (va, vb) {
-                            match rpc.get_multiple_accounts(&[va, vb]).await {
-                                Ok(accounts) => {
-                                    let a = accounts
-                                        .first()
-                                        .and_then(|a| a.as_ref())
-                                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                                        .map(|a| a.amount);
-                                    let b = accounts
-                                        .get(1)
-                                        .and_then(|a| a.as_ref())
-                                        .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
-                                        .map(|a| a.amount);
-                                    (a, b)
+                        let acct = rpc.get_account_by_address(&pool_address).await?;
+                        let (parsed, parse_ok, parse_error) =
+                            match clmm_lp_protocols::raydium::pool_reader::parse_pool_state(
+                                &acct.data,
+                            ) {
+                                Ok(p) => (Some(p), true, None),
+                                Err(e) => (None, false, Some(e.to_string())),
+                            };
+                        let (vault_amount_a, vault_amount_b) = if let Some(ref p) = parsed {
+                            use spl_token::solana_program::program_pack::Pack;
+                            use spl_token::state::Account as SplTokenAccount;
+                            use std::str::FromStr;
+                            let va = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault0).ok();
+                            let vb = solana_sdk::pubkey::Pubkey::from_str(&p.token_vault1).ok();
+                            if let (Some(va), Some(vb)) = (va, vb) {
+                                match rpc.get_multiple_accounts(&[va, vb]).await {
+                                    Ok(accounts) => {
+                                        let a = accounts
+                                            .first()
+                                            .and_then(|a| a.as_ref())
+                                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                                            .map(|a| a.amount);
+                                        let b = accounts
+                                            .get(1)
+                                            .and_then(|a| a.as_ref())
+                                            .and_then(|a| SplTokenAccount::unpack(&a.data).ok())
+                                            .map(|a| a.amount);
+                                        (a, b)
+                                    }
+                                    Err(_) => (None, None),
                                 }
-                                Err(_) => (None, None),
+                            } else {
+                                (None, None)
                             }
                         } else {
                             (None, None)
-                        }
-                    } else {
-                        (None, None)
-                    };
-                    let snap = RaydiumClmmSnapshot {
-                        ts_utc: chrono::Utc::now().to_rfc3339(),
-                        slot: slot_now,
-                        protocol: "raydium".to_string(),
-                        pool_address: pool_address.clone(),
-                        owner: acct.owner.to_string(),
-                        lamports: acct.lamports,
-                        data_len: acct.data.len(),
-                        data_b64: BASE64_STANDARD.encode(&acct.data),
-                        parse_ok,
-                        parse_error,
-                        token_mint_a: parsed.as_ref().map(|p| p.token_mint0.to_string()),
-                        token_mint_b: parsed.as_ref().map(|p| p.token_mint1.to_string()),
-                        token_vault_a: parsed.as_ref().map(|p| p.token_vault0.to_string()),
-                        token_vault_b: parsed.as_ref().map(|p| p.token_vault1.to_string()),
-                        vault_amount_a,
-                        vault_amount_b,
-                        mint_decimals_a: parsed.as_ref().map(|p| p.mint_decimals0),
-                        mint_decimals_b: parsed.as_ref().map(|p| p.mint_decimals1),
-                        liquidity_active: parsed.as_ref().map(|p| p.liquidity_active.to_string()),
-                        tick_current: parsed.as_ref().map(|p| p.tick_current),
-                        sqrt_price_x64: parsed.as_ref().map(|p| p.sqrt_price_x64.to_string()),
-                        fee_growth_global_a_x64: parsed
-                            .as_ref()
-                            .map(|p| p.fee_growth_global0_x64.to_string()),
-                        fee_growth_global_b_x64: parsed
-                            .as_ref()
-                            .map(|p| p.fee_growth_global1_x64.to_string()),
-                        protocol_fees_token_a: parsed.as_ref().map(|p| p.protocol_fees_token0),
-                        protocol_fees_token_b: parsed.as_ref().map(|p| p.protocol_fees_token1),
-                    };
+                        };
+                        let snap = RaydiumClmmSnapshot {
+                            ts_utc: chrono::Utc::now().to_rfc3339(),
+                            slot: slot_now,
+                            protocol: "raydium".to_string(),
+                            pool_address: pool_address.clone(),
+                            owner: acct.owner.to_string(),
+                            lamports: acct.lamports,
+                            data_len: acct.data.len(),
+                            data_b64: BASE64_STANDARD.encode(&acct.data),
+                            parse_ok,
+                            parse_error,
+                            token_mint_a: parsed.as_ref().map(|p| p.token_mint0.to_string()),
+                            token_mint_b: parsed.as_ref().map(|p| p.token_mint1.to_string()),
+                            token_vault_a: parsed.as_ref().map(|p| p.token_vault0.to_string()),
+                            token_vault_b: parsed.as_ref().map(|p| p.token_vault1.to_string()),
+                            vault_amount_a,
+                            vault_amount_b,
+                            mint_decimals_a: parsed.as_ref().map(|p| p.mint_decimals0),
+                            mint_decimals_b: parsed.as_ref().map(|p| p.mint_decimals1),
+                            liquidity_active: parsed
+                                .as_ref()
+                                .map(|p| p.liquidity_active.to_string()),
+                            tick_current: parsed.as_ref().map(|p| p.tick_current),
+                            sqrt_price_x64: parsed.as_ref().map(|p| p.sqrt_price_x64.to_string()),
+                            fee_growth_global_a_x64: parsed
+                                .as_ref()
+                                .map(|p| p.fee_growth_global0_x64.to_string()),
+                            fee_growth_global_b_x64: parsed
+                                .as_ref()
+                                .map(|p| p.fee_growth_global1_x64.to_string()),
+                            protocol_fees_token_a: parsed.as_ref().map(|p| p.protocol_fees_token0),
+                            protocol_fees_token_b: parsed.as_ref().map(|p| p.protocol_fees_token1),
+                        };
 
-                    let mut dir = std::path::PathBuf::from("data");
-                    dir.push("pool-snapshots");
-                    dir.push("raydium");
-                    dir.push(&pool_address);
-                    std::fs::create_dir_all(&dir)?;
-                    let mut path = dir;
-                    path.push(snapshot_jsonl_name.as_str());
+                        let mut dir = std::path::PathBuf::from("data");
+                        dir.push("pool-snapshots");
+                        dir.push("raydium");
+                        dir.push(&pool_address);
+                        std::fs::create_dir_all(&dir)?;
+                        let mut path = dir;
+                        path.push(snapshot_jsonl_name.as_str());
 
-                    let line = serde_json::to_string(&snap)?;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&path)?;
-                    use std::io::Write;
-                    f.write_all(line.as_bytes())?;
-                    f.write_all(b"\n")?;
+                        let line = serde_json::to_string(&snap)?;
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)?;
+                        use std::io::Write;
+                        f.write_all(line.as_bytes())?;
+                        f.write_all(b"\n")?;
 
-                    println!("âś… Snapshot appended: {}", path.display());
-                    Ok(())
-                }
+                        println!("âś… Snapshot appended: {}", path.display());
+                        Ok(())
+                    }
                     .await;
                     match result {
                         Ok(()) => {
@@ -5178,10 +5185,15 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             last_err = Some(e);
                             if attempt < max_attempts {
-                                let msg = last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                                let msg =
+                                    last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
                                 eprintln!(
                                     "⚠️ Raydium snapshot attempt {}/{} failed for {}: {}; retrying in {}ms",
-                                    attempt, max_attempts, pool_address, msg, snapshot_retry_backoff_ms
+                                    attempt,
+                                    max_attempts,
+                                    pool_address,
+                                    msg,
+                                    snapshot_retry_backoff_ms
                                 );
                                 tokio::time::sleep(std::time::Duration::from_millis(
                                     *snapshot_retry_backoff_ms,
@@ -5273,82 +5285,86 @@ async fn main() -> Result<()> {
                 for attempt in 1..=max_attempts {
                     attempts = attempt;
                     let result: anyhow::Result<()> = async {
-                    let acct = rpc.get_account_by_address(&pool_address).await?;
-                    let (parsed, parse_ok, parse_error) =
-                        match clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data) {
-                            Ok(p) => (Some(p), true, None),
-                            Err(e) => (None, false, Some(e.to_string())),
+                        let acct = rpc.get_account_by_address(&pool_address).await?;
+                        let (parsed, parse_ok, parse_error) =
+                            match clmm_lp_protocols::meteora::pool_reader::parse_lb_pair(&acct.data)
+                            {
+                                Ok(p) => (Some(p), true, None),
+                                Err(e) => (None, false, Some(e.to_string())),
+                            };
+                        let (vault_amount_a, vault_amount_b, vault_amount_source) =
+                            if let Some(ref p) = parsed {
+                                let accounts = rpc
+                                    .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
+                                    .await
+                                    .ok();
+                                if let Some(accounts) = accounts {
+                                    let a = accounts
+                                        .first()
+                                        .and_then(|a| a.as_ref())
+                                        .and_then(|a| decode_any_token_account(&a.data))
+                                        .map(|(amount, _)| amount);
+                                    let b = accounts
+                                        .get(1)
+                                        .and_then(|a| a.as_ref())
+                                        .and_then(|a| decode_any_token_account(&a.data))
+                                        .map(|(amount, _)| amount);
+                                    match (a, b) {
+                                        (Some(va), Some(vb)) => {
+                                            (va, vb, "rpc_token_account".to_string())
+                                        }
+                                        _ => (0, 0, "missing_fallback_zero".to_string()),
+                                    }
+                                } else {
+                                    (0, 0, "missing_fallback_zero".to_string())
+                                }
+                            } else {
+                                (0, 0, "missing_fallback_zero".to_string())
+                            };
+                        let snap = MeteoraLbPairSnapshot {
+                            ts_utc: chrono::Utc::now().to_rfc3339(),
+                            slot: slot_now,
+                            protocol: "meteora".to_string(),
+                            pool_address: pool_address.clone(),
+                            owner: acct.owner.to_string(),
+                            lamports: acct.lamports,
+                            data_len: acct.data.len(),
+                            data_b64: BASE64_STANDARD.encode(&acct.data),
+                            parse_ok,
+                            parse_error,
+                            active_id: parsed.as_ref().map(|p| p.active_id),
+                            bin_step: parsed.as_ref().map(|p| p.bin_step),
+                            token_mint_a: parsed.as_ref().map(|p| p.token_mint_x.to_string()),
+                            token_mint_b: parsed.as_ref().map(|p| p.token_mint_y.to_string()),
+                            token_vault_a: parsed.as_ref().map(|p| p.reserve_x.to_string()),
+                            token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
+                            vault_amount_a,
+                            vault_amount_b,
+                            vault_amount_source,
+                            protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),
+                            protocol_fee_amount_b: parsed.as_ref().map(|p| p.protocol_fee_amount_y),
                         };
-                    let (vault_amount_a, vault_amount_b, vault_amount_source) = if let Some(ref p) = parsed {
-                        let accounts = rpc
-                            .get_multiple_accounts(&[p.reserve_x, p.reserve_y])
-                            .await
-                            .ok();
-                        if let Some(accounts) = accounts {
-                            let a = accounts
-                                .first()
-                                .and_then(|a| a.as_ref())
-                                .and_then(|a| decode_any_token_account(&a.data))
-                                .map(|(amount, _)| amount);
-                            let b = accounts
-                                .get(1)
-                                .and_then(|a| a.as_ref())
-                                .and_then(|a| decode_any_token_account(&a.data))
-                                .map(|(amount, _)| amount);
-                            match (a, b) {
-                                (Some(va), Some(vb)) => (va, vb, "rpc_token_account".to_string()),
-                                _ => (0, 0, "missing_fallback_zero".to_string()),
-                            }
-                        } else {
-                            (0, 0, "missing_fallback_zero".to_string())
-                        }
-                    } else {
-                        (0, 0, "missing_fallback_zero".to_string())
-                    };
-                    let snap = MeteoraLbPairSnapshot {
-                        ts_utc: chrono::Utc::now().to_rfc3339(),
-                        slot: slot_now,
-                        protocol: "meteora".to_string(),
-                        pool_address: pool_address.clone(),
-                        owner: acct.owner.to_string(),
-                        lamports: acct.lamports,
-                        data_len: acct.data.len(),
-                        data_b64: BASE64_STANDARD.encode(&acct.data),
-                        parse_ok,
-                        parse_error,
-                        active_id: parsed.as_ref().map(|p| p.active_id),
-                        bin_step: parsed.as_ref().map(|p| p.bin_step),
-                        token_mint_a: parsed.as_ref().map(|p| p.token_mint_x.to_string()),
-                        token_mint_b: parsed.as_ref().map(|p| p.token_mint_y.to_string()),
-                        token_vault_a: parsed.as_ref().map(|p| p.reserve_x.to_string()),
-                        token_vault_b: parsed.as_ref().map(|p| p.reserve_y.to_string()),
-                        vault_amount_a,
-                        vault_amount_b,
-                        vault_amount_source,
-                        protocol_fee_amount_a: parsed.as_ref().map(|p| p.protocol_fee_amount_x),
-                        protocol_fee_amount_b: parsed.as_ref().map(|p| p.protocol_fee_amount_y),
-                    };
 
-                    let mut dir = std::path::PathBuf::from("data");
-                    dir.push("pool-snapshots");
-                    dir.push("meteora");
-                    dir.push(&pool_address);
-                    std::fs::create_dir_all(&dir)?;
-                    let mut path = dir;
-                    path.push(snapshot_jsonl_name.as_str());
+                        let mut dir = std::path::PathBuf::from("data");
+                        dir.push("pool-snapshots");
+                        dir.push("meteora");
+                        dir.push(&pool_address);
+                        std::fs::create_dir_all(&dir)?;
+                        let mut path = dir;
+                        path.push(snapshot_jsonl_name.as_str());
 
-                    let line = serde_json::to_string(&snap)?;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&path)?;
-                    use std::io::Write;
-                    f.write_all(line.as_bytes())?;
-                    f.write_all(b"\n")?;
+                        let line = serde_json::to_string(&snap)?;
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)?;
+                        use std::io::Write;
+                        f.write_all(line.as_bytes())?;
+                        f.write_all(b"\n")?;
 
-                    println!("âś… Snapshot appended: {}", path.display());
-                    Ok(())
-                }
+                        println!("âś… Snapshot appended: {}", path.display());
+                        Ok(())
+                    }
                     .await;
                     match result {
                         Ok(()) => {
@@ -5364,10 +5380,15 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             last_err = Some(e);
                             if attempt < max_attempts {
-                                let msg = last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
+                                let msg =
+                                    last_err.as_ref().map(|x| x.to_string()).unwrap_or_default();
                                 eprintln!(
                                     "⚠️ Meteora snapshot attempt {}/{} failed for {}: {}; retrying in {}ms",
-                                    attempt, max_attempts, pool_address, msg, snapshot_retry_backoff_ms
+                                    attempt,
+                                    max_attempts,
+                                    pool_address,
+                                    msg,
+                                    snapshot_retry_backoff_ms
                                 );
                                 tokio::time::sleep(std::time::Duration::from_millis(
                                     *snapshot_retry_backoff_ms,

@@ -1287,9 +1287,9 @@ mod tests {
         ));
         match err {
             ApiError::BadRequest(msg) => {
-                assert!(
-                    msg.contains("Whirlpool position is not empty yet (custom 6005 / ClosePositionNotEmpty)")
-                );
+                assert!(msg.contains(
+                    "Whirlpool position is not empty yet (custom 6005 / ClosePositionNotEmpty)"
+                ));
                 assert!(msg.contains("zero remaining liquidity"));
             }
             other => panic!("unexpected error variant: {other:?}"),

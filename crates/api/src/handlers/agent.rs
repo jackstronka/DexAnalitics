@@ -7,25 +7,26 @@ use crate::models::{
     AgentScanResponse, AgentSessionRequest, AgentSessionResponse, AgentSupervisorScenario,
     AgentWorkerSettings, AgentWorkerSettingsUpdateRequest, AgentWorkerStatus,
 };
+use crate::services::position_agent_llm;
+use crate::services::position_agent_service;
 use crate::services::position_stream_lineage::compute_position_stream_lineage;
 use crate::services::position_stream_pnl::compute_position_stream_pnl;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
 };
-use crate::services::position_agent_llm;
-use crate::services::position_agent_service;
 use crate::state::AppState;
 use axum::{
     Json,
     extract::{Path, State},
 };
-use solana_sdk::pubkey::Pubkey;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
 fn validate_position(address: &str) -> ApiResult<()> {
-    Pubkey::from_str(address.trim()).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    Pubkey::from_str(address.trim())
+        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
     Ok(())
 }
 
@@ -239,7 +240,8 @@ pub async fn get_position_agent_supervisor(
     let lineage = compute_position_stream_lineage(&state, pos).await?;
 
     let live_value = {
-        let pubkey = Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+        let pubkey =
+            Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
         let from_monitor = state
             .monitor
             .get_positions()
@@ -251,7 +253,8 @@ pub async fn get_position_agent_supervisor(
         } else {
             monitored_position_from_chain(state.provider.clone(), &pubkey).await?
         };
-        let prices = fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&p)).await;
+        let prices =
+            fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&p)).await;
         compute_position_usd_valuation(state.provider.clone(), &p, &prices)
             .await
             .ok()
@@ -261,9 +264,7 @@ pub async fn get_position_agent_supervisor(
 
     let entry = stream_pnl.baseline_value_usd.max(Decimal::ZERO);
     let costs = stream_pnl.tx_fees_usd.max(Decimal::ZERO);
-    let earnings = stream_pnl
-        .realized_cashflow_usd
-        .max(Decimal::ZERO)
+    let earnings = stream_pnl.realized_cashflow_usd.max(Decimal::ZERO)
         + lineage
             .chain_cost_summary
             .as_ref()

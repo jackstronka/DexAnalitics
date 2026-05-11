@@ -83,13 +83,13 @@ fn pool_mints_for_hodl(
     current_mints: (Option<String>, Option<String>),
 ) -> Vec<String> {
     let mut pool_mints = Vec::new();
-    if let Some(a) = nonempty_trimmed_mint(baseline_mints.0)
-        .or_else(|| nonempty_trimmed_mint(current_mints.0))
+    if let Some(a) =
+        nonempty_trimmed_mint(baseline_mints.0).or_else(|| nonempty_trimmed_mint(current_mints.0))
     {
         pool_mints.push(a);
     }
-    if let Some(b) = nonempty_trimmed_mint(baseline_mints.1)
-        .or_else(|| nonempty_trimmed_mint(current_mints.1))
+    if let Some(b) =
+        nonempty_trimmed_mint(baseline_mints.1).or_else(|| nonempty_trimmed_mint(current_mints.1))
     {
         pool_mints.push(b);
     }
@@ -197,12 +197,17 @@ fn stream_pnl_db_disabled_response(position_address: &str) -> PositionStreamPnLR
     }
 }
 
-fn stream_pnl_interpretation_pl(use_lineage_anchor: bool, hodl_basket_ok: bool) -> StreamPnLInterpretation {
+fn stream_pnl_interpretation_pl(
+    use_lineage_anchor: bool,
+    hodl_basket_ok: bool,
+) -> StreamPnLInterpretation {
     let mut il = String::from(
         "Benchmark IL vs HODL: wartość LP na końcu łańcucha minus hipotetyczna wartość trzymania tokenów z depozytu na początku łańcucha, przy bieżących cenach mintów. Inna definicja niż net PnL (bez pełnej księgowości między rotacjami).",
     );
     if use_lineage_anchor {
-        il.push_str(" Start i koniec odczytu odpowiadają pierwszemu i ostatniemu PDA w historii rotacji.");
+        il.push_str(
+            " Start i koniec odczytu odpowiadają pierwszemu i ostatniemu PDA w historii rotacji.",
+        );
     }
     if !hodl_basket_ok {
         il.push_str(" Przy braku mintów/ilości w snapshotach benchmark HODL może być zdegradowany — patrz `note`.");
@@ -249,7 +254,9 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             .bind(pk)
             .fetch_optional(db.pool())
             .await
-            .map_err(|e| ApiError::internal(format!("stream pnl: baseline query (chain start): {e}")))?
+            .map_err(|e| {
+                ApiError::internal(format!("stream pnl: baseline query (chain start): {e}"))
+            })?
     } else {
         sqlx::query(BASELINE_SNAPSHOT_SQL)
             .bind(&positions)
@@ -263,7 +270,9 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             .bind(pk)
             .fetch_optional(db.pool())
             .await
-            .map_err(|e| ApiError::internal(format!("stream pnl: current query (chain end): {e}")))?
+            .map_err(|e| {
+                ApiError::internal(format!("stream pnl: current query (chain end): {e}"))
+            })?
     } else {
         sqlx::query(CURRENT_SNAPSHOT_SQL)
             .bind(&positions)
@@ -284,7 +293,8 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             .await
         {
             let prices =
-                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
+                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
+                    .await;
             if let Ok(v) =
                 compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
             {
@@ -330,13 +340,17 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
                 .bind(pk)
                 .fetch_optional(db.pool())
                 .await
-                .map_err(|e| ApiError::internal(format!("stream pnl: baseline query (after seed): {e}")))?
+                .map_err(|e| {
+                    ApiError::internal(format!("stream pnl: baseline query (after seed): {e}"))
+                })?
         } else {
             sqlx::query(BASELINE_SNAPSHOT_SQL)
                 .bind(&positions)
                 .fetch_optional(db.pool())
                 .await
-                .map_err(|e| ApiError::internal(format!("stream pnl: baseline query (after seed): {e}")))?
+                .map_err(|e| {
+                    ApiError::internal(format!("stream pnl: baseline query (after seed): {e}"))
+                })?
         };
     }
 
@@ -351,7 +365,8 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             .await
         {
             let prices =
-                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
+                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
+                    .await;
             if let Ok(v) =
                 compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
             {
@@ -397,13 +412,17 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
                 .bind(pk)
                 .fetch_optional(db.pool())
                 .await
-                .map_err(|e| ApiError::internal(format!("stream pnl: current query (after seed): {e}")))?
+                .map_err(|e| {
+                    ApiError::internal(format!("stream pnl: current query (after seed): {e}"))
+                })?
         } else {
             sqlx::query(CURRENT_SNAPSHOT_SQL)
                 .bind(&positions)
                 .fetch_optional(db.pool())
                 .await
-                .map_err(|e| ApiError::internal(format!("stream pnl: current query (after seed): {e}")))?
+                .map_err(|e| {
+                    ApiError::internal(format!("stream pnl: current query (after seed): {e}"))
+                })?
         };
     }
 
@@ -434,20 +453,30 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     let baseline_value: Decimal = b.try_get("value_usd").unwrap_or(Decimal::ZERO);
     let baseline_a: Decimal = b.try_get("amount_a_ui").unwrap_or(Decimal::ZERO);
     let baseline_b: Decimal = b.try_get("amount_b_ui").unwrap_or(Decimal::ZERO);
-    let baseline_ma = b.try_get::<Option<String>, _>("token_mint_a").ok().flatten();
-    let baseline_mb = b.try_get::<Option<String>, _>("token_mint_b").ok().flatten();
+    let baseline_ma = b
+        .try_get::<Option<String>, _>("token_mint_a")
+        .ok()
+        .flatten();
+    let baseline_mb = b
+        .try_get::<Option<String>, _>("token_mint_b")
+        .ok()
+        .flatten();
 
-    let (current_ts, current_value, current_ma, current_mb) =
-        if let Some(c) = current_row {
-            (
-                c.try_get::<DateTime<Utc>, _>("ts_utc").ok(),
-                c.try_get::<Decimal, _>("value_usd").unwrap_or(Decimal::ZERO),
-                c.try_get::<Option<String>, _>("token_mint_a").ok().flatten(),
-                c.try_get::<Option<String>, _>("token_mint_b").ok().flatten(),
-            )
-        } else {
-            (None, Decimal::ZERO, None, None)
-        };
+    let (current_ts, current_value, current_ma, current_mb) = if let Some(c) = current_row {
+        (
+            c.try_get::<DateTime<Utc>, _>("ts_utc").ok(),
+            c.try_get::<Decimal, _>("value_usd")
+                .unwrap_or(Decimal::ZERO),
+            c.try_get::<Option<String>, _>("token_mint_a")
+                .ok()
+                .flatten(),
+            c.try_get::<Option<String>, _>("token_mint_b")
+                .ok()
+                .flatten(),
+        )
+    } else {
+        (None, Decimal::ZERO, None, None)
+    };
 
     // Convert tx fees to USD using SOL/USD now (best-effort).
     let (sol_usd, sol_src) = sol_usd().await;
@@ -529,7 +558,11 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         .bind(&sessions)
         .fetch_all(db.pool())
         .await
-        .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows (legacy sessions): {e}")))?
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "stream pnl: token deltas rows (legacy sessions): {e}"
+            ))
+        })?
     } else {
         Vec::new()
     };
@@ -656,10 +689,7 @@ mod tests {
 
     #[test]
     fn pool_mints_mixed_fallback_per_leg() {
-        let v = pool_mints_for_hodl(
-            (Some("  A  ".into()), None),
-            (None, Some("B2".into())),
-        );
+        let v = pool_mints_for_hodl((Some("  A  ".into()), None), (None, Some("B2".into())));
         assert_eq!(v, vec!["A", "B2"]);
     }
 

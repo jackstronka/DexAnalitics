@@ -183,7 +183,7 @@ export interface PositionStreamLineageNode {
   /** Sum of Solana network fees (lamports) for all txs logged for this PDA. */
   tx_fee_lamports: number
   tx_fees_usd: string
-  /** LP fees collected (USD): positive pool-leg deltas from bot_collect_fees × mint USD. */
+  /** Fees collected (USD): best-effort fee legs from collect + close rows × mint USD. */
   fees_collected_usd: string
   /** Best-effort collected fee (token A UI units). */
   fees_collected_token_a_ui?: string | null
@@ -206,7 +206,7 @@ export interface PositionStreamLineageNode {
   } | null
 }
 
-/** Sums of per-node network costs vs LP fees across the full rotation chain. */
+/** Sums of per-node network costs vs collected fees across the full rotation chain. */
 export interface LineageChainCostSummary {
   tx_fee_lamports_total: number
   tx_fees_usd_total: string
@@ -733,10 +733,24 @@ export interface ComponentHealth {
 
 /** Best-effort message from failed fetch (JSON `message`, plain text, or HTML hint). */
 function messageFromErrorBody(text: string, status: number): string {
-  const isPl =
-    typeof navigator !== 'undefined' &&
-    typeof navigator.language === 'string' &&
-    navigator.language.toLowerCase().startsWith('pl')
+  // Prefer app-selected locale (Settings) over browser language.
+  // `I18nProvider` stores it under `clmm.locale`.
+  const isPl = (() => {
+    try {
+      if (typeof window !== 'undefined') {
+        const raw = window.localStorage.getItem('clmm.locale')
+        if (raw === 'pl') return true
+        if (raw === 'en') return false
+      }
+    } catch {
+      /* ignore */
+    }
+    return (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.language === 'string' &&
+      navigator.language.toLowerCase().startsWith('pl')
+    )
+  })()
   const statusLine = `HTTP ${status}`
   const trimmed = text.trim()
   const localizeKnownError = (raw: string): string => {
@@ -1026,6 +1040,38 @@ export interface OrcaOwnerPositionsResponse {
 export const getOrcaPositionsByOwner = (owner: string) =>
   fetchJson<OrcaOwnerPositionsResponse>(
     `/orca/positions-by-owner?${new URLSearchParams({ owner: owner.trim() })}`,
+  )
+
+export interface MarketSnapshotRow {
+  ts_utc: string
+  protocol: string
+  pool_address: string
+  source_path: string
+  price_ab?: string | number | null
+  liquidity_active_raw?: string | number | null
+}
+
+export interface MarketSnapshotsResponse {
+  scanned_files: number
+  rows_returned: number
+  rows: MarketSnapshotRow[]
+}
+
+export interface MarketDataQueryParams {
+  protocol?: string
+  pool?: string
+  from?: string
+  to?: string
+  limit?: number
+}
+
+export const getDataSnapshots = (params: MarketDataQueryParams) =>
+  fetchJson<MarketSnapshotsResponse>(
+    `/data/snapshots?${new URLSearchParams(
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+        .map(([k, v]) => [k, String(v)]),
+    )}`,
   )
 
 // Positions

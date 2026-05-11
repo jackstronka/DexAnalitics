@@ -4,7 +4,9 @@
 use crate::models::{StrandedRebalanceItem, StrandedRebalancesResponse};
 use anyhow::Context;
 use clmm_lp_execution::lifecycle::RebalanceReason;
-use clmm_lp_protocols::ledger::tx_lifecycle::{il_ledger_path_from_env, ledger_read_path};
+use clmm_lp_protocols::ledger::tx_lifecycle::{
+    il_ledger_path_from_env, ledger_read_path, session_has_bot_open_position,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -34,6 +36,8 @@ struct LocalPendingOpenItem {
     intended_tick_lower: i32,
     intended_tick_upper: i32,
     closed_position_nft: String,
+    #[serde(default)]
+    rebalance_session_id: Option<String>,
     reason: RebalanceReason,
     optimization_run_id: Option<String>,
     attempts: u32,
@@ -46,6 +50,7 @@ struct IncompleteHints {
     intended_tick_lower: Option<i32>,
     intended_tick_upper: Option<i32>,
     reason: Option<String>,
+    from_il_row: bool,
 }
 
 fn parse_iso_ts(v: Option<&serde_json::Value>) -> Option<String> {
@@ -57,6 +62,20 @@ fn parse_iso_ts(v: Option<&serde_json::Value>) -> Option<String> {
 fn parse_i32(v: Option<&serde_json::Value>) -> Option<i32> {
     v.and_then(|x| x.as_i64())
         .and_then(|x| i32::try_from(x).ok())
+}
+
+fn parse_tick_hint_from_details(
+    details: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<i32>, Option<i32>) {
+    let lower = parse_i32(details.get("new_tick_lower"))
+        .or_else(|| parse_i32(details.get("planned_new_tick_lower")))
+        .or_else(|| parse_i32(details.get("intended_tick_lower")))
+        .or_else(|| parse_i32(details.get("old_tick_lower")));
+    let upper = parse_i32(details.get("new_tick_upper"))
+        .or_else(|| parse_i32(details.get("planned_new_tick_upper")))
+        .or_else(|| parse_i32(details.get("intended_tick_upper")))
+        .or_else(|| parse_i32(details.get("old_tick_upper")));
+    (lower, upper)
 }
 
 fn parse_reason_str(raw: Option<&str>) -> Option<RebalanceReason> {
@@ -265,6 +284,7 @@ fn build_stranded_rebalances(
                     .get("reason")
                     .and_then(serde_json::Value::as_str)
                     .map(|s| s.to_string()),
+                from_il_row: true,
             },
         );
     }
@@ -292,6 +312,43 @@ fn build_stranded_rebalances(
         let Some(event) = row.get("event").and_then(serde_json::Value::as_str) else {
             continue;
         };
+        // Fallback hints for sessions missing IL `rebalance_incomplete` row:
+        // - `bot_recover_open_replanned` carries `new_tick_*`
+        // - `bot_close_position` carries `planned_new_tick_*` (rotation plan)
+        if (event == "bot_recover_open_replanned" || event == "bot_close_position")
+            && let Some(details) = row.get("details").and_then(serde_json::Value::as_object)
+        {
+            let (hint_lo, hint_hi) = parse_tick_hint_from_details(details);
+            let hint_reason = details
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    details
+                        .get("range_adjustment_reason")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|s| s.to_string())
+                });
+            if hint_lo.is_some() && hint_hi.is_some() {
+                il_hints
+                    .entry(sid.to_string())
+                    .and_modify(|h| {
+                        if !h.from_il_row {
+                            h.intended_tick_lower = hint_lo;
+                            h.intended_tick_upper = hint_hi;
+                            if h.reason.is_none() {
+                                h.reason = hint_reason.clone();
+                            }
+                        }
+                    })
+                    .or_insert(IncompleteHints {
+                        intended_tick_lower: hint_lo,
+                        intended_tick_upper: hint_hi,
+                        reason: hint_reason,
+                        from_il_row: false,
+                    });
+            }
+        }
         let entry = by_sid
             .entry(sid.to_string())
             .or_insert_with(|| StrandedRebalanceItem {
@@ -406,10 +463,24 @@ fn build_stranded_rebalances(
             && it.old_position.is_some()
             && it.pool_address.is_some()
             && !it.in_pending_open_queue;
+        let hints_from_il = il_hints
+            .get(&it.rebalance_session_id)
+            .map(|h| h.from_il_row)
+            .unwrap_or(false);
         it.note = if it.in_pending_open_queue {
             Some("Already queued for pending-open recovery.".to_string())
+        } else if !it.rebalance_incomplete_logged && it.intended_tick_lower.is_some() && it.intended_tick_upper.is_some() {
+            Some(
+                "Missing IL rebalance_incomplete row; using lifecycle replan ticks as fallback for auto-enqueue."
+                    .to_string(),
+            )
         } else if !it.rebalance_incomplete_logged {
             Some("Missing IL rebalance_incomplete row; watchdog can report but cannot infer intended ticks.".to_string())
+        } else if !hints_from_il && it.intended_tick_lower.is_some() && it.intended_tick_upper.is_some() {
+            Some(
+                "Using lifecycle-derived intended ticks (fallback) for pending-open auto-enqueue."
+                    .to_string(),
+            )
         } else if !it.can_auto_enqueue {
             Some("Missing required fields for auto-enqueue.".to_string())
         } else {
@@ -422,6 +493,17 @@ fn build_stranded_rebalances(
     // if queue contains a recoverable item without a visible lifecycle-close row,
     // expose it as a synthetic stranded row so operator can remove it from UI.
     for p in &pending_store.items {
+        if let Some(sid) = p
+            .rebalance_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            // Queue can contain stale leftovers after a successful reopen; hide them from stranded UI.
+            if session_has_bot_open_position(sid) {
+                continue;
+            }
+        }
         let old = p.closed_position_nft.trim();
         if old.is_empty() {
             continue;
@@ -721,6 +803,7 @@ fn reconcile_stranded_with_il_path(
             intended_tick_lower,
             intended_tick_upper,
             closed_position_nft: old_position,
+            rebalance_session_id: Some(it.rebalance_session_id.clone()),
             reason,
             optimization_run_id: None,
             attempts: 0,
@@ -866,6 +949,7 @@ mod tests {
                     intended_tick_lower: -10,
                     intended_tick_upper: 10,
                     closed_position_nft: "oldA".to_string(),
+                    rebalance_session_id: None,
                     reason: RebalanceReason::Manual,
                     optimization_run_id: None,
                     attempts: 0,
@@ -878,6 +962,7 @@ mod tests {
                     intended_tick_lower: -10,
                     intended_tick_upper: 10,
                     closed_position_nft: "otherOld".to_string(),
+                    rebalance_session_id: None,
                     reason: RebalanceReason::Manual,
                     optimization_run_id: None,
                     attempts: 0,
@@ -890,6 +975,7 @@ mod tests {
                     intended_tick_lower: -20,
                     intended_tick_upper: 20,
                     closed_position_nft: "otherRange".to_string(),
+                    rebalance_session_id: None,
                     reason: RebalanceReason::Manual,
                     optimization_run_id: None,
                     attempts: 0,
@@ -935,6 +1021,7 @@ mod tests {
                 intended_tick_lower: -100,
                 intended_tick_upper: 100,
                 closed_position_nft: "old-nft-x".to_string(),
+                rebalance_session_id: None,
                 reason: RebalanceReason::Periodic,
                 optimization_run_id: None,
                 attempts: 2,
@@ -965,6 +1052,7 @@ mod tests {
                 intended_tick_lower: -200,
                 intended_tick_upper: 200,
                 closed_position_nft: "old-nft-hidden".to_string(),
+                rebalance_session_id: None,
                 reason: RebalanceReason::Periodic,
                 optimization_run_id: None,
                 attempts: 0,
@@ -989,6 +1077,7 @@ mod tests {
                     intended_tick_lower: -300,
                     intended_tick_upper: 300,
                     closed_position_nft: "old-1".to_string(),
+                    rebalance_session_id: None,
                     reason: RebalanceReason::Periodic,
                     optimization_run_id: None,
                     attempts: 0,
@@ -1000,6 +1089,7 @@ mod tests {
                     intended_tick_lower: -300,
                     intended_tick_upper: 300,
                     closed_position_nft: "old-2".to_string(),
+                    rebalance_session_id: None,
                     reason: RebalanceReason::RangeExit,
                     optimization_run_id: None,
                     attempts: 0,
@@ -1011,5 +1101,36 @@ mod tests {
         };
         let items = build_stranded_rebalances(&lifecycle, &il, &pending);
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn fallback_replanned_ticks_enable_auto_enqueue_without_il_row() {
+        let sid = "sess-watchdog-fallback";
+        let lifecycle = vec![serde_json::json!({
+            "source": "orca_bot",
+            "rebalance_session_id": sid,
+            "event": "bot_close_position",
+            "position_pubkey": "oldNftX",
+            "pool_address": "poolX",
+        }), serde_json::json!({
+            "source": "orca_bot",
+            "rebalance_session_id": sid,
+            "event": "bot_recover_open_replanned",
+            "details": {
+                "new_tick_lower": -24732,
+                "new_tick_upper": -24528,
+                "reason": "RangeExit"
+            }
+        })];
+        let il = vec![];
+        let pending = LocalPendingOpenStore::default();
+        let items = build_stranded_rebalances(&lifecycle, &il, &pending);
+        assert_eq!(items.len(), 1);
+        let it = &items[0];
+        assert_eq!(it.rebalance_session_id, sid);
+        assert_eq!(it.intended_tick_lower, Some(-24732));
+        assert_eq!(it.intended_tick_upper, Some(-24528));
+        assert!(it.can_auto_enqueue);
+        assert!(it.note.as_deref().unwrap_or("").contains("fallback"));
     }
 }

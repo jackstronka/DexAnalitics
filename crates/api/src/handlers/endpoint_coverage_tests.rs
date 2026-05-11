@@ -137,7 +137,9 @@ async fn backtests_data_readiness_returns_thresholds_payload() {
         1
     );
     assert_eq!(
-        agg.get("variant_count").and_then(|x| x.as_u64()).unwrap_or(0),
+        agg.get("variant_count")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
         1
     );
     assert!(agg.contains_key("source"));

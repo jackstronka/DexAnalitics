@@ -470,9 +470,16 @@ impl RpcProvider {
         let tx = transaction.clone();
         let mut last_err: Option<anyhow::Error> = None;
 
-        // Try endpoints in order, but keep each send+confirm pinned to a single endpoint.
-        for endpoint in self.config.all_endpoints() {
-            let endpoint = endpoint.to_string();
+        // IMPORTANT: The transaction is already signed with a recent blockhash obtained via this
+        // provider. If we "fan out" to other endpoints here, we can hit `BlockhashNotFound` when
+        // the send endpoint does not know the blockhash (common with public RPC fleets).
+        //
+        // Therefore: pin to `current_endpoint()` for each whole send+confirm attempt. If it fails,
+        // rotate endpoint (provider-level) and the caller will typically re-sign with a fresh
+        // blockhash on retry.
+        let max_endpoints = self.config.all_endpoints().len().max(1);
+        for _ in 0..max_endpoints {
+            let endpoint = self.current_endpoint().await;
             let client = RpcClient::new_with_timeout(endpoint.clone(), self.config.timeout);
 
             // 1) Send with retries on this endpoint.
@@ -539,6 +546,7 @@ impl RpcProvider {
                 Ok(sig) => sig,
                 Err(()) => {
                     warn!(endpoint = endpoint, "send failed on endpoint; trying next");
+                    self.rotate_endpoint().await;
                     continue;
                 }
             };
@@ -551,6 +559,7 @@ impl RpcProvider {
                         "confirm timeout (endpoint={endpoint}, signature={sig})"
                     ));
                     warn!(endpoint = endpoint, signature = %sig, "confirm timed out; trying next endpoint");
+                    self.rotate_endpoint().await;
                     break;
                 }
 

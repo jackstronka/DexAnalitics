@@ -117,6 +117,36 @@ export function alignPriceRatioToTicks(
   return { tickLower, tickUpper }
 }
 
+/**
+ * Expand an already spacing-aligned [tickLower, tickUpper) so a live `current_tick` satisfies
+ * `tickLower <= current_tick < tickUpper` (Whirlpool / open-budget quote in-range convention).
+ * Used when Bollinger bands from history sit off the live pool tick — without this, USD quote
+ * stays disabled and swap-before-open never appears.
+ */
+export function expandAlignedTickRangeToIncludeCurrent(
+  tickLower: number,
+  tickUpper: number,
+  currentTick: number,
+  tickSpacing: number,
+): { tickLower: number; tickUpper: number } {
+  const s = Math.max(1, Math.floor(tickSpacing))
+  let tl = Math.floor(tickLower / s) * s
+  let tu = Math.ceil(tickUpper / s) * s
+  if (!Number.isFinite(tl) || !Number.isFinite(tu) || !Number.isFinite(currentTick)) {
+    return { tickLower: tl, tickUpper: tu }
+  }
+  if (tl >= tu) {
+    tu = tl + s
+  }
+  while (currentTick < tl) {
+    tl -= s
+  }
+  while (currentTick >= tu) {
+    tu += s
+  }
+  return { tickLower: tl, tickUpper: tu }
+}
+
 /** String for numeric inputs (avoids overly long `toFixed` chains for tiny ratios). */
 export function priceRatioToInputString(p: number): string {
   if (!Number.isFinite(p) || p <= 0) {

@@ -3,11 +3,12 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     AgentDecisionRow, AgentDecisionWriteRequest, AgentDecisionWriteResponse, AgentDecisionsQuery,
-    AgentDecisionsResponse, MarketDataQuery, MarketSnapshotRow, MarketSnapshotsResponse, MarketSwapRow,
-    MarketSwapsResponse,
+    AgentDecisionsResponse, MarketDataQuery, MarketSnapshotRow, MarketSnapshotsResponse,
+    MarketSwapRow, MarketSwapsResponse,
 };
 use axum::{Json, extract::Query};
 use chrono::{DateTime, Utc};
+use clmm_lp_domain::math::price_tick::tick_to_price;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::fs;
@@ -20,6 +21,16 @@ fn parse_decimal_opt(v: Option<&Value>) -> Option<Decimal> {
         Some(Value::Number(n)) => n.as_f64().and_then(Decimal::from_f64_retain),
         _ => None,
     }
+}
+
+fn parse_snapshot_price_ab(v: &Value) -> Option<Decimal> {
+    if let Some(px) = parse_decimal_opt(v.get("price_ab")) {
+        return Some(px);
+    }
+
+    let tick_i64 = v.get("tick_current").and_then(Value::as_i64)?;
+    let tick = i32::try_from(tick_i64).ok()?;
+    tick_to_price(tick).ok()
 }
 
 fn parse_ts_utc(v: &Value) -> Option<String> {
@@ -42,15 +53,23 @@ fn parse_time_bound(raw: &Option<String>) -> Result<Option<DateTime<Utc>>, ApiEr
     Ok(Some(dt.with_timezone(&Utc)))
 }
 
-fn within_time_window(ts_utc: &str, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> bool {
+fn within_time_window(
+    ts_utc: &str,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> bool {
     let Ok(dt_fixed) = DateTime::parse_from_rfc3339(ts_utc) else {
         return false;
     };
     let dt = dt_fixed.with_timezone(&Utc);
-    if let Some(f) = from && dt < f {
+    if let Some(f) = from
+        && dt < f
+    {
         return false;
     }
-    if let Some(t) = to && dt > t {
+    if let Some(t) = to
+        && dt > t
+    {
         return false;
     }
     true
@@ -124,15 +143,19 @@ pub async fn get_data_snapshots(
         }
         let protocol = comps[ix + 1].to_ascii_lowercase();
         let pool_address = comps[ix + 2].clone();
-        if let Some(ref p) = protocol_filter && &protocol != p {
+        if let Some(ref p) = protocol_filter
+            && &protocol != p
+        {
             continue;
         }
-        if let Some(ref p) = pool_filter && &pool_address != p {
+        if let Some(ref p) = pool_filter
+            && &pool_address != p
+        {
             continue;
         }
 
-        let file =
-            fs::File::open(&f).map_err(|e| ApiError::internal(format!("open {}: {e}", f.display())))?;
+        let file = fs::File::open(&f)
+            .map_err(|e| ApiError::internal(format!("open {}: {e}", f.display())))?;
         let reader = BufReader::new(file);
         for line in reader.lines().map_while(Result::ok) {
             let t = line.trim();
@@ -153,8 +176,12 @@ pub async fn get_data_snapshots(
                 protocol: protocol.clone(),
                 pool_address: pool_address.clone(),
                 source_path: f.to_string_lossy().to_string(),
-                price_ab: parse_decimal_opt(v.get("price_ab")),
-                liquidity_active_raw: v.get("liquidity_active").and_then(Value::as_u64).map(u128::from),
+                // Snapshot rows may carry either `price_ab` or only `tick_current` (5m collector).
+                price_ab: parse_snapshot_price_ab(&v),
+                liquidity_active_raw: v
+                    .get("liquidity_active")
+                    .and_then(Value::as_u64)
+                    .map(u128::from),
                 position_id: None,
                 chain_id: None,
                 session_id: None,
@@ -190,7 +217,9 @@ pub async fn get_data_snapshots(
         (status = 200, description = "Normalized swaps feed", body = MarketSwapsResponse)
     )
 )]
-pub async fn get_data_swaps(Query(q): Query<MarketDataQuery>) -> ApiResult<Json<MarketSwapsResponse>> {
+pub async fn get_data_swaps(
+    Query(q): Query<MarketDataQuery>,
+) -> ApiResult<Json<MarketSwapsResponse>> {
     let from = parse_time_bound(&q.from)?;
     let to = parse_time_bound(&q.to)?;
     let limit = q.limit.unwrap_or(500).min(10_000) as usize;
@@ -217,15 +246,19 @@ pub async fn get_data_swaps(Query(q): Query<MarketDataQuery>) -> ApiResult<Json<
         }
         let protocol = comps[ix + 1].to_ascii_lowercase();
         let pool_address = comps[ix + 2].clone();
-        if let Some(ref p) = protocol_filter && &protocol != p {
+        if let Some(ref p) = protocol_filter
+            && &protocol != p
+        {
             continue;
         }
-        if let Some(ref p) = pool_filter && &pool_address != p {
+        if let Some(ref p) = pool_filter
+            && &pool_address != p
+        {
             continue;
         }
 
-        let file =
-            fs::File::open(&f).map_err(|e| ApiError::internal(format!("open {}: {e}", f.display())))?;
+        let file = fs::File::open(&f)
+            .map_err(|e| ApiError::internal(format!("open {}: {e}", f.display())))?;
         let reader = BufReader::new(file);
         for line in reader.lines().map_while(Result::ok) {
             let t = line.trim();
@@ -300,7 +333,9 @@ pub async fn get_agent_decisions(
     let limit = q.limit.unwrap_or(500).min(10_000) as usize;
     let strategy_filter = q.strategy_id.as_ref().map(|s| s.trim().to_string());
     let source_filter = q.source.as_ref().map(|s| s.trim().to_ascii_lowercase());
-    let path = PathBuf::from("data").join("agent").join("agent_decisions.jsonl");
+    let path = PathBuf::from("data")
+        .join("agent")
+        .join("agent_decisions.jsonl");
     if !path.exists() {
         return Ok(Json(AgentDecisionsResponse {
             path: path.to_string_lossy().to_string(),
@@ -367,7 +402,12 @@ pub async fn post_agent_decision(
     if source.is_empty() {
         return Err(ApiError::bad_request("source cannot be empty"));
     }
-    let ts_utc = match req.ts_utc.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let ts_utc = match req
+        .ts_utc
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(v) => DateTime::parse_from_rfc3339(v)
             .map_err(|_| ApiError::bad_request(format!("Invalid RFC3339 timestamp: {v}")))?
             .with_timezone(&Utc)
@@ -378,10 +418,22 @@ pub async fn post_agent_decision(
     let row = AgentDecisionRow {
         ts_utc,
         source,
-        strategy_id: req.strategy_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-        position_id: req.position_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-        chain_id: req.chain_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-        session_id: req.session_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        strategy_id: req
+            .strategy_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        position_id: req
+            .position_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        chain_id: req
+            .chain_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        session_id: req
+            .session_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         decision: req.decision,
     };
 

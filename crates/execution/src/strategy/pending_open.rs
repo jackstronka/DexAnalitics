@@ -99,9 +99,53 @@ pub fn attempts_alert_threshold() -> u32 {
         .unwrap_or(10)
 }
 
+/// §2.3 faza 2: minimal seconds between **on-chain** recovery attempts for the same item.
+///
+/// When unset or invalid, there is no extra rate limit (legacy: every `evaluate_all` pass may try).
+/// When set (1..=86400), [`should_defer_pending_open_rate_limit`] skips a pass without bumping
+/// `attempts` or updating `last_attempt_at`.
+pub fn pending_open_min_interval_secs() -> Option<u64> {
+    std::env::var("CLMM_PENDING_OPEN_MIN_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| (1..=86400).contains(&n))
+}
+
+/// Returns `true` if this pass should **not** run `recover_open` yet (RPC saver).
+pub fn should_defer_pending_open_rate_limit(
+    item: &PendingOpenItem,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    should_defer_pending_open_rate_limit_with(item, now, pending_open_min_interval_secs())
+}
+
+/// Like [`should_defer_pending_open_rate_limit`] but accepts `min_interval_secs` for tests.
+pub fn should_defer_pending_open_rate_limit_with(
+    item: &PendingOpenItem,
+    now: chrono::DateTime<chrono::Utc>,
+    min_interval_secs: Option<u64>,
+) -> bool {
+    let Some(min_secs) = min_interval_secs else {
+        return false;
+    };
+    let Some(ref last_s) = item.last_attempt_at else {
+        return false;
+    };
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(last_s.trim()) else {
+        return false;
+    };
+    let last = ts.with_timezone(&chrono::Utc);
+    let elapsed = now.signed_duration_since(last);
+    elapsed.num_seconds() < min_secs as i64
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PendingOpenStore, attempts_alert_threshold};
+    use super::{
+        PendingOpenItem, PendingOpenStore, attempts_alert_threshold,
+        should_defer_pending_open_rate_limit_with,
+    };
+    use crate::lifecycle::RebalanceReason;
 
     #[test]
     fn pending_open_store_parses_and_keeps_dismissed_sessions() {
@@ -143,5 +187,60 @@ mod tests {
     #[test]
     fn alert_attempt_threshold_has_safe_default() {
         assert!(attempts_alert_threshold() >= 1);
+    }
+
+    fn sample_item(last_attempt: Option<&str>, attempts: u32) -> PendingOpenItem {
+        PendingOpenItem {
+            pool: "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE".into(),
+            intended_tick_lower: -1,
+            intended_tick_upper: 1,
+            closed_position_nft: "DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq".into(),
+            rebalance_session_id: None,
+            planned_at_utc: None,
+            planned_price_ab: None,
+            reason: RebalanceReason::Manual,
+            optimization_run_id: None,
+            attempts,
+            last_error: None,
+            last_attempt_at: last_attempt.map(String::from),
+            stuck_reason: None,
+            stuck_since: None,
+            last_alert_attempts: None,
+            created_at: "2026-04-17T09:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn defer_rate_limit_false_when_min_interval_disabled() {
+        let item = sample_item(Some("2026-05-11T10:00:00Z"), 1);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-11T10:00:10Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!should_defer_pending_open_rate_limit_with(&item, now, None));
+    }
+
+    #[test]
+    fn defer_rate_limit_false_without_last_attempt() {
+        let item = sample_item(None, 0);
+        let now = chrono::Utc::now();
+        assert!(!should_defer_pending_open_rate_limit_with(&item, now, Some(60)));
+    }
+
+    #[test]
+    fn defer_rate_limit_true_when_within_min_window() {
+        let item = sample_item(Some("2026-05-11T10:00:00Z"), 3);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-11T10:00:30Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(should_defer_pending_open_rate_limit_with(&item, now, Some(60)));
+    }
+
+    #[test]
+    fn defer_rate_limit_false_after_min_window() {
+        let item = sample_item(Some("2026-05-11T10:00:00Z"), 3);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-11T10:01:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!should_defer_pending_open_rate_limit_with(&item, now, Some(60)));
     }
 }

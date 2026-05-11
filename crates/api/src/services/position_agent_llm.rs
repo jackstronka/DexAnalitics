@@ -124,7 +124,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
             ],
             "temperature": 0.2
         });
-        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         let resp = HTTP
             .post(url)
             .bearer_auth(&self.api_key)
@@ -133,15 +136,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .await
             .map_err(|e| ApiError::service_unavailable(format!("LLM request failed: {e}")))?;
         let status = resp.status();
-        let payload: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| ApiError::service_unavailable(format!("LLM invalid JSON response: {e}")))?;
+        let payload: serde_json::Value = resp.json().await.map_err(|e| {
+            ApiError::service_unavailable(format!("LLM invalid JSON response: {e}"))
+        })?;
         if !status.is_success() {
             return Err(ApiError::service_unavailable(format!(
                 "LLM HTTP {}: {}",
-                status,
-                payload
+                status, payload
             )));
         }
         let text = payload

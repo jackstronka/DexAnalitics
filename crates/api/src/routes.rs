@@ -15,10 +15,12 @@ use tower_http::timeout::TimeoutLayer;
 /// Note: timeouts are applied in [`create_versioned_router`]. This helper is kept for internal
 /// callers (e.g. tests / prelude) and returns the merged router without timeout layers.
 pub fn create_router(state: AppState) -> Router {
-    create_base_router(state.clone()).merge(create_onchain_router(state))
+    create_base_http_router(state.clone())
+        .merge(create_ws_router(state.clone()))
+        .merge(create_onchain_router(state))
 }
 
-fn create_base_router(state: AppState) -> Router {
+fn create_base_http_router(state: AppState) -> Router {
     Router::new()
         // Health routes
         .route("/health", get(handlers::health_check))
@@ -228,7 +230,10 @@ fn create_base_router(state: AppState) -> Router {
         .route("/wallets", get(handlers::list_wallets))
         .route("/wallets/create", post(handlers::create_wallet))
         .route("/wallets/balances", get(handlers::get_wallet_balances))
-        .route("/wallets/effective-balances", get(handlers::get_wallet_effective_balances))
+        .route(
+            "/wallets/effective-balances",
+            get(handlers::get_wallet_effective_balances),
+        )
         .route("/wallets/ws-status", get(handlers::get_wallet_ws_status))
         .route("/wallets/api-signer", get(handlers::get_api_signer_wallet))
         .route("/wallets/active-signer", get(handlers::get_active_signer))
@@ -237,9 +242,15 @@ fn create_base_router(state: AppState) -> Router {
         .route("/wallets/ops", get(handlers::list_wallet_ops))
         .route("/wallets/ops/stats", get(handlers::get_wallet_ops_stats))
         .route("/wallets/ops/{op_id}", get(handlers::get_wallet_op))
-        .route("/wallets/transfer", post(handlers::transfer_sol_between_wallets))
+        .route(
+            "/wallets/transfer",
+            post(handlers::transfer_sol_between_wallets),
+        )
         .route("/wallets/transfers", get(handlers::list_wallet_transfers))
-        .route("/wallets/reconcile", post(handlers::reconcile_wallet_stores))
+        .route(
+            "/wallets/reconcile",
+            post(handlers::reconcile_wallet_stores),
+        )
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
@@ -247,10 +258,14 @@ fn create_base_router(state: AppState) -> Router {
             "/evm/base/aerodrome-slipstream/pools/{pool}/slot0",
             get(handlers::get_aerodrome_slipstream_pool_slot0),
         )
-        // WebSocket routes
+        // Add state
+        .with_state(state)
+}
+
+fn create_ws_router(state: AppState) -> Router {
+    Router::new()
         .route("/ws/positions", get(websocket::positions_ws))
         .route("/ws/alerts", get(websocket::alerts_ws))
-        // Add state
         .with_state(state)
 }
 
@@ -308,11 +323,21 @@ pub fn create_versioned_router(
     onchain_request_timeout_secs: u64,
 ) -> Router {
     #[allow(deprecated)]
-    let base = create_base_router(state.clone())
+    let base_http = create_base_http_router(state.clone())
         .layer(TimeoutLayer::new(Duration::from_secs(request_timeout_secs)));
+    let ws = create_ws_router(state.clone());
     #[allow(deprecated)]
     let onchain = create_onchain_router(state).layer(TimeoutLayer::new(Duration::from_secs(
         onchain_request_timeout_secs,
     )));
-    Router::new().nest("/api/v1", base.merge(onchain))
+
+    // IMPORTANT: keep WebSockets out of timeout layers.
+    //
+    // In axum, layering a Router and then merging other routers into it can still lead to the
+    // layer wrapping more routes than intended (depending on composition order). To make the
+    // boundary unambiguous, we apply versioning with separate `nest("/api/v1", ...)` routers and
+    // merge them at the top level.
+    let http_versioned = Router::new().nest("/api/v1", base_http.merge(onchain));
+    let ws_versioned = Router::new().nest("/api/v1", ws);
+    Router::new().merge(http_versioned).merge(ws_versioned)
 }

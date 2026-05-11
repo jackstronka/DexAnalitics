@@ -82,8 +82,7 @@ pub(crate) fn apply_optional_interval_to_decision_config(
                 decision_config.strategy_mode,
                 StrategyMode::Periodic | StrategyMode::LastCandlePeriodic
             );
-            let periodic_minutes = if periodic_like && min_minutes == 0
-            {
+            let periodic_minutes = if periodic_like && min_minutes == 0 {
                 warn!(
                     "periodic-like strategy received min_rebalance_interval_minutes=0; clamping to 1 minute to avoid rebalance every eval tick"
                 );
@@ -97,7 +96,10 @@ pub(crate) fn apply_optional_interval_to_decision_config(
         None => {
             if matches!(decision_config.strategy_mode, StrategyMode::Periodic) {
                 decision_config.periodic_interval_minutes = u64::MAX;
-            } else if matches!(decision_config.strategy_mode, StrategyMode::LastCandlePeriodic) {
+            } else if matches!(
+                decision_config.strategy_mode,
+                StrategyMode::LastCandlePeriodic
+            ) {
                 decision_config.min_rebalance_interval_minutes =
                     DecisionConfig::default().min_rebalance_interval_minutes;
             } else {
@@ -167,15 +169,49 @@ pub async fn wire_executor_allowlist_and_reopen_hook(
                 // IMPORTANT: pending-open recovery queue is global and can be claimed by any executor.
                 // Updating links only for the claimant's `strategy_id` can miss the real owner strategy.
                 // Resolve owners by `old` PDA first, then replace links there.
-                let mut touched: Vec<String> = strategy_ids_holding_position_address(&st, &old_s).await;
+                let mut touched: Vec<String> =
+                    strategy_ids_holding_position_address(&st, &old_s).await;
                 if touched.is_empty() {
                     touched.push(sid.clone());
                 }
+
+                // Durable breadcrumb for debugging: record whether we found an "owner" strategy for
+                // the old PDA, and which strategy ids we attempted to update.
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    st.provider.as_ref(),
+                    "bot_reopen_hook_fired",
+                    "reopen_hook",
+                    None,
+                    None,
+                    None,
+                    serde_json::json!({
+                        "old_position": old_s,
+                        "new_position": new_s,
+                        "claimant_strategy_id": sid,
+                        "touched_strategy_ids": touched,
+                    }),
+                )
+                .await;
 
                 for target_sid in touched {
                     if let Err(e) =
                         replace_position_address_in_strategy(&st, &target_sid, &old_s, &new_s).await
                     {
+                        clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                            st.provider.as_ref(),
+                            "bot_reopen_hook_replace_failed",
+                            "reopen_hook",
+                            None,
+                            None,
+                            None,
+                            serde_json::json!({
+                                "strategy_id": target_sid,
+                                "old_position": old_s,
+                                "new_position": new_s,
+                                "error": e.to_string(),
+                            }),
+                        )
+                        .await;
                         warn!(
                             strategy_id = %target_sid,
                             old_position = %old_s,
@@ -185,7 +221,8 @@ pub async fn wire_executor_allowlist_and_reopen_hook(
                         );
                         continue;
                     }
-                    if let Err(e) = sync_managed_allowlist_from_registry_for_strategy(&st, &target_sid).await
+                    if let Err(e) =
+                        sync_managed_allowlist_from_registry_for_strategy(&st, &target_sid).await
                     {
                         warn!(
                             strategy_id = %target_sid,
@@ -302,10 +339,16 @@ impl StrategyService {
             .get("optimize_result_json_path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let il_ledger_path: Option<String> = params_json
+        let il_ledger_path_from_params: Option<String> = params_json
             .get("il_ledger_path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let il_ledger_path: Option<String> = il_ledger_path_from_params
+            .or_else(|| {
+                clmm_lp_protocols::ledger::tx_lifecycle::il_ledger_path_from_env()
+                    .map(|p| p.display().to_string())
+            })
+            .or_else(|| Some("data/ledger/il-ledger.jsonl".to_string()));
         let result_path_buf = optimize_result_json_path
             .as_ref()
             .map(std::path::PathBuf::from);
@@ -442,8 +485,8 @@ impl StrategyService {
                     Decimal::from_f64_retain(v).unwrap_or(decision_config.bollinger_k);
             }
             if let Some(v) = params.get("retouch_offset_pct").and_then(json_f64) {
-                decision_config.retouch_offset_pct =
-                    Decimal::from_f64_retain(v / 100.0).unwrap_or(decision_config.retouch_offset_pct);
+                decision_config.retouch_offset_pct = Decimal::from_f64_retain(v / 100.0)
+                    .unwrap_or(decision_config.retouch_offset_pct);
             }
 
             let maybe_min_minutes = min_rebalance_interval_minutes_from_params(params);
@@ -467,7 +510,16 @@ impl StrategyService {
             }
         }
 
-        executor.set_decision_config(decision_config);
+        executor.set_decision_config(decision_config.clone());
+        info!(
+            strategy_id = %strategy_id,
+            strategy_mode = ?decision_config.strategy_mode,
+            min_rebalance_interval_minutes = decision_config.min_rebalance_interval_minutes,
+            periodic_interval_minutes = decision_config.periodic_interval_minutes,
+            periodic_requires_out_of_range = decision_config.periodic_requires_out_of_range,
+            rebalance_on_range_exit_immediately = decision_config.rebalance_on_range_exit_immediately,
+            "Strategy decision config applied"
+        );
 
         let executor = Arc::new(RwLock::new(executor));
 
@@ -479,6 +531,17 @@ impl StrategyService {
         }
 
         if let Some(p) = il_ledger_path.as_deref() {
+            if let Some(parent) = PathBuf::from(p).parent()
+                && !parent.as_os_str().is_empty()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                warn!(
+                    strategy_id = %strategy_id,
+                    il_ledger_path = %p,
+                    error = %e,
+                    "Could not create parent directory for IL ledger path"
+                );
+            }
             executor
                 .read()
                 .await
@@ -1105,7 +1168,8 @@ pub async fn heal_rotated_strategy_link_best_effort(
 mod managed_allowlist_tests {
     use super::{
         apply_optional_interval_to_decision_config,
-        managed_allowlist_pubkeys_for_strategy_parameters, min_rebalance_interval_minutes_from_params,
+        managed_allowlist_pubkeys_for_strategy_parameters,
+        min_rebalance_interval_minutes_from_params,
     };
     use clmm_lp_execution::prelude::{DecisionConfig, StrategyMode};
     use solana_sdk::pubkey::Pubkey;

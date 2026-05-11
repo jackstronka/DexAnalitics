@@ -26,7 +26,6 @@ pub use mock::MockMarketDataProvider;
 pub use orca_rest::{
     ListPoolsQuery as OrcaListPoolsQuery, ListTokensQuery as OrcaListTokensQuery, OrcaLockInfo,
     OrcaPoolStats, OrcaPoolSummary, OrcaProtocolStats, OrcaRestClient, OrcaTokenSummary,
-    Paged as OrcaPaged,
-    SearchPoolsQuery as OrcaSearchPoolsQuery, SearchTokensQuery as OrcaSearchTokensQuery,
-    Wrapped as OrcaWrapped,
+    Paged as OrcaPaged, SearchPoolsQuery as OrcaSearchPoolsQuery,
+    SearchTokensQuery as OrcaSearchTokensQuery, Wrapped as OrcaWrapped,
 };

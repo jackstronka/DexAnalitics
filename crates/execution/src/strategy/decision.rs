@@ -82,7 +82,7 @@ impl Default for DecisionConfig {
             // and `Periodic` was strictly timer-based regardless of in-range status.
             periodic_requires_out_of_range: false,
             rebalance_on_range_exit_immediately: true,
-            threshold_pct: Decimal::new(5, 3),    // 0.5% by default
+            threshold_pct: Decimal::new(5, 3), // 0.5% by default
             bollinger_window_points: 20,
             bollinger_k: Decimal::new(2, 0),
             retouch_offset_pct: Decimal::ZERO,
@@ -323,7 +323,8 @@ impl DecisionEngine {
                 Decision::Hold
             }
             StrategyMode::LastCandlePeriodic => {
-                if context.minutes_since_rebalance >= cfg.min_rebalance_interval_minutes {
+                // Periodic-like mode: use the periodic interval (which is defensively clamped when 0).
+                if context.minutes_since_rebalance >= cfg.periodic_interval_minutes {
                     let (new_lower, new_upper) = context
                         .last_candle_ticks
                         .unwrap_or_else(|| self.calculate_new_range(pool));
@@ -676,6 +677,7 @@ mod tests {
         let cfg = DecisionConfig {
             strategy_mode: StrategyMode::LastCandlePeriodic,
             min_rebalance_interval_minutes: 60,
+            periodic_interval_minutes: 60,
             ..DecisionConfig::default()
         };
         let engine = DecisionEngine::new(cfg);
@@ -701,11 +703,30 @@ mod tests {
         let cfg = DecisionConfig {
             strategy_mode: StrategyMode::LastCandlePeriodic,
             min_rebalance_interval_minutes: 120,
+            periodic_interval_minutes: 120,
             ..DecisionConfig::default()
         };
         let engine = DecisionEngine::new(cfg);
         let mut context = create_test_context(false, Decimal::ZERO);
         context.minutes_since_rebalance = 60;
+
+        let decision = engine.decide(&context);
+        assert!(matches!(decision, Decision::Hold));
+    }
+
+    #[test]
+    fn test_last_candle_periodic_uses_periodic_interval_over_min_interval() {
+        // Regression guard: LastCandlePeriodic is timer-driven; it must respect the periodic interval.
+        // This prevents "rebalance every eval tick" loops when min interval is accidentally left at 0.
+        let cfg = DecisionConfig {
+            strategy_mode: StrategyMode::LastCandlePeriodic,
+            min_rebalance_interval_minutes: 0,
+            periodic_interval_minutes: 45,
+            ..DecisionConfig::default()
+        };
+        let engine = DecisionEngine::new(cfg);
+        let mut context = create_test_context(true, Decimal::ZERO);
+        context.minutes_since_rebalance = 4;
 
         let decision = engine.decide(&context);
         assert!(matches!(decision, Decision::Hold));

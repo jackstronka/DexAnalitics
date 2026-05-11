@@ -363,12 +363,26 @@ async fn persist_event_valuation_snapshots_for_positions(
             let mut mint_a_decimals: Option<u8> = None;
             let mut mint_b_decimals: Option<u8> = None;
             if details_obj.is_some_and(|d| {
-                (d.get("open_amount_a_raw").and_then(parse_u64_from_json).is_some()
-                    && d.get("open_amount_b_raw").and_then(parse_u64_from_json).is_some())
-                    || (d.get("open_quote_token_max_a").and_then(parse_u64_from_json).is_some()
-                        && d.get("open_quote_token_max_b").and_then(parse_u64_from_json).is_some())
-                    || (d.get("amount_a_cap").and_then(parse_u64_from_json).is_some()
-                        && d.get("amount_b_cap").and_then(parse_u64_from_json).is_some())
+                (d.get("open_amount_a_raw")
+                    .and_then(parse_u64_from_json)
+                    .is_some()
+                    && d.get("open_amount_b_raw")
+                        .and_then(parse_u64_from_json)
+                        .is_some())
+                    || (d
+                        .get("open_quote_token_max_a")
+                        .and_then(parse_u64_from_json)
+                        .is_some()
+                        && d.get("open_quote_token_max_b")
+                            .and_then(parse_u64_from_json)
+                            .is_some())
+                    || (d
+                        .get("amount_a_cap")
+                        .and_then(parse_u64_from_json)
+                        .is_some()
+                        && d.get("amount_b_cap")
+                            .and_then(parse_u64_from_json)
+                            .is_some())
             }) {
                 let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
                 let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
@@ -1476,8 +1490,12 @@ fn baseline_open_amounts_ui_from_details_or_deltas(
 ) -> (Decimal, Decimal, Option<&'static str>) {
     if let Some(details) = details_obj
         && let (Some(raw_a), Some(raw_b)) = (
-            details.get("open_amount_a_raw").and_then(parse_u64_from_json),
-            details.get("open_amount_b_raw").and_then(parse_u64_from_json),
+            details
+                .get("open_amount_a_raw")
+                .and_then(parse_u64_from_json),
+            details
+                .get("open_amount_b_raw")
+                .and_then(parse_u64_from_json),
         )
         && let (Some(dec_a), Some(dec_b)) = (mint_a_decimals, mint_b_decimals)
     {
@@ -1854,7 +1872,10 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
         if r.position_pubkey.as_deref() != Some(position_pubkey) {
             continue;
         }
-        if r.event.as_deref() != Some("bot_collect_fees") {
+        let event = r.event.as_deref().unwrap_or_default();
+        let is_collect = event == "bot_collect_fees";
+        let is_close = event == "bot_close_position";
+        if !(is_collect || is_close) {
             continue;
         }
         let Some(pool) = r
@@ -1903,13 +1924,19 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
 
         let mut merged_a = map_a.max(col_a);
         let mut merged_b = map_b.max(col_b);
-        let has_authoritative_pair =
-            r.lp_collected_token_a_raw.is_some() && r.lp_collected_token_b_raw.is_some();
+        // NOTE: Some legacy close rows may carry `lp_collected_token_*_raw=0/0` from a stale
+        // pre-update snapshot (principal then leaked into "fees" via `fee_payer_token_deltas`).
+        // Treat 0/0 as non-authoritative so close subtraction can isolate fee legs.
+        let has_authoritative_pair = (is_collect || is_close)
+            && r.lp_collected_token_a_raw.is_some()
+            && r.lp_collected_token_b_raw.is_some()
+            && (r.lp_collected_token_a_raw.unwrap_or(0) > 0 || r.lp_collected_token_b_raw.unwrap_or(0) > 0);
         let mut raw_a_ui: Option<Decimal> = None;
         let mut raw_b_ui: Option<Decimal> = None;
 
-        // Authoritative both legs: position `fee_owed_a/b` read by bot immediately before harvest.
-        if let Some(raw) = r.lp_collected_token_a_raw
+        // Authoritative both legs: position `fee_owed_a/b` read by bot immediately before harvest/close.
+        if (is_collect || is_close)
+            && let Some(raw) = r.lp_collected_token_a_raw
             && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
         {
             let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
@@ -1926,7 +1953,8 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
             raw_a_ui = Some(ui);
             merged_a = merged_a.max(ui);
         }
-        if let Some(raw) = r.lp_collected_token_b_raw
+        if (is_collect || is_close)
+            && let Some(raw) = r.lp_collected_token_b_raw
             && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
         {
             let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
@@ -1951,6 +1979,57 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
             }
             if let Some(v) = raw_b_ui {
                 merged_b = v;
+            }
+        }
+        // On close, `fee_payer_token_deltas` contains principal+fees. If we do NOT have authoritative
+        // fee_owed legs, we can isolate fee leg only when we also have close principal amounts.
+        if is_close && !has_authoritative_pair
+            && let Some(details) = r.details.as_ref().and_then(serde_json::Value::as_object)
+        {
+            let close_raw_a = details
+                .get("close_amount_a_raw")
+                .and_then(dec_from_any)
+                .filter(|d| *d > Decimal::ZERO);
+            let close_raw_b = details
+                .get("close_amount_b_raw")
+                .and_then(dec_from_any)
+                .filter(|d| *d > Decimal::ZERO);
+            // If we cannot subtract principal, do not treat this close row as "fees collected".
+            // Otherwise we would overcount principal+fees as fees.
+            if close_raw_a.is_none() && close_raw_b.is_none() {
+                continue;
+            }
+            if let Some(raw) = close_raw_a
+                && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
+            {
+                let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
+                    d
+                } else if let Some(d) =
+                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+                {
+                    mint_decimals.insert(ma.clone(), d);
+                    d
+                } else {
+                    9u8
+                };
+                let ui = raw / Decimal::from(10u64.pow(dec as u32));
+                merged_a = (merged_a - ui).max(Decimal::ZERO);
+            }
+            if let Some(raw) = close_raw_b
+                && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
+            {
+                let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
+                    d
+                } else if let Some(d) =
+                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+                {
+                    mint_decimals.insert(mb.clone(), d);
+                    d
+                } else {
+                    9u8
+                };
+                let ui = raw / Decimal::from(10u64.pow(dec as u32));
+                merged_b = (merged_b - ui).max(Decimal::ZERO);
             }
         }
 
@@ -1991,10 +2070,13 @@ async fn lp_fees_collected_usd_from_ledger_db(
         r#"
         SELECT fee_payer_token_deltas, pool_pubkey,
                fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui,
+               event,
                NULLIF(raw_json->>'lp_collected_token_a_raw', '')::BIGINT AS lp_collected_token_a_raw,
-               NULLIF(raw_json->>'lp_collected_token_b_raw', '')::BIGINT AS lp_collected_token_b_raw
+               NULLIF(raw_json->>'lp_collected_token_b_raw', '')::BIGINT AS lp_collected_token_b_raw,
+               NULLIF(raw_json->>'close_amount_a_raw', '')::BIGINT AS close_amount_a_raw,
+               NULLIF(raw_json->>'close_amount_b_raw', '')::BIGINT AS close_amount_b_raw
         FROM position_stream_ledger_rows
-        WHERE position_pubkey = $1 AND event = 'bot_collect_fees'
+        WHERE position_pubkey = $1 AND event IN ('bot_collect_fees', 'bot_close_position')
         "#,
     )
     .bind(position_pubkey)
@@ -2012,6 +2094,14 @@ async fn lp_fees_collected_usd_from_ledger_db(
         let pool: Option<String> = r.try_get("pool_pubkey").ok();
         let lp_raw_a: Option<i64> = r.try_get("lp_collected_token_a_raw").ok().flatten();
         let lp_raw_b: Option<i64> = r.try_get("lp_collected_token_b_raw").ok().flatten();
+        let close_raw_a: Option<i64> = r.try_get("close_amount_a_raw").ok().flatten();
+        let close_raw_b: Option<i64> = r.try_get("close_amount_b_raw").ok().flatten();
+        let event: Option<String> = r.try_get("event").ok();
+        let is_collect = event.as_deref() == Some("bot_collect_fees");
+        let is_close = event.as_deref() == Some("bot_close_position");
+        if !(is_collect || is_close) {
+            continue;
+        }
         let col_a: Option<Decimal> = r
             .try_get::<Option<Decimal>, _>("fee_payer_token_a_delta_ui")
             .ok()
@@ -2052,11 +2142,13 @@ async fn lp_fees_collected_usd_from_ledger_db(
         let col_b = col_b.unwrap_or(Decimal::ZERO);
         let mut merged_a = map_a.max(col_a);
         let mut merged_b = map_b.max(col_b);
-        let has_authoritative_pair = lp_raw_a.is_some() && lp_raw_b.is_some();
+        let has_authoritative_pair =
+            (is_collect || is_close) && lp_raw_a.is_some() && lp_raw_b.is_some();
         let mut raw_a_ui: Option<Decimal> = None;
         let mut raw_b_ui: Option<Decimal> = None;
 
-        if let Some(raw) = lp_raw_a.filter(|x| *x > 0).map(|x| x as u64)
+        if (is_collect || is_close)
+            && let Some(raw) = lp_raw_a.filter(|x| *x > 0).map(|x| x as u64)
             && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
         {
             let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
@@ -2073,7 +2165,8 @@ async fn lp_fees_collected_usd_from_ledger_db(
             raw_a_ui = Some(ui);
             merged_a = merged_a.max(ui);
         }
-        if let Some(raw) = lp_raw_b.filter(|x| *x > 0).map(|x| x as u64)
+        if (is_collect || is_close)
+            && let Some(raw) = lp_raw_b.filter(|x| *x > 0).map(|x| x as u64)
             && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
         {
             let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
@@ -2098,6 +2191,44 @@ async fn lp_fees_collected_usd_from_ledger_db(
             }
             if let Some(v) = raw_b_ui {
                 merged_b = v;
+            }
+        }
+        if is_close && !has_authoritative_pair {
+            if close_raw_a.is_none() && close_raw_b.is_none() {
+                // Without principal subtraction inputs, do not treat close token deltas as fees.
+                continue;
+            }
+            if let Some(raw) = close_raw_a.filter(|x| *x > 0).map(|x| x as u64)
+                && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
+            {
+                let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
+                    d
+                } else if let Some(d) =
+                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+                {
+                    mint_decimals.insert(ma.clone(), d);
+                    d
+                } else {
+                    9u8
+                };
+                let ui = decimal_ui_from_raw_u64(raw, dec);
+                merged_a = (merged_a - ui).max(Decimal::ZERO);
+            }
+            if let Some(raw) = close_raw_b.filter(|x| *x > 0).map(|x| x as u64)
+                && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
+            {
+                let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
+                    d
+                } else if let Some(d) =
+                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+                {
+                    mint_decimals.insert(mb.clone(), d);
+                    d
+                } else {
+                    9u8
+                };
+                let ui = decimal_ui_from_raw_u64(raw, dec);
+                merged_b = (merged_b - ui).max(Decimal::ZERO);
             }
         }
 
@@ -2711,8 +2842,7 @@ async fn node_metrics(
                 } else {
                     Decimal::ZERO
                 };
-                db_ledger_fallback_note
-                    .push_str(" tx_fees_from_lifecycle_fallback.");
+                db_ledger_fallback_note.push_str(" tx_fees_from_lifecycle_fallback.");
             }
         }
         if collect_events == 0 && fees_collected_usd.is_zero() {
@@ -2723,8 +2853,7 @@ async fn node_metrics(
                 collect_events = lc_events;
                 fees_collected_usd = lc_fees_usd;
                 collect_by_mint = lc_by_mint;
-                db_ledger_fallback_note
-                    .push_str(" collect_fees_from_lifecycle_fallback.");
+                db_ledger_fallback_note.push_str(" collect_fees_from_lifecycle_fallback.");
             }
         }
     }
@@ -2837,12 +2966,11 @@ async fn node_metrics(
         net_pnl_pct,
         note: Some(
             format!(
-                "Best-effort per-PDA. tx_fee_lamports = sum of network fees for this PDA; fees_collected_usd = bot_collect_fees legs × USD (mint map + fee_payer_token_*_delta_ui columns when present); tx fees use SOL/USD ({sol_src}). cashflow uses non-principal fee_payer_token_deltas (excluding open/close legs) × current mint USD prices when baseline mints are known.{}{}",
+                "Best-effort per-PDA. tx_fee_lamports = sum of network fees for this PDA; fees_collected_usd = realized fee legs from collect + close rows × USD (mint map + fee_payer_token_*_delta_ui columns when present); tx fees use SOL/USD ({sol_src}). cashflow uses non-principal fee_payer_token_deltas (excluding open/close legs) × current mint USD prices when baseline mints are known.{}{}",
                 baseline_note
                     .as_deref()
                     .map(|n| format!(" {n}."))
-                    .unwrap_or_default()
-                ,
+                    .unwrap_or_default(),
                 db_ledger_fallback_note
             ) + collect_zero_note,
         ),
@@ -3297,7 +3425,7 @@ async fn node_metrics_from_lifecycle_best_effort(
         net_pnl_pct,
         note: Some(
             format!(
-                "{} tx_fee_lamports = network fees for this PDA; fees_collected_usd = bot_collect_fees × USD; tx fees use SOL/USD ({sol_src}). start/end value derived from open/close token deltas × current mint USD prices ({}).",
+                "{} tx_fee_lamports = network fees for this PDA; fees_collected_usd = realized fee legs from collect + close rows × USD; tx fees use SOL/USD ({sol_src}). start/end value derived from open/close token deltas × current mint USD prices ({}).",
                 if db_disabled {
                     "DB is disabled; per-node metrics from lifecycle JSONL (no on-chain valuation)."
                 } else {
@@ -3996,7 +4124,17 @@ pub async fn infer_parent_position_from_lifecycle_best_effort(entry: &str) -> Op
 mod tests {
     use super::event_spot_from_ledger_details;
     use super::*;
+    use crate::state::{ApiConfig, AppState};
+    use clmm_lp_protocols::prelude::RpcConfig;
     use serde::Serialize;
+
+    fn test_state_no_db() -> AppState {
+        let rpc_config = RpcConfig {
+            primary_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        };
+        AppState::new(rpc_config, ApiConfig::default(), None)
+    }
 
     fn mk_node(addr: &str, baseline: Decimal, current: Decimal) -> PositionStreamLineageNode {
         PositionStreamLineageNode {
@@ -4064,6 +4202,60 @@ mod tests {
             details: None,
             source: None,
         }
+    }
+
+    #[tokio::test]
+    async fn lp_fees_close_row_uses_close_subtraction_when_authoritative_is_zero_pair() {
+        // This reproduces the "principal leaked into fees" shape when lifecycle has:
+        // - `bot_close_position` with positive `fee_payer_token_deltas` (principal+fees)
+        // - `lp_collected_token_*_raw = Some(0)` (stale snapshot)
+        // In that case we must NOT treat the close row as authoritative; we must subtract principal
+        // using `details.close_amount_*_raw` to isolate fee legs.
+        //
+        // Numbers chosen so both mints use the fallback 9 decimals (no on-chain mint fetch in unit test).
+        let mut r = empty_lifecycle_row();
+        r.event = Some("bot_close_position".to_string());
+        r.pool_address = Some("poolP".to_string());
+        r.position_pubkey = Some("posX".to_string());
+        r.details = Some(serde_json::json!({
+            "close_amount_a_raw": 100_000_000u64,   // 0.1 token A principal (9 decimals)
+            "close_amount_b_raw": 5_000_000_000u64, // 5 token B principal (9 decimals)
+        }));
+        // Seed pool mints cache so `pool_token_mints_cached` does not hit RPC.
+        {
+            let cache = POOL_TOKEN_MINTS_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+            let mut g = cache.write().expect("pool mints cache write");
+            g.insert(
+                "poolP".to_string(),
+                (
+                    "So11111111111111111111111111111111111111112".to_string(),
+                    "G15Lm1pZXNtRc5gJWXRxRXtzc8JKqbaW9nJcw3Ns5UBD".to_string(),
+                ),
+            );
+        }
+        // Net deltas to fee payer (principal+fees):
+        // +0.100027916 tokenA and +5.002338 tokenB => fees = 0.000027916 tokenA and 0.002338 tokenB
+        r.fee_payer_token_deltas = Some(serde_json::json!({
+            "So11111111111111111111111111111111111111112": "0.100027916",
+            "G15Lm1pZXNtRc5gJWXRxRXtzc8JKqbaW9nJcw3Ns5UBD": "5.002338"
+        }));
+        // Legacy stale snapshot (0/0) that must not suppress close-subtraction.
+        r.lp_collected_token_a_raw = Some(0);
+        r.lp_collected_token_b_raw = Some(0);
+
+        let (events, _usd, by_mint) =
+            lp_fees_collected_usd_from_lifecycle_rows(&test_state_no_db(), &[r], "posX").await;
+        assert_eq!(events, 1);
+        let sol = by_mint
+            .get("So11111111111111111111111111111111111111112")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        let usdc = by_mint
+            .get("G15Lm1pZXNtRc5gJWXRxRXtzc8JKqbaW9nJcw3Ns5UBD")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        assert_eq!(sol.round_dp(9).to_string(), "0.000027916");
+        assert_eq!(usdc.round_dp(6).to_string(), "0.002338");
     }
 
     #[test]
@@ -4616,10 +4808,12 @@ mod tests {
         ];
         apply_session_continuity_from_lifecycle_rows(&rows, &mut nodes);
         assert_eq!(nodes[1].baseline_value_usd, Decimal::new(1, 6));
-        assert!(nodes[1]
-            .note
-            .as_deref()
-            .is_none_or(|n| !n.contains("baseline_from_rotation_session")));
+        assert!(
+            nodes[1]
+                .note
+                .as_deref()
+                .is_none_or(|n| !n.contains("baseline_from_rotation_session"))
+        );
     }
 
     #[test]

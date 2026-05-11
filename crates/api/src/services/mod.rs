@@ -20,6 +20,7 @@ pub mod price_fetch;
 pub mod simulation_analytics;
 pub mod stranded_rebalance_watchdog;
 pub mod strategy_service;
+pub mod uncollected_fees_cache;
 
 pub use orca_read_service::OrcaReadService;
 pub use orca_tx_service::OrcaTxService;

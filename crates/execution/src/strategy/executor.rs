@@ -18,8 +18,8 @@ use clmm_lp_protocols::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::pubkey::Pubkey;
-use std::collections::{HashMap, HashSet};
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -81,6 +81,33 @@ fn pending_open_claims() -> &'static Mutex<HashSet<String>> {
     GLOBAL_PENDING_OPEN_CLAIMS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Whirlpool needs `tick_lower <= tick_current < tick_upper` for active liquidity.
+///
+/// Rolling bands (Bollinger / last closed candle) from **historical** prices can sit entirely
+/// below or above the live pool tick. Match `expandAlignedTickRangeToIncludeCurrent` in
+/// `web/src/lib/whirlpoolTicks.ts` (PositionCreate) so automated opens are not immediately OOR.
+fn expand_spacing_aligned_range_to_include_current_tick(
+    mut lo: i32,
+    mut hi: i32,
+    tick_current: i32,
+    tick_spacing: i32,
+) -> (i32, i32) {
+    let step = tick_spacing.max(1);
+    if hi <= lo {
+        hi = lo.saturating_add(step);
+    }
+    while tick_current < lo {
+        lo = lo.saturating_sub(step);
+    }
+    while tick_current >= hi {
+        hi = hi.saturating_add(step);
+    }
+    if hi <= lo {
+        hi = lo.saturating_add(step);
+    }
+    (lo, hi)
+}
+
 fn pending_open_claim_key(item: &pending_open::PendingOpenItem) -> String {
     if let Some(sid) = item
         .rebalance_session_id
@@ -90,7 +117,11 @@ fn pending_open_claim_key(item: &pending_open::PendingOpenItem) -> String {
     {
         return format!("sid:{sid}");
     }
-    format!("pool:{}|closed:{}", item.pool.trim(), item.closed_position_nft.trim())
+    format!(
+        "pool:{}|closed:{}",
+        item.pool.trim(),
+        item.closed_position_nft.trim()
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -700,6 +731,32 @@ impl StrategyExecutor {
                 }
                 continue;
             }
+
+            if let Some(sid) = item
+                .rebalance_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if clmm_lp_protocols::ledger::tx_lifecycle::session_has_bot_open_position(sid) {
+                    info!(
+                        rebalance_session_id = sid,
+                        closed_position = %item.closed_position_nft,
+                        "pending_open: pruning stale queue item because session already has bot_open_position"
+                    );
+                    let mut claims = pending_open_claims().lock().await;
+                    claims.remove(&claim_key);
+                    continue;
+                }
+            }
+
+            if pending_open::should_defer_pending_open_rate_limit(&item, chrono::Utc::now()) {
+                let mut claims = pending_open_claims().lock().await;
+                claims.remove(&claim_key);
+                kept.push(item);
+                continue;
+            }
+
             item.attempts += 1;
             item.last_attempt_at = Some(chrono::Utc::now().to_rfc3339());
             let pool = match solana_sdk::pubkey::Pubkey::from_str(item.pool.trim()) {
@@ -766,6 +823,23 @@ impl StrategyExecutor {
                         if let Some(h) = self.reopen_hook.lock().await.clone() {
                             // Best-effort: keep strategy links in sync after pending-open recovery.
                             h(closed, np);
+                        } else {
+                            // Durable breadcrumb: reopen succeeded but this executor had no hook wired,
+                            // so strategy links may not update (UI can show "no strategy").
+                            clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                                self.rebalance_executor.provider().as_ref(),
+                                "bot_reopen_hook_missing",
+                                "reopen_hook",
+                                Some(pool),
+                                Some(np),
+                                item.rebalance_session_id.clone(),
+                                serde_json::json!({
+                                    "old_position": closed.to_string(),
+                                    "new_position": np.to_string(),
+                                    "context": "pending_open_recovery",
+                                }),
+                            )
+                            .await;
                         }
                         info!(
                             new_position = %np,
@@ -1106,7 +1180,23 @@ impl StrategyExecutor {
         if hi <= lo {
             hi = lo + spacing.max(1);
         }
-        Some((lo, hi))
+        let (lo2, hi2) =
+            expand_spacing_aligned_range_to_include_current_tick(lo, hi, pool.tick_current, spacing);
+        tracing::debug!(
+            position = %position,
+            candle_seconds = candle_seconds,
+            last_closed_bucket = last_closed_bucket,
+            low_price_ab = %low,
+            high_price_ab = %high,
+            tick_lower_raw = lo,
+            tick_upper_raw = hi,
+            tick_lower = lo2,
+            tick_upper = hi2,
+            tick_current = pool.tick_current,
+            tick_spacing = spacing,
+            "LastCandle: computed last-closed-candle tick band"
+        );
+        Some((lo2, hi2))
     }
 
     async fn record_price_and_compute_bollinger_ticks(
@@ -1192,6 +1282,7 @@ impl StrategyExecutor {
         if hi <= lo {
             hi = lo + spacing.max(1);
         }
+        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(lo, hi, pool.tick_current, spacing);
         Some((lo, hi))
     }
 
@@ -1329,7 +1420,46 @@ impl StrategyExecutor {
                                     created_at: chrono::Utc::now().to_rfc3339(),
                                 },
                             );
-                            let _ = pending_open::save(path, &s);
+                            match pending_open::save(path, &s) {
+                                Ok(()) => {
+                                    // Durable breadcrumb: this is the only source of truth for
+                                    // "retry reopen after restart". If this save doesn't happen,
+                                    // operators can end up with closed positions and no retries.
+                                    clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                                        self.rebalance_executor.provider().as_ref(),
+                                        "bot_pending_open_save_ok",
+                                        "pending_open",
+                                        Some(position.pool),
+                                        Some(position.address),
+                                        result.rebalance_session_id.clone(),
+                                        serde_json::json!({
+                                            "path": path.to_string_lossy().to_string(),
+                                            "closed_position_nft": position.address.to_string(),
+                                            "intended_tick_lower": *new_tick_lower,
+                                            "intended_tick_upper": *new_tick_upper,
+                                        }),
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                                        self.rebalance_executor.provider().as_ref(),
+                                        "bot_pending_open_save_failed",
+                                        "pending_open",
+                                        Some(position.pool),
+                                        Some(position.address),
+                                        result.rebalance_session_id.clone(),
+                                        serde_json::json!({
+                                            "path": path.to_string_lossy().to_string(),
+                                            "error": e.to_string(),
+                                            "closed_position_nft": position.address.to_string(),
+                                            "intended_tick_lower": *new_tick_lower,
+                                            "intended_tick_upper": *new_tick_upper,
+                                        }),
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                         self.emit_executor_alert(
                             Alert::new(
@@ -1603,11 +1733,17 @@ fn classify_pending_open_stuck_reason(last_error: Option<&str>) -> &'static str 
     if e.contains("timeout") || e.contains("timed out") {
         return "rpc_timeout";
     }
+    if e.contains("custom(6012)") || e.contains("custom_code=6012") || e.contains("0x177c") {
+        return "open_position_6012";
+    }
     if e.contains("insufficient")
         || e.contains("insufficient funds")
         || e.contains("insufficient balance")
     {
         return "insufficient_balance";
+    }
+    if e.contains("wallet_below_target_after_refresh") {
+        return "wallet_below_target_after_refresh";
     }
     "unknown"
 }
@@ -1665,8 +1801,18 @@ mod clamp_tests {
             "rpc_timeout"
         );
         assert_eq!(
+            classify_pending_open_stuck_reason(Some(
+                "wallet_below_target_after_refresh: wallet_notional=0 still below threshold=1"
+            )),
+            "wallet_below_target_after_refresh"
+        );
+        assert_eq!(
             classify_pending_open_stuck_reason(Some("insufficient funds for instruction")),
             "insufficient_balance"
+        );
+        assert_eq!(
+            classify_pending_open_stuck_reason(Some("InstructionError(3, Custom(6012))")),
+            "open_position_6012"
         );
     }
 
@@ -1675,5 +1821,19 @@ mod clamp_tests {
         assert!(!should_emit_pending_open_stuck_alert(4, 5, None));
         assert!(should_emit_pending_open_stuck_alert(5, 5, None));
         assert!(!should_emit_pending_open_stuck_alert(6, 5, Some(5)));
+    }
+
+    #[test]
+    fn expand_tick_range_includes_current_when_price_above_band() {
+        // Band below current tick (spacing 4): expand upper edge until tick_current < hi.
+        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(-24800, -24700, -24680, 4);
+        assert!(lo <= -24680 && -24680 < hi, "lo={lo} hi={hi}");
+    }
+
+    #[test]
+    fn expand_tick_range_noop_when_already_contains_current() {
+        let (lo, hi) = expand_spacing_aligned_range_to_include_current_tick(-25000, -24000, -24500, 4);
+        assert_eq!(lo, -25000);
+        assert_eq!(hi, -24000);
     }
 }
