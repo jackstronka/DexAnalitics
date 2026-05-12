@@ -82,11 +82,11 @@ NetPnL \approx V^{end} + Cashflow^{realized} - V^{start} - Fees^{network}
 **Plik:** `crates/api/src/services/position_stream_pnl.rs`
 
 - Przy **lineage** `old → new`: **baseline** = snapshot startowy **pierwszego** PDA (prefer `raw_json.kind = baseline_open`), **current** = snapshot **ostatniego** PDA (prefer `end_close`).
-- **HODL USD:**
+- **HODL USD / price basis:**
 
-  `hodl_value_usd = baseline_amount_a_ui * price_a_usd_now + baseline_amount_b_ui * price_b_usd_now`
+  `hodl_value_usd = baseline_amount_a_ui * price_a_usd_end + baseline_amount_b_ui * price_b_usd_end`
 
-  (minty z baseline snapshot, fallback do mintów z current).
+  Dla zamkniętego łańcucha `price_*_usd_end` powinno pochodzić z końcowego snapshotu `end_close` / `raw_json.price_time_kind = at_tx_event` (zapisane `details.event_price_a_usd`, `details.event_price_b_usd`). Dla aktywnego łańcucha używany jest live/free-price fallback.
 
 - **IL USD (implementacja = wariant A / „principal only”):**
 
@@ -94,9 +94,9 @@ NetPnL \approx V^{end} + Cashflow^{realized} - V^{start} - Fees^{network}
 
   gdzie `current_value_usd` pochodzi z `value_usd` snapshotu końcowego — w praktyce to **principal** z wyceny pozycji (zob. `compute_position_usd_valuation`: `value_usd` z amountów; `fees_usd` jest osobnym polem w wycenie on-chain).
 
-- **Fees LP / collect:** trafiają głównie do **`realized_cashflow_usd`** (suma `fee_payer_token_deltas` × ceny), a potem do **`net_pnl_usd`**, a **nie** są dodawane do `il_usd` w tej ścieżce.
+- **Fees LP / collect:** są raportowane osobno jako `realized_lp_fees_usd` (zebrane/close fee legs, principal odfiltrowany) i `uncollected_lp_fees_usd` (claimable dla aktywnego ostatniego PDA). `realized_cashflow_usd` zostaje szerszą metryką ekonomiczną i **nie** jest proxy dla LP fees.
 
-Czyli: **obecny stream IL w API jest bliski wariantowi A** (o ile snapshoty `value_usd` nie mieszają principal z fees — patrz implementacja wyceny).
+Czyli: `il_usd` / `clean_il_usd` = **wariant A** (principal-only), a `lp_vs_hodl_with_fees_usd` = **wariant B** (clean IL + realized/uncollected LP fees).
 
 **Znane regresje / jakość danych:** `doc/BUGS.md` → **BUG-20260419-01** (brak kolumn mint w SELECT psował HODL/IL), oraz wpis o **chain session scoping** dla fee/cashflow vs anchor lineage.
 
@@ -226,3 +226,4 @@ Literatura opisuje m.in. stratę LP względem **rebalancingu po cenie rynkowej**
 |------|--------|
 | 2026-05-11 | Utworzono: definicje A/B, mapa implementacji, rozróżnienie stream vs segment vs PnLTracker. |
 | 2026-05-11 | Dodano §7: literatura zewnętrzna, linki, tabela segment vs jedna baza HODL, LVR. |
+| 2026-05-12 | Doprecyzowano implementację: event-time prices first dla zamkniętych łańcuchów, `clean_il_*`, `realized_lp_fees_usd`, `uncollected_lp_fees_usd`, `lp_vs_hodl_with_fees_*`. |

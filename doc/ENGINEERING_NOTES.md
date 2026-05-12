@@ -1,3 +1,27 @@
+## 2026-05-12 — Fast lineage keeps Fees zebrane
+
+keywords: clmm-lp-api, stream-lineage, logs-rebalances, Fees zebrane, collected-fees, node_metrics_fast_for_chain, BUG-20260505-04
+
+- **What:** Long-chain `stream-lineage` still uses batched snapshot/node metrics, but now also runs a batched ledger fee rollup over all PDAs in the chain and fills per-node `fees_collected_usd`, token legs, and `collect_events`. Lifecycle JSONL is only used as a sparse-data fallback for nodes with no DB fee evidence.
+- **Why:** The first speedup avoided full per-node `node_metrics`, but accidentally hard-coded collected-fee fields to zero in the fast path, so `Logs / rebalances -> Fees zebrane` regressed while latency improved.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-12 — Rebalance blocks undersized reopen caps
+
+keywords: clmm-lp-execution, rebalance, reopen, target_usd, token_caps, swap_mix, pending-open, BUG-20260512-03
+
+- **What:** Automated rebalance/reopen now validates final token caps after `min(wallet_cap, quote.token_max_*)` and before `open_position`. If caps no longer cover the quoted `amount_a/amount_b` within tolerance, the executor logs `bot_reopen_final_caps_below_target`, skips the open, retries fresh cap reads, and fails into recovery instead of silently creating a materially smaller position.
+- **Why:** The bot must preserve the previous close notional target across rotations; tick/rounding drift is acceptable, but missing one quoted leg must not turn a ~$10 reopen into ~$4.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+## 2026-05-12 — Stream IL USD: event-time prices + LP fee components
+
+keywords: clmm-lp-api, web, PositionDetail, IL, HODL, event-time prices, lp_collected_token_raw, stream-pnl, position_stream_lineage
+
+- **What:** `stream-pnl` now exposes clean IL, realized/uncollected LP fees, and LP-vs-HODL including LP fees while keeping `il_usd`/`il_pct` as clean-IL compatibility aliases. Closed-chain HODL/IL prefers `end_close` event-time USD prices from valuation snapshots; active streams use live/fallback prices. `PositionDetail` separates clean IL, LP fees, fee-inclusive LP-vs-HODL, broader cashflow, and strategy Net PnL.
+- **Why:** The manual-open → bot-rotations → manual-close IL target needs a stable USD benchmark with fees visible as components, not blended into `realized_cashflow_usd` or current-price fallbacks when close-event prices exist.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`, `doc/IMPERMANENT_LOSS_USD_AND_FEES.md`, `doc/BUGS.md`
+
 ## 2026-05-12 — Stream-lineage long chains use batched node metrics
 
 keywords: clmm-lp-api, stream-lineage, node-metrics, position-history, rotations, price-fetch, WSOL, latency

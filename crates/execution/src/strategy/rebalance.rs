@@ -536,6 +536,10 @@ fn balances_cover_deposit_quote(wa: u64, wb: u64, q: &DepositBudgetQuote) -> boo
     wa >= q.amount_a.saturating_sub(tol_a) && wb >= q.amount_b.saturating_sub(tol_b)
 }
 
+fn final_caps_cover_deposit_quote(cap_a: u64, cap_b: u64, q: &DepositBudgetQuote) -> bool {
+    balances_cover_deposit_quote(cap_a, cap_b, q)
+}
+
 fn widen_ticks_around_current(
     tick_current: i32,
     tick_spacing: u16,
@@ -2089,6 +2093,67 @@ impl RebalanceExecutor {
             }
             last_cap_a = cap_a;
             last_cap_b = cap_b;
+            if let Some(q) = quote_opt.as_ref()
+                && !final_caps_cover_deposit_quote(cap_a, cap_b, q)
+            {
+                let err_s = format!(
+                    "reopen_final_caps_below_target: final caps do not cover deposit quote \
+                     (cap_a={cap_a}, cap_b={cap_b}, quote_amount_a={}, quote_amount_b={}, \
+                     quote_token_max_a={}, quote_token_max_b={}, target_usd={target_usd:.8}, \
+                     quote_estimated_value_usd={:.8}, wallet_notional={wallet_notional:.8}, \
+                     prev_end_value_usd={prev_end_value_usd:.8})",
+                    q.amount_a, q.amount_b, q.token_max_a, q.token_max_b, q.estimated_value_usd
+                );
+                warn!(
+                    op = "orca_rebalance",
+                    stage = "open_position",
+                    outcome = "final_caps_below_quote",
+                    attempt,
+                    max_attempts = max_open_attempts,
+                    position = %log_position,
+                    pool = %pool,
+                    cap_a,
+                    cap_b,
+                    quote_amount_a = q.amount_a,
+                    quote_amount_b = q.amount_b,
+                    quote_token_max_a = q.token_max_a,
+                    quote_token_max_b = q.token_max_b,
+                    target_usd,
+                    quote_estimated_value_usd = q.estimated_value_usd,
+                    wallet_notional,
+                    prev_end_value_usd,
+                    "Blocking undersized reopen before open_position"
+                );
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_reopen_final_caps_below_target",
+                    "open_position",
+                    Some(*pool),
+                    Some(*log_position),
+                    ledger_session_id.clone(),
+                    serde_json::json!({
+                        "attempt": attempt,
+                        "max_attempts": max_open_attempts,
+                        "cap_a": cap_a,
+                        "cap_b": cap_b,
+                        "quote_amount_a": q.amount_a,
+                        "quote_amount_b": q.amount_b,
+                        "quote_token_max_a": q.token_max_a,
+                        "quote_token_max_b": q.token_max_b,
+                        "target_usd": target_usd,
+                        "quote_estimated_value_usd": q.estimated_value_usd,
+                        "wallet_notional": wallet_notional,
+                        "prev_end_value_usd": prev_end_value_usd,
+                        "note": "Final pre-open guard: do not silently downsize reopen below deposit quote; retry/pending-open instead."
+                    }),
+                )
+                .await;
+                last_open_err = Some(err_s);
+                if attempt < max_open_attempts {
+                    tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+                }
+                continue;
+            }
             if attempt == 1 {
                 info!(
                     position = %log_position,
@@ -4226,6 +4291,34 @@ mod tests {
     fn target_usd_for_swap_mix_falls_back_to_wallet_cap_when_prev_end_zero() {
         let t = target_usd_for_swap_mix_and_open(0.0, 10.0);
         assert!((t - (10.0 * 0.995)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn final_caps_guard_rejects_materially_undersized_quote_leg() {
+        let q = DepositBudgetQuote {
+            amount_a: 1_000_000,
+            amount_b: 5_000_000,
+            token_max_a: 1_005_000,
+            token_max_b: 5_025_000,
+            estimated_value_usd: 9.95,
+            liquidity: 42,
+        };
+
+        assert!(final_caps_cover_deposit_quote(
+            q.token_max_a,
+            q.token_max_b,
+            &q
+        ));
+        assert!(final_caps_cover_deposit_quote(
+            q.amount_a - 9_999,
+            q.amount_b - 49_999,
+            &q
+        ));
+        assert!(!final_caps_cover_deposit_quote(
+            q.amount_a,
+            q.amount_b / 2,
+            &q
+        ));
     }
 
     #[test]

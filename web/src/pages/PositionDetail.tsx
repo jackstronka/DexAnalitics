@@ -1495,11 +1495,33 @@ export default function PositionDetail() {
                           </span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">{locale === 'pl' ? 'Zrealizowany cashflow' : 'Realized cashflow'}</span>
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Clean IL vs HODL' : 'Clean IL vs HODL'}</span>
+                          <span className="font-mono tabular-nums">
+                            {formatUsdFixed(streamTotals.clean_il_usd ?? streamTotals.il_usd, 3)} (
+                            {formatPercentFixed(streamTotals.clean_il_pct ?? streamTotals.il_pct, 3)})
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'LP fees zrealizowane' : 'Realized LP fees'}</span>
+                          <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.realized_lp_fees_usd, 3)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'LP fees niezebrane' : 'Uncollected LP fees'}</span>
+                          <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.uncollected_lp_fees_usd, 3)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'LP vs HODL z fees' : 'LP vs HODL incl. fees'}</span>
+                          <span className="font-mono tabular-nums">
+                            {formatUsdFixed(streamTotals.lp_vs_hodl_with_fees_usd, 3)} (
+                            {formatPercentFixed(streamTotals.lp_vs_hodl_with_fees_pct, 3)})
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Zrealizowany cashflow (szerszy)' : 'Realized cashflow (broader)'}</span>
                           <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.realized_cashflow_usd, 3)}</span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">{locale === 'pl' ? 'Stream Net PnL' : 'Stream Net PnL'}</span>
+                          <span className="text-muted-foreground">{locale === 'pl' ? 'Net PnL strategii' : 'Strategy Net PnL'}</span>
                           <span
                             className={
                               parseFloat(streamTotals.net_pnl_pct) >= 0
@@ -1510,6 +1532,11 @@ export default function PositionDetail() {
                             {formatUsdFixed(streamTotals.net_pnl_usd, 3)} ({formatPercentFixed(streamTotals.net_pnl_pct, 3)})
                           </span>
                         </div>
+                        {streamTotals.price_basis_note ? (
+                          <div className="text-[11px] text-muted-foreground leading-snug">
+                            <span className="font-medium">{streamTotals.valuation_price_time_kind}</span>: {streamTotals.price_basis_note}
+                          </div>
+                        ) : null}
                         {streamTotals.note ? (
                           <div className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamTotals.note, locale)}</div>
                         ) : null}
@@ -2048,7 +2075,9 @@ export default function PositionDetail() {
                           <span className="font-mono">{formatUsdFixed(streamLineage.totals.realized_cashflow_usd, 3)}</span>
                         </div>
                         <div>
-                          <span className="text-muted-foreground">LP collected (sum)</span>{' '}
+                          <span className="text-muted-foreground">
+                            {locale === 'pl' ? 'Realized LP fees (sum)' : 'Realized LP fees (sum)'}
+                          </span>{' '}
                           <span className="font-mono text-[11px] leading-tight inline-block align-top">
                             {streamLineage.chain_cost_summary != null ? (
                               <>
@@ -2108,8 +2137,8 @@ export default function PositionDetail() {
                       </div>
                       <p className="text-[10px] text-muted-foreground leading-snug">
                         {locale === 'pl'
-                          ? 'Wartość LP vs hipotetyczny HODL tokenów depozytu na starcie łańcucha, przy bieżących cenach mintów (USD).'
-                          : 'LP value vs hypothetical HODL of initial deposit tokens, using current mint USD prices.'}
+                          ? 'Wartość LP vs hipotetyczny HODL tokenów depozytu na starcie łańcucha. Dla zamkniętego łańcucha preferuje ceny USD z eventu close; dla aktywnego używa live/fallback.'
+                          : 'LP value vs hypothetical HODL of initial deposit tokens. Closed chains prefer close-event USD prices; active chains use live/fallback prices.'}
                       </p>
                       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
@@ -2117,14 +2146,30 @@ export default function PositionDetail() {
                           <span className="font-mono">{formatUsdFixed(streamLineage.totals.hodl_value_usd, 3)}</span>
                         </div>
                         <div>
-                          <span className="text-muted-foreground">IL USD</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.il_usd, 3)}</span>
+                          <span className="text-muted-foreground">Clean IL USD</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.clean_il_usd ?? streamLineage.totals.il_usd, 3)}</span>
                         </div>
                         <div>
-                          <span className="text-muted-foreground">IL %</span>{' '}
-                          <span className="font-mono">{formatPercentFixed(streamLineage.totals.il_pct, 3)}</span>
+                          <span className="text-muted-foreground">Clean IL %</span>{' '}
+                          <span className="font-mono">{formatPercentFixed(streamLineage.totals.clean_il_pct ?? streamLineage.totals.il_pct, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">LP fees</span>{' '}
+                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.lp_fees_total_usd, 3)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">LP vs HODL incl. fees</span>{' '}
+                          <span className="font-mono">
+                            {formatUsdFixed(streamLineage.totals.lp_vs_hodl_with_fees_usd, 3)} (
+                            {formatPercentFixed(streamLineage.totals.lp_vs_hodl_with_fees_pct, 3)})
+                          </span>
                         </div>
                       </div>
+                      {streamLineage.totals.price_basis_note ? (
+                        <div className="text-[10px] text-muted-foreground leading-snug">
+                          <span className="font-medium">{streamLineage.totals.valuation_price_time_kind}</span>: {streamLineage.totals.price_basis_note}
+                        </div>
+                      ) : null}
                     </div>
                     <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
                       <div className="text-xs font-medium text-foreground">

@@ -364,12 +364,42 @@ pub struct PositionStreamPnLResponse {
     /// HODL value in USD for the baseline basket at current prices (used for IL).
     #[schema(value_type = String)]
     pub hodl_value_usd: Decimal,
-    /// IL in USD (LP - HODL) for the baseline basket.
+    /// Clean IL in USD (LP principal - HODL) for the baseline basket.
+    ///
+    /// Kept for backward compatibility; same value as `clean_il_usd`.
     #[schema(value_type = String)]
     pub il_usd: Decimal,
-    /// IL% (LP - HODL) / HODL.
+    /// Clean IL% (LP principal - HODL) / HODL.
+    ///
+    /// Kept for backward compatibility; same value as `clean_il_pct`.
     #[schema(value_type = String)]
     pub il_pct: Decimal,
+    /// Clean IL in USD (LP principal mark - HODL), excluding LP fees.
+    #[schema(value_type = String)]
+    pub clean_il_usd: Decimal,
+    /// Clean IL% vs HODL, excluding LP fees.
+    #[schema(value_type = String)]
+    pub clean_il_pct: Decimal,
+    /// Realized LP fees in USD from collect/close fee legs, excluding principal.
+    #[schema(value_type = String)]
+    pub realized_lp_fees_usd: Decimal,
+    /// Uncollected/claimable LP fees in USD for the active final PDA (0 for closed/end-close streams).
+    #[schema(value_type = String)]
+    pub uncollected_lp_fees_usd: Decimal,
+    /// Total LP fees included in the fee-inclusive LP-vs-HODL benchmark.
+    #[schema(value_type = String)]
+    pub lp_fees_total_usd: Decimal,
+    /// LP-vs-HODL in USD after adding realized + uncollected LP fees.
+    #[schema(value_type = String)]
+    pub lp_vs_hodl_with_fees_usd: Decimal,
+    /// LP-vs-HODL with LP fees, divided by HODL value.
+    #[schema(value_type = String)]
+    pub lp_vs_hodl_with_fees_pct: Decimal,
+    /// Price basis used for HODL/IL valuation (`at_tx_event`, `live_price`, `free_price_fallback`, etc.).
+    pub valuation_price_time_kind: String,
+    /// Human-readable price/fee component note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_basis_note: Option<String>,
     /// Total network fees in USD (tx_fee_lamports × SOL/USD).
     #[schema(value_type = String)]
     pub tx_fees_usd: Decimal,

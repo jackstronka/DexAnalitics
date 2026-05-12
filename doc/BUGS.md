@@ -28,6 +28,25 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260512-03 — Reopen silently downsizes position from ~$10 to ~$4
+
+status: regressed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-12  
+fixed_in: local  
+keywords: rebalance, reopen, silent-downsize, target_usd, open_position, token_caps, swap_mix, GgcTn1ij, 9danMXEL, AjKc9epD, Retouch shift
+
+- **Symptom:** Rotation history for `GgcTn1ijVCcvPX1fHWUEFAqFBLWpeQhDbuUmwYkfVC9k` shows strategy notional dropping from about `$9.8` to about `$4.1`; user reports "znowu z 10 zrobiło się 4".
+- **Observed evidence (2026-05-12):** Local API `/positions/GgcTn1ijVCcvPX1fHWUEFAqFBLWpeQhDbuUmwYkfVC9k` returns live `value_usd ~= 4.06`, so this is not only a UI render artifact. `/stream-lineage?mode=live` shows first shrink at `9danMXELSER2DxGiV4z1hoqAJVVii15dFQg73YjjKMMK` (`baseline_value_usd ~= 4.238`) after `AY746rx48R6jsXzrt8uCsBV4ksktM3nasbZaazWBdyK2` closed around `$9.760`.
+- **Related prior bug family:** Similar product invariant to `BUG-20260510-01` (avoid `target_usd=0` / wallet-clamped downsizing) and `BUG-20260504-04` (~half notional opens when caps/quote are stale or incomplete), but this appears in automated rebalance/reopen rather than manual `PositionCreate`.
+- **Root cause:** `open_new_range_with_wallet_mix` computes `target_usd` from previous close value, but before `open_position` it clamps each token cap independently to `min(wallet_cap, quote.token_max_*)` and did not re-check that the final caps still cover the quote. If swap-mix left one leg missing/stale, the open could proceed with only one quoted leg, producing an approximately half-sized position instead of failing into pending-open recovery.
+- **Fix:** Added a final pre-open invariant after cap calculation: when a quote exists, effective caps (including native SOL for WSOL legs) must cover `q.amount_a/q.amount_b` within existing tolerance. If not, executor appends `bot_reopen_final_caps_below_target`, skips `open_position`, retries short refresh attempts, then returns a hard error for pending-open/recovery instead of opening undersized.
+- **Guards/tests:** `cargo test -p clmm-lp-execution strategy::rebalance::tests::final_caps_guard_rejects_materially_undersized_quote_leg`
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
+
+---
+
 ### BUG-20260512-02 — Position history lineage loading waits ~30-40s on hot path
 
 status: fixed  
@@ -175,7 +194,7 @@ keywords: pending-open, reopen, insufficient-native-sol, sol-first, wsol, usdc, 
 
 ### BUG-20260505-04 — Fees zebrane overstated: close rows lacked `fee_owed` snapshot; principal leaked into fees
 
-status: regressed  
+status: fixed  
 severity: high  
 reported_by: user  
 first_seen: 2026-05-05  
@@ -185,12 +204,17 @@ keywords: fees, collect_fees, close_position, fee_owed, lp_collected_token_raw, 
 - **Symptom:** In `Logs / rebalances` (Position Detail), the `LP zebrane`/fees column showed values that did not match actual LP fees; could appear inflated because close principal was counted as fees.
 - **Symptom (2026-05-06 regression):** `Fees zebrane` shows `—/0` for positions closed today; lifecycle `bot_close_position` rows miss `lp_collected_token_{a,b}_raw`, so API cannot compute authoritative fees from close events.
 - **Symptom (2026-05-06):** Some positions show **large USDC “Fees zebrane”** that actually equals the **principal+fees** returned on close (`fee_payer_token_deltas`), while lifecycle `lp_collected_token_{a,b}_raw` exists but is **`0/0`**. Solscan shows non-zero “Claim fees” for the same close tx.
+- **Symptom (2026-05-12):** `GET /positions/{address}/stream-pnl` returned `INTERNAL_ERROR: column "lp_collected_token_a_raw" does not exist` on databases where collected-fee raw legs are stored only inside `position_stream_ledger_rows.raw_json`.
+- **Symptom (2026-05-12 regression):** After stream-lineage/logs speedup, `Logs / rebalances -> Fees zebrane` renders all zeros for long rotation chains because the fast per-node path returns `fees_collected_* = 0/None`.
 - **Root cause:** Lifecycle `bot_close_position` rows did not carry an authoritative `fee_owed_a/b` snapshot, and historical data often lacked `details.close_amount_*_raw`, so API fallback subtraction could not remove principal from `fee_payer_token_deltas`.
 - **Root cause (added):** `position.fee_owed_{a,b}` read **before** close can be stale/zero unless Whirlpool `update_fees_and_rewards` has been applied; close instructions compute fees via update+quote (as shown by Solscan / Orca SDK `feesQuote`), so persisting the pre-close account fields produced `0/0` even when “Claim fees” was non-zero.
 - **Fix:** Persist close fees using Orca SDK quote (`close_position_instructions(...).fees_quote.fee_owed_{a,b}`) rather than pre-close `position.fee_owed_{a,b}`. API treats `lp_collected_token_*_raw=0/0` on close as **non-authoritative** and falls back to close-subtraction (principal isolation) to avoid counting principal as fees.
+- **Fix (2026-05-12):** Stream PnL / lineage fee rollups now keep LP fees as first-class components (`realized_lp_fees_usd`, `uncollected_lp_fees_usd`) and the DB collect-fee helper also treats `lp_collected_token_*_raw=0/0` as non-authoritative. Close-event fee legs are valued with `details.event_price_*_usd` when available, falling back to current free prices only when event prices are missing.
+- **Fix (2026-05-12 follow-up):** The DB collect-fee helper reads `lp_collected_token_*_raw` from `raw_json` only, so it works on both older and current local DB schemas that do not have dedicated raw-leg columns.
+- **Fix (2026-05-12 regression):** Long-chain fast lineage keeps the batched snapshot path but now adds a batched ledger fee rollup for all PDAs in the chain (`position_pubkey = ANY(chain)`) and fills per-node `fees_collected_usd`, token legs, and `collect_events`; lifecycle JSONL fallback is used only for nodes where DB fee rows are empty/sparse.
 - **Fix (UI):** Renamed `LP zebrane` → `Fees zebrane` and renamed the multiplier from `collects` to neutral `events`.
-- **Guards/tests:** `cargo test -p clmm-lp-execution --lib`; `cargo check -p clmm-lp-protocols`; `cargo check -p clmm-lp-api`; `npx tsc --noEmit` in `web/`.
-- **Paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/executor.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLifecycleTimeline.tsx`
+- **Guards/tests:** `cargo test -p clmm-lp-execution --lib`; `cargo check -p clmm-lp-protocols`; `cargo check -p clmm-lp-api`; `cargo test -p clmm-lp-api position_stream_pnl`; `cargo test -p clmm-lp-api stream_lineage -- --nocapture`; `cargo clippy -p clmm-lp-api --all-targets -- -D warnings`; `npx tsc --noEmit` in `web/`.
+- **Paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/executor.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLifecycleTimeline.tsx`
 
 ---
 

@@ -2036,10 +2036,10 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
         }
 
         if merged_a > Decimal::ZERO || has_authoritative_pair {
-            *by_mint_ui.entry(ma).or_insert(Decimal::ZERO) += merged_a;
+            *by_mint_ui.entry(ma.clone()).or_insert(Decimal::ZERO) += merged_a;
         }
         if merged_b > Decimal::ZERO || has_authoritative_pair {
-            *by_mint_ui.entry(mb).or_insert(Decimal::ZERO) += merged_b;
+            *by_mint_ui.entry(mb.clone()).or_insert(Decimal::ZERO) += merged_b;
         }
     }
 
@@ -2063,7 +2063,7 @@ async fn lp_fees_collected_usd_from_lifecycle_rows(
     (events, usd, by_mint_ui)
 }
 
-async fn lp_fees_collected_usd_from_ledger_db(
+pub(crate) async fn lp_fees_collected_usd_from_ledger_db(
     state: &AppState,
     db: &Database,
     position_pubkey: &str,
@@ -2075,8 +2075,15 @@ async fn lp_fees_collected_usd_from_ledger_db(
                event,
                NULLIF(raw_json->>'lp_collected_token_a_raw', '')::BIGINT AS lp_collected_token_a_raw,
                NULLIF(raw_json->>'lp_collected_token_b_raw', '')::BIGINT AS lp_collected_token_b_raw,
-               NULLIF(raw_json->>'close_amount_a_raw', '')::BIGINT AS close_amount_a_raw,
-               NULLIF(raw_json->>'close_amount_b_raw', '')::BIGINT AS close_amount_b_raw
+               COALESCE(
+                 NULLIF(raw_json->>'close_amount_a_raw', '')::BIGINT,
+                 NULLIF(raw_json->'details'->>'close_amount_a_raw', '')::BIGINT
+               ) AS close_amount_a_raw,
+               COALESCE(
+                 NULLIF(raw_json->>'close_amount_b_raw', '')::BIGINT,
+                 NULLIF(raw_json->'details'->>'close_amount_b_raw', '')::BIGINT
+               ) AS close_amount_b_raw,
+               raw_json
         FROM position_stream_ledger_rows
         WHERE position_pubkey = $1 AND event IN ('bot_collect_fees', 'bot_close_position')
         "#,
@@ -2089,10 +2096,13 @@ async fn lp_fees_collected_usd_from_ledger_db(
     let mut pool_mints: HashMap<String, (String, String)> = HashMap::new();
     let mut mint_decimals: HashMap<String, u8> = HashMap::new();
     let mut by_mint_ui: BTreeMap<String, Decimal> = BTreeMap::new();
+    let mut fallback_by_mint_ui: BTreeMap<String, Decimal> = BTreeMap::new();
+    let mut usd = Decimal::ZERO;
     let mut events: u32 = 0;
 
     for r in rows {
         let v: Option<serde_json::Value> = r.try_get("fee_payer_token_deltas").ok().flatten();
+        let raw_json: Option<serde_json::Value> = r.try_get("raw_json").ok().flatten();
         let pool: Option<String> = r.try_get("pool_pubkey").ok();
         let lp_raw_a: Option<i64> = r.try_get("lp_collected_token_a_raw").ok().flatten();
         let lp_raw_b: Option<i64> = r.try_get("lp_collected_token_b_raw").ok().flatten();
@@ -2144,8 +2154,10 @@ async fn lp_fees_collected_usd_from_ledger_db(
         let col_b = col_b.unwrap_or(Decimal::ZERO);
         let mut merged_a = map_a.max(col_a);
         let mut merged_b = map_b.max(col_b);
-        let has_authoritative_pair =
-            (is_collect || is_close) && lp_raw_a.is_some() && lp_raw_b.is_some();
+        let has_authoritative_pair = (is_collect || is_close)
+            && lp_raw_a.is_some()
+            && lp_raw_b.is_some()
+            && (lp_raw_a.unwrap_or(0) > 0 || lp_raw_b.unwrap_or(0) > 0);
         let mut raw_a_ui: Option<Decimal> = None;
         let mut raw_b_ui: Option<Decimal> = None;
 
@@ -2235,10 +2247,28 @@ async fn lp_fees_collected_usd_from_ledger_db(
         }
 
         if merged_a > Decimal::ZERO || has_authoritative_pair {
-            *by_mint_ui.entry(ma).or_insert(Decimal::ZERO) += merged_a;
+            *by_mint_ui.entry(ma.clone()).or_insert(Decimal::ZERO) += merged_a;
         }
         if merged_b > Decimal::ZERO || has_authoritative_pair {
-            *by_mint_ui.entry(mb).or_insert(Decimal::ZERO) += merged_b;
+            *by_mint_ui.entry(mb.clone()).or_insert(Decimal::ZERO) += merged_b;
+        }
+
+        let event_spot = raw_json
+            .as_ref()
+            .and_then(|raw| raw.get("details"))
+            .and_then(|details| event_spot_from_ledger_details(Some(details)))
+            .or_else(|| event_spot_from_ledger_details(raw_json.as_ref()));
+        if let Some((pa, pb, _src, _slot)) = event_spot {
+            let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
+            let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
+            usd += merged_a * pa_d + merged_b * pb_d;
+        } else {
+            if merged_a > Decimal::ZERO || has_authoritative_pair {
+                *fallback_by_mint_ui.entry(ma).or_insert(Decimal::ZERO) += merged_a;
+            }
+            if merged_b > Decimal::ZERO || has_authoritative_pair {
+                *fallback_by_mint_ui.entry(mb).or_insert(Decimal::ZERO) += merged_b;
+            }
         }
     }
 
@@ -2246,13 +2276,12 @@ async fn lp_fees_collected_usd_from_ledger_db(
         return Ok((events, Decimal::ZERO, BTreeMap::new()));
     }
 
-    let mints: BTreeSet<String> = by_mint_ui.keys().cloned().collect();
+    let mints: BTreeSet<String> = fallback_by_mint_ui.keys().cloned().collect();
     let (px, _) = match timeout(Duration::from_secs(5), fetch_mint_prices_usd(&mints)).await {
         Ok(r) => r,
-        Err(_) => return Ok((events, Decimal::ZERO, by_mint_ui)),
+        Err(_) => return Ok((events, usd, by_mint_ui)),
     };
-    let mut usd = Decimal::ZERO;
-    for (m, amt) in &by_mint_ui {
+    for (m, amt) in &fallback_by_mint_ui {
         let p = px.get(m).copied().unwrap_or(0.0);
         if p > 0.0 && p.is_finite() {
             let pd = Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO);
@@ -2990,6 +3019,253 @@ struct FastSnapshotMetric {
     valuation_quality: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct FastFeeMetric {
+    collect_events: u32,
+    fees_collected_usd: Decimal,
+    by_mint_ui: BTreeMap<String, Decimal>,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn lp_fees_collected_usd_from_ledger_db_batch(
+    state: &AppState,
+    db: &Database,
+    positions: &[String],
+) -> Result<HashMap<String, FastFeeMetric>, ApiError> {
+    if positions.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT position_pubkey, fee_payer_token_deltas, pool_pubkey,
+               fee_payer_token_a_delta_ui, fee_payer_token_b_delta_ui,
+               event,
+               NULLIF(raw_json->>'lp_collected_token_a_raw', '')::BIGINT AS lp_collected_token_a_raw,
+               NULLIF(raw_json->>'lp_collected_token_b_raw', '')::BIGINT AS lp_collected_token_b_raw,
+               COALESCE(
+                 NULLIF(raw_json->>'close_amount_a_raw', '')::BIGINT,
+                 NULLIF(raw_json->'details'->>'close_amount_a_raw', '')::BIGINT
+               ) AS close_amount_a_raw,
+               COALESCE(
+                 NULLIF(raw_json->>'close_amount_b_raw', '')::BIGINT,
+                 NULLIF(raw_json->'details'->>'close_amount_b_raw', '')::BIGINT
+               ) AS close_amount_b_raw,
+               raw_json
+        FROM position_stream_ledger_rows
+        WHERE position_pubkey = ANY($1) AND event IN ('bot_collect_fees', 'bot_close_position')
+        "#,
+    )
+    .bind(positions)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream lineage: fast collect fee rows: {e}")))?;
+
+    let mut pool_mints: HashMap<String, (String, String)> = HashMap::new();
+    let mut mint_decimals: HashMap<String, u8> = HashMap::new();
+    let mut out: HashMap<String, FastFeeMetric> = HashMap::new();
+    let mut fallback_by_pos_mint_ui: HashMap<String, BTreeMap<String, Decimal>> = HashMap::new();
+
+    for r in rows {
+        let position: String = match r.try_get("position_pubkey") {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let event: Option<String> = r.try_get("event").ok();
+        let is_collect = event.as_deref() == Some("bot_collect_fees");
+        let is_close = event.as_deref() == Some("bot_close_position");
+        if !(is_collect || is_close) {
+            continue;
+        }
+
+        let pool: Option<String> = r.try_get("pool_pubkey").ok();
+        let Some(pool) = pool.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let (ma, mb) = match pool_mints.get(pool) {
+            Some(p) => (p.0.clone(), p.1.clone()),
+            None => {
+                let Some(pair) = pool_token_mints_cached(state, pool).await else {
+                    continue;
+                };
+                pool_mints.insert(pool.to_string(), pair.clone());
+                pair
+            }
+        };
+
+        let v: Option<serde_json::Value> = r.try_get("fee_payer_token_deltas").ok().flatten();
+        let raw_json: Option<serde_json::Value> = r.try_get("raw_json").ok().flatten();
+        let lp_raw_a: Option<i64> = r.try_get("lp_collected_token_a_raw").ok().flatten();
+        let lp_raw_b: Option<i64> = r.try_get("lp_collected_token_b_raw").ok().flatten();
+        let close_raw_a: Option<i64> = r.try_get("close_amount_a_raw").ok().flatten();
+        let close_raw_b: Option<i64> = r.try_get("close_amount_b_raw").ok().flatten();
+        let col_a = r
+            .try_get::<Option<Decimal>, _>("fee_payer_token_a_delta_ui")
+            .ok()
+            .flatten()
+            .filter(|d| *d > Decimal::ZERO)
+            .unwrap_or(Decimal::ZERO);
+        let col_b = r
+            .try_get::<Option<Decimal>, _>("fee_payer_token_b_delta_ui")
+            .ok()
+            .flatten()
+            .filter(|d| *d > Decimal::ZERO)
+            .unwrap_or(Decimal::ZERO);
+
+        let obj = v.as_ref().and_then(|x| x.as_object());
+        let map_a = obj
+            .and_then(|o| o.get(&ma))
+            .and_then(dec_from_any)
+            .filter(|d| *d > Decimal::ZERO)
+            .unwrap_or(Decimal::ZERO);
+        let map_b = obj
+            .and_then(|o| o.get(&mb))
+            .and_then(dec_from_any)
+            .filter(|d| *d > Decimal::ZERO)
+            .unwrap_or(Decimal::ZERO);
+        let mut merged_a = map_a.max(col_a);
+        let mut merged_b = map_b.max(col_b);
+        let has_authoritative_pair = lp_raw_a.is_some()
+            && lp_raw_b.is_some()
+            && (lp_raw_a.unwrap_or(0) > 0 || lp_raw_b.unwrap_or(0) > 0);
+        let mut raw_a_ui: Option<Decimal> = None;
+        let mut raw_b_ui: Option<Decimal> = None;
+
+        if let Some(raw) = lp_raw_a.filter(|x| *x > 0).map(|x| x as u64)
+            && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
+        {
+            let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
+                d
+            } else if let Some(d) =
+                fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+            {
+                mint_decimals.insert(ma.clone(), d);
+                d
+            } else {
+                9u8
+            };
+            let ui = decimal_ui_from_raw_u64(raw, dec);
+            raw_a_ui = Some(ui);
+            merged_a = merged_a.max(ui);
+        }
+        if let Some(raw) = lp_raw_b.filter(|x| *x > 0).map(|x| x as u64)
+            && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
+        {
+            let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
+                d
+            } else if let Some(d) =
+                fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+            {
+                mint_decimals.insert(mb.clone(), d);
+                d
+            } else {
+                9u8
+            };
+            let ui = decimal_ui_from_raw_u64(raw, dec);
+            raw_b_ui = Some(ui);
+            merged_b = merged_b.max(ui);
+        }
+
+        if has_authoritative_pair {
+            if let Some(v) = raw_a_ui {
+                merged_a = v;
+            }
+            if let Some(v) = raw_b_ui {
+                merged_b = v;
+            }
+        }
+        if is_close && !has_authoritative_pair {
+            if close_raw_a.is_none() && close_raw_b.is_none() {
+                let metric = out.entry(position).or_default();
+                metric.collect_events = metric.collect_events.saturating_add(1);
+                continue;
+            }
+            if let Some(raw) = close_raw_a.filter(|x| *x > 0).map(|x| x as u64)
+                && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(ma.as_str())
+            {
+                let dec = if let Some(d) = mint_decimals.get(&ma).copied() {
+                    d
+                } else if let Some(d) =
+                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+                {
+                    mint_decimals.insert(ma.clone(), d);
+                    d
+                } else {
+                    9u8
+                };
+                merged_a = (merged_a - decimal_ui_from_raw_u64(raw, dec)).max(Decimal::ZERO);
+            }
+            if let Some(raw) = close_raw_b.filter(|x| *x > 0).map(|x| x as u64)
+                && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(mb.as_str())
+            {
+                let dec = if let Some(d) = mint_decimals.get(&mb).copied() {
+                    d
+                } else if let Some(d) =
+                    fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk).await
+                {
+                    mint_decimals.insert(mb.clone(), d);
+                    d
+                } else {
+                    9u8
+                };
+                merged_b = (merged_b - decimal_ui_from_raw_u64(raw, dec)).max(Decimal::ZERO);
+            }
+        }
+
+        {
+            let metric = out.entry(position.clone()).or_default();
+            metric.collect_events = metric.collect_events.saturating_add(1);
+            if merged_a > Decimal::ZERO || has_authoritative_pair {
+                *metric.by_mint_ui.entry(ma.clone()).or_insert(Decimal::ZERO) += merged_a;
+            }
+            if merged_b > Decimal::ZERO || has_authoritative_pair {
+                *metric.by_mint_ui.entry(mb.clone()).or_insert(Decimal::ZERO) += merged_b;
+            }
+        }
+
+        let event_spot = raw_json
+            .as_ref()
+            .and_then(|raw| raw.get("details"))
+            .and_then(|details| event_spot_from_ledger_details(Some(details)))
+            .or_else(|| event_spot_from_ledger_details(raw_json.as_ref()));
+        if let Some((pa, pb, _src, _slot)) = event_spot {
+            let pa_d = Decimal::from_f64_retain(pa).unwrap_or(Decimal::ZERO);
+            let pb_d = Decimal::from_f64_retain(pb).unwrap_or(Decimal::ZERO);
+            if let Some(metric) = out.get_mut(&position) {
+                metric.fees_collected_usd += merged_a * pa_d + merged_b * pb_d;
+            }
+        } else {
+            let fallback = fallback_by_pos_mint_ui.entry(position).or_default();
+            if merged_a > Decimal::ZERO || has_authoritative_pair {
+                *fallback.entry(ma).or_insert(Decimal::ZERO) += merged_a;
+            }
+            if merged_b > Decimal::ZERO || has_authoritative_pair {
+                *fallback.entry(mb).or_insert(Decimal::ZERO) += merged_b;
+            }
+        }
+    }
+
+    let mints: BTreeSet<String> = fallback_by_pos_mint_ui
+        .values()
+        .flat_map(|m| m.keys().cloned())
+        .collect();
+    let (px, _) = fetch_mint_prices_usd_stable(&mints).await;
+    for (position, by_mint) in fallback_by_pos_mint_ui {
+        let Some(metric) = out.get_mut(&position) else {
+            continue;
+        };
+        for (mint, amount) in by_mint {
+            let p = px.get(&mint).copied().unwrap_or(0.0);
+            if p > 0.0 && p.is_finite() {
+                let pd = Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO);
+                metric.fees_collected_usd += amount * pd;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 async fn node_metrics_fast_for_chain(
     state: &AppState,
     chain: &[String],
@@ -3100,6 +3376,39 @@ async fn node_metrics_fast_for_chain(
             Some((position, fee.max(0) as u64))
         })
         .collect();
+    let mut fee_metrics = lp_fees_collected_usd_from_ledger_db_batch(state, db, chain).await?;
+    let needs_lifecycle_fee_fallback = chain.iter().any(|p| {
+        fee_metrics.get(p).is_none_or(|m| {
+            m.collect_events == 0 && m.fees_collected_usd.is_zero() && m.by_mint_ui.is_empty()
+        })
+    });
+    let lifecycle_rows = if needs_lifecycle_fee_fallback {
+        Some(lifecycle_rows_cached_best_effort().await)
+    } else {
+        None
+    };
+    if let Some(rows) = lifecycle_rows.as_ref() {
+        for p in chain {
+            let has_fee_metric = fee_metrics.get(p).is_some_and(|m| {
+                m.collect_events > 0 || !m.fees_collected_usd.is_zero() || !m.by_mint_ui.is_empty()
+            });
+            if has_fee_metric {
+                continue;
+            }
+            let (collect_events, fees_collected_usd, by_mint_ui) =
+                lp_fees_collected_usd_from_lifecycle_rows(state, rows, p).await;
+            if collect_events > 0 || !fees_collected_usd.is_zero() || !by_mint_ui.is_empty() {
+                fee_metrics.insert(
+                    p.clone(),
+                    FastFeeMetric {
+                        collect_events,
+                        fees_collected_usd,
+                        by_mint_ui,
+                    },
+                );
+            }
+        }
+    }
 
     let (sol_usd, _sol_src) = sol_usd().await;
     let mut out = Vec::with_capacity(chain.len());
@@ -3126,6 +3435,30 @@ async fn node_metrics_fast_for_chain(
         let mint_b = baseline
             .and_then(|m| m.token_mint_b.clone())
             .or_else(|| current.and_then(|m| m.token_mint_b.clone()));
+        let fee_metric = fee_metrics.get(p).cloned().unwrap_or_default();
+        let collected_a_ui = mint_a
+            .as_deref()
+            .and_then(|m| fee_metric.by_mint_ui.get(m).copied());
+        let collected_b_ui = mint_b
+            .as_deref()
+            .and_then(|m| fee_metric.by_mint_ui.get(m).copied());
+        let mut fees_collected_token_a_ui = ((fee_metric.collect_events > 0) && mint_a.is_some())
+            .then_some(collected_a_ui)
+            .flatten();
+        let mut fees_collected_token_b_ui = ((fee_metric.collect_events > 0) && mint_b.is_some())
+            .then_some(collected_b_ui)
+            .flatten();
+        let bridged_missing_collect_leg = fee_metric.collect_events > 0
+            && ((fees_collected_token_a_ui.is_some() && fees_collected_token_b_ui.is_none())
+                || (fees_collected_token_a_ui.is_none() && fees_collected_token_b_ui.is_some()));
+        if bridged_missing_collect_leg {
+            if fees_collected_token_a_ui.is_none() && mint_a.is_some() {
+                fees_collected_token_a_ui = Some(Decimal::ZERO);
+            }
+            if fees_collected_token_b_ui.is_none() && mint_b.is_some() {
+                fees_collected_token_b_ui = Some(Decimal::ZERO);
+            }
+        }
         let closed_ts =
             current.and_then(|m| closed_ts_for_snapshot_kind(m.kind.as_deref(), m.ts_utc));
         out.push(PositionStreamLineageNode {
@@ -3142,16 +3475,16 @@ async fn node_metrics_fast_for_chain(
             current_valuation_quality: current.and_then(|m| m.valuation_quality.clone()),
             tx_fee_lamports: fee_lamports,
             tx_fees_usd,
-            fees_collected_usd: Decimal::ZERO,
-            fees_collected_token_a_ui: None,
-            fees_collected_token_b_ui: None,
+            fees_collected_usd: fee_metric.fees_collected_usd,
+            fees_collected_token_a_ui,
+            fees_collected_token_b_ui,
             fees_collected_token_a_raw: None,
             fees_collected_token_b_raw: None,
-            collect_events: 0,
+            collect_events: fee_metric.collect_events,
             realized_cashflow_usd: Decimal::ZERO,
             net_pnl_usd,
             net_pnl_pct,
-            note: Some("fast_long_chain_metrics: per-node values use batched DB snapshots; detailed collect/cashflow falls back to chain totals.".to_string()),
+            note: Some("fast_long_chain_metrics: per-node values use batched DB snapshots and batched ledger fee rollups; detailed non-fee cashflow is intentionally omitted from this hot path.".to_string()),
             collect_zero_diagnostics: None,
         });
     }
@@ -4019,6 +4352,10 @@ fn maybe_compute_totals_from_nodes(
         .unwrap_or(Decimal::ZERO);
     let tx_fees_usd: Decimal = nodes.iter().map(|n| n.tx_fees_usd).sum();
     let realized_cashflow_usd: Decimal = nodes.iter().map(|n| n.realized_cashflow_usd).sum();
+    let realized_lp_fees_usd: Decimal = nodes.iter().map(|n| n.fees_collected_usd).sum();
+    let clean_il_usd = Decimal::ZERO;
+    let clean_il_pct = Decimal::ZERO;
+    let lp_fees_total_usd = realized_lp_fees_usd;
     let net_pnl_usd = current_value_usd + realized_cashflow_usd - baseline_value_usd - tx_fees_usd;
     let net_pnl_pct = if baseline_value_usd.is_zero() {
         Decimal::ZERO
@@ -4035,6 +4372,17 @@ fn maybe_compute_totals_from_nodes(
         hodl_value_usd: Decimal::ZERO,
         il_usd: Decimal::ZERO,
         il_pct: Decimal::ZERO,
+        clean_il_usd,
+        clean_il_pct,
+        realized_lp_fees_usd,
+        uncollected_lp_fees_usd: Decimal::ZERO,
+        lp_fees_total_usd,
+        lp_vs_hodl_with_fees_usd: lp_fees_total_usd,
+        lp_vs_hodl_with_fees_pct: Decimal::ZERO,
+        valuation_price_time_kind: "node_fallback_unavailable".to_string(),
+        price_basis_note: Some(
+            "Fallback totals from lineage nodes do not have baseline token basket, so HODL/IL price basis is unavailable.".to_string(),
+        ),
         tx_fees_usd,
         realized_cashflow_usd,
         net_pnl_usd,
@@ -4349,9 +4697,14 @@ mod tests {
 
         assert!(source.contains("node_metrics_fast_for_chain(state, &chain).await?"));
         assert!(
+            source.contains("lp_fees_collected_usd_from_ledger_db_batch(state, db, chain).await?")
+        );
+        assert!(
             source.contains("chain.len() > 8"),
             "long rotation chains must stay on the batched node-metrics path instead of fanning out full node_metrics calls per PDA"
         );
+        assert!(source.contains("fees_collected_usd: fee_metric.fees_collected_usd"));
+        assert!(source.contains("collect_events: fee_metric.collect_events"));
     }
 
     fn mk_node(addr: &str, baseline: Decimal, current: Decimal) -> PositionStreamLineageNode {

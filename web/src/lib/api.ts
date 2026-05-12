@@ -160,6 +160,15 @@ export interface PositionStreamPnLResponse {
   hodl_value_usd: string
   il_usd: string
   il_pct: string
+  clean_il_usd: string
+  clean_il_pct: string
+  realized_lp_fees_usd: string
+  uncollected_lp_fees_usd: string
+  lp_fees_total_usd: string
+  lp_vs_hodl_with_fees_usd: string
+  lp_vs_hodl_with_fees_pct: string
+  valuation_price_time_kind: string
+  price_basis_note?: string | null
   tx_fees_usd: string
   realized_cashflow_usd: string
   net_pnl_usd: string
