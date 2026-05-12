@@ -918,9 +918,14 @@ async function fetchJsonWithTimeout<T>(
   } catch (e) {
     // Browser abort (timeout or navigation). Make it actionable.
     if (e instanceof DOMException && e.name === 'AbortError') {
+      const isReadEndpoint =
+        options?.method == null || String(options.method).toUpperCase() === 'GET'
+      const timeoutHint = isReadEndpoint
+        ? 'API may still be processing this read; wait a moment and retry. If it repeats, the endpoint is too slow for the current data size.'
+        : 'API may still be processing the transaction; check Positions/Registry and retry if needed.'
       throw new Error(
         `Request timed out in UI after ${(timeoutMs / 1000).toFixed(0)}s (endpoint ${API_BASE}${url}). ` +
-          `API may still be processing the transaction; check Positions/Registry and retry if needed.`,
+          timeoutHint,
       )
     }
     throw e

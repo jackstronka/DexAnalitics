@@ -172,7 +172,10 @@ async fn chain_sessions_from_db(
 async fn sol_usd() -> (f64, String) {
     let mut mints: BTreeSet<String> = BTreeSet::new();
     mints.insert(WSOL_MINT.to_string());
-    let (px, src) = fetch_mint_prices_usd(&mints).await;
+    let (px, src) = match timeout(Duration::from_secs(2), fetch_mint_prices_usd(&mints)).await {
+        Ok(r) => r,
+        Err(_) => (BTreeMap::new(), "timeout".to_string()),
+    };
     (px.get(WSOL_MINT).copied().unwrap_or(0.0), src)
 }
 
@@ -228,6 +231,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     positions: Vec<String>,
     sessions: Vec<String>,
     lineage_chain: Option<&[String]>,
+    allow_self_seed: bool,
     settlement_strict: bool,
 ) -> Result<PositionStreamPnLResponse, ApiError> {
     let Some(db) = state.db.as_ref() else {
@@ -283,7 +287,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     let seed_pk_for_baseline = start_pubkey.unwrap_or_else(|| position_address.trim());
 
-    if baseline_row.is_none() && !settlement_strict {
+    if baseline_row.is_none() && allow_self_seed && !settlement_strict {
         // Best-effort self-seed: valuation snapshot for chain **start** PDA (or entry) when missing.
         if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(seed_pk_for_baseline)
             && let Ok(Ok(pos)) = timeout(
@@ -356,7 +360,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     let seed_pk_for_current = end_pubkey.unwrap_or_else(|| position_address.trim());
 
-    if current_row.is_none() && !settlement_strict {
+    if current_row.is_none() && allow_self_seed && !settlement_strict {
         if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(seed_pk_for_current)
             && let Ok(Ok(pos)) = timeout(
                 Duration::from_secs(2),
@@ -586,7 +590,11 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         (current_ma, current_mb),
     );
     let mint_set: BTreeSet<String> = pool_mints.iter().cloned().collect();
-    let (px, price_src) = fetch_mint_prices_usd(&mint_set).await;
+    let (px, price_src) =
+        match timeout(Duration::from_secs(2), fetch_mint_prices_usd(&mint_set)).await {
+            Ok(r) => r,
+            Err(_) => (BTreeMap::new(), "timeout".to_string()),
+        };
     let pa = pool_mints
         .first()
         .and_then(|m| px.get(m))
@@ -732,6 +740,7 @@ pub async fn compute_position_stream_pnl(
         perf.positions,
         perf.sessions,
         Some(lineage_chain.as_slice()),
+        true,
         false,
     )
     .await
@@ -753,6 +762,7 @@ pub async fn compute_position_stream_pnl_settlement_v1(
         perf.positions,
         perf.sessions,
         Some(lineage_chain.as_slice()),
+        false,
         true,
     )
     .await

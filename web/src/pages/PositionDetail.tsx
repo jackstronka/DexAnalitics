@@ -541,22 +541,6 @@ export default function PositionDetail() {
     staleTime: 30_000,
   })
 
-  const { data: streamPerf } = useQuery({
-    queryKey: ['position-stream-performance', address],
-    queryFn: () => getPositionStreamPerformance(address!),
-    enabled: !!address,
-    retry: 0,
-    staleTime: 30_000,
-  })
-
-  const { data: streamPnl } = useQuery({
-    queryKey: ['position-stream-pnl', address, metricsMode],
-    queryFn: () => getPositionStreamPnL(address!, metricsMode),
-    enabled: !!address,
-    retry: 0,
-    staleTime: 30_000,
-  })
-
   const lineageQ = useQuery({
     queryKey: ['position-stream-lineage', address, metricsMode],
     queryFn: () => getPositionStreamLineage(address!, metricsMode),
@@ -564,6 +548,23 @@ export default function PositionDetail() {
     retry: 0,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
+  })
+  const shouldFetchStreamFallback = !!address && lineageQ.isError
+
+  const { data: streamPerf } = useQuery({
+    queryKey: ['position-stream-performance', address],
+    queryFn: () => getPositionStreamPerformance(address!),
+    enabled: shouldFetchStreamFallback,
+    retry: 0,
+    staleTime: 30_000,
+  })
+
+  const { data: streamPnl } = useQuery({
+    queryKey: ['position-stream-pnl', address, metricsMode],
+    queryFn: () => getPositionStreamPnL(address!, metricsMode),
+    enabled: shouldFetchStreamFallback,
+    retry: 0,
+    staleTime: 30_000,
   })
   const streamLineage = lineageQ.data
   const totalsSourceBadge = useMemo(() => {

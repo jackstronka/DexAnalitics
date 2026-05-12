@@ -331,7 +331,7 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
 
     let mut pending: Vec<String> = mints
         .iter()
-        .filter(|m| !prices.contains_key(*m))
+        .filter(|m| !prices.contains_key(*m) && m.as_str() != WSOL_MINT)
         .cloned()
         .collect();
 
@@ -347,7 +347,7 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
 
     pending = mints
         .iter()
-        .filter(|m| !prices.contains_key(*m))
+        .filter(|m| !prices.contains_key(*m) && m.as_str() != WSOL_MINT)
         .cloned()
         .collect();
 
@@ -379,7 +379,7 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
 
     let missing: Vec<String> = mints
         .iter()
-        .filter(|m| !prices.contains_key(*m))
+        .filter(|m| !prices.contains_key(*m) && m.as_str() != WSOL_MINT)
         .cloned()
         .collect();
 
@@ -398,7 +398,7 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
 
     let missing2: Vec<String> = mints
         .iter()
-        .filter(|m| !prices.contains_key(*m))
+        .filter(|m| !prices.contains_key(*m) && m.as_str() != WSOL_MINT)
         .cloned()
         .collect();
 
@@ -415,7 +415,8 @@ pub async fn fetch_mint_prices_usd(mints: &BTreeSet<String>) -> (BTreeMap<String
         }
     }
 
-    // WSOL fallback is handled early (prefer CoinGecko).
+    // WSOL fallback is intentionally handled early (prefer CoinGecko only). Public DEX
+    // token-price fallbacks are noisy/rate-limited for WSOL and can dominate hot read endpoints.
 
     let source = if tags.is_empty() {
         "none".to_string()

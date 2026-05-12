@@ -109,13 +109,14 @@ pub(crate) fn apply_optional_interval_to_decision_config(
     }
 }
 
-/// Positions the strategy executor may act on: registry-open PDAs filtered by configured links.
+/// Positions the strategy executor may act on.
 ///
 /// - If `parameters.position_addresses` is **missing** or not a JSON array: use all
 ///   `registry_open` pubkeys (legacy strategies without an explicit link list).
 /// - If it is an **empty array**: treat as an explicit operator choice to manage **no** PDAs
 ///   (cleared links), not “everything in registry”.
-/// - If non-empty: intersection(`registry_open`, configured).
+/// - If non-empty: use the configured valid PDAs directly. Explicit strategy links are the
+///   executor contract; registry can lag for API/operator-opened positions.
 fn managed_allowlist_pubkeys_for_strategy_parameters(
     parameters: Option<&serde_json::Value>,
     registry_open: Vec<solana_sdk::pubkey::Pubkey>,
@@ -135,11 +136,8 @@ fn managed_allowlist_pubkeys_for_strategy_parameters(
     if configured.is_empty() {
         return Vec::new();
     }
-    let set: std::collections::HashSet<_> = configured.into_iter().collect();
-    registry_open
-        .into_iter()
-        .filter(|p| set.contains(p))
-        .collect()
+    let set: HashSet<_> = configured.into_iter().collect();
+    set.into_iter().collect()
 }
 
 /// Managed allowlist + reopen hook: every executor start path must call this so bot rotations
@@ -1268,5 +1266,21 @@ mod managed_allowlist_tests {
         let params = serde_json::json!({ "position_addresses": [] });
         let got = managed_allowlist_pubkeys_for_strategy_parameters(Some(&params), open);
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn configured_position_addresses_do_not_require_registry_open() {
+        let configured = Pubkey::new_unique();
+        let unrelated_registry_open = Pubkey::new_unique();
+        let params = serde_json::json!({ "position_addresses": [configured.to_string()] });
+
+        let got = managed_allowlist_pubkeys_for_strategy_parameters(
+            Some(&params),
+            vec![unrelated_registry_open],
+        );
+
+        assert_eq!(got.len(), 1);
+        assert!(got.contains(&configured));
+        assert!(!got.contains(&unrelated_registry_open));
     }
 }

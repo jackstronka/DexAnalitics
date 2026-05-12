@@ -28,6 +28,51 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260512-02 — Position history lineage loading waits ~30-40s on hot path
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-12  
+fixed_in: local  
+keywords: stream-lineage, position-history, rotations, loading-lineage, stream-performance, stream-pnl, lifecycle-ingest, position_stream_lineage, position_stream_performance, PositionDetail
+
+- **Symptom:** `PositionDetail -> Historia pozycji (rotacje)` stays on `Ładowanie lineage…` for a long time.
+- **Observed evidence (2026-05-12):** Local API timings for `HbpWqczFGQZkAEPzyQ2AJAm5vUpe41aKZ5CJdWfRTnLQ`: `/stream-performance` ~22-24s, `/stream-pnl?mode=live` ~23-25s, `/stream-lineage?mode=live` ~28-41s. For `85zg8khWUgRGT84VAw9xLddtm5tbqwRcftmVpndageLj`, `/stream-lineage` ~30s. Responses had `chain=1`, `nodes=1`, so the delay is backend work before/around lineage assembly, not a large rendered history.
+- **Related prior bug family:** Stream-lineage has prior correctness fixes (`BUG-20260414-08`, `BUG-20260413-05`, chain-scope fixes), but this is a performance/hot-read regression.
+- **Root cause:** `compute_position_stream_lineage` called `compute_position_stream_performance(state, entry, true)` to skip heavy JSONL->DB ingest, but then called `compute_position_stream_pnl(state, entry)`, whose implementation calls `compute_position_stream_performance(state, position_address, false)`. That reintroduced ingest/work on the lineage hot path. Direct `/stream-performance` and `/stream-pnl` also use `skip_ledger_ingest=false`, so their latency is dominated by repeated ingest/ledger work.
+- **Fix:** `compute_position_stream_lineage` now reuses the already-computed `perf.positions` / `perf.sessions` and resolved lineage chain by calling `compute_position_stream_pnl_for_stream_members` directly. It no longer calls the public PnL wrapper that recomputes stream performance with ingest enabled.
+- **Verification (2026-05-12):** Temporary API on port `18081` with the fix returned `/stream-lineage` for the same two PDAs in ~3.9s and ~6.0s (`chain=1`, `nodes=1`), down from ~30s.
+- **Symptom (2026-05-12, follow-up):** User reports regression on `AjKc9epDjopLRx4QZS5BT9RXyAkNbgi1rY1aPYSGfyTs`: UI now shows `Request timed out in UI after 120s` for `/api/v1/positions/AjKc9epDjopLRx4QZS5BT9RXyAkNbgi1rY1aPYSGfyTs/stream-lineage?mode=live`; history does not render at all. This means the first fix removed one repeated-ingest cost but did not cover all slow paths.
+- **Observed evidence (follow-up):** Direct local API call on `127.0.0.1:8081` returned but still slowly: `/stream-performance` ~24.3s, `/stream-pnl?mode=live` ~25.2s, `/stream-lineage?mode=live` ~41.9-54.6s. `AjKc...` resolves to `chain=12`, `nodes=12` (`3tD3...` -> `AjKc...`), unlike the prior verification (`chain=1`). A 20s proxy/API check times out on `8081`; UI timeout at 120s is plausible under load/background workers.
+- **Root cause (follow-up):** `PositionDetail` launched `stream-performance`, `stream-pnl`, and `stream-lineage` concurrently for the same PDA. `stream-lineage` also still paid long-chain backend costs: per-node `node_metrics` repeated similar DB work, synchronous snapshot persist could contend with the read path, PnL totals could self-seed missing snapshots with on-chain reads, and WSOL price fallback spammed noisy public feeds.
+- **Fix (follow-up):** `PositionDetail` now treats `/stream-lineage` as the primary stream history/totals request and enables `/stream-performance` + `/stream-pnl` only as fallback after lineage errors. Backend long-chain lineage now uses a batched DB snapshot/fee fast path for per-node metrics (`chain.len() > 8`), skips read-path snapshot persist for those long chains, disables PnL self-seed from lineage, adds short price timeouts, and stops WSOL from cascading through rate-limited fallback price feeds after CoinGecko.
+- **Verification (follow-up, 2026-05-12):** Fresh API on port `18086` returned `/stream-lineage?mode=live` for `AjKc9epDjopLRx4QZS5BT9RXyAkNbgi1rY1aPYSGfyTs` (`chain=13`, `nodes=13`) in `3506ms`, then `1165ms` and `1277ms`, down from direct local measurements of ~42-55s.
+- **Guards/tests:** Added invariant tests `stream_lineage_does_not_call_ingest_enabled_pnl_wrapper` and `stream_lineage_long_chains_use_batched_node_metrics`; verified with `cargo test -p clmm-lp-api stream_lineage -- --nocapture`, `cargo clippy -p clmm-lp-api --all-targets -- -D warnings`, `npx tsc --noEmit`, and IDE lints for `web/src/pages/PositionDetail.tsx` + `web/src/lib/api.ts`.
+- **Residual risk:** For long chains, per-node rows use the fast snapshot/tx-fee batch and expose detailed collect/cashflow through chain totals rather than recomputing every detailed per-node collect leg on the UI hot path. If the UI later needs exact per-node collect/cashflow for every historical node, add a separate drill-down endpoint or background materialization.
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/price_fetch.rs`, `crates/api/src/services/position_stream_performance.rs`, `web/src/pages/PositionDetail.tsx`
+
+---
+
+### BUG-20260512-01 — Regression: running strategies skip out-of-range linked positions missing from registry
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-12  
+fixed_in: local  
+keywords: regression, strategy-executor, managed_allowlist, position_addresses, registry_open, out_of_range, monitor_in_range, diagnostics, no-rebalance, retouch_shift, last_candle, auto_execute
+
+- **Symptom:** Dashboard shows linked strategies with `auto_execute=true`, `running=true`, and positions `out_of_range`, but bot does not close/reopen; no `Decision requires action` appears for the affected PDAs.
+- **Observed evidence (2026-05-12):** `HbpWqczFGQZkAEPzyQ2AJAm5vUpe41aKZ5CJdWfRTnLQ` (`Retouch shift`) and `85zg8khWUgRGT84VAw9xLddtm5tbqwRcftmVpndageLj` (`Last Candle 60m`) are in `data/strategies.json` and live `/strategies`, while `/positions` reports `in_range=false`; `/positions/{pda}/diagnostics` has no `last_eval`, and `data/positions/registry.jsonl` has no matching `registry_open`.
+- **Related prior bug family:** This is a regression/variant of the older `in_range` + strategy-link/allowlist issues: 2026-04-06 engineering note (“diagnostics + fresh `in_range`”), `BUG-20260414-04` (empty `position_addresses` / managed allowlist semantics), `BUG-20260414-05` (divergent executor wiring + managed allowlist/reopen hook), and `BUG-20260415` lineage/link follow-ups around `position_addresses` continuity.
+- **Root cause:** `managed_allowlist_pubkeys_for_strategy_parameters` intersected configured `position_addresses` with `registry_open_position_pubkeys()`. Operator/API-opened positions can be present in strategy config and monitor but absent from registry, making the executor allowlist exclude them before evaluation.
+- **Fix:** For explicit non-empty `parameters.position_addresses`, allow configured valid PDAs directly instead of requiring `registry_open`; missing/non-array still falls back to registry-open legacy behavior, and explicit `[]` remains restrictive (“manage nothing”).
+- **Guards/tests:** Added regression `configured_position_addresses_do_not_require_registry_open`; verified with `cargo test -p clmm-lp-api configured_position_addresses_do_not_require_registry_open -- --nocapture`, `cargo test -p clmm-lp-api managed_allowlist -- --nocapture`, and `cargo clippy -p clmm-lp-api --all-targets -- -D warnings`.
+- **Paths:** `crates/api/src/services/strategy_service.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/positions.rs`
+
+---
+
 ### BUG-20260511-01 — CI `make lint` fails on strict clippy after rebalance recovery commit
 
 status: fixed  

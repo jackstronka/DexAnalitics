@@ -2980,6 +2980,184 @@ async fn node_metrics(
     })
 }
 
+#[derive(Debug, Clone)]
+struct FastSnapshotMetric {
+    ts_utc: Option<DateTime<Utc>>,
+    value_usd: Decimal,
+    token_mint_a: Option<String>,
+    token_mint_b: Option<String>,
+    kind: Option<String>,
+    valuation_quality: Option<String>,
+}
+
+async fn node_metrics_fast_for_chain(
+    state: &AppState,
+    chain: &[String],
+) -> Result<Vec<PositionStreamLineageNode>, ApiError> {
+    let Some(db) = state.db.as_ref() else {
+        let rows = lifecycle_rows_cached_best_effort().await;
+        let mut out = Vec::with_capacity(chain.len());
+        for p in chain {
+            out.push(node_metrics_from_lifecycle_best_effort(state, &rows, p).await?);
+        }
+        return Ok(out);
+    };
+    if chain.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let baseline_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (position_pubkey)
+          position_pubkey, ts_utc, value_usd, token_mint_a, token_mint_b, raw_json
+        FROM position_stream_valuation_snapshots
+        WHERE position_pubkey = ANY($1)
+        ORDER BY
+          position_pubkey,
+          CASE WHEN COALESCE(raw_json->>'kind', '') = 'baseline_open' THEN 0 ELSE 1 END,
+          ts_utc ASC
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream lineage: fast baseline query: {e}")))?;
+
+    let current_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (position_pubkey)
+          position_pubkey, ts_utc, value_usd, token_mint_a, token_mint_b, raw_json
+        FROM position_stream_valuation_snapshots
+        WHERE position_pubkey = ANY($1)
+        ORDER BY
+          position_pubkey,
+          CASE WHEN COALESCE(raw_json->>'kind', '') = 'end_close' THEN 0 ELSE 1 END,
+          ts_utc DESC
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream lineage: fast current query: {e}")))?;
+
+    let fee_rows = sqlx::query(
+        r#"
+        SELECT position_pubkey, COALESCE(SUM(tx_fee_lamports), 0) AS fee_lamports
+        FROM position_stream_ledger_rows
+        WHERE position_pubkey = ANY($1)
+        GROUP BY position_pubkey
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream lineage: fast tx fee query: {e}")))?;
+
+    let parse_metric = |r: sqlx::postgres::PgRow| -> Option<(String, FastSnapshotMetric)> {
+        let position: String = r.try_get("position_pubkey").ok()?;
+        let raw_json: Option<serde_json::Value> = r.try_get("raw_json").ok().flatten();
+        let kind = raw_json
+            .as_ref()
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let valuation_quality = raw_json
+            .as_ref()
+            .and_then(|v| v.get("valuation_quality"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Some((
+            position,
+            FastSnapshotMetric {
+                ts_utc: r
+                    .try_get::<Option<DateTime<Utc>>, _>("ts_utc")
+                    .ok()
+                    .flatten(),
+                value_usd: r.try_get("value_usd").unwrap_or(Decimal::ZERO),
+                token_mint_a: r
+                    .try_get::<Option<String>, _>("token_mint_a")
+                    .ok()
+                    .flatten(),
+                token_mint_b: r
+                    .try_get::<Option<String>, _>("token_mint_b")
+                    .ok()
+                    .flatten(),
+                kind,
+                valuation_quality,
+            },
+        ))
+    };
+
+    let baselines: HashMap<String, FastSnapshotMetric> =
+        baseline_rows.into_iter().filter_map(parse_metric).collect();
+    let currents: HashMap<String, FastSnapshotMetric> =
+        current_rows.into_iter().filter_map(parse_metric).collect();
+    let fee_lamports_by_pos: HashMap<String, u64> = fee_rows
+        .into_iter()
+        .filter_map(|r| {
+            let position: String = r.try_get("position_pubkey").ok()?;
+            let fee: i64 = r.try_get("fee_lamports").unwrap_or(0);
+            Some((position, fee.max(0) as u64))
+        })
+        .collect();
+
+    let (sol_usd, _sol_src) = sol_usd().await;
+    let mut out = Vec::with_capacity(chain.len());
+    for p in chain {
+        let baseline = baselines.get(p);
+        let current = currents.get(p);
+        let baseline_value = baseline.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
+        let current_value = current.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
+        let fee_lamports = fee_lamports_by_pos.get(p).copied().unwrap_or(0);
+        let tx_fees_usd = if sol_usd > 0.0 {
+            Decimal::from_f64_retain((fee_lamports as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+        let net_pnl_usd = current_value - baseline_value - tx_fees_usd;
+        let net_pnl_pct = if baseline_value.is_zero() {
+            Decimal::ZERO
+        } else {
+            net_pnl_usd / baseline_value
+        };
+        let mint_a = baseline
+            .and_then(|m| m.token_mint_a.clone())
+            .or_else(|| current.and_then(|m| m.token_mint_a.clone()));
+        let mint_b = baseline
+            .and_then(|m| m.token_mint_b.clone())
+            .or_else(|| current.and_then(|m| m.token_mint_b.clone()));
+        let closed_ts =
+            current.and_then(|m| closed_ts_for_snapshot_kind(m.kind.as_deref(), m.ts_utc));
+        out.push(PositionStreamLineageNode {
+            position_address: p.clone(),
+            token_a_label: mint_a.as_deref().map(token_short_label),
+            token_b_label: mint_b.as_deref().map(token_short_label),
+            token_mint_a: mint_a,
+            token_mint_b: mint_b,
+            opened_ts_utc: baseline.and_then(|m| m.ts_utc.map(|t| t.to_rfc3339())),
+            closed_ts_utc: closed_ts.map(|t| t.to_rfc3339()),
+            baseline_value_usd: baseline_value,
+            baseline_valuation_quality: baseline.and_then(|m| m.valuation_quality.clone()),
+            current_value_usd: current_value,
+            current_valuation_quality: current.and_then(|m| m.valuation_quality.clone()),
+            tx_fee_lamports: fee_lamports,
+            tx_fees_usd,
+            fees_collected_usd: Decimal::ZERO,
+            fees_collected_token_a_ui: None,
+            fees_collected_token_b_ui: None,
+            fees_collected_token_a_raw: None,
+            fees_collected_token_b_raw: None,
+            collect_events: 0,
+            realized_cashflow_usd: Decimal::ZERO,
+            net_pnl_usd,
+            net_pnl_pct,
+            note: Some("fast_long_chain_metrics: per-node values use batched DB snapshots; detailed collect/cashflow falls back to chain totals.".to_string()),
+            collect_zero_diagnostics: None,
+        });
+    }
+    Ok(out)
+}
+
 async fn node_metrics_from_lifecycle_best_effort(
     state: &AppState,
     rows: &[LifecycleRow],
@@ -3268,9 +3446,14 @@ async fn node_metrics_from_lifecycle_best_effort(
     // Current value:
     // - when DB is enabled: try to get on-chain position valuation for open positions
     // - when DB is disabled: rely on close-leg deltas only (no on-chain calls)
-    let mut current_value_usd = if !db_disabled {
+    let mut current_value_usd = if !db_disabled && closed_ts.is_none() {
         if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(position_pubkey) {
-            if let Ok(pos) = monitored_position_from_chain(state.provider.clone(), &pk).await {
+            if let Ok(Ok(pos)) = timeout(
+                Duration::from_secs(2),
+                monitored_position_from_chain(state.provider.clone(), &pk),
+            )
+            .await
+            {
                 let prices =
                     fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
                         .await;
@@ -3525,15 +3708,13 @@ pub async fn compute_position_stream_lineage(
     state: &AppState,
     position_address: &str,
 ) -> Result<PositionStreamLineageResponse, ApiError> {
-    use crate::services::position_stream_pnl::{
-        compute_position_stream_pnl, compute_position_stream_pnl_for_stream_members,
-    };
+    use crate::services::position_stream_pnl::compute_position_stream_pnl_for_stream_members;
 
     let entry = position_address.trim();
 
     // Connectivity + totals: reuse existing stream services.
     let perf = compute_position_stream_performance(state, entry, true).await?;
-    let mut totals = compute_position_stream_pnl(state, entry).await.ok();
+    let mut totals = None;
 
     if state.db.is_none() {
         let rows = lifecycle_rows_cached_best_effort().await;
@@ -3581,40 +3762,52 @@ pub async fn compute_position_stream_lineage(
     // BFS component from `compute_position_stream_performance` — that can merge unrelated PDAs.
     let rows = lifecycle_rows_cached_best_effort().await;
     let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
-    if stitch_suppressed {
-        let stitch_chain = vec![entry.to_string()];
-        totals = compute_position_stream_pnl_for_stream_members(
-            state,
-            entry,
-            vec![entry.to_string()],
-            vec![],
-            Some(stitch_chain.as_slice()),
-            false,
-        )
-        .await
-        .ok();
-    }
-
     let chain = resolve_lineage_chain_for_stream_pnl(state, &perf, entry).await;
 
-    if state.db.is_some() {
-        let _ = persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await;
+    totals = compute_position_stream_pnl_for_stream_members(
+        state,
+        entry,
+        perf.positions.clone(),
+        perf.sessions.clone(),
+        Some(chain.as_slice()),
+        false,
+        false,
+    )
+    .await
+    .ok();
+
+    if state.db.is_some() && chain.len() <= 8 {
+        let st_bg = state.clone();
+        let rows_bg = rows.clone();
+        let chain_bg = chain.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                persist_event_valuation_snapshots_for_positions(&st_bg, &rows_bg, &chain_bg).await
+            {
+                tracing::warn!(error = %e, "stream lineage: background snapshot persist failed");
+            }
+        });
     }
 
-    // Per-node metrics (parallel; each node skips expensive snapshot self-seed — lineage uses lifecycle).
-    let st = state.clone();
-    let node_futs: Vec<_> = chain
-        .iter()
-        .map(|p| {
-            let st = st.clone();
-            let p = p.clone();
-            async move { node_metrics(&st, &p, true).await }
-        })
-        .collect();
-    let mut nodes: Vec<PositionStreamLineageNode> = Vec::with_capacity(node_futs.len());
-    for res in join_all(node_futs).await {
-        nodes.push(res?);
-    }
+    let mut nodes: Vec<PositionStreamLineageNode> = if chain.len() > 8 {
+        node_metrics_fast_for_chain(state, &chain).await?
+    } else {
+        // Per-node metrics (parallel; each node skips expensive snapshot self-seed — lineage uses lifecycle).
+        let st = state.clone();
+        let node_futs: Vec<_> = chain
+            .iter()
+            .map(|p| {
+                let st = st.clone();
+                let p = p.clone();
+                async move { node_metrics(&st, &p, true).await }
+            })
+            .collect();
+        let mut nodes = Vec::with_capacity(node_futs.len());
+        for res in join_all(node_futs).await {
+            nodes.push(res?);
+        }
+        nodes
+    };
 
     apply_session_continuity_from_lifecycle_rows(&rows, &mut nodes);
     // Fill gaps in closed nodes (close row missing leg token deltas) by using next node baseline.
@@ -4136,6 +4329,29 @@ mod tests {
             ..Default::default()
         };
         AppState::new(rpc_config, ApiConfig::default(), None)
+    }
+
+    #[test]
+    fn stream_lineage_does_not_call_ingest_enabled_pnl_wrapper() {
+        let source = include_str!("position_stream_lineage.rs");
+        let wrapper_call = concat!("compute_position_stream_", "pnl(");
+
+        assert!(
+            !source.contains(wrapper_call),
+            "stream-lineage hot path must use compute_position_stream_pnl_for_stream_members with the already-computed perf instead of the wrapper that recomputes stream performance with ingest enabled"
+        );
+        assert!(source.contains("compute_position_stream_pnl_for_stream_members"));
+    }
+
+    #[test]
+    fn stream_lineage_long_chains_use_batched_node_metrics() {
+        let source = include_str!("position_stream_lineage.rs");
+
+        assert!(source.contains("node_metrics_fast_for_chain(state, &chain).await?"));
+        assert!(
+            source.contains("chain.len() > 8"),
+            "long rotation chains must stay on the batched node-metrics path instead of fanning out full node_metrics calls per PDA"
+        );
     }
 
     fn mk_node(addr: &str, baseline: Decimal, current: Decimal) -> PositionStreamLineageNode {

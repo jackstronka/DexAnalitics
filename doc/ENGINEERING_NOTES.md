@@ -1,3 +1,35 @@
+## 2026-05-12 — Stream-lineage long chains use batched node metrics
+
+keywords: clmm-lp-api, stream-lineage, node-metrics, position-history, rotations, price-fetch, WSOL, latency
+
+- **What:** Long chains (`chain.len() > 8`) now build per-node lineage rows from batched Postgres snapshot/tx-fee queries instead of running full `node_metrics` for every PDA. The read path skips snapshot persist for those long chains, lineage PnL totals disable on-chain self-seed, PnL price lookups have short timeouts, and WSOL no longer cascades through noisy public fallback price feeds after CoinGecko misses.
+- **Why:** `AjKc...` (`chain=13`) was still ~42-55s after the first duplicate-ingest/UI-gating fixes. Fresh local measurement after batching: ~3.5s cold, ~1.1-1.3s warm. Detailed per-node collect/cashflow is intentionally left to chain totals/drill-down rather than the hot history table.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/api/src/services/price_fetch.rs`, `doc/BUGS.md`
+
+## 2026-05-12 — PositionDetail gates stream-performance/stream-pnl behind lineage fallback
+
+keywords: web, PositionDetail, stream-lineage, stream-performance, stream-pnl, timeout, lineage, latency
+
+- **What:** `PositionDetail` now fetches `/stream-lineage` as the primary history/totals source and only enables `/stream-performance` + `/stream-pnl` as fallback after lineage errors. Timeout copy now distinguishes read endpoints from transaction endpoints.
+- **Why:** Long chains (e.g. `AjKc...`, 12 nodes) made the page launch three expensive stream requests for the same PDA; duplicated DB/JSONL/price/RPC work could push lineage past the 120s UI timeout.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`, `doc/BUGS.md`
+
+## 2026-05-12 — Stream-lineage reuses precomputed performance for PnL totals
+
+keywords: clmm-lp-api, stream-lineage, stream-pnl, stream-performance, PositionDetail, lineage, latency, lifecycle-ingest
+
+- **What:** `compute_position_stream_lineage` no longer calls the public `compute_position_stream_pnl` wrapper after already computing `stream-performance` with ingest disabled. It now calls `compute_position_stream_pnl_for_stream_members` with the already-resolved `perf.positions`, `perf.sessions`, and lineage chain.
+- **Why:** The wrapper recomputed `stream-performance` with ingest enabled, so `PositionDetail -> Historia pozycji (rotacje)` could spend ~30-40s loading even for a single-node chain.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-12 — Strategy allowlist trusts explicit `position_addresses` even when registry lags
+
+keywords: clmm-lp-api, strategy-executor, managed-allowlist, position_addresses, registry_open, out_of_range, diagnostics, regression
+
+- **What:** `managed_allowlist_pubkeys_for_strategy_parameters` now treats a non-empty `parameters.position_addresses` array as the explicit executor contract and passes those valid PDA links directly to `StrategyExecutor::set_managed_allowlist` instead of intersecting them with `registry_open`.
+- **Why:** API/operator-opened or recovered positions can be visible in `/positions` and linked in strategy config while missing from `data/positions/registry.jsonl`; intersecting with registry made running strategies skip out-of-range linked PDAs before `last_eval`.
+- **paths:** `crates/api/src/services/strategy_service.rs`, `doc/BUGS.md`
+
 ## 2026-05-11 — Functional spec §2.4: parallel bot processes must not share one pending-open JSON (claim is per-process)
 
 keywords: documentation, functional-spec, pending-open, CLMM_PENDING_OPEN_RECOVERY_PATH, multi-process, strategy-compare
