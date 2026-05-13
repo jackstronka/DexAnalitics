@@ -883,10 +883,12 @@ pub async fn set_active_signer(
     }
     let stores = resolve_wallet_stores(&state);
     let kp = load_wallet_keypair_from_stores(&stores, wallet_id)?;
+    let pubkey = kp.pubkey();
     *state.active_signer_wallet_id.write().await = Some(wallet_id.to_string());
+    spawn_effective_refresh_if_needed(state.clone(), pubkey.to_string(), pubkey).await;
     Ok(Json(ActiveSignerResponse {
         wallet_id: Some(wallet_id.to_string()),
-        pubkey: Some(kp.pubkey().to_string()),
+        pubkey: Some(pubkey.to_string()),
         source: "active_wallet".to_string(),
     }))
 }
@@ -1063,6 +1065,8 @@ pub async fn list_wallet_transfers(
 #[derive(Debug, Deserialize)]
 pub struct WalletBalancesQuery {
     pub owner: String,
+    #[serde(default)]
+    pub force: bool,
 }
 
 fn append_tokens_from_keyed_accounts(
@@ -1478,6 +1482,118 @@ fn wallet_effective_cache_ttl_secs() -> u64 {
         .unwrap_or(5)
 }
 
+pub fn wallet_effective_cache_path() -> PathBuf {
+    std::env::var("CLMM_WALLET_EFFECTIVE_CACHE_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data").join("wallet-effective-cache.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalletEffectiveCacheFile {
+    version: u32,
+    updated_at_utc: String,
+    entries: BTreeMap<String, WalletEffectiveCacheFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalletEffectiveCacheFileEntry {
+    updated_at_utc: String,
+    response: WalletEffectiveBalancesResponse,
+}
+
+fn instant_from_wall_timestamp(updated_at_utc: &str, now: Instant) -> Instant {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(updated_at_utc) else {
+        return now;
+    };
+    let age_ms = chrono::Utc::now()
+        .signed_duration_since(ts.with_timezone(&chrono::Utc))
+        .num_milliseconds()
+        .max(0) as u64;
+    now.checked_sub(Duration::from_millis(age_ms))
+        .unwrap_or(now)
+}
+
+fn mark_effective_cache_metadata(
+    mut response: WalletEffectiveBalancesResponse,
+    source: &str,
+    updated_at_utc: &str,
+) -> WalletEffectiveBalancesResponse {
+    response.cache_source = Some(source.to_string());
+    response.cache_updated_at_utc = Some(updated_at_utc.to_string());
+    response
+}
+
+async fn persist_wallet_effective_cache_to_disk(state: &AppState) -> anyhow::Result<()> {
+    let path = wallet_effective_cache_path();
+    let entries = {
+        let cache = state.wallet_effective_cache.read().await;
+        cache
+            .iter()
+            .map(|(owner, cached)| {
+                (
+                    owner.clone(),
+                    WalletEffectiveCacheFileEntry {
+                        updated_at_utc: cached.updated_at_utc.clone(),
+                        response: mark_effective_cache_metadata(
+                            cached.response.clone(),
+                            &cached.source,
+                            &cached.updated_at_utc,
+                        ),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let file = WalletEffectiveCacheFile {
+        version: 1,
+        updated_at_utc: now_utc_iso(),
+        entries,
+    };
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(&file)?;
+    fs::write(&tmp, bytes)?;
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+pub async fn hydrate_wallet_effective_cache_from_disk(state: &AppState) -> anyhow::Result<usize> {
+    let path = wallet_effective_cache_path();
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    let file: WalletEffectiveCacheFile = serde_json::from_str(&text)?;
+    let now = Instant::now();
+    let mut inserted = 0usize;
+    let mut cache = state.wallet_effective_cache.write().await;
+    for (owner, entry) in file.entries {
+        let response = mark_effective_cache_metadata(entry.response, "file", &entry.updated_at_utc);
+        cache.insert(
+            owner,
+            crate::state::CachedWalletEffective {
+                response,
+                updated_at: instant_from_wall_timestamp(&entry.updated_at_utc, now),
+                updated_at_utc: entry.updated_at_utc,
+                source: "file".to_string(),
+            },
+        );
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
 fn ws_url_from_rpc_url(rpc_url: &str) -> String {
     if let Some(rest) = rpc_url.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -1607,9 +1723,21 @@ pub async fn get_wallet_ws_status(
 ) -> ApiResult<Json<WalletWsStatusResponse>> {
     let started = state.wallet_effective_ws_started.read().await;
     let owners = started.iter().cloned().collect::<Vec<_>>();
+    let (effective_cache_owners, effective_cache_updated_at_utc) = {
+        let cache = state.wallet_effective_cache.read().await;
+        let updated_at = cache
+            .values()
+            .filter_map(|c| chrono::DateTime::parse_from_rfc3339(&c.updated_at_utc).ok())
+            .max()
+            .map(|dt| dt.to_rfc3339());
+        (cache.len() as u32, updated_at)
+    };
     Ok(Json(WalletWsStatusResponse {
         owners_monitored: owners.len() as u32,
         owners,
+        effective_cache_owners,
+        effective_cache_updated_at_utc,
+        effective_cache_path: wallet_effective_cache_path().to_string_lossy().to_string(),
         events_total: state.wallet_ws_events_total.load(Ordering::Relaxed),
         reconnects_total: state.wallet_ws_reconnects_total.load(Ordering::Relaxed),
         refresh_failures_total: state
@@ -1698,6 +1826,8 @@ fn build_effective_balances(
         token_2022_ok: chain.token_2022_ok,
         token_legacy_error: chain.token_legacy_error,
         token_2022_error: chain.token_2022_error,
+        cache_source: Some("chain".to_string()),
+        cache_updated_at_utc: Some(now_utc_iso()),
     }
 }
 
@@ -1720,14 +1850,9 @@ async fn spawn_effective_refresh_if_needed(state: AppState, owner: String, owner
     drop(refreshing);
     tokio::spawn(async move {
         if let Ok(resp) = compute_effective_balances(&state, owner_pk).await {
-            let mut cache = state.wallet_effective_cache.write().await;
-            cache.insert(
-                owner.clone(),
-                crate::state::CachedWalletEffective {
-                    response: resp,
-                    updated_at: Instant::now(),
-                },
-            );
+            if let Err(e) = store_wallet_effective_response(&state, &owner, resp, "memory").await {
+                tracing::warn!(owner = %owner, error = %e, "persist wallet effective cache failed");
+            }
         }
         let mut refreshing = state.wallet_effective_refreshing.write().await;
         refreshing.remove(&owner);
@@ -1759,6 +1884,8 @@ async fn build_warmup_placeholder(
         token_2022_ok: Some(false),
         token_legacy_error: Some("warmup: effective cache miss, refresh in progress".to_string()),
         token_2022_error: Some("warmup: effective cache miss, refresh in progress".to_string()),
+        cache_source: Some("warmup".to_string()),
+        cache_updated_at_utc: None,
     }
 }
 
@@ -1807,12 +1934,37 @@ async fn compute_effective_balances(
     Ok(build_effective_balances(chain, &op_rows))
 }
 
+async fn store_wallet_effective_response(
+    state: &AppState,
+    owner: &str,
+    response: WalletEffectiveBalancesResponse,
+    source: &str,
+) -> anyhow::Result<WalletEffectiveBalancesResponse> {
+    let updated_at_utc = now_utc_iso();
+    let response = mark_effective_cache_metadata(response, source, &updated_at_utc);
+    {
+        let mut cache = state.wallet_effective_cache.write().await;
+        cache.insert(
+            owner.to_string(),
+            crate::state::CachedWalletEffective {
+                response: response.clone(),
+                updated_at: Instant::now(),
+                updated_at_utc,
+                source: source.to_string(),
+            },
+        );
+    }
+    persist_wallet_effective_cache_to_disk(state).await?;
+    Ok(response)
+}
+
 #[utoipa::path(
     get,
     path = "/wallets/effective-balances",
     tag = "Wallets",
     params(
-        ("owner" = String, Query, description = "Solana wallet pubkey (base58)")
+        ("owner" = String, Query, description = "Solana wallet pubkey (base58)"),
+        ("force" = Option<bool>, Query, description = "When true, refresh synchronously and persist before returning")
     ),
     responses(
         (status = 200, description = "Fast effective balances", body = WalletEffectiveBalancesResponse),
@@ -1831,6 +1983,13 @@ pub async fn get_wallet_effective_balances(
         Pubkey::from_str(owner_trim).map_err(|_| ApiError::bad_request("invalid owner pubkey"))?;
     let owner = owner_pk.to_string();
     ensure_wallet_ws_owner_worker(state.clone(), owner.clone()).await;
+    if q.force {
+        let resp = compute_effective_balances(&state, owner_pk).await?;
+        let resp = store_wallet_effective_response(&state, &owner, resp, "memory")
+            .await
+            .map_err(|e| ApiError::internal(format!("persist wallet effective cache: {e}")))?;
+        return Ok(Json(stale_marked_response(resp, false, 0)));
+    }
     let ttl = Duration::from_secs(wallet_effective_cache_ttl_secs());
     {
         let cache = state.wallet_effective_cache.read().await;
@@ -1857,15 +2016,21 @@ pub async fn refresh_wallet_effective_owner(state: &AppState, owner: &str) -> an
     let resp = compute_effective_balances(state, owner_pk)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let mut cache = state.wallet_effective_cache.write().await;
-    cache.insert(
-        owner.to_string(),
-        crate::state::CachedWalletEffective {
-            response: resp,
-            updated_at: Instant::now(),
-        },
-    );
+    store_wallet_effective_response(state, owner, resp, "memory").await?;
     Ok(())
+}
+
+pub async fn wallet_effective_resync_owners(state: &AppState) -> Vec<String> {
+    let mut owners: HashSet<String> = {
+        let cache = state.wallet_effective_cache.read().await;
+        cache.keys().cloned().collect()
+    };
+    if let Ok(Some(wallet)) = load_signer_wallet_for_api(state) {
+        owners.insert(wallet.pubkey().to_string());
+    }
+    let mut out = owners.into_iter().collect::<Vec<_>>();
+    out.sort();
+    out
 }
 
 /// Returns the API signing wallet pubkey and SOL balance (wallet loaded from env).
@@ -2283,6 +2448,85 @@ pub async fn get_wallet_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_effective_response(owner: &str) -> WalletEffectiveBalancesResponse {
+        WalletEffectiveBalancesResponse {
+            owner: owner.to_string(),
+            as_of_utc: now_utc_iso(),
+            is_stale: false,
+            stale_age_ms: 0,
+            confidence: WalletBalanceConfidence::Verified,
+            pending_ops_count: 0,
+            native_onchain_lamports: 1_000,
+            native_effective_lamports: 1_000,
+            wsol_onchain_raw: 0,
+            wsol_effective_raw: 0,
+            rpc_url: "https://rpc.example".to_string(),
+            lamports: 1_000,
+            sol: "0.000001000".to_string(),
+            tokens: Vec::new(),
+            token_accounts_total: Some(0),
+            token_legacy_ok: Some(true),
+            token_2022_ok: Some(true),
+            token_legacy_error: None,
+            token_2022_error: None,
+            cache_source: None,
+            cache_updated_at_utc: None,
+        }
+    }
+
+    #[test]
+    fn wallet_effective_cache_metadata_marks_source_and_write_time() {
+        let resp = mark_effective_cache_metadata(
+            test_effective_response("owner-1"),
+            "file",
+            "2026-05-12T20:00:00Z",
+        );
+
+        assert_eq!(resp.cache_source.as_deref(), Some("file"));
+        assert_eq!(
+            resp.cache_updated_at_utc.as_deref(),
+            Some("2026-05-12T20:00:00Z")
+        );
+    }
+
+    #[test]
+    fn wallet_effective_hydrate_timestamp_preserves_stale_age() {
+        let ts = (chrono::Utc::now() - chrono::Duration::seconds(6)).to_rfc3339();
+        let hydrated_at = instant_from_wall_timestamp(&ts, Instant::now());
+        let age_ms = hydrated_at.elapsed().as_millis();
+
+        assert!((5_000..=7_500).contains(&age_ms));
+    }
+
+    #[test]
+    fn wallet_effective_cache_file_roundtrips_public_snapshot_only() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "owner-1".to_string(),
+            WalletEffectiveCacheFileEntry {
+                updated_at_utc: "2026-05-12T20:00:00Z".to_string(),
+                response: test_effective_response("owner-1"),
+            },
+        );
+        let file = WalletEffectiveCacheFile {
+            version: 1,
+            updated_at_utc: "2026-05-12T20:00:01Z".to_string(),
+            entries,
+        };
+
+        let encoded = serde_json::to_string(&file).expect("serialize wallet effective cache");
+        assert!(!encoded.contains("seed"));
+        assert!(!encoded.contains("private"));
+
+        let decoded: WalletEffectiveCacheFile =
+            serde_json::from_str(&encoded).expect("deserialize wallet effective cache");
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(
+            decoded.entries["owner-1"].response.owner.as_str(),
+            "owner-1"
+        );
+    }
 
     #[test]
     fn merge_wallet_token_rows_sums_same_mint() {

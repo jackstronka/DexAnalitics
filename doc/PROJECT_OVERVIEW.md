@@ -6,6 +6,9 @@ Expected behavior of features (open/close, rebalance, strategies, guardrails) is
 
 ## Decision and Worklog Docs
 
+**What „AI agent” means in this repository** (envelope optymalizacji vs Position Agent vs reguły live): **`doc/AI_AGENT_LAYER.md`**.  
+**Warstwa decyzyjna / orkiestrator LP** (cele, fazy, shadow/symulacje, metryki): **`doc/DECISION_LAYER.md`**.
+
 For bot direction and historical context of recent work, see:
 - `doc/BOT_RESEARCH_DECISION_2026-03-23.md` (research-based decision and comparison matrix)
 - `doc/BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md` (weighted scoring and hybrid implementation contract)

@@ -875,6 +875,10 @@ export default function Wallet() {
                     {walletWsStatusQ.data?.owners_monitored ?? 0}
                   </div>
                 </div>
+                <div className="rounded-md border border-border/70 p-2">
+                  <div className="text-muted-foreground">Effective cache owners</div>
+                  <div className="font-mono text-sm">{walletWsStatusQ.data?.effective_cache_owners ?? 0}</div>
+                </div>
                 <div
                   className={`rounded-md border p-2 ${
                     (walletWsStatusQ.data?.events_total ?? 0) > 0
@@ -904,6 +908,15 @@ export default function Wallet() {
                 >
                   <div className="text-muted-foreground">Refresh failures</div>
                   <div className="font-mono text-sm">{walletWsStatusQ.data?.refresh_failures_total ?? 0}</div>
+                </div>
+              </div>
+              <div className="rounded-md border border-border/60 px-2 py-1">
+                <div className="text-muted-foreground">Persistent wallet snapshot</div>
+                <div className="font-mono break-all">
+                  {walletWsStatusQ.data?.effective_cache_path ?? 'data/wallet-effective-cache.json'}
+                </div>
+                <div className="text-muted-foreground">
+                  Last write: {walletWsStatusQ.data?.effective_cache_updated_at_utc ?? '—'}
                 </div>
               </div>
               <div>

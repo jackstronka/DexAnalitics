@@ -2788,12 +2788,21 @@ pub struct WalletEffectiveBalancesResponse {
     pub token_legacy_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_2022_error: Option<String>,
+    /// `chain`, `memory`, `file`, or `warmup`; helps operators understand whether this is a live or cached view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_source: Option<String>,
+    /// Wall-clock timestamp when this effective snapshot was written to the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_updated_at_utc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletWsStatusResponse {
     pub owners_monitored: u32,
     pub owners: Vec<String>,
+    pub effective_cache_owners: u32,
+    pub effective_cache_updated_at_utc: Option<String>,
+    pub effective_cache_path: String,
     pub events_total: u64,
     pub reconnects_total: u64,
     pub refresh_failures_total: u64,

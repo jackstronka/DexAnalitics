@@ -14,6 +14,7 @@
 | Incident registry and fixes | [`BUGS.md`](BUGS.md) |
 | API method map / service split | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) |
 | Run steps, env, operational checklists | runbooks in [`README.md`](README.md) *Runbooks and operations* |
+| Decision / orchestration layer (vision, phases, shadow sims — product contract) | [`DECISION_LAYER.md`](DECISION_LAYER.md) — **§8** below is a normative *stub*; details stay there until implementation |
 
 ---
 
@@ -403,9 +404,45 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 ### 7. Backtests and optimize apply (policy, busy lock, agent envelope)
 
-**Goal:** *TODO* — reference tables already in `PROJECT_OVERVIEW.md`; duplicate only if this file becomes the single norm for operators.
+**Norm:** Zachowanie endpointu `POST /api/v1/strategies/{id}/apply-optimize-result`, polityki `optimize_apply_policy`, lock `optimization_busy` oraz semantyki `AgentDecision` opisuje [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) (tabele i przepływ). **Słownik warstw „agent / AI”** (co jest LLM, co kontraktem JSON, co regułami w execution): [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md).
 
 **keywords:** backtest, backtest-optimize, optimize_apply_policy, AgentDecision
+
+---
+
+### 8. Decision layer (orchestrator LP) — draft
+
+**Status:** **Draft** — funkcje opisane częściowo; pełny kontrakt produktowy i architektura: [`DECISION_LAYER.md`](DECISION_LAYER.md). Po wdrożeniu kodu rozszerz tutaj **Inputs / Happy path / Invariants** i dopisz wskaźniki do plików Rust.
+
+**Goal:** Warstwa ponad istniejącymi narzędziami zbiera sygnały (dane, metryki ciągu pozycji, jakość danych), uruchamia **te same** ścieżki symulacji/backtestu dla wariantów (w tym shadow / what-if), wydaje **rekomendacje lub decyzje pomocnicze** z pełnym audytem, a w późniejszej fazie może być spięta z wykonaniem (tx, apply optimize). Pierwsza faza produktowa: **analiza i informowanie operatora** — bez samowolnego wykonywania transakcji.
+
+**Mapowanie szczegółowego celu operatora (wolumen, wiele par, jeden ciąg PnL, kapitał):** [`DECISION_LAYER.md`](DECISION_LAYER.md) §1a — tam wskazane, co jest już rozpisane, a co jest szkicem do doprecyzowania przy implementacji.
+
+**Inputs (docelowo, nie wszystkie dziś spięte):** lokalne snapshoty/swapy i ich jakość; wyniki `backtest` / `backtest-optimize`; metryki ciągu (m.in. IL, fees, koszty) z API/stream; polityki operatora; opcjonalnie envelope [`AgentDecision`](AI_AGENT_LAYER.md) przy apply siatki.
+
+**Outputs:** rekomendacje i/lub strukturalny log decyzji (co, dlaczego, na jakich danych, wersja/kompletność danych); kanał audytu możliwy przez [`GET`/`POST /api/v1/data/agent/decisions`](AI_AGENT_LAYER.md) lub osobny strumień — **do ustalenia przy implementacji**.
+
+**Happy path (faza 1 — informowanie):**
+
+1. Orkiestrator (proces/moduł) odczytuje stan danych i **bramki jakości** (np. NO-GO przy zbyt słabym decode / starych snapshotach).
+2. Przy akceptowalnej jakości uruchamia **wielokrotnie ten sam silnik symulacji** z różnymi parametrami (zakres, rozmiar, ewentualnie pool) na zsynchronizowanym oknie danych — porównanie wariantów **nie** opiera się na ukrytych regułkach rynkowych poza silnikiem (patrz [`DECISION_LAYER.md`](DECISION_LAYER.md) §7).
+3. Zapisuje wynik i uzasadnienie w logu decyzji; UI/alerty pokazują operatorowi ranking i **założenia**.
+
+**Edge cases:** nierówna jakość danych między parami (ranking **wstrzymany** lub oznaczony jako niepewny); devnet **nie** jest źródłem prawdy ekonomicznej vs mainnet dla porównań „gdzie zarobić więcej”; wiele legów kapitału na tej samej parze wymaga **jawnej agregacji** w metrykach (patrz [`DECISION_LAYER.md`](DECISION_LAYER.md) §8).
+
+**Invariants (projektowe):**
+
+- Źródło prawdy o rynku dla porównań ekonomicznych: **dane mainnetu** (replay / read-only + lokalne pliki), nie zastąpienie devnetem.
+- Shadow / what-if: **wspólna metodologia metryk** z pozycją realną; ten sam silnik backtestu/symulacji co w researchu.
+- Faza 1: **brak** automatycznego wysyłania transakcji bez osobnego Go/No-Go i sekcji normatywnej.
+
+**Observability:** każda decyzja musi być **powtarzalna z logu** (wejścia + wersje danych + parametry runów); pola dokładne — przy implementacji.
+
+**Code pointers:** *TBD* — po dodaniu crate/modułu lub CLI orchestratora.
+
+**keywords:** decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, NO-GO, advisory-phase, DECISION_LAYER
+
+**Audyt stanu implementacji (fakty z repo, bez zgadywania):** [`DECISION_LAYER.md`](DECISION_LAYER.md) §11.
 
 ---
 
@@ -440,7 +477,7 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 | **§2.1 rezerwacja (nie-3A)** | Twarda rezerwacja tokenów per sesja / escrow — **świadomie poza** modelem 3A. |
 | **§6 tryb principal-only** | Osobny tryb sizingu reopen tylko z principal — **nie** zaimplementowany; tylko zapowiedź w §6. |
 | **`wallet_deficit_persistent`** | Heurystyka operatorska z §2.2 — **nie** wymaga osobnego automatu w kodzie, dopóki nie zdefiniujecie UI/alertów pod ten label. |
-| **Sekcje speca 1 / 4 / 5 / 7** | Nadal **draft** dokumentacyjny — nie są „implementacją Rust”; uzupełnienie norm osobno. |
+| **Sekcje speca 1 / 4 / 5 / 7 / 8** | **Draft** dokumentacyjny — nie są pełną implementacją Rust; §8 (decision layer) opiera się o [`DECISION_LAYER.md`](DECISION_LAYER.md) do czasu kodu. |
 | **Równoległe boty (A/B strategii)** | Porównanie strategii ≠ wspólny plik `pending-open` bez izolacji: **unikalny `CLMM_PENDING_OPEN_RECOVERY_PATH`** (i typowo osobny katalog `data/` lub `CLMM_REPO_ROOT`) na proces; ten sam portfel między procesami = nadal **§2.1** (konkurencja). **A8 faza 2** nie zastępuje izolacji pliku — tylko routing „czyja sesja” wewnątrz **jednej** kolejki bezpiecznej dla jednego writera. |
 
 **Czy „zakończyliśmy implementację tej funkcjonalności”?** — **Tak** dla **rdzenia** opisanego w §2–§2.5 + §6.1 + Appendix A (A1–A7) w wykonaniu **faza 1** (wspólny portfel, 3A, pending-open, preflight, brak cichego downsizingu, refresh `W`, min interval). **Nie** w sensie absolutnym: **A8 faza 2** i pozycje z tabeli powyżej pozostają **opcjonalne / poza zakresem**, dopóki nie zdecydujecie inaczej.
@@ -453,7 +490,7 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 | Field | Value |
 | ----- | ----- |
-| Status | **Draft + appendix A (gap audit)** — dalsze sekcje 1/4/5/7 do uzupełnienia |
+| Status | **Draft + appendix A (gap audit)** — dalsze sekcje 1/4/5/7 do uzupełnienia; **§8** stub decision layer (szczegóły w `DECISION_LAYER.md`) |
 | Created | 2026-05-11 |
 | Maintainer | team / operator (update when ownership changes) |
 

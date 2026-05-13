@@ -1528,6 +1528,8 @@ export interface WalletEffectiveBalancesResponse extends WalletBalancesResponse 
   native_effective_lamports: number
   wsol_onchain_raw: number
   wsol_effective_raw: number
+  cache_source?: string | null
+  cache_updated_at_utc?: string | null
 }
 
 export interface ApiSignerWalletResponse {
@@ -1610,6 +1612,9 @@ export interface WalletOpsStatsResponse {
 export interface WalletWsStatusResponse {
   owners_monitored: number
   owners: string[]
+  effective_cache_owners: number
+  effective_cache_updated_at_utc?: string | null
+  effective_cache_path: string
   events_total: number
   reconnects_total: number
   refresh_failures_total: number
@@ -1627,11 +1632,14 @@ export const getWalletBalances = (owner: string) =>
     `/wallets/balances?${new URLSearchParams({ owner: owner.trim() })}`,
     35_000,
   )
-export const getWalletEffectiveBalances = (owner: string) =>
-  fetchJsonWithTimeout<WalletEffectiveBalancesResponse>(
-    `/wallets/effective-balances?${new URLSearchParams({ owner: owner.trim() })}`,
-    15_000,
+export const getWalletEffectiveBalances = (owner: string, opts?: { force?: boolean }) => {
+  const params = new URLSearchParams({ owner: owner.trim() })
+  if (opts?.force) params.set('force', 'true')
+  return fetchJsonWithTimeout<WalletEffectiveBalancesResponse>(
+    `/wallets/effective-balances?${params}`,
+    opts?.force ? 35_000 : 15_000,
   )
+}
 
 export const getApiSignerWallet = () => fetchJson<ApiSignerWalletResponse>('/wallets/api-signer')
 export const getActiveSigner = () => fetchJson<ActiveSignerResponse>('/wallets/active-signer')

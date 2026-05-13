@@ -85,6 +85,8 @@ pub struct AppState {
 pub struct CachedWalletEffective {
     pub response: WalletEffectiveBalancesResponse,
     pub updated_at: Instant,
+    pub updated_at_utc: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone)]

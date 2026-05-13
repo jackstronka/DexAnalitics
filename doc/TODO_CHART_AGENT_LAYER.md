@@ -3,7 +3,7 @@
 **Status:** plan do realizacji (nie wdrożone w kodzie).  
 **Cel:** opcjonalny **drugi głos** przy decyzjach strategii — analiza **wykresów z publicznych stron** Orca / Raydium / Meteora, bez wysyłania danych portfela.
 
-**Powiązane:** [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) (prawda on-chain z RPC, `AgentDecision`, `POST .../apply-optimize-result`, `optimize_apply_policy`), [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) (tryby, eskalacja — snapshot). Typy: [`crates/domain/src/agent_decision.rs`](../crates/domain/src/agent_decision.rs).
+**Powiązane:** [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) (co dziś jest „agentem” w repo vs ten plan), [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) (prawda on-chain z RPC, `AgentDecision`, `POST .../apply-optimize-result`, `optimize_apply_policy`), [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) (tryby, eskalacja — snapshot). Typy: [`crates/domain/src/agent_decision.rs`](../crates/domain/src/agent_decision.rs).
 
 ---
 

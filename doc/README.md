@@ -8,6 +8,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Co robić dalej (kolejka prac):** [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) — sekcja *Od czego zacząć* + fazy A–F i **M** (M1 Meteora TVL, M2 kolejka RPC w enrich).
 
+**Warstwa decyzyjna / orkiestrator LP (wizja + fazy, shadow, symulacje):** [`DECISION_LAYER.md`](DECISION_LAYER.md).
+
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
 
 **Roadmap produktowa (strategie ↔ pozycja, shadow / historia):** [`ROADMAP.md`](ROADMAP.md) — wiele strategii na jednej pozycji (1 live + N shadow), odświeżanie co kilka minut, **zachowanie historii przypisań** przy zmianach.
@@ -21,6 +23,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | Document | Purpose |
 | -------- | ------- |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
+| [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | **Canonical:** „agent / AI” w repo — `AgentDecision` + apply-optimize, Position Agent (LLM opcjonalny), `DecisionEngine` live, `agent_decisions.jsonl`, linki do roadmap |
+| [`DECISION_LAYER.md`](DECISION_LAYER.md) | **Wizja + kontrakt + audyt §11:** orkiestrator LP, fazy, shadow/symulacje; **tabela co w kodzie / czego brak** (dowody ścieżkami) |
 | [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | **Normative:** expected behavior per feature (open/close, rebalance, strategies, wallet, fees); refine here first |
 | [`PROJECT_END_TO_END.md`](PROJECT_END_TO_END.md) | End-to-end: ingest danych -> analytics -> decyzje bota -> wykonanie i UI |
 | [`ROADMAP.md`](ROADMAP.md) | Roadmap produktowy: shadow strategies per position, historia przypisań strategia ↔ pozycja |
@@ -103,6 +107,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | ---- | -------- |
 | [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | aerodrome, slipstream, base, live, alloy, rpc, gauges-v3, WETH, USDC, cbBTC, CL100, deployment phases |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | stream, narrator, obs, studio, agent |
+| [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | AgentDecision, apply-optimize, position agent, DecisionEngine, agent_decisions.jsonl, orchestration, LLM optional |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | async, event bus, kafka, nats, redis, rollout |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |
 | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | bollinger, candle, StratConfig, StrategyMode, backtest, roadmap |
@@ -113,6 +118,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) | ops, alerts, modes (snapshot) |
 | [`BOT_RESEARCH_DECISION_2026-03-23.md`](BOT_RESEARCH_DECISION_2026-03-23.md) | research, matrix, direction (snapshot) |
 | [`BOT_WORKLOG_2026-03-23.md`](BOT_WORKLOG_2026-03-23.md) | worklog, rationale (snapshot) |
+| [`DECISION_LAYER.md`](DECISION_LAYER.md) | decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, phases, capital allocation, implementation-audit |
 | [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | devnet, wallet, runbook, dry-run, limited-live, preflight |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | devnet, bot, production readiness, checklist, go/no-go |
 | [`DOCKER.md`](DOCKER.md) | docker compose, web+api, API_UPSTREAM, Docker Desktop, Windows pipe |

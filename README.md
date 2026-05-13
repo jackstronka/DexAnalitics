@@ -19,6 +19,10 @@ Obsługiwane protokoły:
 
 **Pełny indeks plików w `doc/`:** [doc/README.md](doc/README.md) (architektura, runbooki, plany fees, archiwum decyzji bota). Skrót architektury i pipeline: [doc/PROJECT_OVERVIEW.md](doc/PROJECT_OVERVIEW.md).
 
+**Warstwa „agent / AI” w tym repozytorium** (kontrakt `AgentDecision`, Position Agent, reguły live bota): [doc/AI_AGENT_LAYER.md](doc/AI_AGENT_LAYER.md).
+
+**Warstwa decyzyjna / orkiestrator LP** (cele, fazy, shadow, symulacje): [doc/DECISION_LAYER.md](doc/DECISION_LAYER.md).
+
 ## Co tu jest najważniejsze dzisiaj
 
 - **CLI jako główny interfejs** (`crates/cli`)

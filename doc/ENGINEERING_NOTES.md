@@ -1,3 +1,65 @@
+## 2026-05-13 — DECISION_LAYER §1a: mapowanie celu operatora → wymagania
+
+keywords: DECISION_LAYER, operator-goals, requirements-mapping, FUNCTIONAL_SPECIFICATION, decision-layer
+
+- **What:** Added [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md) **§1a** — tabela mapująca opis celu (wynik ekonomiczny, what-if, wolumen/inne pary, kapitał, jeden ciąg PnL, log, fazy wykonania) na sekcje dokumentu i jawne **luki** (np. brak osobnej normy „wolumen ↑↓”; schema logu TBD).
+- **What:** W [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8 pod **Goal** dopisany link do §1a.
+- **Why:** Pełna ścieżka od narracji operatora do miejsc w specu / oznaczenia co jest jeszcze szkicem.
+
+## 2026-05-13 — Doc: `DECISION_LAYER.md` §11 audyt (evidence-based)
+
+**keywords:** decision-layer, orchestrator, DECISION_LAYER, implementation-audit, evidence-based
+
+- **What:** Added **§11 Audyt** to [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md): methodology (grep/routes 2026-05-13), table of **implemented** building blocks with file evidence, table of **not implemented** orchestrator/shadow-LP items (incl. ROADMAP live+shadow as roadmap-only), note distinguishing lineage test `shadow` from product shadow; maintenance rule for PR updates.
+- **What:** Linked §8 in [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) to that audit section.
+- **Why:** Operator/AI-visible checklist grounded in codebase, not guesswork.
+
+## 2026-05-13 — Functional spec §8 stub: decision layer (orchestrator LP)
+
+keywords: FUNCTIONAL_SPECIFICATION, decision-layer, orchestrator, DECISION_LAYER, draft, normative-stub
+
+- **What:** Added **§8 Decision layer (orchestrator LP) — draft** to [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md): goal, inputs/outputs, happy path phase 1 (advisory), edge cases, invariants, observability TBD, cross-links to [`DECISION_LAYER.md`](doc/DECISION_LAYER.md) and agent decisions API. Extended *Not in scope* table and Appendix A.1 / document status notes.
+- **Why:** Single normative entry point for “what the feature should do” while full product detail lives in `DECISION_LAYER.md` until code exists.
+
+## 2026-05-13 — Doc: `DECISION_LAYER.md` (orchestrator LP, shadow sims, phases)
+
+keywords: documentation, DECISION_LAYER, orchestrator, decision-layer, shadow, counterfactual, simulation, backtest, data-quality, ROADMAP
+
+- **What:** Added [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md) consolidating the product/architecture contract for the decision layer: goals, terminology vs [`AI_AGENT_LAYER.md`](doc/AI_AGENT_LAYER.md), existing building blocks, inputs/outputs, phased rollout (advisory → execution), parallel simulations via **same** simulation engine (no hidden market heuristics), devnet vs mainnet for economics, metrics gaps for fair comparison, links to `ROADMAP` / chart-agent plan / async layer.
+- **Why:** Single canonical doc for “what we agreed” on orchestration; operators and AI sessions can grep `DECISION_LAYER` / `decision-layer` keywords.
+- **paths:** [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md), [`doc/README.md`](doc/README.md), [`doc/PROJECT_OVERVIEW.md`](doc/PROJECT_OVERVIEW.md), [`doc/AI_AGENT_LAYER.md`](doc/AI_AGENT_LAYER.md), [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md)
+
+## 2026-05-13 — Doc: canonical `AI_AGENT_LAYER.md` (agent vs Position Agent vs DecisionEngine)
+
+keywords: documentation, AI_AGENT_LAYER, AgentDecision, apply-optimize-result, position-agent, DecisionEngine, agent_decisions.jsonl
+
+- **What:** Added [`doc/AI_AGENT_LAYER.md`](doc/AI_AGENT_LAYER.md) as the single overview of all „agent / AI” surfaces; linked from [`doc/README.md`](doc/README.md), [`doc/PROJECT_OVERVIEW.md`](doc/PROJECT_OVERVIEW.md), and [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §7.
+- **Why:** Operators and external assistants were missing one place that separates optimization envelope, per-position chat/LLM, deterministic live decisions, and planned multi-agent work (`TODO_CHART_AGENT_LAYER.md`).
+
+## 2026-05-13 — PositionCreate budget quote uses USDC-pool tick fallback
+
+keywords: clmm-lp-api, PositionCreate, quote-open-budget, price-fetch, SOL, WSOL, USDC, empty-amount, BUG-20260513-01
+
+- **What:** `POST /pools/{address}/quote-open-budget` now keeps USD budget sizing available for USDC pairs when public USD feeds miss one leg: USDC/dev-USDC is pinned to `$1`, and the missing non-USDC leg is derived from the pool `tick_current` plus mint decimals before deposit quote math.
+- **Why:** Manual open should not leave Amount SOL/USDC blank just because CoinGecko/Jupiter/GeckoTerminal temporarily misses SOL/USD; for USDC pools the on-chain pool price is enough for a best-effort sizing fallback.
+- **paths:** `crates/api/src/handlers/pools.rs`, `doc/BUGS.md`
+
+## 2026-05-12 — PositionCreate re-checks balances after swap-before-open
+
+keywords: web, PositionCreate, swap-before-open, open-position, effective-balances, insufficient-spl-balance, BUG-20260512-05
+
+- **What:** Manual position creation now force-refreshes the API signer balance after a confirmed Orca swap-before-open and refuses to submit open if the funding check still shows a token deficit. The error names the remaining missing token amount instead of letting backend open preflight fail.
+- **Why:** A confirmed swap signature proves the swap tx landed, not that it produced enough of the short leg for the current open caps.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
+## 2026-05-12 — Wallet effective balances persist across restarts
+
+keywords: clmm-lp-api, web, wallet, effective-balances, persistent-cache, CLMM_WALLET_EFFECTIVE_CACHE_PATH, PositionCreate, BUG-20260512-04
+
+- **What:** API effective wallet balances now persist to `data/wallet-effective-cache.json` (override: `CLMM_WALLET_EFFECTIVE_CACHE_PATH`), hydrate on startup with real wall-clock stale age, and write after each successful refresh. The periodic resync worker seeds the API/active signer even when memory starts empty, `force=true` performs a synchronous refresh, and the UI button uses that path.
+- **Why:** Wallet state must be continuously available for forms/bot decisions rather than depending on a first-hit RPC warmup placeholder after API restart.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/server.rs`, `crates/api/src/models.rs`, `web/src/pages/PositionCreate.tsx`, `web/src/pages/Wallet.tsx`, `doc/DATA_CATALOG.md`, `doc/BUGS.md`
+
 ## 2026-05-12 — Fast lineage keeps Fees zebrane
 
 keywords: clmm-lp-api, stream-lineage, logs-rebalances, Fees zebrane, collected-fees, node_metrics_fast_for_chain, BUG-20260505-04

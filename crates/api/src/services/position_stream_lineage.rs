@@ -3329,6 +3329,29 @@ async fn node_metrics_fast_for_chain(
     .await
     .map_err(|e| ApiError::internal(format!("stream lineage: fast tx fee query: {e}")))?;
 
+    // Guardrail: baseline snapshots derived from open deltas may miss one leg (e.g. WSOL/native),
+    // which can massively understate "start value". Prefer the USD quote captured at open time
+    // (deposit quote estimate / target) when it is meaningfully higher than snapshot baseline.
+    let open_quote_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (position_pubkey)
+          position_pubkey,
+          COALESCE(
+            NULLIF(raw_json #>> '{details,open_quote_estimated_value_usd}', '')::DOUBLE PRECISION,
+            NULLIF(raw_json #>> '{details,open_target_usd}', '')::DOUBLE PRECISION,
+            NULLIF(raw_json #>> '{details,open_prev_end_value_usd}', '')::DOUBLE PRECISION
+          ) AS open_usd
+        FROM position_stream_ledger_rows
+        WHERE position_pubkey = ANY($1)
+          AND event IN ('bot_open_position', 'bot_open_position_full_range', 'position_open')
+        ORDER BY position_pubkey, ts_utc DESC
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream lineage: fast open quote query: {e}")))?;
+
     let parse_metric = |r: sqlx::postgres::PgRow| -> Option<(String, FastSnapshotMetric)> {
         let position: String = r.try_get("position_pubkey").ok()?;
         let raw_json: Option<serde_json::Value> = r.try_get("raw_json").ok().flatten();
@@ -3368,6 +3391,21 @@ async fn node_metrics_fast_for_chain(
         baseline_rows.into_iter().filter_map(parse_metric).collect();
     let currents: HashMap<String, FastSnapshotMetric> =
         current_rows.into_iter().filter_map(parse_metric).collect();
+    let open_usd_by_pos: HashMap<String, Decimal> = open_quote_rows
+        .into_iter()
+        .filter_map(|r| {
+            let position: String = r.try_get("position_pubkey").ok()?;
+            let open_usd: Option<f64> = r.try_get::<Option<f64>, _>("open_usd").ok().flatten();
+            let d = open_usd
+                .and_then(Decimal::from_f64_retain)
+                .unwrap_or(Decimal::ZERO);
+            if d.is_zero() {
+                None
+            } else {
+                Some((position, d))
+            }
+        })
+        .collect();
     let fee_lamports_by_pos: HashMap<String, u64> = fee_rows
         .into_iter()
         .filter_map(|r| {
@@ -3415,8 +3453,16 @@ async fn node_metrics_fast_for_chain(
     for p in chain {
         let baseline = baselines.get(p);
         let current = currents.get(p);
-        let baseline_value = baseline.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
+        let mut baseline_value = baseline.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
         let current_value = current.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
+        if let Some(open_usd) = open_usd_by_pos.get(p).copied() {
+            let looks_understated = baseline_value.is_zero()
+                || (current_value > Decimal::ZERO
+                    && baseline_value < current_value * Decimal::new(60, 2));
+            if looks_understated && open_usd > baseline_value {
+                baseline_value = open_usd;
+            }
+        }
         let fee_lamports = fee_lamports_by_pos.get(p).copied().unwrap_or(0);
         let tx_fees_usd = if sol_usd > 0.0 {
             Decimal::from_f64_retain((fee_lamports as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
@@ -4698,6 +4744,10 @@ mod tests {
         assert!(source.contains("node_metrics_fast_for_chain(state, &chain).await?"));
         assert!(
             source.contains("lp_fees_collected_usd_from_ledger_db_batch(state, db, chain).await?")
+        );
+        assert!(
+            source.contains("open_quote_estimated_value_usd"),
+            "fast path should keep baseline correction from open quote USD"
         );
         assert!(
             source.contains("chain.len() > 8"),

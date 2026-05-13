@@ -28,9 +28,66 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::str::FromStr;
 
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const DEV_USDC_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
 fn parse_decimal_opt(v: Option<&String>) -> Option<Decimal> {
     v.and_then(|s| s.parse::<f64>().ok())
         .and_then(Decimal::from_f64)
+}
+
+fn is_usdc_mint_str(mint: &str) -> bool {
+    mint == USDC_MINT || mint == DEV_USDC_MINT
+}
+
+fn b_per_a_ui_price(tick: i32, dec_a: u8, dec_b: u8) -> Option<f64> {
+    let ln_10001 = 1.0001_f64.ln();
+    let ln_ui =
+        (tick as f64) * ln_10001 + ((dec_a as f64) - (dec_b as f64)) * std::f64::consts::LN_10;
+    if !ln_ui.is_finite() {
+        return None;
+    }
+    let price = ln_ui.exp();
+    if price.is_finite() && price > 0.0 {
+        Some(price)
+    } else {
+        None
+    }
+}
+
+fn apply_usdc_pool_price_fallback(
+    mint_a: &str,
+    mint_b: &str,
+    dec_a: u8,
+    dec_b: u8,
+    tick_current: i32,
+    price_a_usd: &mut f64,
+    price_b_usd: &mut f64,
+) {
+    if is_usdc_mint_str(mint_a) && (!price_a_usd.is_finite() || *price_a_usd <= 0.0) {
+        *price_a_usd = 1.0;
+    }
+    if is_usdc_mint_str(mint_b) && (!price_b_usd.is_finite() || *price_b_usd <= 0.0) {
+        *price_b_usd = 1.0;
+    }
+
+    let Some(b_per_a) = b_per_a_ui_price(tick_current, dec_a, dec_b) else {
+        return;
+    };
+
+    if is_usdc_mint_str(mint_b)
+        && price_b_usd.is_finite()
+        && *price_b_usd > 0.0
+        && (!price_a_usd.is_finite() || *price_a_usd <= 0.0)
+    {
+        *price_a_usd = b_per_a * *price_b_usd;
+    } else if is_usdc_mint_str(mint_a)
+        && price_a_usd.is_finite()
+        && *price_a_usd > 0.0
+        && (!price_b_usd.is_finite() || *price_b_usd <= 0.0)
+    {
+        *price_b_usd = *price_a_usd / b_per_a;
+    }
 }
 
 fn volume_for_period(
@@ -417,16 +474,9 @@ pub async fn quote_open_budget(
         .copied()
         .unwrap_or(0.0);
 
-    const EPJ: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    const DEV_USDC: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
     let ma = pool.token_mint_a.to_string();
     let mb = pool.token_mint_b.to_string();
-    if (ma == EPJ || ma == DEV_USDC) && (!pa.is_finite() || pa <= 0.0) {
-        pa = 1.0;
-    }
-    if (mb == EPJ || mb == DEV_USDC) && (!pb.is_finite() || pb <= 0.0) {
-        pb = 1.0;
-    }
+    apply_usdc_pool_price_fallback(&ma, &mb, dec_a, dec_b, pool.tick_current, &mut pa, &mut pb);
 
     if !pa.is_finite() || !pb.is_finite() || pa <= 0.0 || pb <= 0.0 {
         return Err(ApiError::bad_request(
@@ -465,4 +515,45 @@ pub async fn quote_open_budget(
                 .to_string(),
         ),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+    const OTHER_MINT: &str = "B11111111111111111111111111111111111111111";
+
+    #[test]
+    fn usdc_pool_fallback_prices_token_a_from_tick_when_token_b_is_usdc() {
+        let mut pa = 0.0;
+        let mut pb = 0.0;
+
+        apply_usdc_pool_price_fallback(WSOL_MINT, USDC_MINT, 9, 6, -25_250, &mut pa, &mut pb);
+
+        assert_eq!(pb, 1.0);
+        assert!(pa.is_finite() && (70.0..90.0).contains(&pa), "pa={pa}");
+    }
+
+    #[test]
+    fn usdc_pool_fallback_prices_token_b_from_tick_when_token_a_is_usdc() {
+        let mut pa = 0.0;
+        let mut pb = 0.0;
+
+        apply_usdc_pool_price_fallback(USDC_MINT, WSOL_MINT, 6, 9, 25_250, &mut pa, &mut pb);
+
+        assert_eq!(pa, 1.0);
+        assert!(pb.is_finite() && (70.0..90.0).contains(&pb), "pb={pb}");
+    }
+
+    #[test]
+    fn usdc_pool_fallback_leaves_non_usdc_pair_unpriced() {
+        let mut pa = 0.0;
+        let mut pb = 0.0;
+
+        apply_usdc_pool_price_fallback(WSOL_MINT, OTHER_MINT, 9, 6, -25_250, &mut pa, &mut pb);
+
+        assert_eq!(pa, 0.0);
+        assert_eq!(pb, 0.0);
+    }
 }

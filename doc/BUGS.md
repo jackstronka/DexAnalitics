@@ -28,6 +28,66 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260513-01 — PositionCreate budget mode leaves Amount empty when public SOL/USD feed misses
+
+status: partially fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-13  
+fixed_in: local  
+keywords: position-create, quote-open-budget, empty-amount, Missing USD price, SOL, WSOL, USDC, price-fetch, public-feed
+
+- **Symptom:** `/positions/new` in USD budget mode shows `Bad request: Missing USD price for one or both pool mints; cannot size deposit`, and the bottom Amount SOL/USDC fields stay empty.
+- **Observed evidence (2026-05-13):** Screenshot shows the exact backend 400 on `Last Candle 60m` position create while token Amount fields are blank; terminal history also shows public price feed instability (`GeckoTerminal` 429, Jupiter price misses for WSOL).
+- **Symptom follow-up (2026-05-13):** After the source-level USDC-pool tick fallback was added and unit-tested, user still sees empty Amount SOL/USDC fields on the screen. Current hypothesis is not confirmed yet: either the running web proxy/API is still serving an older backend process, or the UI is not firing/accepting the budget quote for another reason.
+- **Observed evidence (2026-05-13 follow-up):** Direct request to active API `127.0.0.1:8081` for pool `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE` with an in-range tick window returned valid quote values (`amount_a_ui=0.052410078`, `amount_b_ui=5.024187`, `estimated_value_usd~=10`). This shifts remaining suspicion from backend quote math to frontend query/state/refetch behavior.
+- **Observed evidence (2026-05-13 follow-up 2):** User confirmed API had been restarted before the latest screenshot, so the remaining empty fields are not explained by an old backend process alone. Backend quote is healthy; remaining root cause is likely browser/frontend query state or disabled query conditions.
+- **Symptom follow-up (2026-05-13 follow-up 3):** User reports the Amount SOL/USDC fields are still empty after the API restart and after the backend quote endpoint was verified healthy on port `8081`.
+- **Symptom follow-up (2026-05-13 follow-up 4):** User confirms the bug still exists. Treat backend quote fallback as partial only; do not mark fixed until the actual browser/frontend path that leaves Amount empty is identified and verified.
+- **Related prior bug family:** Same UX surface as `BUG-20260504-03` and `BUG-20260504-04` (`position-create`, `quote-open-budget`, empty Amount / stale caps), but this variant is caused by missing USD price data rather than out-of-range ticks or stale quote caps.
+- **Root cause:** `quote_open_budget` required positive USD prices from `fetch_mint_prices_usd` for both pool mints. For SOL/USDC pools, if the public SOL/USD feed missed or was rate-limited, WSOL remained priced at `0`, so the endpoint rejected the quote even though the pool tick plus USDC=1 can derive a usable SOL/USD fallback.
+- **Fix:** `quote_open_budget` now pins USDC/dev-USDC to `$1` and, for USDC pairs, derives the missing non-USDC leg price from `tick_current` and mint decimals before calling `quote_deposit_budget_in_range`.
+- **Guards/tests:** `cargo test -p clmm-lp-api handlers::pools::tests::usdc_pool_fallback`
+- **Paths:** `crates/api/src/handlers/pools.rs`, `doc/BUGS.md`, `doc/ENGINEERING_NOTES.md`
+
+---
+
+### BUG-20260512-05 — PositionCreate opens after insufficient confirmed swap-before-open
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-12  
+fixed_in: local  
+keywords: position-create, swap-before-open, open-position, effective-balances, insufficient-spl-balance, usdc, wsol, Orca
+
+- **Symptom:** `/positions/new` shows green "Swap potwierdzony", then the open step fails with `open preflight: insufficient SPL balance on token B ... have 4785430 raw, need 4887945 raw` for USDC.
+- **Observed evidence (2026-05-12):** API log for pool `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE` shows swap-only `specified_mint=So11111111111111111111111111111111111111112 amount_in=810376` raw, then subsequent open attempts. The confirmed swap was too small to cover the requested USDC cap.
+- **Related prior bug family:** `BUG-20260504-07` also had "green swap confirmed, red open failed" in `PositionCreate`, but that case was stale balance blocking. This regression is the opposite: `handleSubmit` trusted any `swapSignature` and allowed open even when the post-swap funding check still showed a token deficit.
+- **Root cause:** `PositionCreate.handleSubmit` treated a non-empty `swapSignature` as sufficient to bypass the token-deficit block. It did not require the wallet balance check to clear after swap-before-open, so a small/underfilled swap still led to backend open preflight.
+- **Fix:** After swap-before-open succeeds, the UI invalidates and force-refreshes the API signer wallet balance. Submit now blocks if `fundingCheck.shortA/shortB` remains true after a confirmed swap and shows the remaining deficit instead of calling `POST /positions`.
+- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Paths:** `web/src/pages/PositionCreate.tsx`, `doc/BUGS.md`
+
+---
+
+### BUG-20260512-04 — Wallet effective balances disappear on API restart / first form load
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-12  
+fixed_in: local  
+keywords: wallet, effective-balances, PositionCreate, stale, warmup-placeholder, persistent-cache, CLMM_WALLET_EFFECTIVE_CACHE_PATH, force-refresh
+
+- **Symptom:** `PositionCreate` can show stale/zero wallet state after API restart or first form load; "Wymuś odświeżenie" only invalidated frontend queries and could still return the same stale cache while the background refresh was pending.
+- **Root cause:** `wallet_effective_cache` was in-memory only. Startup/resync only refreshed owners already present in memory, so the API signer was not guaranteed to have a last-good effective balance snapshot before the user opened the form.
+- **Fix:** Effective wallet balances now hydrate from `data/wallet-effective-cache.json` (or `CLMM_WALLET_EFFECTIVE_CACHE_PATH`), every successful refresh writes an atomic public snapshot, startup/resync seeds the API/active signer, and `GET /wallets/effective-balances?force=true` performs a synchronized refresh used by the UI button.
+- **Guards/tests:** `cargo test -p clmm-lp-api wallets -- --nocapture`; `npx tsc --noEmit` in `web/`.
+- **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/server.rs`, `crates/api/src/models.rs`, `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`, `doc/DATA_CATALOG.md`
+
+---
+
 ### BUG-20260512-03 — Reopen silently downsizes position from ~$10 to ~$4
 
 status: regressed  

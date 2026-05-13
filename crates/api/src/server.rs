@@ -153,11 +153,7 @@ fn spawn_wallet_effective_resync_worker(state: AppState) {
     );
     tokio::spawn(async move {
         loop {
-            sleep(Duration::from_secs(secs)).await;
-            let owners = {
-                let cache = state.wallet_effective_cache.read().await;
-                cache.keys().cloned().collect::<Vec<_>>()
-            };
+            let owners = crate::handlers::wallets::wallet_effective_resync_owners(&state).await;
             for owner in owners {
                 if let Err(e) =
                     crate::handlers::wallets::refresh_wallet_effective_owner(&state, &owner).await
@@ -165,6 +161,7 @@ fn spawn_wallet_effective_resync_worker(state: AppState) {
                     tracing::warn!(owner = %owner, error = %e, "wallet effective balance resync failed");
                 }
             }
+            sleep(Duration::from_secs(secs)).await;
         }
     });
 }
@@ -353,6 +350,14 @@ impl ApiServer {
 
         // Best-effort: re-add open positions into monitor after restart.
         seed_monitor_from_registry(self.state.monitor.clone()).await;
+        match crate::handlers::wallets::hydrate_wallet_effective_cache_from_disk(&self.state).await
+        {
+            Ok(n) if n > 0 => info!(owners = n, "Hydrated wallet effective cache from disk"),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to hydrate wallet effective cache from disk")
+            }
+        }
         maybe_autostart_strategies(&self.state).await;
         spawn_stranded_reconcile_watchdog();
         spawn_position_agent_background_worker();
@@ -381,6 +386,14 @@ impl ApiServer {
 
         // Best-effort: re-add open positions into monitor after restart.
         seed_monitor_from_registry(self.state.monitor.clone()).await;
+        match crate::handlers::wallets::hydrate_wallet_effective_cache_from_disk(&self.state).await
+        {
+            Ok(n) if n > 0 => info!(owners = n, "Hydrated wallet effective cache from disk"),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to hydrate wallet effective cache from disk")
+            }
+        }
         maybe_autostart_strategies(&self.state).await;
         spawn_stranded_reconcile_watchdog();
         spawn_position_agent_background_worker();

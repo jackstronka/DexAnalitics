@@ -308,6 +308,7 @@ export default function PositionCreate() {
   const prevEffectiveOwnerPkRef = useRef<string | null>(null)
   const [budgetLegSyncing, setBudgetLegSyncing] = useState(false)
   const [budgetLegSyncError, setBudgetLegSyncError] = useState<string | null>(null)
+  const [forceRefreshingWallet, setForceRefreshingWallet] = useState(false)
 
   /** Editable price range (mint B per 1 mint A); when `syncPriceInputsFromTicks`, fields mirror ticks. */
   const [priceRangeLo, setPriceRangeLo] = useState('')
@@ -1227,11 +1228,20 @@ export default function PositionCreate() {
 
   const swapMutation = useMutation({
     mutationFn: swapBeforeOpenTx,
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setSwapSignature(data.swap_signature ?? null)
       setSwapCostSessionId(data.cost_session_id ?? swapCostSessionId)
       setSwapStepInfo(data.message ?? null)
-      queryClient.invalidateQueries({ queryKey: ['wallet-balances', effectiveOwnerPk ?? ''] })
+      const owner = effectiveOwnerPk ?? ''
+      if (!owner) return
+      await queryClient.invalidateQueries({ queryKey: ['wallet-balances', owner] })
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      try {
+        const fresh = await getWalletEffectiveBalances(owner, { force: true })
+        queryClient.setQueryData(['wallet-balances', owner], fresh)
+      } catch {
+        await queryClient.refetchQueries({ queryKey: ['wallet-balances', owner], type: 'active' })
+      }
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err)
@@ -1335,6 +1345,31 @@ export default function PositionCreate() {
           setOpenStepError('Najpierw wykonaj swap (krok 1), dopiero potem otwórz pozycję.')
           return
         }
+        const deficitParts = [
+          fundingCheck.shortA && tokenA
+            ? `${fundingCheck.deficitA.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${tokenA.symbol}`
+            : null,
+          fundingCheck.shortB && tokenB
+            ? `${fundingCheck.deficitB.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${tokenB.symbol}`
+            : null,
+        ].filter(Boolean)
+        const deficitText = deficitParts.length > 0 ? deficitParts.join(', ') : L('tokenów', 'tokens')
+        const staleHint = effBal?.is_stale
+          ? L(
+              'Saldo jest jeszcze oznaczone jako nieświeże, więc najpierw użyj „Wymuś odświeżenie”.',
+              'Balances are still marked stale, so use “Force refresh” first.',
+            )
+          : L(
+              'Wykonaj dodatkowy swap albo zmniejsz Amount przed open.',
+              'Run an additional swap or lower Amount before opening.',
+            )
+        setOpenStepError(
+          L(
+            `Swap potwierdzony, ale saldo nadal nie pokrywa kwot open. Brakuje: ${deficitText}. ${staleHint}`,
+            `Swap confirmed, but the wallet still does not cover the open amounts. Missing: ${deficitText}. ${staleHint}`,
+          ),
+        )
+        return
       } else {
         setOpenStepError('Za mało tokenów na portfelu dla zadanych kwot (zrób swap albo zmniejsz Amount).')
         return
@@ -1415,6 +1450,24 @@ export default function PositionCreate() {
       amount_in: swapBeforeOpenPlan.amount_in,
       cost_session_id: id,
     })
+  }
+
+  const forceRefreshWalletBalances = async () => {
+    if (!effectiveOwnerPk) return
+    setForceRefreshingWallet(true)
+    setOpenStepError(null)
+    try {
+      const fresh = await getWalletEffectiveBalances(effectiveOwnerPk, { force: true })
+      queryClient.setQueryData(['wallet-balances', effectiveOwnerPk], fresh)
+      if (ownerPk && ownerPk !== effectiveOwnerPk) {
+        const selected = await getWalletEffectiveBalances(ownerPk, { force: true })
+        queryClient.setQueryData(['wallet-balances-selected-owner', ownerPk], selected)
+      }
+    } catch (err) {
+      setOpenStepError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setForceRefreshingWallet(false)
+    }
   }
 
   return (
@@ -1891,17 +1944,12 @@ export default function PositionCreate() {
                   <button
                     type="button"
                     className="shrink-0 inline-flex items-center rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted/60 disabled:opacity-60"
-                    disabled={effectiveBalancesQ.isFetching}
+                    disabled={effectiveBalancesQ.isFetching || forceRefreshingWallet}
                     onClick={() => {
-                      void queryClient.invalidateQueries({ queryKey: ['wallet-balances', effectiveOwnerPk ?? ''] })
-                      void effectiveBalancesQ.refetch()
-                      if (ownerPk && ownerPk !== effectiveOwnerPk) {
-                        void queryClient.invalidateQueries({ queryKey: ['wallet-balances-selected-owner', ownerPk] })
-                        void selectedOwnerBalancesQ.refetch()
-                      }
+                      void forceRefreshWalletBalances()
                     }}
                   >
-                    {effectiveBalancesQ.isFetching ? 'Odświeżam…' : 'Wymuś odświeżenie'}
+                    {effectiveBalancesQ.isFetching || forceRefreshingWallet ? 'Odświeżam…' : 'Wymuś odświeżenie'}
                   </button>
                 </InlineError>
               )}
@@ -2311,13 +2359,19 @@ export default function PositionCreate() {
                   type="submit"
                   disabled={
                     mutation.isPending ||
+                    swapMutation.isPending ||
+                    forceRefreshingWallet ||
                     (fundingCheck.ready &&
                       fundingCheck.blocked &&
                       swapBeforeOpen &&
                       !swapSignature)
                   }
                 >
-                  {mutation.isPending ? L('Otwieranie...', 'Opening...') : L('Otwórz pozycję', 'Open Position')}
+                  {forceRefreshingWallet || swapMutation.isPending
+                    ? L('Odświeżam saldo...', 'Refreshing balance...')
+                    : mutation.isPending
+                      ? L('Otwieranie...', 'Opening...')
+                      : L('Otwórz pozycję', 'Open Position')}
                 </Button>
               )}
             </div>

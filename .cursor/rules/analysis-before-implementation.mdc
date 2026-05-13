@@ -11,6 +11,7 @@ This rule is mandatory for every bugfix/refactor/request in this repository.
 
 - Do **not** edit code, run migrations, change configs, or propose "done" fixes immediately.
 - Start with a **diagnostic phase only** (read/search/log analysis).
+- For bugs/regressions, do **not** implement from a plausible guess. First identify the concrete source of the problem: exact failing request/state, code path, data file, log line, or runtime condition.
 - Implementation is allowed only after explicit user approval, e.g. `GO`, `wdrażaj`, `implementuj`, `zrób fix`.
 
 ## Required Diagnostic Output Before Any Edit
@@ -23,6 +24,13 @@ Provide a short pre-implementation report:
 4. **Fix plan** (minimal scope, affected files, intended tests).
 
 If confidence is low or evidence is missing, explicitly say so and continue diagnosis instead of guessing.
+
+## Source-of-Problem Requirement
+
+- Before changing code, know what actually fails and where. If there are multiple possible causes, eliminate them with evidence instead of picking one.
+- A backend/API bug requires a reproduced failing endpoint, log, test, or code path. A frontend/UI bug requires knowing whether the browser request fires, which endpoint/port it hits, and what state prevents render/update.
+- If a proposed fix only makes one suspected path more resilient but does not explain the observed symptom, label it partial/experimental and do not present it as the fix.
+- After changing code, verify the original symptom path, not only a nearby helper/unit path.
 
 ## During Implementation (after explicit GO)
 

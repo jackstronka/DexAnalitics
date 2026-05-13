@@ -5,12 +5,20 @@ Purpose: quickly discover existing datasets before adding new ingestion/snapshot
 ## Tag schema
 
 - `domain:` lineage | valuation | swaps | lifecycle | backtest | strategy
-- `source:` rpc | onchain-account | jsonl-local | postgres
+- `source:` rpc | onchain-account | json-local | jsonl-local | postgres
 - `freshness:` realtime | near-realtime | historical
 - `quality:` authoritative | best-effort | fallback
 - `cost:` free
 
 ## Sources
+
+### `data/wallet-effective-cache.json`
+
+tags: domain=wallet; source=json-local; freshness=near-realtime; quality=best-effort(read-model); cost=free
+
+- Public read-model cache for API effective wallet balances, keyed by owner pubkey.
+- Contains balances, token rows, confidence/staleness metadata, and cache write timestamps only; it must not contain seed phrases, private keys, or keypair bytes.
+- Produced by API wallet refresh paths (`GET /wallets/effective-balances?force=true`, periodic resync, WS-triggered refresh). Path override: `CLMM_WALLET_EFFECTIVE_CACHE_PATH`.
 
 ### `data/orca_position_lifecycle.jsonl`
 
