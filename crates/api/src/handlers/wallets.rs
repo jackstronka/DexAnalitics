@@ -5,12 +5,14 @@ use crate::models::{
     ActiveSignerResponse, ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateWalletRequest, CreateWalletResponse, SetActiveSignerRequest,
     WalletBalanceConfidence, WalletBalancesResponse, WalletConvertOpResponse,
-    WalletEffectiveBalancesResponse, WalletEntry, WalletOpsStatsResponse, WalletReconcileItem,
-    WalletReconcileResponse, WalletReconciliationStatus, WalletReplicationStatus,
-    WalletTokenBalance, WalletTransferLogEntry, WalletTransferRequest, WalletTransferResponse,
+    WalletEffectiveBalancesResponse, WalletEntry, WalletLedgerDelta, WalletLedgerEventsResponse,
+    WalletLedgerStatus, WalletOpsStatsResponse, WalletReconcileItem, WalletReconcileResponse,
+    WalletReconciliationStatus, WalletReplicationStatus, WalletTokenBalance,
+    WalletTransferLogEntry, WalletTransferRequest, WalletTransferResponse,
     WalletTransfersListResponse, WalletWsStatusResponse, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
+use crate::services::wallet_ledger;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
 use clmm_lp_protocols::orca::executor::WhirlpoolExecutor;
@@ -893,6 +895,113 @@ pub async fn set_active_signer(
     }))
 }
 
+async fn wallet_ledger_transfer_append_failed_pair(
+    state: &AppState,
+    correlation_id: &str,
+    from: &Pubkey,
+    to: &Pubkey,
+    lamports: u64,
+    err: &str,
+) {
+    if state.dry_run {
+        return;
+    }
+    let lam = lamports as i64;
+    let e = err.to_string();
+    for (owner, delta) in [(from.to_string(), -lam), (to.to_string(), lam)] {
+        let ev = wallet_ledger::new_ledger_event(
+            correlation_id,
+            WalletLedgerStatus::Failed,
+            "transfer_sol",
+            Some(owner),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(delta),
+            vec![],
+            Some(e.clone()),
+            "api:wallets",
+        );
+        wallet_ledger::append_wallet_ledger_event(state, ev).await;
+    }
+}
+
+async fn wallet_ledger_convert_append_pending(
+    state: &AppState,
+    correlation_id: &str,
+    owner: &Pubkey,
+    direction: &ConvertSolDirection,
+    amount_raw: u64,
+) {
+    if state.dry_run {
+        return;
+    }
+    let amt = amount_raw as i128;
+    let (n_delta, deltas) = match direction {
+        ConvertSolDirection::NativeToWsol => (
+            Some(-(amount_raw as i64)),
+            vec![WalletLedgerDelta {
+                mint: wallet_ledger::WSOL_MINT.to_string(),
+                decimals: 9,
+                raw_delta_i128: amt.to_string(),
+            }],
+        ),
+        ConvertSolDirection::WsolToNative => (
+            Some(amount_raw as i64),
+            vec![WalletLedgerDelta {
+                mint: wallet_ledger::WSOL_MINT.to_string(),
+                decimals: 9,
+                raw_delta_i128: (-amt).to_string(),
+            }],
+        ),
+    };
+    let ev = wallet_ledger::new_ledger_event(
+        correlation_id,
+        WalletLedgerStatus::Pending,
+        "convert_sol",
+        Some(owner.to_string()),
+        None,
+        None,
+        None,
+        None,
+        false,
+        n_delta,
+        deltas,
+        None,
+        "api:wallets",
+    );
+    wallet_ledger::append_wallet_ledger_event(state, ev).await;
+}
+
+async fn wallet_ledger_convert_append_failed(
+    state: &AppState,
+    correlation_id: &str,
+    owner: &str,
+    err: &str,
+) {
+    if state.dry_run {
+        return;
+    }
+    let ev = wallet_ledger::new_ledger_event(
+        correlation_id,
+        WalletLedgerStatus::Failed,
+        "convert_sol",
+        Some(owner.to_string()),
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        vec![],
+        Some(err.to_string()),
+        "api:wallets",
+    );
+    wallet_ledger::append_wallet_ledger_event(state, ev).await;
+}
+
 #[utoipa::path(
     post,
     path = "/wallets/transfer",
@@ -964,18 +1073,76 @@ pub async fn transfer_sol_between_wallets(
             req.lamports
         )));
     }
+    let correlation_id = Uuid::new_v4().to_string();
+    let lam = req.lamports as i64;
+    if !state.dry_run {
+        let pend_out = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "transfer_sol",
+            Some(from_pubkey.to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(-lam),
+            vec![],
+            None,
+            "api:wallets",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pend_out).await;
+        let pend_in = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "transfer_sol",
+            Some(to_pubkey.to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(lam),
+            vec![],
+            None,
+            "api:wallets",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pend_in).await;
+    }
     let ix = system_instruction::transfer(&from_pubkey, &to_pubkey, req.lamports);
-    let recent = state
-        .provider
-        .get_latest_blockhash()
-        .await
-        .map_err(|e| ApiError::internal(format!("latest blockhash failed: {e}")))?;
+    let recent = match state.provider.get_latest_blockhash().await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("latest blockhash failed: {e}");
+            wallet_ledger_transfer_append_failed_pair(
+                &state,
+                &correlation_id,
+                &from_pubkey,
+                &to_pubkey,
+                req.lamports,
+                &msg,
+            )
+            .await;
+            return Err(ApiError::internal(msg));
+        }
+    };
     let tx = Transaction::new_signed_with_payer(&[ix], Some(&from_pubkey), &[&from_kp], recent);
-    let sig = state
-        .provider
-        .send_and_confirm_transaction(&tx)
-        .await
-        .map_err(|e| ApiError::bad_request(format!("transfer failed: {e}")))?;
+    let sig = match state.provider.send_and_confirm_transaction(&tx).await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("transfer failed: {e}");
+            wallet_ledger_transfer_append_failed_pair(
+                &state,
+                &correlation_id,
+                &from_pubkey,
+                &to_pubkey,
+                req.lamports,
+                &msg,
+            )
+            .await;
+            return Err(ApiError::bad_request(msg));
+        }
+    };
 
     // Best-effort local log (append-only JSONL) for ops/audit.
     {
@@ -1011,12 +1178,80 @@ pub async fn transfer_sol_between_wallets(
         }
     }
 
+    if !state.dry_run {
+        let sig_str = sig.to_string();
+        let out_from = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Confirmed,
+            "transfer_sol",
+            Some(from_pubkey.to_string()),
+            Some(sig_str.clone()),
+            None,
+            None,
+            None,
+            false,
+            Some(-lam),
+            vec![],
+            None,
+            "api:wallets",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, out_from).await;
+        let in_to = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Confirmed,
+            "transfer_sol",
+            Some(to_pubkey.to_string()),
+            Some(sig_str),
+            None,
+            None,
+            None,
+            false,
+            Some(lam),
+            vec![],
+            None,
+            "api:wallets",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, in_to).await;
+    }
+
     Ok(Json(WalletTransferResponse {
         from_wallet_id: source_wallet_id,
         from_pubkey: from_pubkey.to_string(),
         to_pubkey: to_pubkey.to_string(),
         lamports: req.lamports,
         signature: sig.to_string(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletLedgerEventsQuery {
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Append-only wallet journal (GL-style): pending / confirmed / failed rows from API-originated txs.
+#[utoipa::path(
+    get,
+    path = "/wallets/ledger-events",
+    tag = "Wallets",
+    params(
+        ("owner" = Option<String>, Query, description = "Filter by owner pubkey (substring match)"),
+        ("limit" = Option<usize>, Query, description = "Max events (default 200, max 500)")
+    ),
+    responses((status = 200, description = "Recent ledger events", body = WalletLedgerEventsResponse))
+)]
+pub async fn get_wallet_ledger_events(
+    State(state): State<AppState>,
+    Query(q): Query<WalletLedgerEventsQuery>,
+) -> ApiResult<Json<WalletLedgerEventsResponse>> {
+    let _ = &state;
+    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    let (path, events) = wallet_ledger::read_wallet_ledger_tail(limit, q.owner.as_deref()).await;
+    Ok(Json(WalletLedgerEventsResponse {
+        path: path.to_string_lossy().to_string(),
+        events,
     }))
 }
 
@@ -1841,6 +2076,141 @@ fn stale_marked_response(
     resp
 }
 
+fn parse_wallet_ui_amount(s: &str) -> f64 {
+    s.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0)
+}
+
+fn format_wallet_ui_amount(v: f64) -> String {
+    if !v.is_finite() || v.abs() < f64::EPSILON {
+        return "0".to_string();
+    }
+    let s = format!("{:.12}", v);
+    let t = s.trim_end_matches('0').trim_end_matches('.');
+    if t.is_empty() || t == "-" {
+        "0".to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// RPC can return an empty SPL mint list or a **Degraded** row set that regresses vs the last
+/// good snapshot. `GET .../effective-balances?force=true` passes `allow_balance_regression=true`
+/// to persist the live read as authoritative.
+fn apply_monotonic_effective_balance_guard(
+    prev: Option<&WalletEffectiveBalancesResponse>,
+    next: WalletEffectiveBalancesResponse,
+    allow_balance_regression: bool,
+) -> WalletEffectiveBalancesResponse {
+    if allow_balance_regression {
+        return next;
+    }
+    let Some(prev) = prev else {
+        return next;
+    };
+    if prev.owner != next.owner {
+        return next;
+    }
+
+    if next.tokens.is_empty() && !prev.tokens.is_empty() {
+        return salvage_prev_tokens_snapshot(prev, &next);
+    }
+
+    if !matches!(next.confidence, WalletBalanceConfidence::Degraded) {
+        return next;
+    }
+
+    let mut out = next;
+    merge_tokens_from_prev_where_regressive(&mut out, prev);
+    out
+}
+
+fn salvage_prev_tokens_snapshot(
+    prev: &WalletEffectiveBalancesResponse,
+    next: &WalletEffectiveBalancesResponse,
+) -> WalletEffectiveBalancesResponse {
+    let mut out = prev.clone();
+    out.as_of_utc.clone_from(&next.as_of_utc);
+    out.rpc_url.clone_from(&next.rpc_url);
+    out.confidence = WalletBalanceConfidence::Degraded;
+    let note = "monotonic guard: empty SPL token list on refresh; retained prior cached tokens";
+    out.token_legacy_error = Some(match out.token_legacy_error.clone() {
+        Some(e) if !e.contains("monotonic guard") => format!("{e} | {note}"),
+        _ => note.to_string(),
+    });
+    out
+}
+
+/// Near-zero on the wire vs meaningful prior balance (flash to `0` in UI).
+const MONOTONIC_ZERO_EPS: f64 = 1e-9;
+/// Ignore dust-level "previous" balances so we do not resurrect noise.
+const MONOTONIC_PREV_MIN: f64 = 1e-6;
+
+fn merge_tokens_from_prev_where_regressive(
+    out: &mut WalletEffectiveBalancesResponse,
+    prev: &WalletEffectiveBalancesResponse,
+) {
+    let mut prev_mint_ui: BTreeMap<String, f64> = BTreeMap::new();
+    for t in &prev.tokens {
+        prev_mint_ui.insert(t.mint.clone(), parse_wallet_ui_amount(&t.ui_amount));
+    }
+    if prev_mint_ui.is_empty() {
+        return;
+    }
+
+    let mut next_by_mint: BTreeMap<String, f64> = BTreeMap::new();
+    for t in &out.tokens {
+        next_by_mint.insert(t.mint.clone(), parse_wallet_ui_amount(&t.ui_amount));
+    }
+
+    let mut changed = false;
+
+    for (mint, prev_ui) in &prev_mint_ui {
+        if *prev_ui <= MONOTONIC_ZERO_EPS {
+            continue;
+        }
+        if !next_by_mint.contains_key(mint) {
+            next_by_mint.insert(mint.clone(), *prev_ui);
+            changed = true;
+        }
+    }
+
+    for (mint, prev_ui) in &prev_mint_ui {
+        if *prev_ui < MONOTONIC_PREV_MIN {
+            continue;
+        }
+        if let Some(next_ui) = next_by_mint.get_mut(mint) {
+            if *next_ui <= MONOTONIC_ZERO_EPS {
+                *next_ui = *prev_ui;
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return;
+    }
+
+    out.tokens = next_by_mint
+        .into_iter()
+        .map(|(mint, ui)| WalletTokenBalance {
+            mint,
+            ui_amount: format_wallet_ui_amount(ui),
+        })
+        .collect();
+    out.token_accounts_total = Some(out.tokens.len() as u64);
+    out.confidence = WalletBalanceConfidence::Degraded;
+    let note = "monotonic guard: carried forward prior mint rows / clamped near-zero SPL reads";
+    out.token_legacy_error = Some(match out.token_legacy_error.clone() {
+        Some(e) if !e.contains("monotonic guard") => format!("{e} | {note}"),
+        Some(e) => e,
+        None => note.to_string(),
+    });
+}
+
 async fn spawn_effective_refresh_if_needed(state: AppState, owner: String, owner_pk: Pubkey) {
     let mut refreshing = state.wallet_effective_refreshing.write().await;
     if refreshing.contains(&owner) {
@@ -1849,10 +2219,11 @@ async fn spawn_effective_refresh_if_needed(state: AppState, owner: String, owner
     refreshing.insert(owner.clone());
     drop(refreshing);
     tokio::spawn(async move {
-        if let Ok(resp) = compute_effective_balances(&state, owner_pk).await {
-            if let Err(e) = store_wallet_effective_response(&state, &owner, resp, "memory").await {
-                tracing::warn!(owner = %owner, error = %e, "persist wallet effective cache failed");
-            }
+        if let Ok(resp) = compute_effective_balances(&state, owner_pk).await
+            && let Err(e) =
+                store_wallet_effective_response(&state, &owner, resp, "memory", false).await
+        {
+            tracing::warn!(owner = %owner, error = %e, "persist wallet effective cache failed");
         }
         let mut refreshing = state.wallet_effective_refreshing.write().await;
         refreshing.remove(&owner);
@@ -1939,7 +2310,17 @@ async fn store_wallet_effective_response(
     owner: &str,
     response: WalletEffectiveBalancesResponse,
     source: &str,
+    allow_balance_regression: bool,
 ) -> anyhow::Result<WalletEffectiveBalancesResponse> {
+    let prev_snapshot = {
+        let cache = state.wallet_effective_cache.read().await;
+        cache.get(owner).map(|c| c.response.clone())
+    };
+    let response = apply_monotonic_effective_balance_guard(
+        prev_snapshot.as_ref(),
+        response,
+        allow_balance_regression,
+    );
     let updated_at_utc = now_utc_iso();
     let response = mark_effective_cache_metadata(response, source, &updated_at_utc);
     {
@@ -1985,7 +2366,7 @@ pub async fn get_wallet_effective_balances(
     ensure_wallet_ws_owner_worker(state.clone(), owner.clone()).await;
     if q.force {
         let resp = compute_effective_balances(&state, owner_pk).await?;
-        let resp = store_wallet_effective_response(&state, &owner, resp, "memory")
+        let resp = store_wallet_effective_response(&state, &owner, resp, "memory", true)
             .await
             .map_err(|e| ApiError::internal(format!("persist wallet effective cache: {e}")))?;
         return Ok(Json(stale_marked_response(resp, false, 0)));
@@ -2016,7 +2397,7 @@ pub async fn refresh_wallet_effective_owner(state: &AppState, owner: &str) -> an
     let resp = compute_effective_balances(state, owner_pk)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    store_wallet_effective_response(state, owner, resp, "memory").await?;
+    store_wallet_effective_response(state, owner, resp, "memory", false).await?;
     Ok(())
 }
 
@@ -2136,6 +2517,8 @@ pub async fn convert_sol(
         .read_wsol_balance_raw(&owner)
         .await
         .map_err(|e| ApiError::internal(format!("read pre WSOL balance: {e}")))?;
+    let convert_correlation_id = Uuid::new_v4().to_string();
+    let mut convert_pending_emitted = false;
     let (signature, wrap_signature, unwrap_signature, rewrap_signature, partial, message) =
         match req.direction {
             ConvertSolDirection::NativeToWsol => {
@@ -2145,11 +2528,45 @@ pub async fn convert_sol(
                         req.amount_raw
                     )));
                 }
-                let wrap_sig = exec
+                if !state.dry_run {
+                    wallet_ledger_convert_append_pending(
+                        &state,
+                        &convert_correlation_id,
+                        &owner,
+                        &req.direction,
+                        req.amount_raw,
+                    )
+                    .await;
+                    convert_pending_emitted = true;
+                }
+                let wrap_res = exec
                     .submit_wsol_wrap_with_signature_delta(req.amount_raw, signer.keypair())
-                    .await
-                    .map_err(|e| ApiError::bad_request(format!("native_to_wsol failed: {e}")))?
-                    .map(|s| s.to_string());
+                    .await;
+                let wrap_sig = match wrap_res {
+                    Ok(s) => s.map(|sig| sig.to_string()),
+                    Err(e) => {
+                        let msg = format!("native_to_wsol failed: {e}");
+                        if convert_pending_emitted {
+                            wallet_ledger_convert_append_failed(
+                                &state,
+                                &convert_correlation_id,
+                                &owner.to_string(),
+                                &msg,
+                            )
+                            .await;
+                        }
+                        return Err(ApiError::bad_request(msg));
+                    }
+                };
+                if convert_pending_emitted && wrap_sig.is_none() {
+                    wallet_ledger_convert_append_failed(
+                        &state,
+                        &convert_correlation_id,
+                        &owner.to_string(),
+                        "native_to_wsol returned no signature (no-op)",
+                    )
+                    .await;
+                }
                 let msg = if wrap_sig.is_some() {
                     "SOL conversion confirmed".to_string()
                 } else {
@@ -2164,12 +2581,37 @@ pub async fn convert_sol(
                         req.amount_raw
                     )));
                 }
+                if !state.dry_run {
+                    wallet_ledger_convert_append_pending(
+                        &state,
+                        &convert_correlation_id,
+                        &owner,
+                        &req.direction,
+                        req.amount_raw,
+                    )
+                    .await;
+                    convert_pending_emitted = true;
+                }
                 let partial = req.amount_raw < pre_wsol_raw;
-                let sig = exec
+                let unwrap_res = exec
                     .submit_wsol_unwrap_with_signature(req.amount_raw, signer.keypair())
-                    .await
-                    .map_err(|e| ApiError::bad_request(format!("wsol_to_native failed: {e}")))?;
-                let unwrap_sig = sig.to_string();
+                    .await;
+                let unwrap_sig = match unwrap_res {
+                    Ok(sig) => sig.to_string(),
+                    Err(e) => {
+                        let msg = format!("wsol_to_native failed: {e}");
+                        if convert_pending_emitted {
+                            wallet_ledger_convert_append_failed(
+                                &state,
+                                &convert_correlation_id,
+                                &owner.to_string(),
+                                &msg,
+                            )
+                            .await;
+                        }
+                        return Err(ApiError::bad_request(msg));
+                    }
+                };
                 // For partial unwrap close+rewrap path, unwrap tx signature is still useful as primary.
                 (
                     Some(unwrap_sig.clone()),
@@ -2181,15 +2623,67 @@ pub async fn convert_sol(
                 )
             }
         };
-    let post_native_lamports = state
-        .provider
-        .get_balance(&owner)
-        .await
-        .map_err(|e| ApiError::internal(format!("read post native SOL balance: {e}")))?;
-    let post_wsol_raw = exec
-        .read_wsol_balance_raw(&owner)
-        .await
-        .map_err(|e| ApiError::internal(format!("read post WSOL balance: {e}")))?;
+    let post_native_lamports = match state.provider.get_balance(&owner).await {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("read post native SOL balance: {e}");
+            if convert_pending_emitted && signature.is_some() {
+                wallet_ledger_convert_append_failed(
+                    &state,
+                    &convert_correlation_id,
+                    &owner.to_string(),
+                    &msg,
+                )
+                .await;
+            }
+            return Err(ApiError::internal(msg));
+        }
+    };
+    let post_wsol_raw = match exec.read_wsol_balance_raw(&owner).await {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("read post WSOL balance: {e}");
+            if convert_pending_emitted && signature.is_some() {
+                wallet_ledger_convert_append_failed(
+                    &state,
+                    &convert_correlation_id,
+                    &owner.to_string(),
+                    &msg,
+                )
+                .await;
+            }
+            return Err(ApiError::internal(msg));
+        }
+    };
+
+    if !state.dry_run {
+        if let Some(ref sig_s) = signature {
+            let n_delta = post_native_lamports as i64 - pre_native_lamports as i64;
+            let w_delta = post_wsol_raw as i128 - pre_wsol_raw as i128;
+            let deltas = vec![WalletLedgerDelta {
+                mint: wallet_ledger::WSOL_MINT.to_string(),
+                decimals: 9,
+                raw_delta_i128: w_delta.to_string(),
+            }];
+            let ev = wallet_ledger::new_ledger_event(
+                &convert_correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "convert_sol",
+                Some(owner.to_string()),
+                Some(sig_s.clone()),
+                None,
+                None,
+                None,
+                false,
+                Some(n_delta),
+                deltas,
+                None,
+                "api:wallets",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, ev).await;
+        }
+    }
+
     let op_id = Uuid::new_v4().to_string();
     let mut reconciliation_status = WalletReconciliationStatus::ConfirmedUnreconciled;
     if is_reconciled(
@@ -2473,6 +2967,122 @@ mod tests {
             cache_source: None,
             cache_updated_at_utc: None,
         }
+    }
+
+    fn eff_with_tokens(
+        owner: &str,
+        confidence: WalletBalanceConfidence,
+        tokens: Vec<WalletTokenBalance>,
+    ) -> WalletEffectiveBalancesResponse {
+        let mut r = test_effective_response(owner);
+        r.confidence = confidence;
+        r.tokens = tokens;
+        r.token_accounts_total = Some(r.tokens.len() as u64);
+        r
+    }
+
+    #[test]
+    fn monotonic_guard_empty_next_tokens_keeps_prev_spl() {
+        let prev = eff_with_tokens(
+            "o1",
+            WalletBalanceConfidence::Verified,
+            vec![WalletTokenBalance {
+                mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                ui_amount: "4.91".to_string(),
+            }],
+        );
+        let mut next = test_effective_response("o1");
+        next.confidence = WalletBalanceConfidence::Degraded;
+        next.token_legacy_ok = Some(true);
+        next.token_2022_ok = Some(false);
+        next.tokens.clear();
+        next.token_accounts_total = Some(0);
+
+        let out = apply_monotonic_effective_balance_guard(Some(&prev), next, false);
+        assert_eq!(out.tokens.len(), 1);
+        assert_eq!(out.tokens[0].mint, prev.tokens[0].mint);
+        assert_eq!(out.tokens[0].ui_amount, "4.91");
+        assert!(matches!(out.confidence, WalletBalanceConfidence::Degraded));
+        assert!(
+            out.token_legacy_error
+                .as_deref()
+                .unwrap()
+                .contains("monotonic")
+        );
+    }
+
+    #[test]
+    fn monotonic_guard_empty_tokens_salvages_even_when_next_marks_verified() {
+        let prev = eff_with_tokens(
+            "o1",
+            WalletBalanceConfidence::Verified,
+            vec![WalletTokenBalance {
+                mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                ui_amount: "3".to_string(),
+            }],
+        );
+        let mut next = test_effective_response("o1");
+        next.confidence = WalletBalanceConfidence::Verified;
+        next.token_legacy_ok = Some(true);
+        next.token_2022_ok = Some(true);
+        next.tokens.clear();
+        next.token_accounts_total = Some(0);
+
+        let out = apply_monotonic_effective_balance_guard(Some(&prev), next, false);
+        assert_eq!(out.tokens.len(), 1);
+        assert_eq!(out.tokens[0].ui_amount, "3");
+    }
+
+    #[test]
+    fn monotonic_guard_clamps_flash_zero_usdc_on_degraded() {
+        let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string();
+        let prev = eff_with_tokens(
+            "o1",
+            WalletBalanceConfidence::Degraded,
+            vec![WalletTokenBalance {
+                mint: mint.clone(),
+                ui_amount: "5.02".to_string(),
+            }],
+        );
+        let mut next = prev.clone();
+        next.confidence = WalletBalanceConfidence::Degraded;
+        next.tokens[0].ui_amount = "0".to_string();
+
+        let out = apply_monotonic_effective_balance_guard(Some(&prev), next, false);
+        assert_eq!(out.tokens[0].ui_amount, "5.02");
+    }
+
+    #[test]
+    fn monotonic_guard_allows_regression_when_authoritative_flag() {
+        let prev = eff_with_tokens(
+            "o1",
+            WalletBalanceConfidence::Degraded,
+            vec![WalletTokenBalance {
+                mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                ui_amount: "5".to_string(),
+            }],
+        );
+        let mut next = prev.clone();
+        next.tokens.clear();
+        let out = apply_monotonic_effective_balance_guard(Some(&prev), next, true);
+        assert!(out.tokens.is_empty());
+    }
+
+    #[test]
+    fn monotonic_guard_verified_next_drops_balance_without_clamp() {
+        let prev = eff_with_tokens(
+            "o1",
+            WalletBalanceConfidence::Degraded,
+            vec![WalletTokenBalance {
+                mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                ui_amount: "9".to_string(),
+            }],
+        );
+        let mut next = prev.clone();
+        next.confidence = WalletBalanceConfidence::Verified;
+        next.tokens[0].ui_amount = "2.5".to_string();
+        let out = apply_monotonic_effective_balance_guard(Some(&prev), next, false);
+        assert_eq!(out.tokens[0].ui_amount, "2.5");
     }
 
     #[test]

@@ -1,3 +1,381 @@
+## 2026-05-14 — Chain-history Postgres: wypełnianie kolumn display (pool, ticki open, event spot A) + UI
+
+keywords: clmm-lp-api, position_chain_history_nodes, materialize_chain_history_for_anchor, load_chain_history_from_db, PositionStreamLineageNode, PositionLineageHistoryPanel, position_stream_ledger_rows, position_stream_valuation_snapshots
+
+- **What:** Przy materializacji **`INSERT`** ustawia `pool_address`, `tick_lower_open` / `tick_upper_open`, `range_label_at_open`, `event_price_a_usd` (open), `event_price_b_usd` (close — nadal **token A** z wiersza close, jak w lifecycle UI). Źródło: **`position_stream_valuation_snapshots`** / **`position_stream_ledger_rows`**. Odczyt **`GET …/chain-history`** nakłada te kolumny na węzeł (`chain_history_*`). Web preferuje ticki/ceny z węzła zamiast samych map z JSONL.
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/models.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/lib/api.ts`, `web/src/components/PositionLineageHistoryPanel.tsx`
+
+## 2026-05-14 — Stream-lineage fast path: minty puli + nogi `fees_collected_token_*_ui` gdy snapshot bez `token_mint_a/b`
+
+keywords: clmm-lp-api, stream-lineage, node_metrics_fast_for_chain, FastFeeMetric, pool_mint_a, fill_missing_lineage_mints_from_fee_metric, refresh_chain_history_node_fees_from_ledger, Fees zebrane, BUG-20260514-06
+
+- **What:** `lp_fees_collected_usd_from_ledger_db_batch` zapisuje **`pool_mint_a` / `pool_mint_b`** (Whirlpool). **`node_metrics_fast_for_chain`** i **`refresh_chain_history_node_fees_from_ledger`** wywołują **`fill_missing_lineage_mints_from_fee_metric`** + **`fees_collected_token_ui_for_fee_metric`**, żeby UI **Logs/rebalances** miał obie nogi fee, gdy `position_stream_valuation_snapshots` nie podał mintów.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-14 — Dev: `chain_history_sql_probe --coverage-recent` (snapshoty waluacji vs chain-history live)
+
+keywords: chain_history_sql_probe, position_stream_valuation_snapshots, coverage, position_chain_history
+
+- **What:** Tryb **`--coverage-recent`**: ostatnie **14 dni**, max **150** unikalnych `position_pubkey` z `position_stream_valuation_snapshots` (proxy „API widziało ten PDA”) vs obecność w **`position_chain_history_*`** (`live`: węzeł, anchor, entry, `chain_json @>`).
+- **paths:** `crates/data/src/bin/chain_history_sql_probe.rs`
+
+## 2026-05-14 — Web: `getPositionChainHistory` — timeout UI 15s → 120s (wolny odczyt merge/ledger)
+
+keywords: web, api.ts, getPositionChainHistory, chain-history, fetchJsonWithTimeout
+
+- **What:** `GET …/chain-history` może trwać dłużej niż domyślne **15 s** (merge lineage, `refresh_chain_history_node_fees_from_ledger`, wiele PDA). Klient używa **`fetchJsonWithTimeout(..., 120_000)`** jak przy `getPositionStreamLineage`.
+- **paths:** `web/src/lib/api.ts`
+
+## 2026-05-14 — API: chain-history materialize przy pierwszym `GET /positions/:addr` z RPC + seed strategii
+
+keywords: clmm-lp-api, spawn_chain_history_materialize_background, get_position, start_strategy_seed, strategy_position_link, position_chain_history
+
+- **What:** `open_position` już wołał materializację; brakowało triggerów gdy pozycja trafia do monitora **bez** `open_position`: pierwszy **`GET /positions/:addr`** z ścieżki `monitored_position_from_chain` (on-chain seed), **`start_strategy`** po udanym `monitor.add_position` na `parameters.position_addresses`, oraz **`ensure_strategy_running_after_position_link`** po udanym `add_position`. Nadal best-effort / async (UI może widzieć snapshot dopiero po chwili).
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/strategies.rs`
+
+## 2026-05-14 — Web: zakładka „Historia (Postgres)” — zawsze treść: chain-history → stream-lineage fallback
+
+keywords: web, PositionDetail, chain-history-pg, getPositionChainHistory, getPositionStreamLineage, stream_lineage_fallback
+
+- **What:** `chainHistoryPgQ` zwraca `{ lineage, readSource }`. Po wyczerpaniu `GET …/chain-history` (`live` / opcjonalnie `settlement_v1`→`live`) przy braku materializacji używa **cache** `position-stream-lineage` albo `getPositionStreamLineage` — zakładka nie kończy się pustym 404. Baner + `badgeMode=stream` + osobny `apiIntro` gdy fallback.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-14 — GET chain-history: resolve materialized `chain_anchor_pubkey` gdy URL to inny człon łańcucha
+
+keywords: chain-history, position_chain_history_nodes, chain_anchor_pubkey, position_pubkey, load_chain_history_from_db, rotation
+
+- **What:** `GET …/chain-history`: (1) kotwica przez `nodes` / `meta.entry` / `chain_json @> [pda]`; (2) gdy zapis w Postgres **nie zawiera jeszcze ogona** rotacji, **spacer po łańcuchu** z `resolve_lineage_chain_for_stream_pnl` (jak w stream-lineage) aż do pierwszego PDA z materializacją — naprawia 404 dla „najnowszej” pozycji w łańcuchu.
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `doc/BUGS.md` **BUG-20260514-05**
+
+## 2026-05-14 — Web dev: Vite proxy domyślnie 8081; liveness banner mniej fałszywych alarmów (Abort / timeout)
+
+keywords: web, vite, API_UPSTREAM, ApiBackendBanner, getLiveness, isCancelledError, start-dev-stack, local-dev-api-port
+
+- **What:** Domyślny **`API_PORT` w `vite.config.ts` i `start-dev-stack.mjs`** zmieniony z 8080 na **8081** (zgodnie z lokalnym API w tym workspace). `web/.env.development`: **`API_PORT=8081`**. **`getLiveness`:** 8s zamiast 2s, opcjonalny `signal` z React Query, timeout mapowany na czytelny `Error` (bez surowego „signal is aborted without reason”). **`ApiBackendBanner`:** `isCancelledError` (StrictMode / anulowane refetch), więcej retry.
+- **paths:** `web/vite.config.ts`, `web/scripts/start-dev-stack.mjs`, `web/.env.development`, `web/src/lib/api.ts`, `web/src/components/ApiBackendBanner.tsx`
+
+## 2026-05-14 — Web: `getOrcaPositionsByOwner` — timeout UI 15s → 120s (zgodność z wolnym skanem RPC)
+
+keywords: web, api.ts, getOrcaPositionsByOwner, positions-by-owner, fetchJsonWithTimeout, orca_onchain
+
+- **What:** `GET /api/v1/orca/positions-by-owner` może trwać dłużej niż domyślne **15 s** w `fetchJson` (wiele RPC, 30 s na próbę, plus enrichment per pozycja). UI przerywało żądanie i pokazywało timeout mimo że API nadal pracowało; `/health` pozostawał „OK”. Klient używa teraz **`fetchJsonWithTimeout(..., 120_000)`** jak przy ciężkich odczytach pozycji.
+- **paths:** `web/src/lib/api.ts`
+
+## 2026-05-14 — Migracja 009: średnik w stringu `notes` psuł `Database::migrate` (brak `db`, 503 chain-history)
+
+keywords: clmm-lp-data, migrate, 009_wallet_gl_curated_tokens_and_pools, semicolon split, wallet_gl_token_account, connect_db_best_effort
+
+- **What:** Runner migracji dzieli SQL po `;` po stripie komentarzy `--`. W INSERT dla `wallet_gl_token_account` pole `notes` zawierało `…); curated…` — split rozbijał zapytanie → błąd wykonania → **`migrate()` Err** → API startowało **bez Postgres** (`state.db = None`). Poprawka: usunięty `;` z `notes`. Zob. `doc/BUGS.md` **BUG-20260514-03**.
+- **paths:** `crates/data/migrations/009_wallet_gl_curated_tokens_and_pools.sql`
+
+## 2026-05-14 — Windows: `Start-ClmmApi-8081.ps1` przekazuje `DATABASE_URL` z `.env` do okna API
+
+keywords: Start-ClmmApi-8081, Start-Dashboard-Safe, DATABASE_URL, Postgres, chain-history, 503
+
+- **What:** Skrypt ładował z `.env` tylko zmienne signera i watchdog; **`DATABASE_URL` / `DATABASE_POOL_SIZE` nie trafiały** do procesu `cargo run`, więc `state.db` było `None` mimo poprawnego `.env` — **503** na chain-history. Dodano hydrację + przekazanie env do child pwsh oraz log `DATABASE_URL=set|unset`. **`STARTUP.md`:** sekcja troubleshooting.
+- **paths:** `tools/Start-ClmmApi-8081.ps1`, `STARTUP.md`
+
+## 2026-05-14 — Wallet GL Postgres: `wallet_gl_token_account` + `wallet_gl_curated_pool` (seed z curated pairs)
+
+keywords: wallet_gl, PostgreSQL, wallet_gl_token_account, wallet_gl_curated_pool, curated_backtest_pools, migration 009, clmm-lp-data
+
+- **What:** Migracja **`009_wallet_gl_curated_tokens_and_pools.sql`**: tabela **`wallet_gl_token_account`** — jedno konto per **unikalny mint** z listy tokenów w parach Orca/Raydium/Meteora (`curated_backtest_pools`); tabela **`wallet_gl_curated_pool`** — wszystkie **curated** poole z FK do mintów. `Database::migrate` dołącza plik 009. Komentarz przy `curated_backtest_pools()` wskazuje synchronizację z SQL / `doc/DATA_CATALOG.md`.
+- **paths:** `crates/data/migrations/009_wallet_gl_curated_tokens_and_pools.sql`, `crates/data/src/repositories/database.rs`, `crates/api/src/handlers/backtests.rs`, `doc/DATA_CATALOG.md`, `doc/WALLET_GL.md`
+
+## 2026-05-14 — Wallet GL: decyzja — PostgreSQL jako docelowy magazyn (plan kont, journal, read model)
+
+keywords: wallet_gl, wallet_ledger, PostgreSQL, WALLET_GL.md, DATA_CATALOG, append-only, chart of accounts
+
+- **What:** Zapisana decyzja produktowa/inżynierska: **Postgres** jako docelowe miejsce na plan kont, trwały journal (append-only biznesowo) i projekcję sald (Fazy C–E w `doc/WALLET_GL.md`). **JSONL** `wallet-ledger-events.jsonl` zostaje do czasu migracji (dual-write albo cutover po backfillu). Szczegółowe nazwy tabel i rollout w osobnym PR.
+- **paths:** `doc/WALLET_GL.md`, `doc/DATA_CATALOG.md`
+
+## 2026-05-14 — Web: chain-history Postgres — fallback `live` gdy `settlement_v1` → 404; `getMetricsMode()` bez zamrożonego useMemo
+
+keywords: web, PositionDetail, getPositionChainHistory, settlement_v1, position_chain_history_meta, metrics_mode, getMetricsMode
+
+- **What:** W Postgres jest **tylko** `metrics_mode=live` (drugi pass `settlement_v1` jest opcjonalny w API). UI z `pnl_mode=settlement_v1` wołało `GET …/chain-history?mode=settlement_v1` → **404** mimo że snapshot **live** istnieje. **queryFn** zakładki Postgres: przy 404 dla settlement ponawia odczyt **`live`**. Usunięto **`useMemo(() => getMetricsMode(), [])`** na rzecz **`getMetricsMode()`** przy każdym renderze (jak `ClosedPositionDetail` / `Positions`), żeby zmiana ustawień od razu zmieniała queryKey.
+- **paths:** `web/src/pages/PositionDetail.tsx`
+
+## 2026-05-14 — GET chain-history: łańcuch z live resolve + brakujące PDA z `node_metrics` (meta tylko `[new]`)
+
+keywords: clmm-lp-api, load_chain_history_from_db, chain_json, merge_meta_chain_with_resolved_for_read, compute_position_stream_performance, resolve_lineage_chain_for_stream_pnl, node_metrics, reopen
+
+- **What:** `chain_json` w meta często zawierał **tylko najnowsze PDA** po reopen, podczas gdy stream-lineage zwracał **pełną** rotację (`[old, new]`). GET chain-history budował `nodes` wyłącznie z wierszy dla tego krótkiego łańcucha → brak wiersza **Gmkzi…**, same zera fee, zły start **3Pgx…**. Teraz: po wczytaniu meta wywołanie **`compute_position_stream_performance` + `resolve_lineage_chain_for_stream_pnl`**, merge przez **`merge_meta_chain_with_resolved_for_read`** (prefiks + przypadek **pojedynczego ogona** = pełny `resolved`), dla PDAs spoza wierszy INSERT — **`node_metrics(..., skip_snapshot_self_seed=true)`** równolegle (`join_all`), potem istniejący enrich / refresh fee / rollup.
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs` (`node_metrics` pub(crate))
+
+## 2026-05-14 — GET chain-history: regresja start (nadpisanie baseline), live fee rollup z ledgera
+
+keywords: clmm-lp-api, load_chain_history_from_db, chain_history_start_value_usd, refresh_chain_history_node_fees_from_ledger, rollup_lineage_chain_costs, position_stream_ledger_rows
+
+- **What:** Usunięto nadpisywanie **`chain_history_start_value_usd`** z **`baseline_value_usd`** po enrich, gdy pole z kolumny SQL już było ustawione (open-quote w baseline mógł nadpisać poprawniejszy **`start_value_usd`** z writerów). Po enrich: **`refresh_chain_history_node_fees_from_ledger`** (sumy lamportów + `lp_fees_collected_usd_from_ledger_db_batch` + fallback lifecycle jak w fast lineage), potem **`rollup_lineage_chain_costs`** zamiast wyłącznie zamarzniętego `chain_cost_summary_json` z meta.
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-05-14 — Web: Postgres „wartość start” — `baseline_value_usd` zanim ledger open_quote
+
+keywords: web, PositionLineageHistoryPanel, chain_history_start_value_usd, baseline_value_usd, isLineageStoredUsdMissing, formatLineageOpeningUsdDisplay, ledger open_quote
+
+- **What:** Na zakładce Postgres, gdy **`chain_history_start_value_usd`** jest puste (stary cache / starszy kształt odpowiedzi), UI wpadało w **`formatLineageOpeningUsdDisplay`** i brało **ledger `open_quote`** (~9.66x z `DOUBLE PRECISION`), mimo że ten sam węzeł miał już **`baseline_value_usd`** zgodny z materializacją (~9.67x). Kolejność: kolumna start → **`baseline_value_usd`** (gdy nie „missing” wg `isLineageStoredUsdMissing`) → dopiero ledger/totals. Przywrócono też **`pgEnd`** w mapie wiersza (regresja po edycji bloku start). Tooltip PL/EN rozróżnia źródło kolumna vs baseline.
+- **paths:** `web/src/components/PositionLineageHistoryPanel.tsx`
+
+## 2026-05-14 — Chain-history GET: sync `chain_history_*` JSON po enrich; lineage DB+JSONL gdy edges opóźnione (reopen)
+
+keywords: clmm-lp-api, load_chain_history_from_db, chain_history_start_value_usd, chain_history_end_value_usd, enrich_chain_history_nodes_open_quote_baseline_lift, resolve_lineage_chain_for_stream_pnl, prefer_lifecycle_lineage_if_extends_db_prefix, position_stream_edges, reopen
+
+- **What:** `load_chain_history_from_db` po enrich ustawia **`chain_history_start_value_usd`** z końcowego **`baseline_value_usd`** (gdy &gt; 0), żeby zakładka Postgres nie pokazywała starej kolumny start vs podniesiony baseline; dla **`closed_ts_utc`** + **`current_value_usd` &gt; 0** ustawiane jest **`chain_history_end_value_usd`** (kolumna mogła być 0 mimo uzupełnionego current po fallbackach). **`resolve_lineage_chain_for_stream_pnl`:** gdy łańcuch z JSONL **przedłuża ten sam prefiks** co łańcuch z DB, wybierany jest dłuższy (reopen zanim trafi do `position_stream_edges`).
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-05-14 — Chain-history materialize: `await` zapisu snapshotów przed `apply_open_start_*` (wyścig ze `spawn`)
+
+keywords: clmm-lp-api, position_chain_history, materialize_chain_history_for_anchor, compute_position_stream_lineage_opts, ComputePositionStreamLineageOpts, persist_event_valuation_snapshots_for_positions, start_value_usd
+
+- **What:** `compute_position_stream_lineage` nadal dla zwykłego GET `stream-lineage` odpala `persist_event_valuation_snapshots_for_positions` w **`tokio::spawn`** (bez blokady). **Materializacja** chain-history wywołuje **`compute_position_stream_lineage_opts`** z `await_valuation_snapshot_persist: true`, więc snapshoty dla łańcucha ≤8 PDA są w DB **zanim** `apply_open_start_usd_from_lifecycle_snapshots_for_chain_history` czyta `position_stream_valuation_snapshots` i zapisuje **`start_value_usd`** z `baseline_value_usd`. **`tracing::info`** przed `INSERT` węzła: `baseline_value_usd` / `baseline_valuation_quality` / `current_value_usd` (weryfikacja „co trafia do `start_value_usd`”).
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_chain_history.rs`
+
+## 2026-05-14 — Dev bin `snapshot_probe`: podgląd `position_stream_valuation_snapshots` po PDA
+
+keywords: clmm-lp-data, snapshot_probe, position_stream_valuation_snapshots, DATABASE_URL
+
+- **What:** `cargo run -p clmm-lp-data --bin snapshot_probe -- <POSITION_PUBKEY>` (wymaga `DATABASE_URL`) wypisuje wiersze snapshotów + prosty NAV z kolumn `amount_*_ui` × `price_*_usd` gdy wszystkie dodatnie.
+- **paths:** `crates/data/src/bin/snapshot_probe.rs`, `crates/data/Cargo.toml`
+
+## 2026-05-14 — Chain-history / lineage: wartość start z **snapshotów DB** (ilości × ceny), potem lifecycle
+
+keywords: clmm-lp-api, position_stream_valuation_snapshots, open_nav_usd_from_valuation_snapshot_row, apply_open_start_usd_from_lifecycle_snapshots_for_chain_history, node_metrics, start_value_usd, baseline_open
+
+- **What:** Przy materializacji `position_chain_history_nodes` i w **`node_metrics`** (gdy `value_usd` na pierwszym wierszu snapshotu = 0), **NAV otwarcia** liczony jako `amount_a_ui * price_a_usd + amount_b_ui * price_b_usd` z kolumn lub `raw_json`, z uzupełnieniem brakującej ceny nogi przez `fetch_mint_prices_usd_stable`. **Kolejność przy zapisie chain-history:** najpierw ten wynik, dopiero potem fallback `open_start_usd_from_event_spot_open_row` (ledger `event_price_*`). Zapis w Postgres nadal: **`start_value_usd` ← `baseline_value_usd`**, **`end_value_usd`** tylko przy `closed_ts_utc` — UI „wartość end” dla otwartej pozostaje `—`. **`GET …/chain-history`:** po `enrich_chain_history_nodes_open_quote_baseline_lift`, jeśli **`chain_history_start_value_usd`** było puste (kolumna `start_value_usd` ≤ 0), a **`baseline_value_usd`** już > 0, pole JSON jest uzupełniane — zakładka Postgres nie pokazuje `—`, gdy lift z ledgera dał baseline, ale writer jeszcze nie nadpisał wiersza.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-05-14 — Lineage tabela: kolumna ceny — open vs close (`event_price_a_usd`)
+
+keywords: web, PositionLineageHistoryPanel, PositionDetail, extractOpenEventPriceByPosition, lifecycle, event_price_a_usd
+
+- **What:** Nagłówek **„cena @ open / zamknięciu”** (EN: *Price @ open / close*). Komórka: gdy `closed_ts_utc` — mapa z wierszy **close**; gdy pozycja otwarta — **najwcześniejszy** wiersz **open** z tego samego pola `details.event_price_a_usd` co wcześniej tylko dla close. Usuwa mylące „cena zamknięcia” dla NFT nadal otwartych.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLineageHistoryPanel.tsx`
+
+## 2026-05-14 — Chain-history materialize: wartość start z lifecycle (`open_amount*` × `event_price_*_usd`)
+
+keywords: clmm-lp-api, position_chain_history, materialize_chain_history_for_anchor, apply_open_start_usd_from_lifecycle_snapshots_for_chain_history, baseline_open_amounts_ui_from_details_or_deltas, event_spot_from_ledger_details
+
+- **What:** Przed zapisem węzłów do Postgres, **`apply_open_start_usd_from_lifecycle_snapshots_for_chain_history`** liczy NAV otwarcia z wiersza open w lifecycle: te same ilości co `baseline_open_amounts_ui_from_details_or_deltas` × **`event_price_a_usd` / `event_price_b_usd`** z tego wiersza; wybór **najnowszego** open po `ts_utc`. Ustawia **`baseline_value_usd`** + `baseline_valuation_quality=open_event_spot_amounts` i przelicza `net_pnl_*`, więc `start_value_usd` w INSERT i `raw_snapshot` są spójne. **Web:** otwarta pozycja — kolumna „wartość end” z powrotem tylko `—` (current NAV nie jest „end”).
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_chain_history.rs`, `web/src/components/PositionLineageHistoryPanel.tsx`
+
+## 2026-05-14 — Wallet GL (faza B): journal dla close / collect / decrease / rebalance
+
+keywords: wallet_gl, wallet_ledger, append_wallet_ledger_event, close_position, collect_fees, decrease_liquidity, rebalance_position, positions handlers
+
+- **What:** Handlery `DELETE /positions/{address}`, `POST …/collect`, `POST …/decrease`, `POST …/rebalance` dopisują do `data/wallet-ledger-events.jsonl` te same korelacje **pending → confirmed/failed** co swap/open (owner = portfel operacji pozycji). **`collect_fees`:** delty SPL z różnicy `pre_uncollected_fees` vs `post_uncollected_fees` (UI amount → raw przez decimals mintu z poolu). Close/decrease/rebalance: zdarzenia z `pool_address` / `position_pda`; delty tokenów poza collect nadal puste do fazy C/decode.
+- **paths:** `crates/api/src/handlers/positions.rs`, `doc/WALLET_GL.md`
+
+## 2026-05-14 — Chain-history UI 10x: jawne `chain_history_*_usd` z kolumn Postgres (zakładka „Historia Postgres”)
+
+keywords: web, PositionStreamLineageNode, chain_history_start_value_usd, PositionLineageHistoryPanel, chain-history, position_chain_history_nodes
+
+- **What:** `GET …/chain-history` ustawia opcjonalne stringi **`chain_history_start_value_usd` / `end` / `current`** z kolumn `position_chain_history_nodes` **tylko gdy wartość NUMERIC &gt; 0** (zero = brak sensownej wyceny przy materializacji — pole pomijane, żeby UI nie pokazywało mylącego `$0.000` i wróciło do fallbacku lineage/ledger). **Web:** zakładka Postgres — te same progi (`parseFloat` &gt; 0) przed `formatUsdField` / Δ.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_chain_history.rs`, `web/src/lib/api.ts`, `web/src/components/PositionLineageHistoryPanel.tsx`
+
+## 2026-05-14 — GET chain-history: live open-quote baseline lift na odczycie (spójność ze stream-lineage)
+
+keywords: clmm-lp-api, chain-history, load_chain_history_from_db, enrich_chain_history_nodes_open_quote_baseline_lift, position_stream_ledger_rows, baseline_value_usd, raw_snapshot
+
+- **What:** Po zdeserializowaniu `raw_snapshot` węzłów z `position_chain_history_nodes`, API wywołuje **`enrich_chain_history_nodes_open_quote_baseline_lift`** (mapa open-quote z DB + merge lifecycle JSONL + `apply_open_quote_baseline_lift_after_lineage_fallbacks` jak w `compute_position_stream_lineage`). Dodatkowo **`start_value_usd` / `current_value_usd` / `end_value_usd`** z tych samych wierszy tabeli są nakładane na węzeł, gdy JSON ma zera (wcześniej GET czytał wyłącznie `raw_snapshot` i ignorował kolumny `NUMERIC`).
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+## 2026-05-14 — Web: lineage „wartość start” — ledger + totals (dopasowanie do Rust)
+
+keywords: web, extractLifecycleOpenQuoteUsdByPosition, formatLineageOpeningUsdDisplay, LineageOpeningUsdExtra, lineageLedgerOpenQuote, PositionLineageHistoryPanel
+
+- **What:** Ekstrakcja z ledgera jak backend: **dokładne** `event` open (`bot_open_position`, …), kolejność kluczy jak `open_quote_usd_from_open_details` (+ legacy `open_quote_value_usd`), parsowanie **`details` jako JSON-string**, `position` gdy brak `position_pubkey`, **najnowszy** wiersz open po czasie (jak `merge_open_quote_usd_from_lifecycle_rows`). Przy **jednym węźle** łańcucha: fallback **`totals.baseline_value_usd`** gdy ledger i node baseline puste.
+- **paths:** `web/src/lib/lineageLedgerOpenQuote.ts`, `web/src/lib/utils.ts`, `web/src/components/PositionLineageHistoryPanel.tsx`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-05-14 — Web: lineage „wartość start” — fallback z ledgera (`open_quote_estimated_value_usd`)
+
+keywords: web, formatLineageOpeningUsdDisplay, formatPrincipalDeltaForLineageNode, extractLifecycleOpenQuoteUsdByPosition, lineageLedgerOpenQuote, PositionLineageHistoryPanel, PositionDetail
+
+- **What:** Gdy API lineage ma **brak baseline** (`missing_inputs` / `missing_price` + 0), kolumna **wartość start** i **kapitał Δ** używają open-quote z **scalonym lifecycle ledgerem** (zob. wpis powyżej — doprecyzowanie kluczy/czasu). Tooltip PL/EN przy wartości z ledgera / totals.
+- **paths:** `web/src/lib/lineageLedgerOpenQuote.ts`, `web/src/lib/utils.ts`, `web/src/components/PositionLineageHistoryPanel.tsx`, `web/src/pages/PositionDetail.tsx`
+
+## 2026-05-14 — Web: lineage „wartość start” — nie ukrywaj zera przy `exact`
+
+keywords: web, formatLineageStoredValueUsd, formatPrincipalDeltaUsdOrDash, PositionLineageHistoryPanel, ClosedPositionDetail, baseline_valuation_quality
+
+- **What:** Kolumny start/end (baseline/current) używały `usdOrDash`, które traktowało **każde** `0` jako `—` (myliło brak danych z prawdziwym zerem). Nowe **`formatLineageStoredValueUsd`** / **`isLineageStoredUsdMissing`**: `—` tylko przy braku liczby albo **`missing_inputs` / `missing_price`** z wartością 0 (sentinel API). **`formatPrincipalDeltaUsdOrDash`** bierze też `baseline_valuation_quality` / `current_valuation_quality`.
+- **paths:** `web/src/lib/utils.ts`, `web/src/components/PositionLineageHistoryPanel.tsx`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-05-14 — Web: Postgres chain-history refetch on tab focus
+
+keywords: web, PositionDetail, chain-history-pg, React Query, invalidateQueries, staleTime, refetchOnMount
+
+- **What:** Zapytanie `position-chain-history-pg` ma **`staleTime: 0`** i **`refetchOnMount: 'always'`** (snapshot może pojawić się chwilę po open). **`Tabs.Root onValueChange`** — przy wejściu w zakładkę **Historia (Postgres)** invalidacja tego query, żeby UI nie trzymał pierwszego 404 / ubogego wiersza przez minutę.
+- **paths:** `web/src/pages/PositionDetail.tsx`
+
+## 2026-05-14 — Chain-history GET: `materialized_ts_utc` + web refresh toolbar
+
+keywords: clmm-lp-api, PositionStreamLineageResponse, chain_history_materialized_ts_utc, position_chain_history, load_chain_history_from_db, PositionDetail, refreshPositionChainHistory, VITE_CHAIN_HISTORY_REFRESH_SECRET
+
+- **What:** `GET …/chain-history` zwraca opcjonalnie **`chain_history_materialized_ts_utc`** (RFC3339 z `position_chain_history_meta.materialized_ts_utc`). Live **`GET …/stream-lineage`** pole pomija (`None`). **Web:** zakładka „Historia (Postgres)” — pasek z czasem materializacji, ostrzeżenie gdy `chain.length` w PG &lt; stream-lineage, przycisk **`POST …/chain-history/refresh`** (`refreshPositionChainHistory`, timeout 180s); opcjonalny **`VITE_CHAIN_HISTORY_REFRESH_SECRET`** jak `CLMM_CHAIN_HISTORY_REFRESH_SECRET` na API.
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`, `web/src/lib/i18n.tsx`, `web/src/vite-env.d.ts`, `web/.env.example`
+
+## 2026-05-14 — Web: osobne zakładki lineage — stream-lineage vs Postgres chain-history
+
+keywords: web, PositionDetail, PositionLineageHistoryPanel, stream-lineage, chain-history, React Query, position-stream-lineage, position-chain-history-pg
+
+- **What:** Na `PositionDetail` zakładka **Logi / rebalanse** używa wyłącznie `GET …/stream-lineage` (query `position-stream-lineage`). Nowa zakładka **Historia (Postgres)** — wyłącznie `GET …/chain-history` (`position-chain-history-pg`), z hintem przy błędzie (np. 404). Oba zapytania działają równolegle; `chainSet` dla ledgerów / timeline to **unia** łańcuchów ze stream i PG. Wspólny UI: `web/src/components/PositionLineageHistoryPanel.tsx`.
+- **paths:** `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLineageHistoryPanel.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-14 — Chain-history: `submit-signed` anchors + strategy `RebalanceExecutor` hook
+
+keywords: clmm-lp-api, clmm-lp-execution, SubmitSignedTxRequest, chain_history_anchors, tx_submit_signed, RebalanceExecutor, StrategyExecutor, strategy_service, spawn_chain_history_materialize_background, strategy_executor, ensure_execution_success
+
+- **What:** `POST …/tx/submit-signed` accepts optional **`chain_history_anchors`** (`Vec<String>`); after successful RPC send, each trimmed non-empty anchor schedules background materialize with trigger **`tx_submit_signed`** (same `CLMM_CHAIN_HISTORY_TRIGGERS` / DB gates as other paths). **`StrategyService`** sets **`StrategyExecutor::set_chain_history_hook`** → **`RebalanceExecutor`**: on **`ensure_execution_success`** when `result.success`, before wallet-dependent ledger IO — anchors from **`created_position`** for **`open_*`**, from **`position`** argument for **`close_position` / `collect_fees` / `decrease_liquidity` / `swap_exact_in`** (trigger label **`strategy_executor`**). **Web:** `web/src/lib/api.ts` — `txBuildUnsigned`, `txSubmitSigned`, `chainHistoryAnchorsFromTxBuild` (kotwice z `position_address` po buildzie). **Testy:** `normalized_submit_chain_history_anchors` w `handlers/tx.rs`. **Operator:** `doc/POSITION_CHAIN_HISTORY_PLAN.md` §5 (tabela triggerów).
+- **paths:** `crates/api/src/models.rs`, `crates/api/src/handlers/tx.rs`, `crates/api/src/services/strategy_service.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/devnet_e2e_tests.rs`, `crates/api/src/handlers/tx_tests.rs`, `web/src/lib/api.ts`, `doc/POSITION_CHAIN_HISTORY_PLAN.md`
+
+## 2026-05-14 — API triggers: chain-history po mutujących operacjach na pozycji
+
+keywords: clmm-lp-api, position_chain_history, spawn_chain_history_materialize_background, CLMM_CHAIN_HISTORY_TRIGGERS, CLMM_CHAIN_HISTORY_CLOSE_TRIGGER, CLMM_CHAIN_HISTORY_TRIGGERS_SETTLEMENT_V1, open_position, close_position, collect_fees, decrease_liquidity, rebalance_position
+
+- **What:** `spawn_chain_history_materialize_background(state, anchor, trigger)` — po sukcesie (nie dry-run, jest DB): **`open_position`** (gdy jest `position_pda`), **`close_position`**, **`collect_fees`**, **`decrease_liquidity`**, **`rebalance_position`**. Zawsze najpierw `live`; drugi pass `settlement_v1` tylko gdy `CLMM_CHAIN_HISTORY_TRIGGERS_SETTLEMENT_V1` ∈ `1|true|yes|on`. Wyłączenie wszystkich: `CLMM_CHAIN_HISTORY_TRIGGERS=0` (lub legacy `CLMM_CHAIN_HISTORY_CLOSE_TRIGGER=0`). **`swap_before_open`** bez PDA pozycji — brak triggera. **`POST /tx/submit-signed`** — opcjonalnie **`chain_history_anchors`** w body (klient podaje kotwice z build response, np. `position_address`); patrz wpis powyżej. **Bot/strategia** — hook w `RebalanceExecutor` (wpis powyżej).
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/handlers/positions.rs`, `.env.example`, `doc/POSITION_CHAIN_HISTORY_PLAN.md`
+
+## 2026-05-14 — CLI: `chain-history-refresh` (HTTP → API materialize)
+
+keywords: clmm-lp-cli, chain-history-refresh, CLMM_API_BASE_URL, CLMM_CHAIN_HISTORY_REFRESH_SECRET, CLMM_X_API_KEY, position_chain_history, POST chain-history/refresh
+
+- **What:** Komenda woła `POST /api/v1/positions/{address}/chain-history/refresh?mode=live|settlement_v1` na `CLMM_API_BASE_URL` (domyślnie `http://127.0.0.1:8081`). Opcjonalnie `Authorization: Bearer` / `CLMM_CHAIN_HISTORY_REFRESH_SECRET`; `X-API-Key` / `CLMM_X_API_KEY` gdy API wymaga `API_KEYS`.
+- **paths:** `crates/cli/src/commands/position_chain_history.rs`, `crates/cli/src/main.rs`, `crates/cli/src/commands/mod.rs`, `.env.example`
+
+## 2026-05-14 — Web P4: badge źródła odczytu lineage (Postgres vs compute)
+
+keywords: web, P4, lineageReadSource, PositionDetail, ClosedPositionDetail, i18n, chain-history, stream-lineage
+
+- **What:** `isLineageFromPostgresMaterialized` (`note` zawiera `postgres_chain_history`). Na kartach „Historia pozycji” badge + `t('positionDetail.lineageHistoryApiIntro')`. `ClosedPositionDetail`: intro semantyki PL/EN zamiast samego „stream-lineage”.
+- **paths:** `web/src/lib/lineageReadSource.ts`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/ClosedPositionDetail.tsx`, `web/src/lib/i18n.tsx`, `doc/POSITION_CHAIN_HISTORY_PLAN.md`
+
+## 2026-05-14 — Web P3: lineage UI prefers `chain-history`, fallback na `stream-lineage`
+
+keywords: web, PositionDetail, ClosedPositionDetail, chain-history, stream-lineage, getPositionLineagePreferMaterialized, react-query, position-lineage
+
+- **What:** `getPositionLineagePreferMaterialized` — najpierw `GET …/chain-history`, przy dowolnym błędzie (w tym 404 brak materializacji) fallback `GET …/stream-lineage`. React Query: `queryKey` `['position-lineage', address|pos, metricsMode]`; po collect invalidacja `['position-lineage', address]`.
+- **paths:** `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-05-14 — Chain history: writer + `GET/POST …/chain-history` (Postgres materialized path)
+
+keywords: clmm-lp-api, clmm-lp-data, position_chain_history, position_chain_history_meta, migration 008, chain-history, stream-lineage, sqlx, MaterializeChainHistoryResponse, POSITION_CHAIN_HISTORY_PLAN, CLMM_CHAIN_HISTORY_REFRESH_SECRET
+
+- **What:** Migracja `008_position_chain_history_meta.sql` (`metrics_mode` na `position_chain_history_nodes`, unikalność per mode, tabela meta z JSON totals/chain). Serwis `position_chain_history::materialize_chain_history_for_anchor` wywołuje `compute_position_stream_lineage` (+ settlement totals gdy `mode=settlement_v1`), zapisuje `raw_snapshot` per node i meta w jednej transakcji. `GET /positions/{address}/chain-history`, `POST …/chain-history/refresh`. Gdy **`CLMM_CHAIN_HISTORY_REFRESH_SECRET`** jest niepusty, refresh wymaga `Authorization: Bearer …` lub `X-Chain-History-Refresh: …`. Testy pokrycia endpointów (503 bez DB, 400 zły adres, 401 bez sekretu gdy skonfigurowany). TS: `getPositionChainHistory`, `refreshPositionChainHistory` (+ opcjonalny `refreshSecret`).
+- **paths:** `crates/data/migrations/008_position_chain_history_meta.sql`, `crates/data/src/repositories/database.rs`, `crates/api/src/services/position_chain_history.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `crates/api/src/models.rs`, `crates/api/src/state.rs`, `crates/api/src/main.rs`, `crates/api/src/handlers/endpoint_coverage_tests.rs`, `web/src/lib/api.ts`, `.env.example`, `doc/POSITION_CHAIN_HISTORY_PLAN.md`, `doc/DATA_CATALOG.md`
+
+## 2026-05-14 — Web: jedna nazwa „Historia pozycji” + i18n zakładki „Logi / rebalanse”
+
+keywords: web, i18n, PositionDetail, ClosedPositionDetail, positionDetail.positionHistory, positionDetail.tabLedger, stream-lineage, UX
+
+- **What:** Tytuł karty lineage na otwartej i zamkniętej pozycji: **„Historia pozycji”** / **Position history** (bez dopisku „(rotacje)”). Etykieta zakładki z ledgerem oraz podpowiedź w diagnostyce używają `t('positionDetail.tabLedger')` i spójnych hintów z `i18n.tsx`.
+- **paths:** `web/src/lib/i18n.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/ClosedPositionDetail.tsx`
+
+## 2026-05-14 — Doc: kanoniczny plan materializacji lineage (`POSITION_CHAIN_HISTORY_PLAN.md`)
+
+keywords: doc, POSITION_CHAIN_HISTORY_PLAN, position_chain_history_nodes, postgres, writer, stream-lineage, chain-history, DATA_CATALOG, handoff
+
+- **What:** Nowy dokument [`doc/POSITION_CHAIN_HISTORY_PLAN.md`](POSITION_CHAIN_HISTORY_PLAN.md): cele (szybki read z PG), ścieżka równoległa do `stream-lineage`, mapowanie na `PositionStreamLineageNode`, propozycja endpointu read/refresh, triggery writera, fazy P0–P4, checklist przed włączeniem UI. Indeks: [`doc/README.md`](README.md). `DATA_CATALOG` + wpis 2026-05-13 w `ENGINEERING_NOTES` wskazują na ten plan zamiast luźnej checklisty.
+
+## 2026-05-13 — Postgres read-model: `position_chain_history_nodes` (materialized chain table)
+
+keywords: clmm-lp-data, position_chain_history_nodes, migration 007, migration 005, stream-lineage, lineage, DATA_CATALOG, database.rs, handoff, writer, TODO
+
+- **What:** New table `position_chain_history_nodes` (anchor pubkey + `chain_seq`, position PDA, open/close timestamps, range/price labels, USD start/end/current, fees both legs, cashflow, net PnL, optional `raw_snapshot`). Migration `crates/data/migrations/007_position_chain_history_nodes.sql`. Runner now includes previously missing **`005_ledger_lp_collected_raw.sql`** in `Database::migrate` so fresh DBs get `lp_collected_token_*` columns.
+- **Why:** Dedicated persisted table for the full-chain analytics grid; API keeps computing `stream-lineage` until a writer/UI switch.
+- **paths:** `crates/data/migrations/007_position_chain_history_nodes.sql`, `crates/data/src/repositories/database.rs`, `doc/DATA_CATALOG.md`
+- **Stan na koniec pracy (gotowe):** schemat Postgres + migracja `007`, runner `Database::migrate` (001–007, w tym `005`), opis w `DATA_CATALOG`, ten wpis w `ENGINEERING_NOTES`. Live `GET …/stream-lineage` **bez zmian** — tabela jest na razie pusta do czasu zapisu.
+- **Plan (kanoniczny):** [`doc/POSITION_CHAIN_HISTORY_PLAN.md`](POSITION_CHAIN_HISTORY_PLAN.md) — cele, kontrakt API (propozycja), triggery writera, fazy P0–P4, checklist przed włączeniem UI na PG.
+- **Do wykonania dalej (skrót):** (1) **writer** — `UPSERT`/`ON CONFLICT` z wyniku lineage (+ lifecycle/JSONL tam gdzie DB niepełna), reguła **kiedy** nadpisywać; (2) **API** — `GET` z DB (+ opcjonalny refresh); (3) **UI** — fallback na `stream-lineage`; (4) migracja `008+` jeśli brakuje pól; (5) **testy** po kodzie zapisu.
+
+## 2026-05-13 — Stream lineage: lifecycle hydracja dla długich łańcuchów (daty, minty, open-quote do liftu)
+
+keywords: clmm-lp-api, position_stream_lineage, stream-lineage, node_metrics_fast_for_chain, hydrate_lineage_open_close_ts_and_mints_from_lifecycle, merge_open_quote_usd_from_lifecycle_rows, orca_position_lifecycle.jsonl, BUG-20260513-04
+
+- **What:** Po `node_metrics_fast_for_chain` / `node_metrics` (join) wywołanie `hydrate_lineage_open_close_ts_and_mints_from_lifecycle` — uzupełnia `opened_ts_utc` (pierwszy `bot_open`), `closed_ts_utc` (ostatni `bot_close`) oraz brakujące `token_mint_{a,b}` z lifecycle JSONL, gdy snapshoty DB są puste. Przed `apply_open_quote_baseline_lift_after_lineage_fallbacks`: `merge_open_quote_usd_from_lifecycle_rows` scala `open_quote_*` z JSONL do mapy open USD (max z DB).
+- **Why:** Łańcuch >8 PDA: UI pokazywał długie serie „—” mimo kompletnych wierszy w pliku lifecycle; ingest DB nie zawsze obejmuje wszystkie PDA przed odświeżeniem UI.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-13 — Stream lineage: open-quote baseline post-fallbacks + live current (short & long chains)
+
+keywords: clmm-lp-api, position_stream_lineage, stream-lineage, baseline_value_usd, open_quote_estimated_value_usd, node_metrics_fast_for_chain, apply_end_value_fallback_from_next_baseline, live_rpc
+
+- **What:** Extracted `fetch_ledger_open_quote_usd_by_positions`; **after** rotation fallbacks, `apply_open_quote_baseline_lift_after_lineage_fallbacks` runs for **all** DB lineage chains (not only `chain.len() > 8`). Fast path also overwrites **open** nodes’ `current_value_usd` from live RPC when the snapshot is missing/stale. `node_metrics` (≤8 PDAs): ledger `open_quote` baseline lift + same live **current** for open PDAs. Post-fallback lift also handles **open** nodes when `baseline < 85%` of ledger open USD (bad `baseline_from_prev_end` after a bad prior row).
+- **Why:** First rollout gated post-fallback lift on long chains only; short chains kept $0.84-style baselines. DB-only `current` left open rows at “—” vs `/positions` ~$8.7.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/BUGS.md`
+
+## 2026-05-13 — FUNCTIONAL_SPECIFICATION §5 + §5.1: wallet salda vs Wallet GL (norma)
+
+keywords: FUNCTIONAL_SPECIFICATION, wallet_gl, WALLET_GL.md, effective-balances, journal, shadow-ledger
+
+- **What:** Replaced stub **§5** with normative **source of truth for UI balances** (`effective-balances`, not GL sum). New **§5.1 Wallet GL** — append-only journal, phase A rules, pointer to [`doc/WALLET_GL.md`](doc/WALLET_GL.md); explicit **out of scope** for phase A vs future phases without changing §5 until product decision.
+- **paths:** [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md)
+
+## 2026-05-13 — Doc: `WALLET_GL.md` (plan implementacji: journal → pełny GL)
+
+keywords: wallet_gl, wallet_ledger, GL, chart_of_accounts, reconcile, DATA_CATALOG, doc
+
+- **What:** New [`doc/WALLET_GL.md`](doc/WALLET_GL.md): normative **accounting-GL vision** (every tx → account deltas; incremental state; reconcile vs on-chain); **current code = phase A journal** only; phased checklist **B** (complete API ops), **C** (chart of accounts), **D** (read model from GL), **E** (reconcile). Linked from [`doc/README.md`](doc/README.md).
+- **Why:** Single repo anchor so operators / AI sessions do not restate the same chat requirements; execution tracks the doc.
+
+## 2026-05-13 — Wallet GL journal (`wallet-ledger-events.jsonl`) + `GET /wallets/ledger-events` + UI
+
+keywords: clmm-lp-api, wallet_ledger, WalletLedgerEvent, correlation_id, swap_before_open, open_position, transfer_sol, convert_sol, DATA_CATALOG, web
+
+- **What:** Append-only JSONL at `data/wallet-ledger-events.jsonl` (`CLMM_WALLET_LEDGER_PATH`); `pending` / `confirmed` / `failed` with `correlation_id` for swap-before-open, open, **`transfer_sol`** (two owners, same id), **`convert_sol`** (pending before submit, failed on submit/post-read errors, confirmed after post-balance reads — before wallet-ops JSON write). **`GET /api/v1/wallets/ledger-events`**; UI **`/wallet/ledger`**.
+- **Why:** Shadow audit trail for API-originated wallet movements without using the file as a balance source.
+- **paths:** `crates/api/src/services/wallet_ledger.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/routes.rs`, `crates/api/src/openapi.rs`, `web/src/pages/WalletLedger.tsx`, `web/src/lib/api.ts`
+
+## 2026-05-14 — CLI `orchestrator-backtests-full`: API-first `POST /backtests/full` + poll + audyt
+
+keywords: clmm-lp-cli, orchestrator-backtests-full, orchestrator_api_full, api_backtests_full, backtests/full, backtests/data-readiness, data_readiness, reqwest, decision-layer, agent_decisions, CLMM_API_BASE_URL
+
+- **What:** New `crates/cli/src/orchestrator_api_full.rs`: optional curated health collect (same thresholds as gate); `POST {CLMM_API_BASE_URL}/api/v1/backtests/full` with JSON body from `--request-json`; poll `GET …/backtests/full/{id}` until terminal `succeeded`/`partial`/`failed`; optional `--save-job-json`; append JSONL via `orchestrator_gate::append_agent_decision_row` or `POST …/data/agent/decisions` (`--decisions-via-http`). Decision payload `kind` `api_backtests_full` (`schema_version` 1). CLI `clap` enables `env` for `CLMM_API_BASE_URL`; added workspace `reqwest` to `clmm-lp-cli`.
+- **Why:** Decision-layer phase 2 API-first path — single implementation of multi-pool optimize matrix in API, orchestrator only schedules + audits.
+- **paths:** `crates/cli/src/orchestrator_api_full.rs`, `crates/cli/src/main.rs`, `crates/cli/Cargo.toml`, [`doc/examples/backtest-full-request.min.json`](doc/examples/backtest-full-request.min.json), [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8, [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md) §1b/§11, [`doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md), [`README.md`](README.md), [`doc/README.md`](doc/README.md)
+
+- **What (follow-up):** Before `POST /backtests/full`, CLI calls **`POST /api/v1/backtests/data-readiness`** with `pool_ids` + `snapshot_variants` copied from the FULL request JSON (`--skip-data-readiness`, `--fail-on-data-readiness` default true). Full response stored under `decision.data_quality.data_readiness`; `tools_invoked` lists the readiness POST unless skipped.
+
+## 2026-05-13 — `gate_health`: `inputs_ref` (curated file stats for audit / replay)
+
+keywords: clmm-lp-cli, orchestrator-gate, inputs_ref, curated_dataset_file_stats, health_check_curated_all_collect, swap_sync, FUNCTIONAL_SPECIFICATION
+
+- **What:** `HealthCheckCuratedSummary` includes `inputs_ref` JSON: `schema_version` 1, `role` `curated_dataset_file_stats`, `curated_pool_list_source` (`data_file_stat_json` on `STARTUP.md`), `pool_data_files` sorted by (`protocol`, `pool`) with `swaps_raw` / `decoded_swaps` / `snapshots_jsonl` each `{ path, mtime_unix_secs, size_bytes }` (null meta when missing). `OrchestratorRunV1` carries the same object as `inputs_ref`. Unit test `data_file_stat_json_missing_has_null_meta` in `swap_sync` tests.
+- **Why:** Close decision-layer phase 0 requirement for traceable inputs without full-content hashing (optional later).
+- **paths:** `crates/cli/src/swap_sync.rs`, `crates/cli/src/orchestrator_gate.rs`, [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8, [`doc/examples/orchestrator-run-v1.example.json`](doc/examples/orchestrator-run-v1.example.json), [`doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md), [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md) §11.2
+
+## 2026-05-13 — CLI `orchestrator-gate`: health gate + `gate_health` row in `agent_decisions.jsonl`
+
+keywords: clmm-lp-cli, orchestrator-gate, orchestrator_gate, gate_health, agent_decisions, decision-layer, health_check_curated_all_collect, FUNCTIONAL_SPECIFICATION, DECISION_LAYER
+
+- **What:** New module `crates/cli/src/orchestrator_gate.rs`: runs `health_check_curated_all_collect` (same curated thresholds as `data-health-check`), builds `OrchestratorRunV1` (`schema_version` 1, `kind` `gate_health`, `outcome` `ok` / `no_go`, `data_quality`, optional `no_go_reason`), appends one API-compatible JSON line via `append_agent_decision_row`. Subcommand `orchestrator-gate` in `main.rs` (`--fail-on-no-go`, `--jsonl-out` or `CLMM_AGENT_DECISIONS_JSONL_PATH`, `--source`, `--chain-id`). `HealthCheckCuratedSummary` + `health_check_curated_all_collect` in `swap_sync.rs`; `data-health-check` unchanged (still uses `health_check_curated_all` with optional bail).
+- **Why:** Phase 1 gate runner from [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md): auditable log before ranking/backtest orchestration; reuses existing health logic.
+- **paths:** `crates/cli/src/orchestrator_gate.rs`, `crates/cli/src/main.rs`, `crates/cli/src/swap_sync.rs`, [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8, [`doc/examples/orchestrator-run-v1.example.json`](doc/examples/orchestrator-run-v1.example.json), [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md) §1b / §11, [`doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md) (faza 0–1 status), [`README.md`](README.md)
+
+## 2026-05-14 — Doc: `IMPLEMENTATION_PLAN_DECISION_LAYER.md` (fazy 0–6+)
+
+keywords: IMPLEMENTATION_PLAN_DECISION_LAYER, decision-layer, orchestrator, gate-runner, NO-GO, phased-rollout, observability
+
+- **What:** Added [`doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md): principles, phases 0–6+ (log contract, health gate, multi-backtest report, real vs sim merge, human-in-loop apply, UI/alerts, future multi-pair/shadow/volume), out-of-scope, success criteria, suggested PR order; linked from [`doc/README.md`](doc/README.md), [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md) §10, [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8, [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md).
+- **paths:** [`doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md), [`doc/README.md`](doc/README.md), [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md), [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md), [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md)
+
+## 2026-05-13 — Monotoniczny zapis `wallet_effective` (brak cofnięcia SPL bez autorytatywnego odczytu)
+
+keywords: clmm-lp-api, wallets, effective-balances, wallet_effective_cache, monotonic, PositionCreate, USDC, degraded, force
+
+- **What:** Before persisting `WalletEffectiveBalancesResponse` into the in-memory/disk effective cache, `store_wallet_effective_response` applies `apply_monotonic_effective_balance_guard`: if the new snapshot has an **empty** SPL token list while the cache had tokens, the prior token rows are retained (any `confidence`); for **`Degraded`** non-empty reads, missing mints and **near-zero** amounts vs a meaningful prior balance are merged from the last snapshot. `GET /wallets/effective-balances?force=true` passes `allow_balance_regression=true` so an explicit refresh stays authoritative.
+- **Why:** Public RPC can intermittently return empty or “zeroed” SPL rows while native SOL still looks fine — trading-style UI should not flash **0 USDC** over a good cache until the operator forces a fresh read or a verified-quality snapshot arrives.
+- **paths:** `crates/api/src/handlers/wallets.rs`, `doc/BUGS.md`
+
+## 2026-05-13 — DECISION_LAYER §1b: rejestr zdolności (capability registry)
+
+keywords: DECISION_LAYER, capability-registry, NO-GO, ops-ingest-cycle, data-health-check, CLI, API
+
+- **What:** Added **§1b Rejestr zdolności** to [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md): table mapping resources/tools to goals, invocation (`clmm-lp-cli` commands, HTTP paths, data paths), and high-level NO-GO; maintenance note to update on new orchestration-relevant commands.
+- **What:** Updated [`doc/README.md`](doc/README.md) DECISION_LAYER row + A–Z keywords; linked §1b from [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8; [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md) — skrót linku do §1b.
+- **Why:** Single “mine map” for decision layer orientation without guessing tools.
+- **paths:** [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md), [`doc/README.md`](doc/README.md), [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md), [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md)
+
 ## 2026-05-13 — DECISION_LAYER §1a: mapowanie celu operatora → wymagania
 
 keywords: DECISION_LAYER, operator-goals, requirements-mapping, FUNCTIONAL_SPECIFICATION, decision-layer
@@ -8,7 +386,7 @@ keywords: DECISION_LAYER, operator-goals, requirements-mapping, FUNCTIONAL_SPECI
 
 ## 2026-05-13 — Doc: `DECISION_LAYER.md` §11 audyt (evidence-based)
 
-**keywords:** decision-layer, orchestrator, DECISION_LAYER, implementation-audit, evidence-based
+keywords: decision-layer, orchestrator, DECISION_LAYER, implementation-audit, evidence-based
 
 - **What:** Added **§11 Audyt** to [`doc/DECISION_LAYER.md`](doc/DECISION_LAYER.md): methodology (grep/routes 2026-05-13), table of **implemented** building blocks with file evidence, table of **not implemented** orchestrator/shadow-LP items (incl. ROADMAP live+shadow as roadmap-only), note distinguishing lineage test `shadow` from product shadow; maintenance rule for PR updates.
 - **What:** Linked §8 in [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) to that audit section.

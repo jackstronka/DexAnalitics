@@ -135,6 +135,138 @@ fn json_u64_for_event_slot(v: Option<&serde_json::Value>) -> Option<u64> {
     })
 }
 
+fn json_decimal_from_value(v: &serde_json::Value) -> Option<Decimal> {
+    v.as_f64()
+        .and_then(Decimal::from_f64_retain)
+        .or_else(|| v.as_i64().and_then(|i| Decimal::try_from(i).ok()))
+        .or_else(|| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok())
+        })
+}
+
+/// Open NAV from the first `position_stream_valuation_snapshots` row for this PDA (same ordering as
+/// [`node_metrics`]: prefer `raw_json.kind = baseline_open`, then earliest `ts_utc`).
+///
+/// Uses **amount_a_ui × price_a_usd + amount_b_ui × price_b_usd** from typed columns, falling back to
+/// the same keys inside `raw_json`. Missing positive prices for a non‑zero leg are filled via
+/// [`fetch_mint_prices_usd_stable`]. If recomputed NAV is still zero, returns persisted `value_usd` when
+/// **> 0** (legacy rows that only stored the total).
+async fn open_nav_usd_from_valuation_snapshot_row(
+    _state: &AppState,
+    row: &sqlx::postgres::PgRow,
+) -> Option<Decimal> {
+    let raw_json: serde_json::Value = row
+        .try_get::<serde_json::Value, _>("raw_json")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let value_usd: Decimal = row.try_get("value_usd").ok().unwrap_or(Decimal::ZERO);
+
+    let mut aa = row
+        .try_get::<Option<Decimal>, _>("amount_a_ui")
+        .ok()
+        .flatten();
+    let mut bb = row
+        .try_get::<Option<Decimal>, _>("amount_b_ui")
+        .ok()
+        .flatten();
+    let mut pa = row
+        .try_get::<Option<Decimal>, _>("price_a_usd")
+        .ok()
+        .flatten();
+    let mut pb = row
+        .try_get::<Option<Decimal>, _>("price_b_usd")
+        .ok()
+        .flatten();
+    let mut ma = row
+        .try_get::<Option<String>, _>("token_mint_a")
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut mb = row
+        .try_get::<Option<String>, _>("token_mint_b")
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if let Some(o) = raw_json.as_object() {
+        if aa.is_none() {
+            aa = o.get("amount_a_ui").and_then(json_decimal_from_value);
+        }
+        if bb.is_none() {
+            bb = o.get("amount_b_ui").and_then(json_decimal_from_value);
+        }
+        if pa.is_none() {
+            pa = o.get("price_a_usd").and_then(json_decimal_from_value);
+        }
+        if pb.is_none() {
+            pb = o.get("price_b_usd").and_then(json_decimal_from_value);
+        }
+        if ma.is_none() {
+            ma = o
+                .get("token_mint_a")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+        if mb.is_none() {
+            mb = o
+                .get("token_mint_b")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+    }
+
+    let aa = aa.unwrap_or(Decimal::ZERO);
+    let bb = bb.unwrap_or(Decimal::ZERO);
+    if aa.is_zero() && bb.is_zero() {
+        return (value_usd > Decimal::ZERO).then_some(value_usd);
+    }
+
+    let mut mints: BTreeSet<String> = BTreeSet::new();
+    if let Some(ref m) = ma {
+        mints.insert(m.clone());
+    }
+    if let Some(ref m) = mb {
+        mints.insert(m.clone());
+    }
+    let (stable_px, _) = fetch_mint_prices_usd_stable(&mints).await;
+
+    let pa_d = pa
+        .or_else(|| {
+            ma.as_ref()
+                .and_then(|m| stable_px.get(m.as_str()).copied())
+                .and_then(Decimal::from_f64_retain)
+        })
+        .unwrap_or(Decimal::ZERO);
+    let pb_d = pb
+        .or_else(|| {
+            mb.as_ref()
+                .and_then(|m| stable_px.get(m.as_str()).copied())
+                .and_then(Decimal::from_f64_retain)
+        })
+        .unwrap_or(Decimal::ZERO);
+
+    if !aa.is_zero() && pa_d <= Decimal::ZERO {
+        return (value_usd > Decimal::ZERO).then_some(value_usd);
+    }
+    if !bb.is_zero() && pb_d <= Decimal::ZERO {
+        return (value_usd > Decimal::ZERO).then_some(value_usd);
+    }
+
+    let nav = aa * pa_d + bb * pb_d;
+    if nav > Decimal::ZERO {
+        return Some(nav);
+    }
+    (value_usd > Decimal::ZERO).then_some(value_usd)
+}
+
 /// Ledger `details` fields written on successful bot open/close (`event_*` keys — see `doc/DATA_CATALOG.md`).
 fn event_spot_from_ledger_details(
     details: Option<&serde_json::Value>,
@@ -150,6 +282,206 @@ fn event_spot_from_ledger_details(
         .unwrap_or_else(|| "unknown".to_string());
     let slot = json_u64_for_event_slot(d.get("event_slot"));
     Some((pa, pb, src, slot))
+}
+
+/// Open NAV from lifecycle **open** row: leg UI amounts (`open_amount_raw` / caps / payer deltas) ×
+/// **`event_price_a_usd` / `event_price_b_usd`** on the same row when present (bot persist path — see
+/// `DATA_CATALOG.md`). If only one leg is priced in `details`, the other leg uses
+/// [`fetch_mint_prices_usd_stable`] so the UI can show `event_price_a_usd` alone (e.g. SOL/USDC quote)
+/// while still materializing **start NAV**.
+/// Picks the **latest** qualifying open row by `ts_utc` (same spirit as open-quote merge).
+async fn open_start_usd_from_event_spot_open_row(
+    state: &AppState,
+    rows: &[LifecycleRow],
+    node: &PositionStreamLineageNode,
+) -> Option<Decimal> {
+    let mint_a = node
+        .token_mint_a
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let mint_b = node
+        .token_mint_b
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let pos = node.position_address.trim();
+    if pos.is_empty() {
+        return None;
+    }
+    let ma = solana_sdk::pubkey::Pubkey::from_str(mint_a).ok()?;
+    let mb = solana_sdk::pubkey::Pubkey::from_str(mint_b).ok()?;
+    let dec_a = fetch_mint_decimals_best_effort(state.provider.as_ref(), &ma).await?;
+    let dec_b = fetch_mint_decimals_best_effort(state.provider.as_ref(), &mb).await?;
+
+    let mut mints = BTreeSet::new();
+    mints.insert(mint_a.to_string());
+    mints.insert(mint_b.to_string());
+    let (stable_px, _) = fetch_mint_prices_usd_stable(&mints).await;
+
+    let mut best: Option<(DateTime<Utc>, Decimal)> = None;
+    for r in rows {
+        let Some(p) = r
+            .position_pubkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if p != pos {
+            continue;
+        }
+        if !is_lifecycle_open_event(r.event.as_deref()) {
+            continue;
+        }
+        let details_obj = r.details.as_ref().and_then(|v| v.as_object());
+        let deltas_obj = r
+            .fee_payer_token_deltas
+            .as_ref()
+            .and_then(|v| v.as_object());
+        let (amount_a_ui, amount_b_ui, _) = baseline_open_amounts_ui_from_details_or_deltas(
+            details_obj,
+            deltas_obj,
+            mint_a,
+            mint_b,
+            Some(dec_a),
+            Some(dec_b),
+        );
+        if amount_a_ui.is_zero() && amount_b_ui.is_zero() {
+            continue;
+        }
+
+        let (pa_e, pb_e) =
+            if let Some((pa, pb, _, _)) = event_spot_from_ledger_details(r.details.as_ref()) {
+                (Some(pa), Some(pb))
+            } else {
+                let Some(d) = details_obj else {
+                    continue;
+                };
+                (
+                    json_f64_for_event_price(d.get("event_price_a_usd")),
+                    json_f64_for_event_price(d.get("event_price_b_usd")),
+                )
+            };
+
+        let pa_d = pa_e
+            .and_then(Decimal::from_f64_retain)
+            .or_else(|| {
+                stable_px
+                    .get(mint_a)
+                    .copied()
+                    .and_then(Decimal::from_f64_retain)
+            })
+            .unwrap_or(Decimal::ZERO);
+        let pb_d = pb_e
+            .and_then(Decimal::from_f64_retain)
+            .or_else(|| {
+                stable_px
+                    .get(mint_b)
+                    .copied()
+                    .and_then(Decimal::from_f64_retain)
+            })
+            .unwrap_or(Decimal::ZERO);
+
+        if !amount_a_ui.is_zero() && pa_d.is_zero() {
+            continue;
+        }
+        if !amount_b_ui.is_zero() && pb_d.is_zero() {
+            continue;
+        }
+
+        let usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
+        if usd <= Decimal::ZERO {
+            continue;
+        }
+        let ts = r.ts_utc.unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let replace = match best {
+            None => true,
+            Some((et, _)) => ts >= et,
+        };
+        if replace {
+            best = Some((ts, usd));
+        }
+    }
+    best.map(|(_, u)| u)
+}
+
+/// Before persisting `position_chain_history_nodes`, set `baseline_value_usd` (and derived PnL) for
+/// **open NAV** so `start_value_usd` matches the economic “value at open” column in the UI.
+///
+/// **Order:** (1) recompute from **`position_stream_valuation_snapshots`** first row for the PDA
+/// (amounts × snapshot prices, same source as stream lineage), (2) else lifecycle open row
+/// (`event_price_*` + deposit amounts, [`open_start_usd_from_event_spot_open_row`]).
+pub async fn apply_open_start_usd_from_lifecycle_snapshots_for_chain_history(
+    state: &AppState,
+    nodes: &mut [PositionStreamLineageNode],
+) -> Result<(), ApiError> {
+    let rows = lifecycle_rows_cached_best_effort().await;
+    for node in nodes.iter_mut() {
+        let pos = node.position_address.trim();
+        if pos.is_empty() {
+            continue;
+        }
+
+        let mut chosen: Option<(Decimal, &'static str)> = None;
+
+        if let Some(db) = state.db.as_ref() {
+            let q = sqlx::query(
+                r#"
+                SELECT value_usd, amount_a_ui, amount_b_ui, price_a_usd, price_b_usd, token_mint_a, token_mint_b, raw_json
+                FROM position_stream_valuation_snapshots
+                WHERE position_pubkey = $1
+                ORDER BY
+                  CASE WHEN COALESCE(raw_json->>'kind', '') = 'baseline_open' THEN 0 ELSE 1 END,
+                  ts_utc ASC
+                LIMIT 1
+                "#,
+            )
+            .bind(pos);
+            match q.fetch_optional(db.pool()).await {
+                Ok(Some(row)) => {
+                    if let Some(usd) = open_nav_usd_from_valuation_snapshot_row(state, &row).await
+                        && usd > Decimal::ZERO
+                    {
+                        chosen = Some((usd, "baseline_open_snapshot_amounts_prices"));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        position = %pos,
+                        "chain-history materialize: baseline snapshot row lookup failed"
+                    );
+                }
+            }
+        }
+
+        if chosen.is_none() {
+            if let Some(usd) =
+                open_start_usd_from_event_spot_open_row(state, rows.as_ref(), node).await
+                && usd > Decimal::ZERO
+            {
+                chosen = Some((usd, "open_event_spot_amounts"));
+            }
+        }
+
+        let Some((usd, quality)) = chosen else {
+            continue;
+        };
+        node.baseline_value_usd = usd;
+        node.baseline_valuation_quality = Some(quality.to_string());
+        node.net_pnl_usd = node.current_value_usd + node.realized_cashflow_usd
+            - node.baseline_value_usd
+            - node.tx_fees_usd;
+        if !node.baseline_value_usd.is_zero() {
+            node.net_pnl_pct = node.net_pnl_usd / node.baseline_value_usd;
+        } else {
+            node.net_pnl_pct = Decimal::ZERO;
+        }
+    }
+    Ok(())
 }
 
 async fn persist_event_valuation_snapshots_for_positions(
@@ -2291,7 +2623,7 @@ pub(crate) async fn lp_fees_collected_usd_from_ledger_db(
     Ok((events, usd, by_mint_ui))
 }
 
-fn rollup_lineage_chain_costs(
+pub(crate) fn rollup_lineage_chain_costs(
     nodes: &[PositionStreamLineageNode],
 ) -> Option<LineageChainCostSummary> {
     if nodes.is_empty() {
@@ -2456,7 +2788,7 @@ async fn fetch_mint_decimals_best_effort(
     Some(mint_state.decimals)
 }
 
-async fn node_metrics(
+pub(crate) async fn node_metrics(
     state: &AppState,
     position_pubkey: &str,
     // When true (stream-lineage): no DB snapshots → lifecycle JSONL, not on-chain self-seed RPC.
@@ -2663,7 +2995,7 @@ async fn node_metrics(
         .as_ref()
         .and_then(|r| r.try_get::<Decimal, _>("value_usd").ok())
         .unwrap_or(Decimal::ZERO);
-    let current_value: Decimal = current
+    let mut current_value: Decimal = current
         .as_ref()
         .and_then(|r| r.try_get::<Decimal, _>("value_usd").ok())
         .unwrap_or(Decimal::ZERO);
@@ -2732,6 +3064,19 @@ async fn node_metrics(
         .flatten()
         .filter(|s| !s.trim().is_empty());
     let mut baseline_note: Option<String> = None;
+
+    // When `value_usd` on the snapshot row is still zero but `amount_*_ui` + `price_*_usd` are present
+    // (or only in `raw_json`), recompute open NAV so lineage baseline matches materialized `start_value_usd`.
+    if baseline_value <= Decimal::ZERO {
+        if let Some(ref br) = baseline {
+            if let Some(nav) = open_nav_usd_from_valuation_snapshot_row(state, br).await
+                && nav > Decimal::ZERO
+            {
+                baseline_value = nav;
+                baseline_note = Some("baseline_nav_from_snapshot_amounts_prices".to_string());
+            }
+        }
+    }
 
     // DB path guardrail: baseline snapshots derived from open deltas may miss one leg (WSOL),
     // which can massively understate "start value". Correct from open `amount_*_cap` when available.
@@ -2827,6 +3172,25 @@ async fn node_metrics(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    let open_usd_solo =
+        fetch_ledger_open_quote_usd_by_positions(db, &[position_pubkey.trim().to_string()]).await?;
+    if let Some(open_usd) = open_usd_solo.get(position_pubkey.trim()).copied() {
+        if open_usd > baseline_value {
+            let vs_mark = current_value > Decimal::ZERO
+                && baseline_value < current_value * Decimal::new(60, 2);
+            let zero_current_open = current_value.is_zero() && open_usd > baseline_value;
+            let open_notional_mismatch = baseline_value < open_usd * Decimal::new(85, 2);
+            if baseline_value.is_zero() || vs_mark || zero_current_open || open_notional_mismatch {
+                baseline_value = open_usd;
+                baseline_note = Some(
+                    baseline_note
+                        .map(|n| format!("{n} baseline_from_ledger_open_quote_usd."))
+                        .unwrap_or_else(|| "baseline_from_ledger_open_quote_usd.".to_string()),
+                );
             }
         }
     }
@@ -2940,6 +3304,32 @@ async fn node_metrics(
             None
         };
 
+    // Open PDA: align "current" with live mark (matches `/positions/{pda}`); DB snapshots can lag.
+    let mut current_value_usd_live_note = String::new();
+    if closed_ts.is_none() {
+        if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(position_pubkey) {
+            if let Ok(Ok(pos)) = timeout(
+                Duration::from_secs(2),
+                monitored_position_from_chain(state.provider.clone(), &pk),
+            )
+            .await
+            {
+                let prices =
+                    fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
+                        .await;
+                if let Ok(v) =
+                    compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
+                    && v.value_usd > Decimal::ZERO
+                {
+                    if (v.value_usd - current_value).abs() > Decimal::new(5, 2) {
+                        current_value_usd_live_note.push_str(" current_value_usd_from_live_rpc.");
+                    }
+                    current_value = v.value_usd;
+                }
+            }
+        }
+    }
+
     let net_pnl_usd = current_value + realized_cashflow_usd - baseline_value - tx_fees_usd;
     let net_pnl_pct = if baseline_value.is_zero() {
         Decimal::ZERO
@@ -3003,9 +3393,18 @@ async fn node_metrics(
                     .map(|n| format!(" {n}."))
                     .unwrap_or_default(),
                 db_ledger_fallback_note
-            ) + collect_zero_note,
+            ) + collect_zero_note
+                + current_value_usd_live_note.as_str(),
         ),
         collect_zero_diagnostics: None,
+        chain_history_start_value_usd: None,
+        chain_history_end_value_usd: None,
+        chain_history_current_value_usd: None,
+        chain_history_pool_address: None,
+        chain_history_tick_lower_open: None,
+        chain_history_tick_upper_open: None,
+        chain_history_event_spot_token_a_usd_open: None,
+        chain_history_event_spot_token_a_usd_close: None,
     })
 }
 
@@ -3024,6 +3423,115 @@ struct FastFeeMetric {
     collect_events: u32,
     fees_collected_usd: Decimal,
     by_mint_ui: BTreeMap<String, Decimal>,
+    /// On-chain pool token mint A/B (same order as Whirlpool `token_mint_a/b`) when fee rows carried a `pool_pubkey`.
+    pool_mint_a: Option<String>,
+    pool_mint_b: Option<String>,
+}
+
+/// Fill missing `token_mint_a` / `token_mint_b` on lineage nodes from batched fee rollup metadata.
+/// Fast-path snapshots often omit one or both mints for mid-chain PDAs; `by_mint_ui` keys are still pool-canonical.
+fn fill_missing_lineage_mints_from_fee_metric(
+    mint_a: &mut Option<String>,
+    mint_b: &mut Option<String>,
+    fee: &FastFeeMetric,
+) {
+    let pool_pair = fee
+        .pool_mint_a
+        .as_ref()
+        .zip(fee.pool_mint_b.as_ref())
+        .map(|(a, b)| (a.as_str(), b.as_str()));
+    if let Some((pa, pb)) = pool_pair {
+        match (mint_a.as_ref(), mint_b.as_ref()) {
+            (None, None) => {
+                *mint_a = Some(pa.to_string());
+                *mint_b = Some(pb.to_string());
+            }
+            (Some(a), None) => {
+                if a == pa {
+                    *mint_b = Some(pb.to_string());
+                } else if a == pb {
+                    *mint_b = Some(pa.to_string());
+                } else {
+                    *mint_b = Some(pb.to_string());
+                }
+            }
+            (None, Some(b)) => {
+                if b == pb {
+                    *mint_a = Some(pa.to_string());
+                } else if b == pa {
+                    *mint_a = Some(pb.to_string());
+                } else {
+                    *mint_a = Some(pa.to_string());
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    if fee.by_mint_ui.len() != 2 {
+        return;
+    }
+    let mut ks: Vec<String> = fee.by_mint_ui.keys().cloned().collect();
+    ks.sort();
+    let pa = ks[0].as_str();
+    let pb = ks[1].as_str();
+    match (mint_a.as_ref(), mint_b.as_ref()) {
+        (None, None) => {
+            *mint_a = Some(pa.to_string());
+            *mint_b = Some(pb.to_string());
+        }
+        (Some(a), None) => {
+            if a == pa {
+                *mint_b = Some(pb.to_string());
+            } else if a == pb {
+                *mint_b = Some(pa.to_string());
+            } else {
+                *mint_b = Some(pb.to_string());
+            }
+        }
+        (None, Some(b)) => {
+            if b == pb {
+                *mint_a = Some(pa.to_string());
+            } else if b == pa {
+                *mint_a = Some(pb.to_string());
+            } else {
+                *mint_a = Some(pa.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fees_collected_token_ui_for_fee_metric(
+    mint_a: Option<&String>,
+    mint_b: Option<&String>,
+    fee_metric: &FastFeeMetric,
+) -> (Option<Decimal>, Option<Decimal>) {
+    let ev = fee_metric.collect_events;
+    let collected_a_ui = mint_a
+        .map(|s| s.as_str())
+        .and_then(|m| fee_metric.by_mint_ui.get(m).copied());
+    let collected_b_ui = mint_b
+        .map(|s| s.as_str())
+        .and_then(|m| fee_metric.by_mint_ui.get(m).copied());
+    let mut fees_collected_token_a_ui = (ev > 0 && mint_a.is_some())
+        .then_some(collected_a_ui)
+        .flatten();
+    let mut fees_collected_token_b_ui = (ev > 0 && mint_b.is_some())
+        .then_some(collected_b_ui)
+        .flatten();
+    let bridged_missing_collect_leg = ev > 0
+        && ((fees_collected_token_a_ui.is_some() && fees_collected_token_b_ui.is_none())
+            || (fees_collected_token_a_ui.is_none() && fees_collected_token_b_ui.is_some()));
+    if bridged_missing_collect_leg {
+        if fees_collected_token_a_ui.is_none() && mint_a.is_some() {
+            fees_collected_token_a_ui = Some(Decimal::ZERO);
+        }
+        if fees_collected_token_b_ui.is_none() && mint_b.is_some() {
+            fees_collected_token_b_ui = Some(Decimal::ZERO);
+        }
+    }
+    (fees_collected_token_a_ui, fees_collected_token_b_ui)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3092,6 +3600,12 @@ async fn lp_fees_collected_usd_from_ledger_db_batch(
                 pair
             }
         };
+
+        {
+            let m = out.entry(position.clone()).or_default();
+            m.pool_mint_a = Some(ma.clone());
+            m.pool_mint_b = Some(mb.clone());
+        }
 
         let v: Option<serde_json::Value> = r.try_get("fee_payer_token_deltas").ok().flatten();
         let raw_json: Option<serde_json::Value> = r.try_get("raw_json").ok().flatten();
@@ -3176,7 +3690,7 @@ async fn lp_fees_collected_usd_from_ledger_db_batch(
         }
         if is_close && !has_authoritative_pair {
             if close_raw_a.is_none() && close_raw_b.is_none() {
-                let metric = out.entry(position).or_default();
+                let metric = out.entry(position.clone()).or_default();
                 metric.collect_events = metric.collect_events.saturating_add(1);
                 continue;
             }
@@ -3266,6 +3780,422 @@ async fn lp_fees_collected_usd_from_ledger_db_batch(
     Ok(out)
 }
 
+/// Latest open-quote USD per position from stream ledger (`details.open_quote_estimated_value_usd`, etc.).
+async fn fetch_ledger_open_quote_usd_by_positions(
+    db: &Database,
+    chain: &[String],
+) -> Result<HashMap<String, Decimal>, ApiError> {
+    if chain.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let open_quote_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (position_pubkey)
+          position_pubkey,
+          COALESCE(
+            NULLIF(raw_json #>> '{details,open_quote_estimated_value_usd}', '')::DOUBLE PRECISION,
+            NULLIF(raw_json #>> '{details,open_target_usd}', '')::DOUBLE PRECISION,
+            NULLIF(raw_json #>> '{details,open_prev_end_value_usd}', '')::DOUBLE PRECISION
+          ) AS open_usd
+        FROM position_stream_ledger_rows
+        WHERE position_pubkey = ANY($1)
+          AND event IN ('bot_open_position', 'bot_open_position_full_range', 'position_open')
+        ORDER BY position_pubkey, ts_utc DESC
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("stream lineage: open quote USD batch query: {e}")))?;
+
+    let out: HashMap<String, Decimal> = open_quote_rows
+        .into_iter()
+        .filter_map(|r| {
+            let position: String = r.try_get("position_pubkey").ok()?;
+            let open_usd: Option<f64> = r.try_get::<Option<f64>, _>("open_usd").ok().flatten();
+            let d = open_usd
+                .and_then(Decimal::from_f64_retain)
+                .unwrap_or(Decimal::ZERO);
+            if d.is_zero() {
+                None
+            } else {
+                Some((position, d))
+            }
+        })
+        .collect();
+    Ok(out)
+}
+
+/// Parse open USD fields from a lifecycle `bot_open_position` `details` object (same precedence as SQL).
+fn open_quote_usd_from_open_details(
+    details: &serde_json::Map<String, serde_json::Value>,
+) -> Decimal {
+    for key in [
+        "open_quote_estimated_value_usd",
+        "open_target_usd",
+        "open_prev_end_value_usd",
+    ] {
+        let Some(v) = details.get(key) else {
+            continue;
+        };
+        let f = v
+            .as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()));
+        let Some(f) = f else { continue };
+        let Some(d) = Decimal::from_f64_retain(f) else {
+            continue;
+        };
+        if d > Decimal::ZERO {
+            return d;
+        }
+    }
+    Decimal::ZERO
+}
+
+/// Merge latest-per-PDA open-quote USD from lifecycle JSONL into `out` (max with any DB value).
+fn merge_open_quote_usd_from_lifecycle_rows(
+    rows: &[LifecycleRow],
+    chain: &[String],
+    out: &mut HashMap<String, Decimal>,
+) {
+    let want: HashSet<&str> = chain.iter().map(|s| s.trim()).collect();
+    let mut best: HashMap<String, (Option<DateTime<Utc>>, Decimal)> = HashMap::new();
+    for r in rows {
+        let Some(pos) = r
+            .position_pubkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if !want.contains(pos) {
+            continue;
+        }
+        if !is_lifecycle_open_event(r.event.as_deref()) {
+            continue;
+        }
+        let Some(details) = r.details.as_ref().and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let usd = open_quote_usd_from_open_details(details);
+        if usd.is_zero() {
+            continue;
+        }
+        let ts = r.ts_utc;
+        let pos_key = pos.to_string();
+        let entry = best.entry(pos_key).or_insert((None, Decimal::ZERO));
+        let replace = match (entry.0, ts) {
+            (None, Some(_)) => true,
+            (Some(et), Some(nt)) => nt >= et,
+            (Some(_), None) => false,
+            (None, None) => true,
+        };
+        if replace {
+            *entry = (ts.or(entry.0), usd);
+        }
+    }
+    for (pos, (_, usd)) in best {
+        if usd.is_zero() {
+            continue;
+        }
+        out.entry(pos)
+            .and_modify(|e| {
+                if usd > *e {
+                    *e = usd;
+                }
+            })
+            .or_insert(usd);
+    }
+}
+
+/// [`node_metrics_fast_for_chain`] only reads `opened_ts_utc` / `closed_ts_utc` from DB valuation snapshots.
+/// When snapshots are missing (common for mid-chain PDAs), the UI shows long runs of `—`. Lifecycle JSONL
+/// has authoritative open/close timestamps and usually has `token_mint_a` / `token_mint_b` on bot rows.
+fn hydrate_lineage_open_close_ts_and_mints_from_lifecycle(
+    rows: &[LifecycleRow],
+    nodes: &mut [PositionStreamLineageNode],
+) {
+    if nodes.is_empty() {
+        return;
+    }
+    let want: HashSet<&str> = nodes.iter().map(|n| n.position_address.as_str()).collect();
+    let mut first_open: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut last_close: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut mints: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for r in rows {
+        let Some(pos) = r
+            .position_pubkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if !want.contains(pos) {
+            continue;
+        }
+        let pos_key = pos.to_string();
+        if let Some(ts) = r.ts_utc {
+            if is_lifecycle_open_event(r.event.as_deref()) {
+                first_open
+                    .entry(pos_key.clone())
+                    .and_modify(|e| {
+                        if ts < *e {
+                            *e = ts;
+                        }
+                    })
+                    .or_insert(ts);
+            }
+            if is_lifecycle_close_event(r.event.as_deref()) {
+                last_close
+                    .entry(pos_key.clone())
+                    .and_modify(|e| {
+                        if ts > *e {
+                            *e = ts;
+                        }
+                    })
+                    .or_insert(ts);
+            }
+        }
+        if let Some(d) = r.details.as_ref().and_then(|v| v.as_object()) {
+            let ma = d
+                .get("token_mint_a")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let mb = d
+                .get("token_mint_b")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if ma.is_some() || mb.is_some() {
+                let e = mints.entry(pos_key).or_insert((None, None));
+                if e.0.is_none() {
+                    e.0 = ma;
+                }
+                if e.1.is_none() {
+                    e.1 = mb;
+                }
+            }
+        }
+    }
+    for n in nodes.iter_mut() {
+        let addr = n.position_address.clone();
+        if n.opened_ts_utc.is_none() {
+            if let Some(ts) = first_open.get(&addr) {
+                n.opened_ts_utc = Some(ts.to_rfc3339());
+            }
+        }
+        if n.closed_ts_utc.is_none() {
+            if let Some(ts) = last_close.get(&addr) {
+                n.closed_ts_utc = Some(ts.to_rfc3339());
+            }
+        }
+        if let Some((ma, mb)) = mints.get(&addr) {
+            if n.token_mint_a.is_none() {
+                n.token_mint_a = ma.clone();
+                n.token_a_label = n.token_mint_a.as_deref().map(token_short_label);
+            }
+            if n.token_mint_b.is_none() {
+                n.token_mint_b = mb.clone();
+                n.token_b_label = n.token_mint_b.as_deref().map(token_short_label);
+            }
+        }
+    }
+}
+
+/// After rotation continuity fills `current_value_usd` / baselines, re-apply open-quote baseline lift.
+///
+/// [`node_metrics_fast_for_chain`] runs **before** [`apply_end_value_fallback_from_next_baseline`]. For
+/// closed nodes without an `end_close` snapshot, `current_value_usd` is still zero there, so the
+/// inline `baseline < 60% * current` guard never fires and one-leg snapshot baselines (e.g. ~$0.84)
+/// survive. This pass uses the final `current_value_usd` plus `closed_ts_utc` heuristics.
+fn apply_open_quote_baseline_lift_after_lineage_fallbacks(
+    nodes: &mut [PositionStreamLineageNode],
+    chain: &[String],
+    open_usd_by_pos: &HashMap<String, Decimal>,
+) {
+    for (i, addr) in chain.iter().enumerate() {
+        if i >= nodes.len() {
+            break;
+        }
+        let Some(open_usd) = open_usd_by_pos.get(addr.trim()).copied() else {
+            continue;
+        };
+        let n = &mut nodes[i];
+        if open_usd <= n.baseline_value_usd {
+            continue;
+        }
+        let has_end = n.current_value_usd > Decimal::ZERO;
+        let suspicious_vs_mark =
+            has_end && n.baseline_value_usd < n.current_value_usd * Decimal::new(60, 2);
+        let suspicious_closed_vs_quote =
+            n.closed_ts_utc.is_some() && n.baseline_value_usd < open_usd * Decimal::new(85, 2);
+        let suspicious_open_vs_quote =
+            n.closed_ts_utc.is_none() && n.baseline_value_usd < open_usd * Decimal::new(85, 2);
+        if !(n.baseline_value_usd.is_zero()
+            || suspicious_vs_mark
+            || suspicious_closed_vs_quote
+            || suspicious_open_vs_quote)
+        {
+            continue;
+        }
+        n.baseline_value_usd = open_usd;
+        n.net_pnl_usd =
+            n.current_value_usd + n.realized_cashflow_usd - n.baseline_value_usd - n.tx_fees_usd;
+        if !n.baseline_value_usd.is_zero() {
+            n.net_pnl_pct = n.net_pnl_usd / n.baseline_value_usd;
+        }
+        let append = " open_quote_baseline_lift_post_fallbacks.";
+        if let Some(ref mut note) = n.note {
+            note.push_str(append);
+        } else {
+            n.note = Some(append.trim().to_string());
+        }
+    }
+}
+
+/// After loading materialized chain-history nodes from `raw_snapshot`, re-apply open-quote baseline lift
+/// using **current** `position_stream_ledger_rows` + lifecycle JSONL (same inputs as live stream-lineage).
+///
+/// Snapshots can be older than the stream ledger table (open rows appended post-materialize); without this,
+/// `GET …/chain-history` often shows empty "start" baselines while `GET …/stream-lineage` does not.
+pub async fn enrich_chain_history_nodes_open_quote_baseline_lift(
+    state: &AppState,
+    chain: &[String],
+    nodes: &mut [PositionStreamLineageNode],
+) -> Result<(), ApiError> {
+    if chain.is_empty() || nodes.is_empty() {
+        return Ok(());
+    }
+    let Some(db) = state.db.as_ref() else {
+        return Ok(());
+    };
+    let mut open_usd_map = fetch_ledger_open_quote_usd_by_positions(db, chain).await?;
+    let rows = lifecycle_rows_cached_best_effort().await;
+    merge_open_quote_usd_from_lifecycle_rows(&rows, chain, &mut open_usd_map);
+    apply_open_quote_baseline_lift_after_lineage_fallbacks(nodes, chain, &open_usd_map);
+    Ok(())
+}
+
+/// Refresh per-PDA **network tx fees** and **LP fees collected** from `position_stream_ledger_rows`
+/// (+ lifecycle JSONL fallback when DB rows are sparse), then recompute `net_pnl_*`.
+///
+/// Used by `GET …/chain-history`: materialized `raw_snapshot` can freeze zeros while the ledger table
+/// already has rows (or rows arrive after materialize).
+pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
+    state: &AppState,
+    chain: &[String],
+    nodes: &mut [PositionStreamLineageNode],
+) -> Result<(), ApiError> {
+    let Some(db) = state.db.as_ref() else {
+        return Ok(());
+    };
+    if chain.is_empty() || nodes.is_empty() {
+        return Ok(());
+    }
+
+    let fee_rows = sqlx::query(
+        r#"
+        SELECT position_pubkey, COALESCE(SUM(tx_fee_lamports), 0) AS fee_lamports
+        FROM position_stream_ledger_rows
+        WHERE position_pubkey = ANY($1)
+        GROUP BY position_pubkey
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("chain-history: tx fee batch: {e}")))?;
+
+    let fee_lamports_by_pos: HashMap<String, u64> = fee_rows
+        .into_iter()
+        .filter_map(|r| {
+            let position: String = r.try_get("position_pubkey").ok()?;
+            let fee: i64 = r.try_get("fee_lamports").unwrap_or(0);
+            Some((position, fee.max(0) as u64))
+        })
+        .collect();
+
+    let mut fee_metrics = lp_fees_collected_usd_from_ledger_db_batch(state, db, chain).await?;
+    let needs_lifecycle_fee_fallback = chain.iter().any(|p| {
+        fee_metrics.get(p).is_none_or(|m| {
+            m.collect_events == 0 && m.fees_collected_usd.is_zero() && m.by_mint_ui.is_empty()
+        })
+    });
+    let lifecycle_rows = if needs_lifecycle_fee_fallback {
+        Some(lifecycle_rows_cached_best_effort().await)
+    } else {
+        None
+    };
+    if let Some(rows) = lifecycle_rows.as_ref() {
+        for p in chain {
+            let has_fee_metric = fee_metrics.get(p).is_some_and(|m| {
+                m.collect_events > 0 || !m.fees_collected_usd.is_zero() || !m.by_mint_ui.is_empty()
+            });
+            if has_fee_metric {
+                continue;
+            }
+            let (collect_events, fees_collected_usd, by_mint_ui) =
+                lp_fees_collected_usd_from_lifecycle_rows(state, rows, p).await;
+            if collect_events > 0 || !fees_collected_usd.is_zero() || !by_mint_ui.is_empty() {
+                fee_metrics.insert(
+                    p.clone(),
+                    FastFeeMetric {
+                        collect_events,
+                        fees_collected_usd,
+                        by_mint_ui,
+                        pool_mint_a: None,
+                        pool_mint_b: None,
+                    },
+                );
+            }
+        }
+    }
+
+    let (sol_usd, _) = sol_usd().await;
+    for node in nodes {
+        let p = node.position_address.trim().to_string();
+        let fee_lamports = fee_lamports_by_pos.get(&p).copied().unwrap_or(0);
+        let tx_fees_usd = if sol_usd > 0.0 {
+            Decimal::from_f64_retain((fee_lamports as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+        let fee_metric = fee_metrics.get(&p).cloned().unwrap_or_default();
+        let mut mint_a = node.token_mint_a.clone();
+        let mut mint_b = node.token_mint_b.clone();
+        fill_missing_lineage_mints_from_fee_metric(&mut mint_a, &mut mint_b, &fee_metric);
+        node.token_mint_a = mint_a.clone();
+        node.token_mint_b = mint_b.clone();
+        node.token_a_label = mint_a.as_deref().map(token_short_label);
+        node.token_b_label = mint_b.as_deref().map(token_short_label);
+        let (fees_collected_token_a_ui, fees_collected_token_b_ui) =
+            fees_collected_token_ui_for_fee_metric(mint_a.as_ref(), mint_b.as_ref(), &fee_metric);
+
+        node.tx_fee_lamports = fee_lamports;
+        node.tx_fees_usd = tx_fees_usd;
+        node.collect_events = fee_metric.collect_events;
+        node.fees_collected_usd = fee_metric.fees_collected_usd;
+        node.fees_collected_token_a_ui = fees_collected_token_a_ui;
+        node.fees_collected_token_b_ui = fees_collected_token_b_ui;
+
+        node.net_pnl_usd = node.current_value_usd + node.realized_cashflow_usd
+            - node.baseline_value_usd
+            - node.tx_fees_usd;
+        if !node.baseline_value_usd.is_zero() {
+            node.net_pnl_pct = node.net_pnl_usd / node.baseline_value_usd;
+        } else {
+            node.net_pnl_pct = Decimal::ZERO;
+        }
+    }
+
+    Ok(())
+}
+
 async fn node_metrics_fast_for_chain(
     state: &AppState,
     chain: &[String],
@@ -3332,25 +4262,7 @@ async fn node_metrics_fast_for_chain(
     // Guardrail: baseline snapshots derived from open deltas may miss one leg (e.g. WSOL/native),
     // which can massively understate "start value". Prefer the USD quote captured at open time
     // (deposit quote estimate / target) when it is meaningfully higher than snapshot baseline.
-    let open_quote_rows = sqlx::query(
-        r#"
-        SELECT DISTINCT ON (position_pubkey)
-          position_pubkey,
-          COALESCE(
-            NULLIF(raw_json #>> '{details,open_quote_estimated_value_usd}', '')::DOUBLE PRECISION,
-            NULLIF(raw_json #>> '{details,open_target_usd}', '')::DOUBLE PRECISION,
-            NULLIF(raw_json #>> '{details,open_prev_end_value_usd}', '')::DOUBLE PRECISION
-          ) AS open_usd
-        FROM position_stream_ledger_rows
-        WHERE position_pubkey = ANY($1)
-          AND event IN ('bot_open_position', 'bot_open_position_full_range', 'position_open')
-        ORDER BY position_pubkey, ts_utc DESC
-        "#,
-    )
-    .bind(chain)
-    .fetch_all(db.pool())
-    .await
-    .map_err(|e| ApiError::internal(format!("stream lineage: fast open quote query: {e}")))?;
+    let open_usd_by_pos = fetch_ledger_open_quote_usd_by_positions(db, chain).await?;
 
     let parse_metric = |r: sqlx::postgres::PgRow| -> Option<(String, FastSnapshotMetric)> {
         let position: String = r.try_get("position_pubkey").ok()?;
@@ -3391,21 +4303,6 @@ async fn node_metrics_fast_for_chain(
         baseline_rows.into_iter().filter_map(parse_metric).collect();
     let currents: HashMap<String, FastSnapshotMetric> =
         current_rows.into_iter().filter_map(parse_metric).collect();
-    let open_usd_by_pos: HashMap<String, Decimal> = open_quote_rows
-        .into_iter()
-        .filter_map(|r| {
-            let position: String = r.try_get("position_pubkey").ok()?;
-            let open_usd: Option<f64> = r.try_get::<Option<f64>, _>("open_usd").ok().flatten();
-            let d = open_usd
-                .and_then(Decimal::from_f64_retain)
-                .unwrap_or(Decimal::ZERO);
-            if d.is_zero() {
-                None
-            } else {
-                Some((position, d))
-            }
-        })
-        .collect();
     let fee_lamports_by_pos: HashMap<String, u64> = fee_rows
         .into_iter()
         .filter_map(|r| {
@@ -3442,6 +4339,8 @@ async fn node_metrics_fast_for_chain(
                         collect_events,
                         fees_collected_usd,
                         by_mint_ui,
+                        pool_mint_a: None,
+                        pool_mint_b: None,
                     },
                 );
             }
@@ -3454,11 +4353,12 @@ async fn node_metrics_fast_for_chain(
         let baseline = baselines.get(p);
         let current = currents.get(p);
         let mut baseline_value = baseline.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
-        let current_value = current.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
+        let mut current_value = current.map(|m| m.value_usd).unwrap_or(Decimal::ZERO);
         if let Some(open_usd) = open_usd_by_pos.get(p).copied() {
             let looks_understated = baseline_value.is_zero()
                 || (current_value > Decimal::ZERO
-                    && baseline_value < current_value * Decimal::new(60, 2));
+                    && baseline_value < current_value * Decimal::new(60, 2))
+                || (current_value.is_zero() && open_usd > baseline_value);
             if looks_understated && open_usd > baseline_value {
                 baseline_value = open_usd;
             }
@@ -3469,44 +4369,47 @@ async fn node_metrics_fast_for_chain(
         } else {
             Decimal::ZERO
         };
+        let closed_ts_pre =
+            current.and_then(|m| closed_ts_for_snapshot_kind(m.kind.as_deref(), m.ts_utc));
+        if closed_ts_pre.is_none() {
+            if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(p.trim()) {
+                if let Ok(Ok(pos)) = timeout(
+                    Duration::from_secs(2),
+                    monitored_position_from_chain(state.provider.clone(), &pk),
+                )
+                .await
+                {
+                    let prices = fetch_prices_for_positions(
+                        state.provider.clone(),
+                        std::slice::from_ref(&pos),
+                    )
+                    .await;
+                    if let Ok(v) =
+                        compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
+                        && v.value_usd > Decimal::ZERO
+                    {
+                        current_value = v.value_usd;
+                    }
+                }
+            }
+        }
         let net_pnl_usd = current_value - baseline_value - tx_fees_usd;
         let net_pnl_pct = if baseline_value.is_zero() {
             Decimal::ZERO
         } else {
             net_pnl_usd / baseline_value
         };
-        let mint_a = baseline
+        let mut mint_a = baseline
             .and_then(|m| m.token_mint_a.clone())
             .or_else(|| current.and_then(|m| m.token_mint_a.clone()));
-        let mint_b = baseline
+        let mut mint_b = baseline
             .and_then(|m| m.token_mint_b.clone())
             .or_else(|| current.and_then(|m| m.token_mint_b.clone()));
         let fee_metric = fee_metrics.get(p).cloned().unwrap_or_default();
-        let collected_a_ui = mint_a
-            .as_deref()
-            .and_then(|m| fee_metric.by_mint_ui.get(m).copied());
-        let collected_b_ui = mint_b
-            .as_deref()
-            .and_then(|m| fee_metric.by_mint_ui.get(m).copied());
-        let mut fees_collected_token_a_ui = ((fee_metric.collect_events > 0) && mint_a.is_some())
-            .then_some(collected_a_ui)
-            .flatten();
-        let mut fees_collected_token_b_ui = ((fee_metric.collect_events > 0) && mint_b.is_some())
-            .then_some(collected_b_ui)
-            .flatten();
-        let bridged_missing_collect_leg = fee_metric.collect_events > 0
-            && ((fees_collected_token_a_ui.is_some() && fees_collected_token_b_ui.is_none())
-                || (fees_collected_token_a_ui.is_none() && fees_collected_token_b_ui.is_some()));
-        if bridged_missing_collect_leg {
-            if fees_collected_token_a_ui.is_none() && mint_a.is_some() {
-                fees_collected_token_a_ui = Some(Decimal::ZERO);
-            }
-            if fees_collected_token_b_ui.is_none() && mint_b.is_some() {
-                fees_collected_token_b_ui = Some(Decimal::ZERO);
-            }
-        }
-        let closed_ts =
-            current.and_then(|m| closed_ts_for_snapshot_kind(m.kind.as_deref(), m.ts_utc));
+        fill_missing_lineage_mints_from_fee_metric(&mut mint_a, &mut mint_b, &fee_metric);
+        let (fees_collected_token_a_ui, fees_collected_token_b_ui) =
+            fees_collected_token_ui_for_fee_metric(mint_a.as_ref(), mint_b.as_ref(), &fee_metric);
+        let closed_ts = closed_ts_pre;
         out.push(PositionStreamLineageNode {
             position_address: p.clone(),
             token_a_label: mint_a.as_deref().map(token_short_label),
@@ -3532,6 +4435,14 @@ async fn node_metrics_fast_for_chain(
             net_pnl_pct,
             note: Some("fast_long_chain_metrics: per-node values use batched DB snapshots and batched ledger fee rollups; detailed non-fee cashflow is intentionally omitted from this hot path.".to_string()),
             collect_zero_diagnostics: None,
+            chain_history_start_value_usd: None,
+            chain_history_end_value_usd: None,
+            chain_history_current_value_usd: None,
+            chain_history_pool_address: None,
+            chain_history_tick_lower_open: None,
+            chain_history_tick_upper_open: None,
+            chain_history_event_spot_token_a_usd_open: None,
+            chain_history_event_spot_token_a_usd_close: None,
         });
     }
     Ok(out)
@@ -3999,7 +4910,37 @@ async fn node_metrics_from_lifecycle_best_effort(
             ) + collect_zero_note,
         ),
         collect_zero_diagnostics: None,
+        chain_history_start_value_usd: None,
+        chain_history_end_value_usd: None,
+        chain_history_current_value_usd: None,
+        chain_history_pool_address: None,
+        chain_history_tick_lower_open: None,
+        chain_history_tick_upper_open: None,
+        chain_history_event_spot_token_a_usd_open: None,
+        chain_history_event_spot_token_a_usd_close: None,
     })
+}
+
+/// When `position_stream_edges` lags JSONL (e.g. reopen PDA not ingested yet), DB-only lineage can stop
+/// early while lifecycle already lists the same ordered prefix plus newer PDAs. Prefer the longer chain
+/// only when it **extends** `from_db` as an exact prefix (avoid replacing unrelated orderings).
+pub(crate) fn prefer_lifecycle_lineage_if_extends_db_prefix(
+    from_db: Vec<String>,
+    lifecycle: Vec<String>,
+) -> Vec<String> {
+    if from_db.is_empty() {
+        return if lifecycle.is_empty() { from_db } else { lifecycle };
+    }
+    if lifecycle.len() > from_db.len()
+        && from_db
+            .iter()
+            .enumerate()
+            .all(|(i, p)| lifecycle.get(i) == Some(p))
+    {
+        lifecycle
+    } else {
+        from_db
+    }
 }
 
 /// Same ordered PDA chain as [`compute_position_stream_lineage`] (oldest → newest along rotations).
@@ -4075,6 +5016,11 @@ pub(crate) async fn resolve_lineage_chain_for_stream_pnl(
         }
     }
 
+    if !stitch_suppressed {
+        let lc = chain_from_lifecycle_best_effort_rows(&rows, entry, 100);
+        chain = prefer_lifecycle_lineage_if_extends_db_prefix(chain, lc);
+    }
+
     if chain.is_empty() {
         vec![entry.to_string()]
     } else {
@@ -4082,10 +5028,33 @@ pub(crate) async fn resolve_lineage_chain_for_stream_pnl(
     }
 }
 
+/// Options for [`compute_position_stream_lineage_opts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ComputePositionStreamLineageOpts {
+    /// When true, **await** `persist_event_valuation_snapshots_for_positions` before per-node metrics
+    /// (chains ≤ 8 PDAs). Used by **chain-history materialize** so `apply_open_start_usd_from_lifecycle_snapshots_for_chain_history`
+    /// reads rows that were previously written only in a background `tokio::spawn` (race → `start_value_usd` = 0).
+    pub await_valuation_snapshot_persist: bool,
+}
+
 /// Build an ordered stream lineage chain and enrich each node with best-effort metrics.
 pub async fn compute_position_stream_lineage(
     state: &AppState,
     position_address: &str,
+) -> Result<PositionStreamLineageResponse, ApiError> {
+    compute_position_stream_lineage_opts(
+        state,
+        position_address,
+        ComputePositionStreamLineageOpts::default(),
+    )
+    .await
+}
+
+/// Same as [`compute_position_stream_lineage`] with optional snapshot-persist **ordering** for writers.
+pub async fn compute_position_stream_lineage_opts(
+    state: &AppState,
+    position_address: &str,
+    opts: ComputePositionStreamLineageOpts,
 ) -> Result<PositionStreamLineageResponse, ApiError> {
     use crate::services::position_stream_pnl::compute_position_stream_pnl_for_stream_members;
 
@@ -4133,6 +5102,7 @@ pub async fn compute_position_stream_lineage(
                 "DB is disabled; chain reconstructed best-effort from lifecycle JSONL (rotation signals: matching rebalance_session_id, or bot activity tied to the closed PDA in the pre-open window; 60m lookback)."
                     .to_string(),
             ),
+            chain_history_materialized_ts_utc: None,
         });
     }
 
@@ -4156,16 +5126,21 @@ pub async fn compute_position_stream_lineage(
     .ok();
 
     if state.db.is_some() && chain.len() <= 8 {
-        let st_bg = state.clone();
-        let rows_bg = rows.clone();
-        let chain_bg = chain.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                persist_event_valuation_snapshots_for_positions(&st_bg, &rows_bg, &chain_bg).await
-            {
-                tracing::warn!(error = %e, "stream lineage: background snapshot persist failed");
-            }
-        });
+        if opts.await_valuation_snapshot_persist {
+            persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await?;
+        } else {
+            let st_bg = state.clone();
+            let rows_bg = rows.clone();
+            let chain_bg = chain.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    persist_event_valuation_snapshots_for_positions(&st_bg, &rows_bg, &chain_bg)
+                        .await
+                {
+                    tracing::warn!(error = %e, "stream lineage: background snapshot persist failed");
+                }
+            });
+        }
     }
 
     let mut nodes: Vec<PositionStreamLineageNode> = if chain.len() > 8 {
@@ -4188,11 +5163,20 @@ pub async fn compute_position_stream_lineage(
         nodes
     };
 
+    hydrate_lineage_open_close_ts_and_mints_from_lifecycle(&rows, &mut nodes);
+
     apply_session_continuity_from_lifecycle_rows(&rows, &mut nodes);
     // Fill gaps in closed nodes (close row missing leg token deltas) by using next node baseline.
     // This is useful in DB mode too when per-PDA current/end valuation is missing.
     apply_end_value_fallback_from_next_baseline(&mut nodes);
     apply_baseline_fallback_from_prev_end(&mut nodes);
+    // Long chains use batched fast metrics; short chains use per-`node_metrics`. Both need the same
+    // post-fallback open-quote baseline lift (BUG-20260513-03 regressed when gated on `chain.len() > 8`).
+    if let Some(db) = state.db.as_ref() {
+        let mut open_usd_map = fetch_ledger_open_quote_usd_by_positions(db, &chain).await?;
+        merge_open_quote_usd_from_lifecycle_rows(&rows, &chain, &mut open_usd_map);
+        apply_open_quote_baseline_lift_after_lineage_fallbacks(&mut nodes, &chain, &open_usd_map);
+    }
     let cps = fee_checkpoint_rows_cached_best_effort().await;
     attach_collect_zero_diagnostics(&rows, &cps, &mut nodes);
 
@@ -4220,6 +5204,7 @@ pub async fn compute_position_stream_lineage(
         totals,
         chain_cost_summary,
         note: Some(note),
+        chain_history_materialized_ts_utc: None,
     })
 }
 
@@ -4726,6 +5711,36 @@ mod tests {
     }
 
     #[test]
+    fn prefer_lifecycle_lineage_if_extends_db_prefix_extends_tail() {
+        let db = vec!["a".to_string(), "b".to_string()];
+        let lc = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(
+            super::prefer_lifecycle_lineage_if_extends_db_prefix(db, lc),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn prefer_lifecycle_lineage_if_extends_db_prefix_noop_when_not_prefix() {
+        let db = vec!["b".to_string()];
+        let lc = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(
+            super::prefer_lifecycle_lineage_if_extends_db_prefix(db, lc),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn prefer_lifecycle_lineage_if_extends_db_prefix_empty_db_uses_lifecycle() {
+        let db = vec![];
+        let lc = vec!["x".to_string()];
+        assert_eq!(
+            super::prefer_lifecycle_lineage_if_extends_db_prefix(db, lc),
+            vec!["x"]
+        );
+    }
+
+    #[test]
     fn stream_lineage_does_not_call_ingest_enabled_pnl_wrapper() {
         let source = include_str!("position_stream_lineage.rs");
         let wrapper_call = concat!("compute_position_stream_", "pnl(");
@@ -4750,11 +5765,187 @@ mod tests {
             "fast path should keep baseline correction from open quote USD"
         );
         assert!(
+            source.contains("apply_open_quote_baseline_lift_after_lineage_fallbacks"),
+            "long-chain lineage must re-lift understated baselines after rotation end-value fallbacks"
+        );
+        assert!(
             source.contains("chain.len() > 8"),
             "long rotation chains must stay on the batched node-metrics path instead of fanning out full node_metrics calls per PDA"
         );
         assert!(source.contains("fees_collected_usd: fee_metric.fees_collected_usd"));
         assert!(source.contains("collect_events: fee_metric.collect_events"));
+    }
+
+    #[test]
+    fn fill_missing_mints_from_fee_metric_restores_sol_usdc_fee_legs() {
+        let wsol = WSOL_MINT.to_string();
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string();
+        let mut mint_a: Option<String> = None;
+        let mut mint_b: Option<String> = None;
+        let mut fee = FastFeeMetric::default();
+        fee.collect_events = 1;
+        fee.pool_mint_a = Some(wsol.clone());
+        fee.pool_mint_b = Some(usdc.clone());
+        fee
+            .by_mint_ui
+            .insert(wsol.clone(), Decimal::new(11434, 9));
+        fee
+            .by_mint_ui
+            .insert(usdc.clone(), Decimal::new(145, 6));
+        fill_missing_lineage_mints_from_fee_metric(&mut mint_a, &mut mint_b, &fee);
+        assert_eq!(mint_a.as_ref(), Some(&wsol));
+        assert_eq!(mint_b.as_ref(), Some(&usdc));
+        let (a_ui, b_ui) =
+            fees_collected_token_ui_for_fee_metric(mint_a.as_ref(), mint_b.as_ref(), &fee);
+        assert!(a_ui.is_some_and(|v| v > Decimal::ZERO));
+        assert!(b_ui.is_some_and(|v| v > Decimal::ZERO));
+    }
+
+    #[test]
+    fn merge_open_quote_usd_from_lifecycle_rows_fills_missing_db_map() {
+        let ts = DateTime::parse_from_rfc3339("2026-05-13T12:15:58.385Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let row = LifecycleRow {
+            ts_utc: Some(ts),
+            event: Some("bot_open_position".to_string()),
+            pool_address: None,
+            position_pubkey: Some("2Zjk86Sb5sM5T54CefNtjK6BypP8SUjujE1wokfce4qP".to_string()),
+            fee_payer_pubkey: None,
+            rebalance_session_id: None,
+            tx_fee_lamports: None,
+            fee_payer_token_deltas: None,
+            fee_payer_token_a_delta_ui: None,
+            fee_payer_token_b_delta_ui: None,
+            lp_collected_token_a_raw: None,
+            lp_collected_token_b_raw: None,
+            details: Some(serde_json::json!({
+                "open_quote_estimated_value_usd": 9.955919156645884
+            })),
+            source: None,
+        };
+        let chain = vec!["2Zjk86Sb5sM5T54CefNtjK6BypP8SUjujE1wokfce4qP".to_string()];
+        let mut out = HashMap::new();
+        merge_open_quote_usd_from_lifecycle_rows(&[row], &chain, &mut out);
+        let v = out
+            .get("2Zjk86Sb5sM5T54CefNtjK6BypP8SUjujE1wokfce4qP")
+            .copied()
+            .unwrap();
+        let expected = Decimal::from_f64_retain(9.955919156645884).unwrap();
+        assert!((v - expected).abs() < Decimal::new(1, 6));
+    }
+
+    #[test]
+    fn hydrate_lineage_fills_open_close_ts_and_mints_from_lifecycle() {
+        let ts_open = DateTime::parse_from_rfc3339("2026-05-13T12:15:58.385Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_close = DateTime::parse_from_rfc3339("2026-05-13T13:05:51.721Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let rows = vec![
+            LifecycleRow {
+                ts_utc: Some(ts_open),
+                event: Some("bot_open_position".to_string()),
+                pool_address: Some("Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE".to_string()),
+                position_pubkey: Some("2Zjk86Sb5sM5T54CefNtjK6BypP8SUjujE1wokfce4qP".to_string()),
+                fee_payer_pubkey: None,
+                rebalance_session_id: None,
+                tx_fee_lamports: None,
+                fee_payer_token_deltas: None,
+                fee_payer_token_a_delta_ui: None,
+                fee_payer_token_b_delta_ui: None,
+                lp_collected_token_a_raw: None,
+                lp_collected_token_b_raw: None,
+                details: Some(serde_json::json!({
+                    "token_mint_a": "So11111111111111111111111111111111111111112",
+                    "token_mint_b": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                })),
+                source: None,
+            },
+            LifecycleRow {
+                ts_utc: Some(ts_close),
+                event: Some("bot_close_position".to_string()),
+                pool_address: Some("Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE".to_string()),
+                position_pubkey: Some("2Zjk86Sb5sM5T54CefNtjK6BypP8SUjujE1wokfce4qP".to_string()),
+                fee_payer_pubkey: None,
+                rebalance_session_id: None,
+                tx_fee_lamports: None,
+                fee_payer_token_deltas: None,
+                fee_payer_token_a_delta_ui: None,
+                fee_payer_token_b_delta_ui: None,
+                lp_collected_token_a_raw: None,
+                lp_collected_token_b_raw: None,
+                details: None,
+                source: None,
+            },
+        ];
+        let mut nodes = vec![mk_node(
+            "2Zjk86Sb5sM5T54CefNtjK6BypP8SUjujE1wokfce4qP",
+            Decimal::ZERO,
+            Decimal::ZERO,
+        )];
+        hydrate_lineage_open_close_ts_and_mints_from_lifecycle(&rows, &mut nodes);
+        assert_eq!(
+            nodes[0].opened_ts_utc.as_deref(),
+            Some(ts_open.to_rfc3339().as_str())
+        );
+        assert_eq!(
+            nodes[0].closed_ts_utc.as_deref(),
+            Some(ts_close.to_rfc3339().as_str())
+        );
+        assert_eq!(
+            nodes[0].token_mint_a.as_deref(),
+            Some("So11111111111111111111111111111111111111112")
+        );
+        assert_eq!(
+            nodes[0].token_mint_b.as_deref(),
+            Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+        );
+        assert_eq!(nodes[0].token_a_label.as_deref(), Some("SOL"));
+        assert_eq!(nodes[0].token_b_label.as_deref(), Some("USDC"));
+    }
+
+    #[test]
+    fn open_quote_baseline_lift_post_fallbacks_repairs_understated_closed_node() {
+        let mut n = mk_node(
+            "Aaiey3FyWAwAU8YC",
+            Decimal::new(842, 3),
+            Decimal::new(3301, 3),
+        );
+        n.closed_ts_utc = Some("2026-05-13T15:50:00Z".to_string());
+        let mut nodes = vec![n];
+        let chain = vec!["Aaiey3FyWAwAU8YC".to_string()];
+        let mut m = HashMap::new();
+        m.insert("Aaiey3FyWAwAU8YC".to_string(), Decimal::new(3300, 3));
+        apply_open_quote_baseline_lift_after_lineage_fallbacks(&mut nodes, &chain, &m);
+        assert_eq!(nodes[0].baseline_value_usd, Decimal::new(3300, 3));
+        assert!(
+            nodes[0]
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains("post_fallbacks")
+        );
+    }
+
+    #[test]
+    fn open_quote_baseline_lift_post_fallbacks_repairs_open_node_rotation_baseline() {
+        let mut n = mk_node(
+            "GJaKtidWc1eu59BJmhmHXDX4YxDjc9UH8omedNNizjzv",
+            Decimal::new(3301, 3),
+            Decimal::new(8700, 3),
+        );
+        n.closed_ts_utc = None;
+        let mut nodes = vec![n];
+        let chain = vec!["GJaKtidWc1eu59BJmhmHXDX4YxDjc9UH8omedNNizjzv".to_string()];
+        let mut m = HashMap::new();
+        m.insert(
+            "GJaKtidWc1eu59BJmhmHXDX4YxDjc9UH8omedNNizjzv".to_string(),
+            Decimal::new(8700, 3),
+        );
+        apply_open_quote_baseline_lift_after_lineage_fallbacks(&mut nodes, &chain, &m);
+        assert_eq!(nodes[0].baseline_value_usd, Decimal::new(8700, 3));
     }
 
     fn mk_node(addr: &str, baseline: Decimal, current: Decimal) -> PositionStreamLineageNode {
@@ -4783,6 +5974,14 @@ mod tests {
             net_pnl_pct: Decimal::ZERO,
             note: None,
             collect_zero_diagnostics: None,
+            chain_history_start_value_usd: None,
+            chain_history_end_value_usd: None,
+            chain_history_current_value_usd: None,
+            chain_history_pool_address: None,
+            chain_history_tick_lower_open: None,
+            chain_history_tick_upper_open: None,
+            chain_history_event_spot_token_a_usd_open: None,
+            chain_history_event_spot_token_a_usd_close: None,
         }
     }
 

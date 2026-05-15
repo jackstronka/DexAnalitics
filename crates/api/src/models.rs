@@ -553,6 +553,35 @@ pub struct PositionStreamLineageNode {
     /// Extra diagnostics for collect rows that show zero LP fees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collect_zero_diagnostics: Option<LineageCollectZeroDiagnostics>,
+    /// `GET …/chain-history` only: `start_value_usd` when **> 0** (zero in DB = unknown at materialize; omitted so UI falls back).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub chain_history_start_value_usd: Option<String>,
+    /// `GET …/chain-history` only: `end_value_usd` when **> 0**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub chain_history_end_value_usd: Option<String>,
+    /// `GET …/chain-history` only: `current_value_usd` when **> 0** (last materialized mark).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub chain_history_current_value_usd: Option<String>,
+    /// `GET …/chain-history` only: `position_chain_history_nodes.pool_address` (valuation / ledger).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_history_pool_address: Option<String>,
+    /// `GET …/chain-history` only: open tick lower from persisted ledger row (`tick_*` / `new_tick_*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_history_tick_lower_open: Option<i32>,
+    /// `GET …/chain-history` only: open tick upper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_history_tick_upper_open: Option<i32>,
+    /// Open-event USD spot for token A (`event_price_a_usd` on earliest open ledger row), as string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub chain_history_event_spot_token_a_usd_open: Option<String>,
+    /// Close-event USD spot for token A (stored in SQL column `event_price_b_usd` at materialize), as string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub chain_history_event_spot_token_a_usd_close: Option<String>,
 }
 
 /// Aggregated **network costs** and **LP fees collected** across the full rotation chain.
@@ -583,6 +612,15 @@ pub struct LineageChainCostSummary {
     pub collect_events_total: u32,
 }
 
+/// Result of `POST /positions/{address}/chain-history/refresh` (materialize Postgres read-model).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MaterializeChainHistoryResponse {
+    pub ok: bool,
+    pub chain_anchor_pubkey: String,
+    pub metrics_mode: String,
+    pub nodes_written: u32,
+}
+
 /// Ordered lineage for a position stream (root → … → current) plus per-node metrics.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PositionStreamLineageResponse {
@@ -601,6 +639,11 @@ pub struct PositionStreamLineageResponse {
     /// Notes about lineage reconstruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// When this payload was last written to Postgres (`position_chain_history_meta.materialized_ts_utc`).
+    /// Present only on `GET …/chain-history`; omitted on live `stream-lineage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub chain_history_materialized_ts_utc: Option<String>,
 }
 
 /// Position status.
@@ -945,6 +988,10 @@ pub struct BuildUnsignedTxResponse {
 pub struct SubmitSignedTxRequest {
     /// Base64 serialized signed transaction.
     pub signed_tx_base64: String,
+    /// Optional position pubkey strings (e.g. from `/tx/*/build` `position_address`) to refresh
+    /// materialized chain-history after a successful RPC send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_history_anchors: Option<Vec<String>>,
 }
 
 /// Submit signed tx response.
@@ -3107,6 +3154,66 @@ pub struct AgentDecisionWriteResponse {
     pub path: String,
     pub written: bool,
     pub row: AgentDecisionRow,
+}
+
+// ============================================================================
+// Wallet ledger (append-only GL-style journal)
+// ============================================================================
+
+/// Status of a ledger line: in-flight, confirmed on-chain, or failed before/at submit.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletLedgerStatus {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+/// One SPL leg: signed change in **smallest units** (`raw_delta_i128` as decimal string).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletLedgerDelta {
+    pub mint: String,
+    pub decimals: u8,
+    pub raw_delta_i128: String,
+}
+
+/// One append-only journal row.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletLedgerEvent {
+    pub schema_version: u32,
+    pub ts_utc: String,
+    pub event_id: String,
+    pub correlation_id: String,
+    pub status: WalletLedgerStatus,
+    /// e.g. `swap_before_open`, `open_position`, `close_position`, `collect_fees`,
+    /// `decrease_liquidity`, `rebalance_position`, `transfer_sol`, `convert_sol`
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_pda: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_session_id: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Native SOL lamport change for `owner` (decimal string of i64).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_lamports_delta: Option<String>,
+    pub deltas: Vec<WalletLedgerDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub source: String,
+}
+
+/// Response for `GET /wallets/ledger-events`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletLedgerEventsResponse {
+    pub path: String,
+    pub events: Vec<WalletLedgerEvent>,
 }
 
 #[cfg(test)]

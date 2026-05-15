@@ -9,6 +9,7 @@ use crate::models::{
 use crate::services::optimization_runner::{
     apply_optimize_result_parsed, end_optimize_busy, try_begin_optimize_busy,
 };
+use crate::services::position_chain_history::spawn_chain_history_materialize_background;
 use crate::services::position_executor::load_wallet_from_env;
 use crate::services::strategy_service::{
     apply_optional_interval_to_decision_config, min_rebalance_interval_minutes_from_params,
@@ -684,6 +685,12 @@ async fn start_strategy_executor_core(
                         "start_strategy: monitor.add_position failed (RPC); continuing without this PDA in monitor"
                     );
                     monitor_failures.push(format!("{s}: {e}"));
+                } else if !dry_run && !state.dry_run {
+                    spawn_chain_history_materialize_background(
+                        state,
+                        s.to_string(),
+                        "start_strategy_seed",
+                    );
                 }
             } else {
                 return Err(ApiError::bad_request(
@@ -917,15 +924,26 @@ pub async fn ensure_strategy_running_after_position_link(
 
     if !need_full_start {
         let mut note = None;
-        if let Err(e) = state.monitor.add_position(position_pda).await {
-            warn!(
-                position = %position_pda,
-                error = %e,
-                "ensure_strategy_running_after_position_link: monitor.add_position failed (RPC); link is already saved"
-            );
-            note = Some(format!(
-                "Monitor could not load this position from RPC: {e}"
-            ));
+        match state.monitor.add_position(position_pda).await {
+            Err(e) => {
+                warn!(
+                    position = %position_pda,
+                    error = %e,
+                    "ensure_strategy_running_after_position_link: monitor.add_position failed (RPC); link is already saved"
+                );
+                note = Some(format!(
+                    "Monitor could not load this position from RPC: {e}"
+                ));
+            }
+            Ok(()) => {
+                if !state.dry_run {
+                    spawn_chain_history_materialize_background(
+                        state,
+                        position_pda.to_string(),
+                        "strategy_position_link",
+                    );
+                }
+            }
         }
         sync_executor_disabled_from_config(state, strategy_id).await?;
         return Ok(note);

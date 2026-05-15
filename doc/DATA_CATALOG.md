@@ -12,6 +12,28 @@ Purpose: quickly discover existing datasets before adding new ingestion/snapshot
 
 ## Sources
 
+### `data/wallet-ledger-events.jsonl`
+
+tags: domain=wallet,lineage; source=jsonl-local; freshness=near-realtime; quality=best-effort(audit); cost=free
+
+- Append-only **wallet journal** (GL-style): API-originated actions (`swap_before_open`, `open_position`, `transfer_sol`, `convert_sol`) with `pending` / `confirmed` / `failed` and `correlation_id` to tie in-flight rows to outcomes (`transfer_sol` / `convert_sol` use the same id for sender+recipient or for convert pending→outcome).
+- **Not** a balance register; UI and automation must not treat it as authoritative SPL/native balances.
+- Include in host **backup** / retention policy like other `data/*.jsonl` audit files (loss = weaker post-mortem, not consensus breakage).
+- Written by `clmm-lp-api` (`wallet_ledger` service); path override: `CLMM_WALLET_LEDGER_PATH`. Read via **`GET /wallets/ledger-events`**.
+- **Roadmap:** docelowo mirror lub wyłączny zapis w **PostgreSQL** (plan kont + wpisy journal / read model); zob. `doc/WALLET_GL.md` §2.1. Do migracji ten plik pozostaje źródłem append.
+
+### `wallet_gl_token_account` (Postgres)
+
+tags: domain=wallet; source=postgres; freshness=static(curated); quality=authoritative(config); cost=free
+
+- Jedno wierszowe **konto księgowe per mint SPL** z listy tokenów występujących w **curated** parach (`mint`, `symbol`, `account_code` = `SPL:{mint}`, `decimals`). Seed: migracja `009_wallet_gl_curated_tokens_and_pools.sql` — **zsynchronizuj** z `crates/api/src/handlers/backtests.rs::curated_backtest_pools()`.
+
+### `wallet_gl_curated_pool` (Postgres)
+
+tags: domain=wallet; source=postgres; freshness=static(curated); quality=authoritative(config); cost=free
+
+- **Pary / poolle** (Orca, Raydium, Meteora) z tej samej listy co backtest: `pair_id`, `protocol`, `pool_address`, minty A/B + symbole. FK do `wallet_gl_token_account`.
+
 ### `data/wallet-effective-cache.json`
 
 tags: domain=wallet; source=json-local; freshness=near-realtime; quality=best-effort(read-model); cost=free
@@ -47,6 +69,21 @@ tags: domain=valuation,lineage; source=postgres; freshness=near-realtime; qualit
 
 - Baseline/current valuation snapshots.
 - May include backfilled rows tagged with approximate price-source metadata.
+
+### `position_chain_history_nodes` (Postgres)
+
+tags: domain=lineage,valuation; source=postgres; freshness=near-realtime; quality=best-effort(read-model); cost=free
+
+- **Materialized read-model** for one resolved rotation chain (UI “Historia pozycji” / lineage table): one row per PDA with `chain_anchor_pubkey` (URL/session anchor), `chain_seq` (1 = oldest), `metrics_mode` (`live` | `settlement_v1`), USD marks, fee legs, cashflow / net PnL, `raw_snapshot` JSONB (pełny `PositionStreamLineageNode` dla szybkiego odczytu API).
+- **API (równoległe do `stream-lineage`):** `POST /api/v1/positions/{address}/chain-history/refresh` zapisuje (opcjonalnie chronione env **`CLMM_CHAIN_HISTORY_REFRESH_SECRET`** + nagłówek Bearer lub `X-Chain-History-Refresh`); `GET /api/v1/positions/{address}/chain-history` czyta. Zobacz [`doc/POSITION_CHAIN_HISTORY_PLAN.md`](POSITION_CHAIN_HISTORY_PLAN.md).
+- **Meta:** tabela `position_chain_history_meta` (migracja `008_position_chain_history_meta.sql`) trzyma `chain_json`, `totals_json`, `chain_cost_summary_json`, `note` dla pary (anchor, `metrics_mode`).
+- **paths:** migracje `007`, `008`; `crates/api/src/services/position_chain_history.rs`; `handlers/positions.rs`; `web/src/lib/api.ts` (`getPositionChainHistory`, `refreshPositionChainHistory`).
+
+### `position_chain_history_meta` (Postgres)
+
+tags: domain=lineage; source=postgres; freshness=on-write; quality=same-as-stream-lineage; cost=free
+
+- Jedna logiczna „koperta” odpowiedzi lineage na `(chain_anchor_pubkey, metrics_mode)`: łańcuch adresów, opcjonalne totals / `chain_cost_summary`, notatka. Uzupełnia wiersze w `position_chain_history_nodes`.
 
 ### `data/snapshots.jsonl`
 

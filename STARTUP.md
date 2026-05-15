@@ -581,6 +581,14 @@ docker-compose up -d
 
 ## Troubleshooting
 
+### Postgres / chain-history 503 on Windows (`Start-Dashboard-Safe`)
+
+If `/api/v1/health` works but chain-history (or other DB routes) returns **503** with *Postgres is not connected*, the `clmm-lp-api` process usually has **no `DATABASE_URL`**. The launcher [`tools/Start-ClmmApi-8081.ps1`](tools/Start-ClmmApi-8081.ps1) loads `DATABASE_URL` and `DATABASE_POOL_SIZE` from `.env` (when not already set in the environment) and forwards them to the API window. Ensure:
+
+1. Repo root `.env` exists and contains `DATABASE_URL=postgres://...` (see [`.env.example`](.env.example)).
+2. PostgreSQL is **running** and accepts connections (default in docs: `localhost:5432`, db `clmm_lp`, user `clmm_user`).
+3. Restart the stack so the API window picks up the change.
+
 ### Database Connection Failed
 
 ```

@@ -1,0 +1,11 @@
+---
+description: Local dev API port convention
+alwaysApply: true
+---
+
+# Local Dev API Port
+
+- In this workspace, assume the actively used local API runs on `http://127.0.0.1:8081` unless the user explicitly says otherwise.
+- Do not assume Vite/backend defaults of `8080` when diagnosing the running app. Check `8081` first for `/api/v1/health`, API requests, and manual endpoint probes.
+- When starting or validating the web app, set or expect the frontend API upstream to point at port `8081` (for example `API_PORT=8081` / `API_UPSTREAM=http://127.0.0.1:8081`), unless current terminal/env evidence proves a different port.
+- If `8080` responds differently (for example `403`) and `8081` is healthy, treat `8081` as the application backend for this repo.

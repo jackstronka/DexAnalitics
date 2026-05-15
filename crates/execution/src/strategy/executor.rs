@@ -387,6 +387,11 @@ impl StrategyExecutor {
         self.rebalance_executor.set_wallet(wallet);
     }
 
+    /// Optional hook after successful on-chain steps in [`RebalanceExecutor`] (e.g. chain-history refresh).
+    pub fn set_chain_history_hook(&self, hook: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+        self.rebalance_executor.set_chain_history_hook(hook);
+    }
+
     /// Returns the configured wallet pubkey (if any).
     #[must_use]
     pub fn wallet_pubkey(&self) -> Option<solana_sdk::pubkey::Pubkey> {

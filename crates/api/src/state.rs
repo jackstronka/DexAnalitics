@@ -65,6 +65,8 @@ pub struct AppState {
     pub active_signer_wallet_id: Arc<RwLock<Option<String>>>,
     /// Serialize wallet operation store reads/writes.
     pub wallet_ops_lock: Arc<Mutex<()>>,
+    /// Serialize append-only writes to `wallet-ledger-events.jsonl`.
+    pub wallet_ledger_append_lock: Arc<Mutex<()>>,
     /// Owner-scoped fast read-model for effective wallet balances.
     pub wallet_effective_cache: Arc<RwLock<HashMap<String, CachedWalletEffective>>>,
     /// Guards against duplicate background refresh for the same owner.
@@ -182,6 +184,7 @@ impl AppState {
             ledger_ingest_last_at: Arc::new(RwLock::new(None)),
             active_signer_wallet_id: Arc::new(RwLock::new(None)),
             wallet_ops_lock: Arc::new(Mutex::new(())),
+            wallet_ledger_append_lock: Arc::new(Mutex::new(())),
             wallet_effective_cache: Arc::new(RwLock::new(HashMap::new())),
             wallet_effective_refreshing: Arc::new(RwLock::new(HashSet::new())),
             wallet_effective_ws_started: Arc::new(RwLock::new(HashSet::new())),
@@ -297,6 +300,9 @@ pub struct ApiConfig {
     pub wallets_dir_secondary: Option<String>,
     /// Base (EVM) JSON-RPC URL for read-only calls (`BASE_RPC_URL`). Optional: Slipstream endpoints return 503 if unset.
     pub base_rpc_url: Option<String>,
+    /// When set (non-empty), `POST /positions/{address}/chain-history/refresh` requires
+    /// `Authorization: Bearer <same>` or `X-Chain-History-Refresh: <same>`.
+    pub chain_history_refresh_secret: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -321,6 +327,7 @@ impl Default for ApiConfig {
             wallets_dir_primary: None,
             wallets_dir_secondary: None,
             base_rpc_url: None,
+            chain_history_refresh_secret: None,
         }
     }
 }

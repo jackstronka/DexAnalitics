@@ -7,7 +7,7 @@
 Bociarz LP — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScript web dashboard. See `README.md` and `STARTUP.md` for full details.
 
 **AI / „agent” in this repo:** see `doc/AI_AGENT_LAYER.md` (`AgentDecision` + apply-optimize, Position Agent, live `DecisionEngine`, audit JSONL — not a single generic chatbot).  
-**Decision / orchestration layer (vision, shadow sims, phases):** `doc/DECISION_LAYER.md`.
+**Decision / orchestration layer (vision, phases, §1b capability registry / NO-GO, §11 audit, implementation plan):** `doc/DECISION_LAYER.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`.
 
 ### Required system dependencies
 

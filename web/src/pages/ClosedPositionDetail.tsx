@@ -10,7 +10,7 @@ import {
   getJupiterPricesUsd,
   getPositionExperimentConfig,
   getPositionLifecycleSummary,
-  getPositionStreamLineage,
+  getPositionLineagePreferMaterialized,
   runBacktestFromClosedPosition,
 } from '@/lib/api'
 import {
@@ -20,20 +20,16 @@ import {
   formatLineageFeesCollectedUsdMain,
   formatPercentFixed,
   formatPrincipalDeltaUsdOrDash,
+  formatLineageStoredValueUsd,
   formatUsdField,
   formatUsdFixed,
   shortenAddress,
 } from '@/lib/utils'
 import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { getMetricsMode } from '@/lib/metricsMode'
 import { useI18n } from '@/lib/i18n'
-
-function usdOrDash(v: string | number, digits = 3): string {
-  const n = typeof v === 'string' ? parseFloat(v) : v
-  if (!Number.isFinite(n) || n === 0) return '—'
-  return formatUsdFixed(n, digits)
-}
+import { isLineageFromPostgresMaterialized } from '@/lib/lineageReadSource'
 
 function valuationQualityLabel(q?: string | null): string | null {
   const v = (q ?? '').trim().toLowerCase()
@@ -45,7 +41,7 @@ function valuationQualityLabel(q?: string | null): string | null {
 }
 
 export default function ClosedPositionDetail() {
-  const { locale } = useI18n()
+  const { locale, t } = useI18n()
   const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const { address } = useParams<{ address: string }>()
   const pos = (address ?? '').trim()
@@ -61,8 +57,8 @@ export default function ClosedPositionDetail() {
   })
 
   const lineageQ = useQuery({
-    queryKey: ['position-stream-lineage', pos, metricsMode],
-    queryFn: () => getPositionStreamLineage(pos, metricsMode),
+    queryKey: ['position-lineage', pos, metricsMode],
+    queryFn: () => getPositionLineagePreferMaterialized(pos, metricsMode),
     enabled: pos.length > 0,
     staleTime: 30_000,
     retry: 0,
@@ -70,6 +66,10 @@ export default function ClosedPositionDetail() {
 
   const data = lifecycleQ.data
   const streamLineage = lineageQ.data
+  const lineageReadFromPostgres = useMemo(
+    () => isLineageFromPostgresMaterialized(streamLineage),
+    [streamLineage?.note],
+  )
   const totals = streamLineage?.totals ?? null
   const totalsSourceBadge = (() => {
     const note = (totals?.note ?? '').toLowerCase()
@@ -563,23 +563,57 @@ export default function ClosedPositionDetail() {
       {lineageQ.isPending ? (
         <Card>
           <CardHeader>
-            <CardTitle>{L('Historia pozycji (rotacje)', 'Position history (rotations)')}</CardTitle>
+            <CardTitle>{t('positionDetail.positionHistory')}</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">{L('Ładowanie lineage…', 'Loading lineage…')}</CardContent>
         </Card>
       ) : streamLineage ? (
         <Card>
-          <CardHeader>
-            <CardTitle>{L('Historia pozycji (rotacje)', 'Position history (rotations)')}</CardTitle>
+          <CardHeader className="space-y-2">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <CardTitle className="mb-0">{t('positionDetail.positionHistory')}</CardTitle>
+              <span
+                className={
+                  lineageReadFromPostgres
+                    ? 'inline-flex shrink-0 rounded-full border border-sky-600/35 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-200'
+                    : 'inline-flex shrink-0 rounded-full border border-amber-600/35 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200'
+                }
+                title={t('positionDetail.lineageHistoryApiIntro')}
+              >
+                {lineageReadFromPostgres
+                  ? t('positionDetail.lineageReadBadgePostgres')
+                  : t('positionDetail.lineageReadBadgeCompute')}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground font-normal leading-snug">{t('positionDetail.lineageHistoryApiIntro')}</p>
             <p className="text-sm text-muted-foreground font-normal">
-              Łańcuch PDA (stara → nowa) z API <code className="text-[11px]">/positions/…/stream-lineage</code>. CLI
-              zapisuje <code className="text-[11px]">position_open</code> / <code className="text-[11px]">position_close</code>, bot —{' '}
-              <code className="text-[11px]">bot_*</code>; oba są łączone.
+              {locale === 'pl' ? (
+                <>
+                  Łańcuch PDA (stara → nowa): semantyka jak w stream-lineage (CLI:{' '}
+                  <code className="text-[11px]">position_open</code> / <code className="text-[11px]">position_close</code>; bot:{' '}
+                  <code className="text-[11px]">bot_*</code>; oba źródła są łączone).
+                </>
+              ) : (
+                <>
+                  PDA chain (old → new): same semantics as stream-lineage (CLI:{' '}
+                  <code className="text-[11px]">position_open</code> / <code className="text-[11px]">position_close</code>; bot:{' '}
+                  <code className="text-[11px]">bot_*</code>; both sources merged).
+                </>
+              )}
             </p>
             <p className="text-[11px] text-muted-foreground font-normal leading-snug">
-              Kolumna <span className="font-medium">Fees zebrane</span> to best-effort suma prowizji z eventów collect + close.
-              Dla części transakcji Orca/RPC w <code className="text-[10px]">fee_payer_token_deltas</code> bywa widoczna tylko jedna
-              noga mintu, więc breakdown tokenowy może być niepełny.
+              {locale === 'pl' ? (
+                <>
+                  Kolumna <span className="font-medium">Fees zebrane</span> to best-effort suma prowizji z eventów collect + close.
+                  Dla części transakcji Orca/RPC w <code className="text-[10px]">fee_payer_token_deltas</code> bywa widoczna tylko jedna
+                  noga mintu, więc breakdown tokenowy może być niepełny.
+                </>
+              ) : (
+                <>
+                  <span className="font-medium">Fees collected</span> is a best-effort sum from collect + close events. For some Orca/RPC
+                  txs in <code className="text-[10px]">fee_payer_token_deltas</code> only one mint leg may appear, so token breakdown can be incomplete.
+                </>
+              )}
             </p>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -617,17 +651,16 @@ export default function ClosedPositionDetail() {
                     {streamLineage.nodes.map((n, i) => (
                       <tr key={n.position_address} className="border-t border-border/60">
                         <td className="px-2 py-1 font-mono tabular-nums">{i + 1}</td>
-                        <td className="px-2 py-1 font-mono whitespace-nowrap">
+                        <td className="px-2 py-1 font-mono text-[11px] align-top break-all min-w-[12rem] max-w-[28rem]">
                           <Link
                             to={
                               n.closed_ts_utc
                                 ? `/positions/closed/${n.position_address}`
                                 : `/positions/${n.position_address}`
                             }
-                            className="text-primary hover:underline"
-                            title={n.position_address}
+                            className="text-primary hover:underline break-all"
                           >
-                            {shortenAddress(n.position_address, 8)}
+                            {n.position_address}
                           </Link>
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap">
@@ -637,7 +670,7 @@ export default function ClosedPositionDetail() {
                           {n.closed_ts_utc ? formatDate(n.closed_ts_utc) : '—'}
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono">
-                          {usdOrDash(n.baseline_value_usd, 3)}
+                          {formatLineageStoredValueUsd(n.baseline_value_usd, n.baseline_valuation_quality, 3)}
                           {valuationQualityLabel(n.baseline_valuation_quality) ? (
                             <span className="ml-1 rounded border border-border/60 px-1 py-0 text-[10px] text-muted-foreground">
                               {valuationQualityLabel(n.baseline_valuation_quality)}
@@ -645,7 +678,7 @@ export default function ClosedPositionDetail() {
                           ) : null}
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono">
-                          {usdOrDash(n.current_value_usd, 3)}
+                          {formatLineageStoredValueUsd(n.current_value_usd, n.current_valuation_quality, 3)}
                           {valuationQualityLabel(n.current_valuation_quality) ? (
                             <span className="ml-1 rounded border border-border/60 px-1 py-0 text-[10px] text-muted-foreground">
                               {valuationQualityLabel(n.current_valuation_quality)}
@@ -653,7 +686,13 @@ export default function ClosedPositionDetail() {
                           ) : null}
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono">
-                          {formatPrincipalDeltaUsdOrDash(n.baseline_value_usd, n.current_value_usd, 3)}
+                          {formatPrincipalDeltaUsdOrDash(
+                            n.baseline_value_usd,
+                            n.baseline_valuation_quality,
+                            n.current_value_usd,
+                            n.current_valuation_quality,
+                            3,
+                          )}
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px] leading-tight">
                           {(n.tx_fee_lamports ?? 0).toLocaleString()} λ
@@ -741,7 +780,7 @@ export default function ClosedPositionDetail() {
       ) : (
         <Card>
           <CardHeader>
-            <CardTitle>{L('Historia pozycji (rotacje)', 'Position history (rotations)')}</CardTitle>
+            <CardTitle>{t('positionDetail.positionHistory')}</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
             {lineageQ.isError ? (

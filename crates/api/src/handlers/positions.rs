@@ -5,13 +5,18 @@ use crate::handlers::strategies::ensure_strategy_running_after_position_link;
 use crate::models::{
     BackfillValuationSnapshotsRequest, BackfillValuationSnapshotsResponse, ClosedPositionEntry,
     ClosedPositionsResponse, DecreaseLiquidityRequest, LinkPositionStrategyRequest,
-    ListPositionsResponse, MessageResponse, OpenPositionRequest, PnLResponse,
-    PositionDiagnosticsResponse, PositionExperimentConfigResponse, PositionLastEvalSnapshot,
-    PositionLifecycleEvent, PositionLifecycleSessionSummary, PositionLifecycleSummaryResponse,
-    PositionOpenResponse, PositionResponse, PositionStatus, PositionStrategyDiagnostics,
-    PositionStreamLineageResponse, PositionStreamPerformanceResponse, PositionStreamPnLResponse,
-    RebalanceRequest, SuggestStrategyLinkResponse, SwapBeforeOpenRequest, SwapBeforeOpenResponse,
-    UncollectedFeesInfo,
+    ListPositionsResponse, MaterializeChainHistoryResponse, MessageResponse, OpenPositionRequest,
+    PnLResponse, PositionDiagnosticsResponse, PositionExperimentConfigResponse,
+    PositionLastEvalSnapshot, PositionLifecycleEvent, PositionLifecycleSessionSummary,
+    PositionLifecycleSummaryResponse, PositionOpenResponse, PositionResponse, PositionStatus,
+    PositionStrategyDiagnostics, PositionStreamLineageResponse, PositionStreamPerformanceResponse,
+    PositionStreamPnLResponse, RebalanceRequest, SuggestStrategyLinkResponse,
+    SwapBeforeOpenRequest, SwapBeforeOpenResponse, UncollectedFeesInfo, WalletLedgerDelta,
+    WalletLedgerStatus,
+};
+use crate::services::position_chain_history::{
+    load_chain_history_from_db, materialize_chain_history_for_anchor,
+    require_chain_history_refresh_auth, spawn_chain_history_materialize_background,
 };
 use crate::services::position_stream_lineage::{
     backfill_valuation_snapshots_from_lifecycle_current_prices, compute_position_stream_lineage,
@@ -29,6 +34,7 @@ use crate::state::{AppState, PositionUpdate};
 use axum::{
     Json,
     extract::{Path, State},
+    http::HeaderMap,
 };
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
@@ -48,6 +54,7 @@ use crate::services::position_valuation::{
     uncollected_fees_info_for_position,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
+use crate::services::wallet_ledger;
 use axum::extract::Query;
 use clmm_lp_domain::math::price_tick::tick_to_price;
 use clmm_lp_protocols::ledger::position_registry::registry_path;
@@ -58,6 +65,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use uuid::Uuid;
 
 fn token_short_label(mint: &str) -> String {
     match mint.trim() {
@@ -77,6 +85,144 @@ async fn fetch_mint_decimals_best_effort(
     let account = provider.get_account(&pk).await.ok()?;
     let mint_state = Mint::unpack(&account.data).ok()?;
     Some(mint_state.decimals)
+}
+
+async fn position_ops_wallet_owner(state: &AppState) -> Option<String> {
+    let ex = resolve_executor_for_position_ops(state).await?;
+    let g = ex.read().await;
+    g.wallet_pubkey().map(|p| p.to_string())
+}
+
+/// SPL legs for liquidity deposit (negative raw = outbound from wallet).
+async fn open_position_ledger_deltas(
+    state: &AppState,
+    request: &OpenPositionRequest,
+) -> Vec<WalletLedgerDelta> {
+    let reader = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone());
+    let Ok(ps) = reader.get_pool_state(request.pool_address.trim()).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if request.amount_a > 0 {
+        let dec =
+            fetch_mint_decimals_best_effort(state.provider.as_ref(), &ps.token_mint_a.to_string())
+                .await
+                .unwrap_or(9);
+        out.push(WalletLedgerDelta {
+            mint: ps.token_mint_a.to_string(),
+            decimals: dec,
+            raw_delta_i128: (-(request.amount_a as i128)).to_string(),
+        });
+    }
+    if request.amount_b > 0 {
+        let dec =
+            fetch_mint_decimals_best_effort(state.provider.as_ref(), &ps.token_mint_b.to_string())
+                .await
+                .unwrap_or(9);
+        out.push(WalletLedgerDelta {
+            mint: ps.token_mint_b.to_string(),
+            decimals: dec,
+            raw_delta_i128: (-(request.amount_b as i128)).to_string(),
+        });
+    }
+    out
+}
+
+/// Pool address for a position PDA: monitor first, then on-chain (same idea as `GET /positions/:addr`).
+async fn position_pool_address_best_effort(state: &AppState, pubkey: &Pubkey) -> Option<String> {
+    let positions = state.monitor.get_positions().await;
+    if let Some(p) = positions.iter().find(|p| p.address == *pubkey) {
+        return Some(p.pool.to_string());
+    }
+    monitored_position_from_chain(state.provider.clone(), pubkey)
+        .await
+        .ok()
+        .map(|m| m.pool.to_string())
+}
+
+fn json_decimal_amount_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Decimal {
+    obj.get(key)
+        .map(|v| match v {
+            serde_json::Value::String(s) => Decimal::from_str(s.as_str()).ok(),
+            serde_json::Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
+            _ => None,
+        })
+        .flatten()
+        .unwrap_or(Decimal::ZERO)
+}
+
+/// Parse `collect_fees` `OperationResult` JSON (`pre_uncollected_fees` / `post_uncollected_fees` UI amounts).
+fn parse_collect_fees_pre_post_ui(
+    data: &serde_json::Value,
+) -> Option<(Decimal, Decimal, Decimal, Decimal)> {
+    let pre = data.get("pre_uncollected_fees")?.as_object()?;
+    let post = data.get("post_uncollected_fees")?.as_object()?;
+    Some((
+        json_decimal_amount_field(pre, "amount_a"),
+        json_decimal_amount_field(pre, "amount_b"),
+        json_decimal_amount_field(post, "amount_a"),
+        json_decimal_amount_field(post, "amount_b"),
+    ))
+}
+
+/// Positive SPL delta in smallest units (fees credited to the wallet).
+fn decimal_ui_to_positive_raw_i128_string(ui: Decimal, decimals: u8) -> Option<String> {
+    if ui <= Decimal::ZERO {
+        return None;
+    }
+    let scale = Decimal::from(10i128.pow(u32::from(decimals)));
+    let raw = (ui * scale).trunc();
+    let i = raw.to_i128()?;
+    Some(i.to_string())
+}
+
+/// Build SPL legs for a successful `collect_fees` response (pre/post uncollected snapshot diff).
+async fn collect_fees_ledger_deltas_from_op_data(
+    state: &AppState,
+    pool_address: &str,
+    data: &serde_json::Value,
+) -> Vec<WalletLedgerDelta> {
+    let Some((pre_a, pre_b, post_a, post_b)) = parse_collect_fees_pre_post_ui(data) else {
+        return Vec::new();
+    };
+    let reader = clmm_lp_protocols::prelude::WhirlpoolReader::new(state.provider.clone());
+    let Ok(ps) = reader.get_pool_state(pool_address.trim()).await else {
+        return Vec::new();
+    };
+    let mint_a = ps.token_mint_a.to_string();
+    let mint_b = ps.token_mint_b.to_string();
+    let dec_a = fetch_mint_decimals_best_effort(state.provider.as_ref(), &mint_a)
+        .await
+        .unwrap_or(9);
+    let dec_b = fetch_mint_decimals_best_effort(state.provider.as_ref(), &mint_b)
+        .await
+        .unwrap_or(9);
+
+    let mut out = Vec::new();
+    let col_a = (pre_a - post_a).max(Decimal::ZERO);
+    let col_b = (pre_b - post_b).max(Decimal::ZERO);
+    if col_a > Decimal::ZERO {
+        if let Some(s) = decimal_ui_to_positive_raw_i128_string(col_a, dec_a) {
+            out.push(WalletLedgerDelta {
+                mint: mint_a,
+                decimals: dec_a,
+                raw_delta_i128: s,
+            });
+        }
+    }
+    if col_b > Decimal::ZERO {
+        if let Some(s) = decimal_ui_to_positive_raw_i128_string(col_b, dec_b) {
+            out.push(WalletLedgerDelta {
+                mint: mint_b,
+                decimals: dec_b,
+                raw_delta_i128: s,
+            });
+        }
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -1164,6 +1310,13 @@ pub async fn get_position(
         p.clone()
     } else {
         let p = monitored_position_from_chain(state.provider.clone(), &pubkey).await?;
+        if !state.dry_run {
+            spawn_chain_history_materialize_background(
+                &state,
+                address.clone(),
+                "get_position_on_chain_seed",
+            );
+        }
         let st = state.clone();
         let addr = address.clone();
         tokio::spawn(async move {
@@ -1567,6 +1720,67 @@ pub async fn get_position_stream_lineage(
     Ok(Json(resp))
 }
 
+/// Materialize Postgres read-model for chain history (parallel path to live `stream-lineage`).
+#[utoipa::path(
+    post,
+    path = "/positions/{address}/chain-history/refresh",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA anchor (base58)"),
+        ("mode" = Option<String>, Query, description = "Optional `settlement_v1` for persisted-totals mode")
+    ),
+    responses(
+        (status = 200, description = "Rows written", body = MaterializeChainHistoryResponse),
+        (status = 400, description = "Invalid address"),
+        (status = 401, description = "When CLMM_CHAIN_HISTORY_REFRESH_SECRET is set: missing or wrong Bearer / X-Chain-History-Refresh"),
+        (status = 503, description = "Database disabled")
+    )
+)]
+pub async fn refresh_position_chain_history(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+    Query(mode_q): Query<StreamModeQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<MaterializeChainHistoryResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    require_chain_history_refresh_auth(&state.config, &headers)?;
+    let r = materialize_chain_history_for_anchor(&state, pos, mode_q.is_settlement_v1()).await?;
+    Ok(Json(r))
+}
+
+/// Read materialized chain history from Postgres (fast path). Returns 404 until refresh.
+#[utoipa::path(
+    get,
+    path = "/positions/{address}/chain-history",
+    tag = "Positions",
+    params(
+        ("address" = String, Path, description = "Position PDA anchor (base58)"),
+        ("mode" = Option<String>, Query, description = "Optional `settlement_v1`")
+    ),
+    responses(
+        (status = 200, description = "Materialized lineage payload (same shape as stream-lineage)", body = PositionStreamLineageResponse),
+        (status = 400, description = "Invalid address"),
+        (status = 404, description = "No materialized rows for this anchor/mode"),
+        (status = 503, description = "Database disabled")
+    )
+)]
+pub async fn get_position_chain_history(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+    Query(mode_q): Query<StreamModeQuery>,
+) -> ApiResult<Json<PositionStreamLineageResponse>> {
+    let pos = address.trim();
+    Pubkey::from_str(pos).map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    let Some(resp) = load_chain_history_from_db(&state, pos, mode_q.is_settlement_v1()).await?
+    else {
+        return Err(ApiError::not_found(
+            "no materialized chain-history for this anchor/mode; POST /positions/{address}/chain-history/refresh first",
+        ));
+    };
+    Ok(Json(resp))
+}
+
 /// Backfill synthetic DB valuation snapshots from lifecycle JSONL using current free prices.
 #[utoipa::path(
     post,
@@ -1609,6 +1823,52 @@ pub async fn swap_before_open(
         "Swapping before open (swap-only step)"
     );
 
+    let correlation_id = Uuid::new_v4().to_string();
+    let ledger_owner = if state.dry_run {
+        None
+    } else {
+        position_ops_wallet_owner(&state).await
+    };
+
+    let cost_session_id = request
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if !state.dry_run {
+        if let Some(ref owner) = ledger_owner {
+            let dec = fetch_mint_decimals_best_effort(
+                state.provider.as_ref(),
+                request.specified_mint.trim(),
+            )
+            .await
+            .unwrap_or(9);
+            let raw_in = request.amount_in as i128;
+            let deltas = vec![WalletLedgerDelta {
+                mint: request.specified_mint.trim().to_string(),
+                decimals: dec,
+                raw_delta_i128: (-raw_in).to_string(),
+            }];
+            let pending = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Pending,
+                "swap_before_open",
+                Some(owner.clone()),
+                None,
+                Some(request.pool_address.trim().to_string()),
+                None,
+                cost_session_id.clone(),
+                false,
+                None,
+                deltas,
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+        }
+    }
+
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
@@ -1618,7 +1878,30 @@ pub async fn swap_before_open(
         svc.set_executor(exec);
     }
 
-    let op = svc.swap_before_open_exact_in(&request).await?;
+    let op = match svc.swap_before_open_exact_in(&request).await {
+        Ok(o) => o,
+        Err(e) => {
+            if !state.dry_run && ledger_owner.is_some() {
+                let fail = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Failed,
+                    "swap_before_open",
+                    ledger_owner.clone(),
+                    None,
+                    Some(request.pool_address.trim().to_string()),
+                    None,
+                    cost_session_id.clone(),
+                    false,
+                    None,
+                    vec![],
+                    Some(e.to_string()),
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+            }
+            return Err(e);
+        }
+    };
 
     if op.success {
         let data = op.data.as_ref();
@@ -1633,11 +1916,36 @@ pub async fn swap_before_open(
             .and_then(|v| v.as_str())
             .map(std::string::ToString::to_string);
 
-        let cost_session_id = request
-            .cost_session_id
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        if !state.dry_run && ledger_owner.is_some() {
+            let dec = fetch_mint_decimals_best_effort(
+                state.provider.as_ref(),
+                request.specified_mint.trim(),
+            )
+            .await
+            .unwrap_or(9);
+            let raw_in = request.amount_in as i128;
+            let deltas = vec![WalletLedgerDelta {
+                mint: request.specified_mint.trim().to_string(),
+                decimals: dec,
+                raw_delta_i128: (-raw_in).to_string(),
+            }];
+            let conf = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "swap_before_open",
+                ledger_owner.clone(),
+                swap_signature.clone(),
+                Some(request.pool_address.trim().to_string()),
+                None,
+                cost_session_id.clone(),
+                false,
+                None,
+                deltas,
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
+        }
 
         Ok(Json(SwapBeforeOpenResponse {
             message,
@@ -1645,6 +1953,24 @@ pub async fn swap_before_open(
             cost_session_id,
         }))
     } else {
+        if !state.dry_run && ledger_owner.is_some() {
+            let fail = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Failed,
+                "swap_before_open",
+                ledger_owner.clone(),
+                None,
+                Some(request.pool_address.trim().to_string()),
+                None,
+                cost_session_id.clone(),
+                false,
+                None,
+                vec![],
+                op.error.clone().or_else(|| Some("Swap failed".to_string())),
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+        }
         Err(ApiError::ServiceUnavailable(
             op.error.unwrap_or_else(|| "Swap failed".to_string()),
         ))
@@ -1699,12 +2025,95 @@ pub async fn open_position(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let op = svc.open_position(&request).await?;
+    let correlation_id = Uuid::new_v4().to_string();
+    let ledger_owner = if state.dry_run {
+        None
+    } else {
+        position_ops_wallet_owner(&state).await
+    };
+
+    let open_deltas = if state.dry_run {
+        Vec::new()
+    } else {
+        open_position_ledger_deltas(&state, &request).await
+    };
+
+    if !state.dry_run {
+        if let Some(ref owner) = ledger_owner {
+            if !open_deltas.is_empty() {
+                let pending = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Pending,
+                    "open_position",
+                    Some(owner.clone()),
+                    None,
+                    Some(request.pool_address.trim().to_string()),
+                    None,
+                    cost_session_id.clone(),
+                    false,
+                    None,
+                    open_deltas.clone(),
+                    None,
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+            }
+        }
+    }
+
+    let op = match svc.open_position(&request).await {
+        Ok(o) => o,
+        Err(e) => {
+            if !state.dry_run && ledger_owner.is_some() && !open_deltas.is_empty() {
+                let fail = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Failed,
+                    "open_position",
+                    ledger_owner.clone(),
+                    None,
+                    Some(request.pool_address.trim().to_string()),
+                    None,
+                    cost_session_id.clone(),
+                    false,
+                    None,
+                    vec![],
+                    Some(e.to_string()),
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+            }
+            return Err(e);
+        }
+    };
+
     if op.success {
         let data = op.data.as_ref();
         let position_pda_opt = data
             .and_then(|d| d.get("position_pda"))
             .and_then(|v| v.as_str());
+        let swap_signature_early = data
+            .and_then(|d| d.get("swap_signature"))
+            .and_then(|v| v.as_str())
+            .map(std::string::ToString::to_string);
+
+        if !state.dry_run && ledger_owner.is_some() && !open_deltas.is_empty() {
+            let conf = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "open_position",
+                ledger_owner.clone(),
+                swap_signature_early.clone(),
+                Some(request.pool_address.trim().to_string()),
+                position_pda_opt.map(|s| s.to_string()),
+                cost_session_id.clone(),
+                false,
+                None,
+                open_deltas.clone(),
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
+        }
 
         // New positions exist on-chain but `GET /positions/:addr` reads the in-memory monitor first.
         // Without this, the dashboard shows "Position not found" until API restart + registry seed.
@@ -1731,6 +2140,13 @@ pub async fn open_position(
             }));
         }
         if let Some(pda) = position_pda_opt {
+            if !state.dry_run {
+                spawn_chain_history_materialize_background(
+                    &state,
+                    pda.to_string(),
+                    "open_position",
+                );
+            }
             let swap_signature = data
                 .and_then(|d| d.get("swap_signature"))
                 .and_then(|v| v.as_str())
@@ -1805,6 +2221,27 @@ pub async fn open_position(
         }));
     }
 
+    if !state.dry_run && ledger_owner.is_some() {
+        let fail = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Failed,
+            "open_position",
+            ledger_owner.clone(),
+            None,
+            Some(request.pool_address.trim().to_string()),
+            None,
+            cost_session_id.clone(),
+            false,
+            None,
+            open_deltas.clone(),
+            op.error
+                .clone()
+                .or_else(|| Some("Position opening failed".to_string())),
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+    }
+
     Err(ApiError::ServiceUnavailable(
         op.error
             .unwrap_or_else(|| "Position opening failed".to_string()),
@@ -1866,19 +2303,87 @@ pub async fn close_position(
         ))));
     }
 
+    let sid = q
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let correlation_id = Uuid::new_v4().to_string();
+    let ledger_owner = position_ops_wallet_owner(&state).await;
+    let pool_str = position_snapshot.pool.to_string();
+    let pos_pda = address.trim().to_string();
+
+    if let Some(ref owner) = ledger_owner {
+        let pending = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "close_position",
+            Some(owner.clone()),
+            None,
+            Some(pool_str.clone()),
+            Some(pos_pda.clone()),
+            sid.clone(),
+            false,
+            None,
+            vec![],
+            None,
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+    }
+
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(false);
     if let Some(exec) = resolve_executor_for_position_ops(&state).await {
         svc.set_executor(exec);
     }
 
-    let sid = q
-        .cost_session_id
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let op = svc.close_position(&address, sid).await?;
+    let op = match svc.close_position(&address, sid.clone()).await {
+        Ok(o) => o,
+        Err(e) => {
+            if ledger_owner.is_some() {
+                let fail = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Failed,
+                    "close_position",
+                    ledger_owner.clone(),
+                    None,
+                    Some(pool_str.clone()),
+                    Some(pos_pda.clone()),
+                    sid.clone(),
+                    false,
+                    None,
+                    vec![],
+                    Some(e.to_string()),
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+            }
+            return Err(e);
+        }
+    };
+
     if op.success {
+        if ledger_owner.is_some() {
+            let sig = op.signature.clone();
+            let conf = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "close_position",
+                ledger_owner.clone(),
+                sig,
+                Some(pool_str.clone()),
+                Some(pos_pda.clone()),
+                sid.clone(),
+                false,
+                None,
+                vec![],
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
+        }
         // Manual close is an explicit end-of-history decision by operator.
         // Detach this PDA from all strategies so it cannot be managed/reopened via stale links.
         if let Err(e) = remove_position_address_from_all_strategies(&state, &address).await {
@@ -1899,10 +2404,32 @@ pub async fn close_position(
             })
             .await;
 
+        spawn_chain_history_materialize_background(&state, address.clone(), "close_position");
+
         Ok(Json(MessageResponse::new(format!(
             "Position closed: {address}"
         ))))
     } else {
+        if ledger_owner.is_some() {
+            let fail = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Failed,
+                "close_position",
+                ledger_owner.clone(),
+                None,
+                Some(pool_str.clone()),
+                Some(pos_pda.clone()),
+                sid.clone(),
+                false,
+                None,
+                vec![],
+                op.error
+                    .clone()
+                    .or_else(|| Some("Position closing failed".to_string())),
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+        }
         Err(ApiError::ServiceUnavailable(
             op.error
                 .unwrap_or_else(|| "Position closing failed".to_string()),
@@ -1963,19 +2490,92 @@ pub async fn collect_fees(
         ))));
     }
 
+    let sid = q
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let correlation_id = Uuid::new_v4().to_string();
+    let ledger_owner = position_ops_wallet_owner(&state).await;
+    let pool_str = position.pool.to_string();
+    let pos_pda = address.trim().to_string();
+
+    if let Some(ref owner) = ledger_owner {
+        let pending = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "collect_fees",
+            Some(owner.clone()),
+            None,
+            Some(pool_str.clone()),
+            Some(pos_pda.clone()),
+            sid.clone(),
+            false,
+            None,
+            vec![],
+            None,
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+    }
+
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(false);
     if let Some(exec) = resolve_executor_for_position_ops(&state).await {
         svc.set_executor(exec);
     }
 
-    let sid = q
-        .cost_session_id
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let op = svc.collect_fees(&address, sid).await?;
+    let op = match svc.collect_fees(&address, sid.clone()).await {
+        Ok(o) => o,
+        Err(e) => {
+            if ledger_owner.is_some() {
+                let fail = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Failed,
+                    "collect_fees",
+                    ledger_owner.clone(),
+                    None,
+                    Some(pool_str.clone()),
+                    Some(pos_pda.clone()),
+                    sid.clone(),
+                    false,
+                    None,
+                    vec![],
+                    Some(e.to_string()),
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+            }
+            return Err(e);
+        }
+    };
+
     if op.success {
+        let deltas = if let Some(ref data) = op.data {
+            collect_fees_ledger_deltas_from_op_data(&state, pool_str.as_str(), data).await
+        } else {
+            Vec::new()
+        };
+        if ledger_owner.is_some() {
+            let sig = op.signature.clone();
+            let conf = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "collect_fees",
+                ledger_owner.clone(),
+                sig,
+                Some(pool_str.clone()),
+                Some(pos_pda.clone()),
+                sid.clone(),
+                false,
+                None,
+                deltas,
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
+        }
         let msg = op
             .data
             .as_ref()
@@ -1983,8 +2583,29 @@ pub async fn collect_fees(
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| format!("Fees collected from position: {address}"));
+        spawn_chain_history_materialize_background(&state, address.clone(), "collect_fees");
         Ok(Json(MessageResponse::new(msg.to_string())))
     } else {
+        if ledger_owner.is_some() {
+            let fail = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Failed,
+                "collect_fees",
+                ledger_owner.clone(),
+                None,
+                Some(pool_str.clone()),
+                Some(pos_pda.clone()),
+                sid.clone(),
+                false,
+                None,
+                vec![],
+                op.error
+                    .clone()
+                    .or_else(|| Some("Fee collection failed".to_string())),
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+        }
         Err(ApiError::ServiceUnavailable(
             op.error
                 .unwrap_or_else(|| "Fee collection failed".to_string()),
@@ -2011,6 +2632,9 @@ pub async fn decrease_liquidity(
     Path(address): Path<String>,
     Json(request): Json<DecreaseLiquidityRequest>,
 ) -> ApiResult<Json<MessageResponse>> {
+    let pubkey = Pubkey::from_str(address.trim())
+        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
@@ -2024,7 +2648,60 @@ pub async fn decrease_liquidity(
         ApiError::bad_request("liquidity_amount must be a non-negative decimal integer string")
     })?;
 
-    let op = svc.decrease_liquidity(&address, liquidity_amount).await?;
+    let correlation_id = Uuid::new_v4().to_string();
+    let ledger_owner = if state.dry_run {
+        None
+    } else {
+        position_ops_wallet_owner(&state).await
+    };
+    let pool_str = position_pool_address_best_effort(&state, &pubkey).await;
+
+    if !state.dry_run {
+        if let Some(ref owner) = ledger_owner {
+            let pending = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Pending,
+                "decrease_liquidity",
+                Some(owner.clone()),
+                None,
+                pool_str.clone(),
+                Some(address.trim().to_string()),
+                None,
+                false,
+                None,
+                vec![],
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+        }
+    }
+
+    let op = match svc.decrease_liquidity(&address, liquidity_amount).await {
+        Ok(o) => o,
+        Err(e) => {
+            if !state.dry_run && ledger_owner.is_some() {
+                let fail = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Failed,
+                    "decrease_liquidity",
+                    ledger_owner.clone(),
+                    None,
+                    pool_str.clone(),
+                    Some(address.trim().to_string()),
+                    None,
+                    false,
+                    None,
+                    vec![],
+                    Some(e.to_string()),
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+            }
+            return Err(e);
+        }
+    };
+
     if op.success {
         if state.dry_run {
             let msg = op
@@ -2035,10 +2712,50 @@ pub async fn decrease_liquidity(
                 .unwrap_or("Dry-run: liquidity decrease simulated");
             return Ok(Json(MessageResponse::new(format!("[DRY-RUN] {msg}"))));
         }
+        if ledger_owner.is_some() {
+            let sig = op.signature.clone();
+            let conf = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "decrease_liquidity",
+                ledger_owner.clone(),
+                sig,
+                pool_str.clone(),
+                Some(address.trim().to_string()),
+                None,
+                false,
+                None,
+                vec![],
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
+        }
+        spawn_chain_history_materialize_background(&state, address.clone(), "decrease_liquidity");
         Ok(Json(MessageResponse::new(format!(
             "Liquidity decreased for position: {address}"
         ))))
     } else {
+        if !state.dry_run && ledger_owner.is_some() {
+            let fail = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Failed,
+                "decrease_liquidity",
+                ledger_owner.clone(),
+                None,
+                pool_str.clone(),
+                Some(address.trim().to_string()),
+                None,
+                false,
+                None,
+                vec![],
+                op.error
+                    .clone()
+                    .or_else(|| Some("Decrease liquidity failed".to_string())),
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+        }
         Err(ApiError::ServiceUnavailable(
             op.error
                 .unwrap_or_else(|| "Decrease liquidity failed".to_string()),
@@ -2065,6 +2782,38 @@ pub async fn rebalance_position(
     Path(address): Path<String>,
     Json(request): Json<RebalanceRequest>,
 ) -> ApiResult<Json<MessageResponse>> {
+    let pubkey = Pubkey::from_str(address.trim())
+        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+    let correlation_id = Uuid::new_v4().to_string();
+    let ledger_owner = if state.dry_run {
+        None
+    } else {
+        position_ops_wallet_owner(&state).await
+    };
+    let pool_str = position_pool_address_best_effort(&state, &pubkey).await;
+
+    if !state.dry_run {
+        if let Some(ref owner) = ledger_owner {
+            let pending = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Pending,
+                "rebalance_position",
+                Some(owner.clone()),
+                None,
+                pool_str.clone(),
+                Some(address.trim().to_string()),
+                None,
+                false,
+                None,
+                vec![],
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+        }
+    }
+
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
 
@@ -2074,7 +2823,31 @@ pub async fn rebalance_position(
         svc.set_executor(exec);
     }
 
-    let op = svc.rebalance_position(&address, &request).await?;
+    let op = match svc.rebalance_position(&address, &request).await {
+        Ok(o) => o,
+        Err(e) => {
+            if !state.dry_run && ledger_owner.is_some() {
+                let fail = wallet_ledger::new_ledger_event(
+                    &correlation_id,
+                    WalletLedgerStatus::Failed,
+                    "rebalance_position",
+                    ledger_owner.clone(),
+                    None,
+                    pool_str.clone(),
+                    Some(address.trim().to_string()),
+                    None,
+                    false,
+                    None,
+                    vec![],
+                    Some(e.to_string()),
+                    "api:positions",
+                );
+                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+            }
+            return Err(e);
+        }
+    };
+
     if op.success {
         if state.dry_run {
             let msg = op
@@ -2085,10 +2858,50 @@ pub async fn rebalance_position(
                 .unwrap_or("Dry-run: rebalance simulated");
             return Ok(Json(MessageResponse::new(format!("[DRY-RUN] {msg}"))));
         }
+        if ledger_owner.is_some() {
+            let sig = op.signature.clone();
+            let conf = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "rebalance_position",
+                ledger_owner.clone(),
+                sig,
+                pool_str.clone(),
+                Some(address.trim().to_string()),
+                None,
+                false,
+                None,
+                vec![],
+                None,
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
+        }
+        spawn_chain_history_materialize_background(&state, address.clone(), "rebalance_position");
         Ok(Json(MessageResponse::new(
             "Rebalance requested".to_string(),
         )))
     } else {
+        if !state.dry_run && ledger_owner.is_some() {
+            let fail = wallet_ledger::new_ledger_event(
+                &correlation_id,
+                WalletLedgerStatus::Failed,
+                "rebalance_position",
+                ledger_owner.clone(),
+                None,
+                pool_str.clone(),
+                Some(address.trim().to_string()),
+                None,
+                false,
+                None,
+                vec![],
+                op.error
+                    .clone()
+                    .or_else(|| Some("Rebalance failed".to_string())),
+                "api:positions",
+            );
+            wallet_ledger::append_wallet_ledger_event(&state, fail).await;
+        }
         Err(ApiError::ServiceUnavailable(
             op.error.unwrap_or_else(|| "Rebalance failed".to_string()),
         ))
@@ -2264,4 +3077,28 @@ pub async fn suggest_position_strategy(
             "Inferred parent PDA {parent} but no strategy contains it in parameters.position_addresses."
         ),
     }))
+}
+
+#[cfg(test)]
+mod wallet_ledger_collect_fees_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_collect_fees_pre_post_ui_parses_strings() {
+        let data = serde_json::json!({
+            "pre_uncollected_fees": { "amount_a": "1.5", "amount_b": "2" },
+            "post_uncollected_fees": { "amount_a": "0.5", "amount_b": "2" },
+        });
+        let (pre_a, pre_b, post_a, post_b) = parse_collect_fees_pre_post_ui(&data).expect("parse");
+        assert_eq!(pre_a, Decimal::from_str("1.5").unwrap());
+        assert_eq!(pre_b, Decimal::from_str("2").unwrap());
+        assert_eq!(post_a, Decimal::from_str("0.5").unwrap());
+        assert_eq!(post_b, Decimal::from_str("2").unwrap());
+    }
+
+    #[test]
+    fn decimal_ui_to_positive_raw_i128_string_roundtrip_small() {
+        let s = decimal_ui_to_positive_raw_i128_string(Decimal::new(123456789, 6), 6).expect("raw");
+        assert_eq!(s, "123456789");
+    }
 }

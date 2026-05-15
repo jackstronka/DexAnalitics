@@ -311,6 +311,14 @@ export default function Wallet() {
         <p className="text-muted-foreground text-sm mt-1">
           {t('wallet.subtitle')}
         </p>
+        <p className="mt-2">
+          <Link
+            to="/wallet/ledger"
+            className="text-sm text-primary underline-offset-4 hover:underline"
+          >
+            {t('walletLedger.linkFromWallet')} →
+          </Link>
+        </p>
       </div>
 
       <ApiDataHint />

@@ -28,6 +28,136 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260514-06 — Logs/rebalances: „Fees zebrane” bez nogi SOL (tylko USDC / brak rozbicia) przy długim łańcuchu
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-14  
+fixed_in: local  
+keywords: stream-lineage, fast_long_chain_metrics, Fees zebrane, fees_collected_token_a_ui, pool_mint_a, position_stream_valuation_snapshots, lp_fees_collected_usd_from_ledger_db_batch, logs-rebalances
+
+- **Symptom:** W **Logs / rebalances** kolumna **Fees zebrane** pokazywała sumę USD lub tylko jedną nogę (np. USDC), bez widocznej drugiej nogi (SOL), mimo że Solscan pokazuje obie nogi.
+- **Root cause:** Ścieżka **`node_metrics_fast_for_chain`** brała `token_mint_a/b` tylko ze snapshotów waluacji; dla wielu PDA w środku łańcucha minty były **puste**, podczas gdy rollup fee z ledgera (`by_mint_ui`) miał poprawne klucze mintów z **puli** — UI nie mógł zmapować kwot na etykiety SOL/USDC.
+- **Fix:** `lp_fees_collected_usd_from_ledger_db_batch` zapisuje **`pool_mint_a` / `pool_mint_b`** (kolejność Whirlpool). Przed złożeniem węzła fast-path i przy **`refresh_chain_history_node_fees_from_ledger`**: **`fill_missing_lineage_mints_from_fee_metric`** + **`fees_collected_token_ui_for_fee_metric`** uzupełniają minty i `fees_collected_token_*_ui`.
+- **Guards/tests:** `fill_missing_mints_from_fee_metric_restores_sol_usdc_fee_legs` (`cargo test -p clmm-lp-api stream_lineage`).
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+---
+
+### BUG-20260514-05 — GET chain-history: 404 „no materialized…” mimo że snapshot w Postgres jest (inny PDA w URL)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-14  
+fixed_in: local  
+keywords: chain-history, position_chain_history_meta, chain_anchor_pubkey, position_pubkey, rotation, 404, load_chain_history_from_db
+
+- **Symptom:** Zakładka **Historia (Postgres)** — komunikat jak przy braku materializacji (`Not found: no materialized chain-history…`), choć wcześniej dane były widoczne / snapshot istnieje w DB.
+- **Root cause:** (1) Odczyt szukał wyłącznie **`chain_anchor_pubkey =` URL** — materializacja pod **innym** PDA w tej samej rotacji → 404. (2) **Ogon łańcucha** (`stream-lineage` ma więcej PDAs niż zapisane `chain_json` / `nodes` w momencie materializacji): bieżący człon **nie występuje** w Postgresie → same SQL-heurystyki nadal 404.
+- **Fix:** `load_chain_history_from_db`: kotwica przez `nodes` / `meta.entry` / `chain_json @> jsonb_build_array(pda)`; jeśli brak — **spacer** po łańcuchu z `resolve_lineage_chain_for_stream_pnl` (jak stream-lineage) do pierwszego PDA z materializacją; odczyt pod `effective_anchor`; w `note` dopisek przy remapie.
+- **Guards/tests:** `cargo test -p clmm-lp-api position_chain_history`; regresja manualna: GET z członka ≠ anchor przy istniejącej materializacji.
+- **Paths:** `crates/api/src/services/position_chain_history.rs`
+
+### BUG-20260514-03 — Po migracji 009 API bez Postgres (503 chain-history), wcześniej działało
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-14  
+fixed_in: local  
+keywords: migrate, Database::migrate, semicolon split, wallet_gl_token_account, 009_wallet_gl_curated_tokens_and_pools, DATABASE_URL, connect_db_best_effort, chain-history
+
+- **Symptom:** Po ostatnich zmianach w repo **503** *Postgres is not connected* na chain-history; `/health` OK; użytkownik nic nie zmieniał w `.env`.
+- **Root cause:** `009_wallet_gl_curated_tokens_and_pools.sql` zawierał w stringu SQL **`notes`** średnik (`…token order); curated…`). `Database::migrate` dzieli pliki po **`;`** (po usunięciu linii `--`), więc statement się **rozcinał** na niepoprawne fragmenty → **błąd migracji** → `connect_db_best_effort` zwracał **`db: None`** dla całego API.
+- **Fix:** Usunięto średnik z treści `notes` (zamiana na przecineek). Osobno: `Start-ClmmApi-8081.ps1` przekazuje `DATABASE_URL` (inna klasa problemów na Windows).
+- **Guards/tests:** unikać `;` w literałach stringów w plikach migracji dopóki runner jest naiwny; rozważyć parser SQL lub migracje jednoplikowe bez `;` w stringach.
+- **Paths:** `crates/data/migrations/009_wallet_gl_curated_tokens_and_pools.sql`, `crates/data/src/repositories/database.rs`
+
+### BUG-20260514-02 — Postgres chain-history: zły start (~open_quote), brak „end” mimo close, brak reopen w tabeli, zera fee/tx w UI
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-14  
+fixed_in: local  
+keywords: chain-history, chain_history_start_value_usd, chain_history_end_value_usd, enrich_chain_history_nodes_open_quote_baseline_lift, baseline_value_usd, current_value_usd, position_stream_edges, reopen, lifecycle JSONL, resolve_lineage_chain_for_stream_pnl, refresh_chain_history_node_fees_from_ledger, position_stream_ledger_rows, rollup_lineage_chain_costs
+
+- **Symptom:** Zakładka **Historia (Postgres)** — zły **start** (~open_quote), **„—”** przy **end** mimo close, **reopen** nie w tabeli; ponadto zera **tx fee** / **fees collected** mimo danych w ledgerze.
+- **Root cause:** (1) Łańcuch z DB urwał się przed reopen, bo lifecycle fallback działał tylko przy `chain.len() <= 1`. (2) Pętla po enrich nadpisywała **`chain_history_start_value_usd`** zawsze z **`baseline_value_usd`** — gdy baseline zostawał przy open_quote, **nadpisywała lepszy `start_value_usd` z kolumny SQL** (regresja). (3) `GET chain-history` nie odświeżał fee z **`position_stream_ledger_rows`** — UI brało głównie **`raw_snapshot`** z materializacji (często zera zanim ledger się zapełnił). (4) `chain_history_end_value_usd` — backfill tylko gdy pole JSON puste, a `current` po enrich &gt; 0.
+- **Fix:** Prefiksowe przedłużenie łańcucha lifecycle w `resolve_lineage_chain_for_stream_pnl` (testy `prefer_lifecycle_lineage_if_extends_db_prefix_*`). W `load_chain_history_from_db`: backfill `chain_history_*` **tylko** gdy pole JSON było puste; **`refresh_chain_history_node_fees_from_ledger`** + przeliczenie `net_pnl_*`; suma kosztów z **`rollup_lineage_chain_costs`** po odświeżeniu (fallback na meta JSON). **Read:** merge `chain_json` z live `resolve_lineage_*` gdy meta to sam ogon (`[new]`) lub krótszy prefiks; brakujące PDA z **`node_metrics`**.
+- **Guards/tests:** `cargo test -p clmm-lp-api prefer_lifecycle_lineage_if_extends_db_prefix_*`; `cargo build -p clmm-lp-api`
+- **Paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+### BUG-20260514-01 — Zakładka Postgres chain-history: pusta „wartość start”, stream-lineage pokazuje kwotę
+
+status: fixed  
+severity: low  
+reported_by: user  
+first_seen: 2026-05-14  
+fixed_in: local  
+keywords: chain-history, stream-lineage, baseline_value_usd, raw_snapshot, position_stream_ledger_rows, open_quote_baseline_lift, UI start value
+
+- **Symptom:** W jednej zakładce lineage (stream) widać sensowną **wartość start** / baseline, w **Historia (Postgres)** ta sama kolumna pusta (`—`).
+- **Root cause:** `GET …/chain-history` zwracał węzły **wyłącznie** z zamrożonego `raw_snapshot` z momentu materializacji. Live `GET …/stream-lineage` po każdym żądaniu ponownie stosuje lift z **aktualnej** tabeli `position_stream_ledger_rows` (+ lifecycle), więc po dopisaniu open do DB stream ma baseline, a snapshot PG — nie, dopóki nie zrobi się pełnego refresh materialize. Frontendowy fallback z JSONL ma ten sam problem co stream (ogon pliku vs pełna historia w DB).
+- **Fix:** (1) Lift open-quote przy odczycie. (2) Overlay z kolumn SQL na zdeserializowany węzeł + przeliczenie `net_pnl_*`. (3) **10x UI/API:** jawne pola `chain_history_start_value_usd` / `end` / `current` w JSON — zakładka Postgres rysuje te liczby wprost, zamiast tylko heurystyk lineage.
+- **Guards/tests:** `cargo check -p clmm-lp-api`; regresja manualna: GET chain-history vs stream przy starym snapshotcie.
+- **Paths:** `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`
+
+---
+
+### BUG-20260513-04 — Stream lineage (długi łańcuch): wiersze z samymi „—” (brak dat / baseline / mintów w UI)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-13  
+fixed_in: local  
+keywords: stream-lineage, node_metrics_fast_for_chain, position_stream_valuation_snapshots, lifecycle JSONL, opened_ts_utc, closed_ts_utc, token_mint_a, open_quote_estimated_value_usd, UI dashes
+
+- **Symptom:** Przy łańcuchu **>8** PDA (np. 16–17 NFT) tabela lineage pokazywała **„—”** dla `opened` / `closed`, pustych baseline/current oraz komunikat „Brak sumy USD w API…” mimo że `orca_position_lifecycle.jsonl` zawiera pełne `bot_open` / `bot_close` i `open_quote_*`.
+- **Root cause:** `node_metrics_fast_for_chain` bierze `opened_ts_utc` / `closed_ts_utc` **wyłącznie** z tabeli `position_stream_valuation_snapshots`; dla wielu środkowych PDA snapshotów brak → API zwracało puste pola. Mapa `open_quote` dla `apply_open_quote_baseline_lift` pochodziła tylko z `position_stream_ledger_rows` (ingest) — gdy DB nie nadążała za JSONL, lift nie miał danych.
+- **Fix:** Po zbudowaniu węzłów: `hydrate_lineage_open_close_ts_and_mints_from_lifecycle` (pierwszy open / ostatni close + minty z lifecycle); przed liftem: `merge_open_quote_usd_from_lifecycle_rows` łączy open-quote z JSONL z mapą z DB (max per PDA).
+- **Guards/tests:** `merge_open_quote_usd_from_lifecycle_rows_fills_missing_db_map`, `hydrate_lineage_fills_open_close_ts_and_mints_from_lifecycle` (`cargo test -p clmm-lp-api <filter>`).
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `doc/ENGINEERING_NOTES.md`
+
+---
+
+### BUG-20260513-03 — Stream lineage: zaniżony start ($0.84) vs koniec ($3.30) na długim łańcuchu (fast path)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-13  
+fixed_in: local  
+keywords: stream-lineage, baseline_value_usd, current_value_usd, node_metrics_fast_for_chain, open_quote_estimated_value_usd, rotation, end_close snapshot
+
+- **Symptom follow-up (2026-05-13):** Ten sam zły start (~$0.84 / ~$3.30) na **krótkich** łańcuchach (≤8 PDA) — pierwsza naprawa ograniczała `apply_open_quote_baseline_lift_after_lineage_fallbacks` do `chain.len() > 8`; otwarty wiersz pokazywał **current** tylko ze snapshotu DB (np. „—”) zamiast ~$8.7 z live.
+- **Root cause:** Przy `chain.len() > 8` `node_metrics_fast_for_chain` podnosił baseline z open-quote tylko gdy `current_value_usd > 0` i baseline &lt; 60% current. Bez snapshotu `end_close` w DB **`current_value_usd` było 0** do czasu `apply_end_value_fallback_from_next_baseline` (wywołane **po** fast metrics), więc lift się nie wykonywał.
+- **Fix (follow-up):** Post-fallback open-quote lift dla **każdego** łańcucha z DB; w `node_metrics` dodany odczyt `open_quote` z ledgera + **live `current_value_usd`** dla otwartych PDA; w fast path live current dla otwartych; w post-fallback lift heurystyka także dla **otwartych** węzłów (`baseline < 85% open_quote`).
+- **Guards/tests:** `cargo test -p clmm-lp-api open_quote_baseline_lift_post_fallbacks`
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`
+
+---
+
+### BUG-20260513-02 — PositionCreate: USDC saldo miga poprawnie, potem wraca do 0 (efektywne saldo / cache)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-13  
+fixed_in: local  
+keywords: PositionCreate, effective-balances, wallet_effective_cache, USDC, SPL, monotonic, degraded, force refresh, public RPC
+
+- **Symptom:** Na `/positions/new` po swapie chwilowo widać sensowną sumę (SOL + USDC), po bezczynności **Stan portfela** pokazuje **0 USDC** mimo środków on-chain; walidacja „za mało środków” / stale wraca.
+- **Root cause:** Tło odświeża `wallet_effective_cache` odczytem łańcucha, który potrafi zwrócić **pustą lub „zerową”** listę SPL przy nadal sensownym native SOL — zapis nadpisywał dobry snapshot gorszym.
+- **Fix:** Monotoniczna straż przy zapisie do cache: pusta lista SPL względem poprzedniego snapshotu → zachowanie poprzednich wierszy tokenów; przy `confidence == degraded` uzupełnianie brakujących mintów i ochrona przed błyskiem „~0” względem sensownego poprzedniego salda; pełna regresja sald tylko przy `GET .../effective-balances?force=true` (`allow_balance_regression`).
+- **Guards/tests:** `cargo test -p clmm-lp-api monotonic_guard`
+- **Paths:** `crates/api/src/handlers/wallets.rs`, `doc/ENGINEERING_NOTES.md`
+
+---
+
 ### BUG-20260513-01 — PositionCreate budget mode leaves Amount empty when public SOL/USD feed misses
 
 status: partially fixed  

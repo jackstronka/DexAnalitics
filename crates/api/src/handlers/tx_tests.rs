@@ -41,6 +41,7 @@ async fn tx_submit_rejects_invalid_base64() {
         State(s),
         Json(SubmitSignedTxRequest {
             signed_tx_base64: "not-base64".to_string(),
+            chain_history_anchors: None,
         }),
     )
     .await

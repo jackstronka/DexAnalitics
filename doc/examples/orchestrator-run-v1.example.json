@@ -1,0 +1,52 @@
+{
+  "ts_utc": "2026-05-14T10:15:30.123456+00:00",
+  "source": "orchestrator-gate",
+  "chain_id": "solana-mainnet",
+  "decision": {
+    "schema_version": 1,
+    "run_id": "gate-550e8400-e29b-41d4-a716-446655440000",
+    "kind": "gate_health",
+    "tools_invoked": ["health_check_curated_all_collect"],
+    "data_quality": {
+      "alerts": [],
+      "alert_count": 0,
+      "health_report_path": null,
+      "summary_ts_utc": "2026-05-14T10:15:29.987654+00:00"
+    },
+    "outcome": "ok",
+    "inputs": {
+      "max_age_minutes": 30,
+      "min_decode_ok_pct": 65.0
+    },
+    "inputs_ref": {
+      "schema_version": 1,
+      "role": "curated_dataset_file_stats",
+      "curated_pool_list_source": {
+        "path": "STARTUP.md",
+        "mtime_unix_secs": 1715680800,
+        "size_bytes": 12000
+      },
+      "pool_data_files": [
+        {
+          "protocol": "orca",
+          "pool": "4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72",
+          "swaps_raw": {
+            "path": "data/swaps/orca/4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72/swaps.jsonl",
+            "mtime_unix_secs": 1715680700,
+            "size_bytes": 2048576
+          },
+          "decoded_swaps": {
+            "path": "data/swaps/orca/4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72/decoded_swaps.jsonl",
+            "mtime_unix_secs": 1715680710,
+            "size_bytes": 1536000
+          },
+          "snapshots_jsonl": {
+            "path": "data/pool-snapshots/orca/4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72/snapshots.jsonl",
+            "mtime_unix_secs": 1715680720,
+            "size_bytes": 512000
+          }
+        }
+      ]
+    }
+  }
+}

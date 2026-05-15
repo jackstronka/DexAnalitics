@@ -20,7 +20,7 @@ use solana_transaction_status_client_types::UiTransactionEncoding;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Account as SplTokenAccount;
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -1903,6 +1903,28 @@ pub fn decode_audit_curated_all(limit: Option<usize>, save_report: bool) -> Resu
     Ok(())
 }
 
+/// `{ path, mtime_unix_secs, size_bytes }` for `inputs_ref` (no file content hash).
+fn data_file_stat_json(path: &Path) -> serde_json::Value {
+    let path_str = path.to_string_lossy().to_string();
+    let Ok(meta) = std::fs::metadata(path) else {
+        return serde_json::json!({
+            "path": path_str,
+            "mtime_unix_secs": serde_json::Value::Null,
+            "size_bytes": serde_json::Value::Null,
+        });
+    };
+    let mtime_unix_secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    serde_json::json!({
+        "path": path_str,
+        "mtime_unix_secs": mtime_unix_secs,
+        "size_bytes": meta.len(),
+    })
+}
+
 fn age_minutes(path: &std::path::Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let now = SystemTime::now();
@@ -1910,17 +1932,31 @@ fn age_minutes(path: &std::path::Path) -> Option<i64> {
     Some((d.as_secs() / 60) as i64)
 }
 
-pub fn health_check_curated_all(
+/// Result of `health_check_curated_all_collect` for curated pools (Orca, Raydium, Meteora).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HealthCheckCuratedSummary {
+    pub ts_utc: String,
+    pub max_age_minutes: i64,
+    pub min_decode_ok_pct: f64,
+    pub alerts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_path: Option<String>,
+    /// File-level audit trail for the curated pools pass (`gate_health` / decision layer).
+    pub inputs_ref: serde_json::Value,
+}
+
+/// Run the same curated health pass as `data-health-check`, returning alert lines and optional report path.
+pub fn health_check_curated_all_collect(
     max_age_minutes: i64,
     min_decode_ok_pct: f64,
-    fail_on_alert: bool,
-) -> Result<()> {
+) -> Result<HealthCheckCuratedSummary> {
     let plans: Vec<(Proto, Vec<String>)> = vec![
         (Proto::Orca, parse_curated_pool_addrs(Proto::Orca)?),
         (Proto::Raydium, parse_curated_pool_addrs(Proto::Raydium)?),
         (Proto::Meteora, parse_curated_pool_addrs(Proto::Meteora)?),
     ];
     let mut alerts: Vec<String> = Vec::new();
+    let mut pool_data_files: Vec<serde_json::Value> = Vec::new();
     for (proto, pools) in plans {
         for pool in pools {
             let base = std::path::Path::new("data")
@@ -1971,28 +2007,70 @@ pub fn health_check_curated_all(
                 println!("⚠️ health alert {}", msg);
                 alerts.push(msg);
             }
+            pool_data_files.push(serde_json::json!({
+                "protocol": proto.dir(),
+                "pool": pool,
+                "swaps_raw": data_file_stat_json(&raw),
+                "decoded_swaps": data_file_stat_json(&dec),
+                "snapshots_jsonl": data_file_stat_json(&snap),
+            }));
         }
     }
     println!("📌 health summary: alerts={}", alerts.len());
-    if !alerts.is_empty() {
+    pool_data_files.sort_by(|a, b| {
+        let pa = a.get("protocol").and_then(|x| x.as_str()).unwrap_or("");
+        let pb = b.get("protocol").and_then(|x| x.as_str()).unwrap_or("");
+        match pa.cmp(pb) {
+            std::cmp::Ordering::Equal => {
+                let ca = a.get("pool").and_then(|x| x.as_str()).unwrap_or("");
+                let cb = b.get("pool").and_then(|x| x.as_str()).unwrap_or("");
+                ca.cmp(cb)
+            }
+            o => o,
+        }
+    });
+    let inputs_ref = serde_json::json!({
+        "schema_version": 1,
+        "role": "curated_dataset_file_stats",
+        "curated_pool_list_source": data_file_stat_json(Path::new("STARTUP.md")),
+        "pool_data_files": pool_data_files,
+    });
+    let ts_utc = Utc::now().to_rfc3339();
+    let report_path = if !alerts.is_empty() {
         let ts = Utc::now().format("%Y%m%d_%H%M%S");
         let out_dir = std::path::Path::new("data").join("reports");
         std::fs::create_dir_all(&out_dir)?;
         let out = out_dir.join(format!("health_alerts_{}.json", ts));
         let body = serde_json::json!({
-            "ts_utc": Utc::now().to_rfc3339(),
+            "ts_utc": ts_utc,
             "max_age_minutes": max_age_minutes,
             "min_decode_ok_pct": min_decode_ok_pct,
-            "alerts": alerts,
+            "alerts": alerts.clone(),
         });
         std::fs::write(&out, serde_json::to_string_pretty(&body)?)?;
         println!("📝 health report saved: {}", out.display());
-        if fail_on_alert {
-            anyhow::bail!(
-                "health check failed with {} alerts",
-                body["alerts"].as_array().map(|a| a.len()).unwrap_or(0)
-            );
-        }
+        Some(out.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    Ok(HealthCheckCuratedSummary {
+        ts_utc,
+        max_age_minutes,
+        min_decode_ok_pct,
+        alerts,
+        report_path,
+        inputs_ref,
+    })
+}
+
+pub fn health_check_curated_all(
+    max_age_minutes: i64,
+    min_decode_ok_pct: f64,
+    fail_on_alert: bool,
+) -> Result<()> {
+    let summary = health_check_curated_all_collect(max_age_minutes, min_decode_ok_pct)?;
+    if !summary.alerts.is_empty() && fail_on_alert {
+        anyhow::bail!("health check failed with {} alerts", summary.alerts.len());
     }
     Ok(())
 }
@@ -2000,6 +2078,15 @@ pub fn health_check_curated_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_file_stat_json_missing_has_null_meta() {
+        let p = PathBuf::from("__no_such_path_for_health_stat_test__");
+        let v = data_file_stat_json(&p);
+        assert!(v["mtime_unix_secs"].is_null());
+        assert!(v["size_bytes"].is_null());
+        assert_eq!(v["path"].as_str().unwrap(), p.to_string_lossy());
+    }
 
     #[test]
     fn meta_from_tx_root_reads_flattened_meta() {

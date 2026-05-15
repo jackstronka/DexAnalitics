@@ -10,6 +10,7 @@ pub mod orca_read_service;
 pub mod orca_tx_service;
 pub mod position_agent_llm;
 pub mod position_agent_service;
+pub mod position_chain_history;
 pub mod position_executor;
 pub mod position_service;
 pub mod position_stream_lineage;
@@ -21,6 +22,7 @@ pub mod simulation_analytics;
 pub mod stranded_rebalance_watchdog;
 pub mod strategy_service;
 pub mod uncollected_fees_cache;
+pub mod wallet_ledger;
 
 pub use orca_read_service::OrcaReadService;
 pub use orca_tx_service::OrcaTxService;

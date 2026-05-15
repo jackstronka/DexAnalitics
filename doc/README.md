@@ -8,7 +8,11 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Co robić dalej (kolejka prac):** [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) — sekcja *Od czego zacząć* + fazy A–F i **M** (M1 Meteora TVL, M2 kolejka RPC w enrich).
 
-**Warstwa decyzyjna / orkiestrator LP (wizja + fazy, shadow, symulacje):** [`DECISION_LAYER.md`](DECISION_LAYER.md).
+**Warstwa decyzyjna / orkiestrator LP (wizja, fazy, audyt, rejestr zdolności §1b):** [`DECISION_LAYER.md`](DECISION_LAYER.md).
+
+**Plan implementacji (świadomość środowiska → gate → symulacje → raport → apply):** [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md).
+
+**Wallet GL — wizja księgowa vs journal, plan faz (kompletność zdarzeń → konta → read model → reconcile):** [`WALLET_GL.md`](WALLET_GL.md).
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
 
@@ -24,8 +28,10 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | -------- | ------- |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
 | [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | **Canonical:** „agent / AI” w repo — `AgentDecision` + apply-optimize, Position Agent (LLM opcjonalny), `DecisionEngine` live, `agent_decisions.jsonl`, linki do roadmap |
-| [`DECISION_LAYER.md`](DECISION_LAYER.md) | **Wizja + kontrakt + audyt §11:** orkiestrator LP, fazy, shadow/symulacje; **tabela co w kodzie / czego brak** (dowody ścieżkami) |
+| [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | **Fazy 0–6+:** kontrakt logu, gate runner, multi-backtest, raport real vs symulacja, apply z review, poza zakresem; kryteria sukcesu; kolejność PR |
+| [`DECISION_LAYER.md`](DECISION_LAYER.md) | **Wizja + kontrakt + §1a mapowanie celów + §1b rejestr zdolności + §11 audyt:** orkiestrator LP, fazy, shadow/symulacje, tabela CLI/API vs NO-GO, tabela co w kodzie / czego brak |
 | [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | **Normative:** expected behavior per feature (open/close, rebalance, strategies, wallet, fees); refine here first |
+| [`WALLET_GL.md`](WALLET_GL.md) | **Wallet GL:** wizja księgowa (każda transakcia → delty na konta, stan z GL); faza A = journal obecny w kodzie; plan faz B–E (kompletność API, chart of accounts, read model, reconcile) |
 | [`PROJECT_END_TO_END.md`](PROJECT_END_TO_END.md) | End-to-end: ingest danych -> analytics -> decyzje bota -> wykonanie i UI |
 | [`ROADMAP.md`](ROADMAP.md) | Roadmap produktowy: shadow strategies per position, historia przypisań strategia ↔ pozycja |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | Async event bus v2: decision matrix, event contract, rollout |
@@ -77,6 +83,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | Document | Purpose |
 | -------- | ------- |
 | [`IMPERMANENT_LOSS_USD_AND_FEES.md`](IMPERMANENT_LOSS_USD_AND_FEES.md) | IL vs HODL w USD, wariant z/bez fees LP, łańcuch PDAs (lineage), mapa kodu (`stream-pnl`, domain, symulacja), ograniczenia `PnLTracker` |
+| [`POSITION_CHAIN_HISTORY_PLAN.md`](POSITION_CHAIN_HISTORY_PLAN.md) | **Plan:** materializacja UI „Historii pozycji” w Postgres (`position_chain_history_nodes`) — writer, read API, UI fallback, fazy P0–P4; ścieżka równoległa do `stream-lineage` |
 
 ## Bot direction and worklog (dated snapshot — 2026-03-23)
 
@@ -111,6 +118,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | async, event bus, kafka, nats, redis, rollout |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |
 | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | bollinger, candle, StratConfig, StrategyMode, backtest, roadmap |
+| [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | decision-layer, orchestrator, implementation-plan, gate-runner, NO-GO, orchestrator-runs, phased-rollout, situational-awareness |
 | [`IMPERMANENT_LOSS_USD_AND_FEES.md`](IMPERMANENT_LOSS_USD_AND_FEES.md) | IL, HODL, USD, fees LP, stream-pnl, lineage, calculate_il_concentrated, segment IL |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | whETH/SOL, fees, grid example |
 | [`BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md`](BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md) | hybrid bot, scoring, contract (snapshot) |
@@ -118,16 +126,19 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`BOT_OPERATIONS_MODEL_2026-03-23.md`](BOT_OPERATIONS_MODEL_2026-03-23.md) | ops, alerts, modes (snapshot) |
 | [`BOT_RESEARCH_DECISION_2026-03-23.md`](BOT_RESEARCH_DECISION_2026-03-23.md) | research, matrix, direction (snapshot) |
 | [`BOT_WORKLOG_2026-03-23.md`](BOT_WORKLOG_2026-03-23.md) | worklog, rationale (snapshot) |
-| [`DECISION_LAYER.md`](DECISION_LAYER.md) | decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, phases, capital allocation, implementation-audit |
+| [`DECISION_LAYER.md`](DECISION_LAYER.md) | decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, phases, capital allocation, implementation-audit, operator-goals, capability-registry, NO-GO, ops-ingest-cycle |
 | [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | devnet, wallet, runbook, dry-run, limited-live, preflight |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | devnet, bot, production readiness, checklist, go/no-go |
 | [`DOCKER.md`](DOCKER.md) | docker compose, web+api, API_UPSTREAM, Docker Desktop, Windows pipe |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | code changes, keywords, changelog, AI-searchable |
+| [`examples/backtest-full-request.min.json`](examples/backtest-full-request.min.json) | Minimal `BacktestFullRequest` sample for `orchestrator-backtests-full` |
+| [`examples/orchestrator-run-v1.example.json`](examples/orchestrator-run-v1.example.json) | Sample JSONL row: `gate_health` + `inputs_ref` (`curated_dataset_file_stats`); see §8 in FUNCTIONAL_SPECIFICATION |
 | [`FEES_DATA_PLAN.md`](FEES_DATA_PLAN.md) | fees data |
 | [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | normative feature behavior, operator spec, single source of truth for “should” |
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora, swap event, DLMM |
 | [`ONCHAIN_FEES_PROGRESS.md`](ONCHAIN_FEES_PROGRESS.md) | on-chain fees, progress |
 | [`ONCHAIN_FEES_TRUTH_PLAN.md`](ONCHAIN_FEES_TRUTH_PLAN.md) | on-chain fees, plan |
+| [`POSITION_CHAIN_HISTORY_PLAN.md`](POSITION_CHAIN_HISTORY_PLAN.md) | lineage, position_chain_history_nodes, postgres materialized read-model, writer, stream-lineage, chain-history API |
 | [`POSITION_REGISTRY.md`](POSITION_REGISTRY.md) | registry.jsonl, active positions, orca-positions-list, collectors, API registry |
 | [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | bot supervision, systemd, Docker, Windows script, logs, alerts hooks |
 | [`ORCA_FEES_DATA_PLAN.md`](ORCA_FEES_DATA_PLAN.md) | Orca, fees plan |
@@ -145,3 +156,4 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) | agent_layer_profile, osobny tryb, chart screenshot, rules-as-training, consensus, eval harness, `AgentDecision`, P1–P13 |
 | [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) | roadmap, phases A–F, M1/M2 sprint, start-here queue |
 | [`UI_REQUIREMENTS_PHASE1.md`](UI_REQUIREMENTS_PHASE1.md) | dashboard phase 1, scripts, wallet, positions, ledger, implementation status |
+| [`WALLET_GL.md`](WALLET_GL.md) | wallet GL, ledger, journal, chart of accounts, reconcile, correlation_id, wallet_ledger |

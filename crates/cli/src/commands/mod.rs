@@ -13,6 +13,7 @@ pub mod orca_bot;
 pub mod orca_position;
 pub mod orca_swap;
 pub mod orca_wallet;
+pub mod position_chain_history;
 pub mod position_lifecycle_ledger;
 pub mod snapshot_backtest_prep;
 pub mod snapshot_price_path;

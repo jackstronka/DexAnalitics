@@ -9,6 +9,7 @@ const LS_LOCALE_KEY = 'clmm.locale'
 const pl: Dictionary = {
   'nav.dashboard': 'Dashboard',
   'nav.wallet': 'Portfel',
+  'nav.walletLedger': 'Dziennik portfela',
   'nav.swap': 'Swap',
   'nav.positions': 'Pozycje',
   'nav.closed': 'Zamknięte',
@@ -42,6 +43,25 @@ const pl: Dictionary = {
   'wallet.solPreview': 'SOL (podgląd)',
   'wallet.quickAmounts': 'Szybkie kwoty',
   'wallet.transferHistory': 'Ostatnie transfery (lokalny log)',
+  'walletLedger.title': 'Dziennik portfela (GL)',
+  'walletLedger.subtitle':
+    'Append-only JSONL z API: pending / confirmed / failed dla swap-before-open, open, transfer SOL, convert SOL. Nie jest źródłem sald — tylko audyt operacji.',
+  'walletLedger.refresh': 'Odśwież',
+  'walletLedger.filters': 'Filtry',
+  'walletLedger.ownerFilter': 'Filtr owner (substring)',
+  'walletLedger.ownerPlaceholder': 'opcjonalnie pubkey…',
+  'walletLedger.limit': 'Limit',
+  'walletLedger.filePath': 'Plik',
+  'walletLedger.empty': 'Brak zdarzeń (albo plik jeszcze nie istnieje).',
+  'walletLedger.colTime': 'Czas',
+  'walletLedger.colStatus': 'Status',
+  'walletLedger.colKind': 'Rodzaj',
+  'walletLedger.colOwner': 'Owner',
+  'walletLedger.colCorr': 'Correlation',
+  'walletLedger.colSig': 'Sygnatura',
+  'walletLedger.colDeltas': 'Deltas (mint / raw)',
+  'walletLedger.colErr': 'Błąd',
+  'walletLedger.linkFromWallet': 'Dziennik operacji',
   'wallet.currentWallet': 'Aktualny portfel',
   'wallet.copy': 'Kopiuj',
   'wallet.onChainTitle': 'Saldo on-chain (read-only)',
@@ -216,11 +236,44 @@ const pl: Dictionary = {
   'positionDetail.info': 'Informacje o pozycji',
   'positionDetail.performance': 'Wyniki',
   'positionDetail.automation': 'Automatyzacja strategii (ta pozycja)',
+  'positionDetail.tabLedger': 'Logi / rebalanse',
+  'positionDetail.tabChainHistoryPostgres': 'Historia (Postgres)',
+  'positionDetail.positionHistoryPostgres': 'Historia pozycji (Postgres)',
+  'positionDetail.lineageStreamOnlyIntro':
+    'Ta zakładka używa wyłącznie GET …/stream-lineage (przeliczenie na żądanie). Porównaj z zakładką „Historia (Postgres)”.',
+  'positionDetail.chainHistoryPgApiIntro':
+    'Ta zakładka używa wyłącznie GET …/chain-history (odczyt zmaterializowanych wierszy w Postgresie). HTTP 404 = brak zapisu dla tego anchoru i trybu metryk.',
+  'positionDetail.chainHistoryPgStreamFallbackBanner':
+    'Brak jeszcze zmaterializowanego łańcucha w Postgresie dla tej pozycji — poniżej ten sam wynik co GET …/stream-lineage (przeliczanie na żądanie). Żeby zapisać snapshot w Postgresie, użyj „Odśwież zapis w Postgres”.',
+  'positionDetail.chainHistoryPgStreamFallbackApiIntro':
+    'Ten widok pokazuje dane jak GET …/stream-lineage (compute on read), bo w Postgresie nie ma jeszcze wierszy chain-history dla tego PDA. Po odświeżeniu materializacji wróci odczyt wyłącznie z Postgresa.',
+  'positionDetail.chainHistoryPgChainHelp':
+    'Dane zapisane przez writera (triggery po mutacjach / refresh). Semantyka wierszy jak w stream-lineage; źródło odczytu to Postgres, nie przeliczanie IL edges w locie.',
+  'positionDetail.chainHistoryPgHintDb':
+    'To jest błąd połączenia z bazą (zwykle HTTP 503): proces `clmm-lp-api` nie ma działającego Postgresa. Ustaw `DATABASE_URL` w środowisku tego procesu (np. `.env` w katalogu repo — skrypt startowy 8081 wczytuje tę zmienną), upewnij się że usługa PostgreSQL działa, zrestartuj API i sprawdź logi (connect / migrate).',
+  'positionDetail.chainHistoryPgHint404':
+    'To jest brak zapisu w Postgres (zwykle HTTP 404): dla tego anchoru i trybu metryk nie ma jeszcze zmaterializowanego łańcucha. Użyj przycisku „Odśwież zapis w Postgres” poniżej (albo `POST …/chain-history/refresh` / CLI), ewentualnie poczekaj na automatyczną materializację po operacji na pozycji. Po `git pull` zrestartuj `clmm-lp-api` — mapowanie PDA → zapis w Postgresie jest po stronie serwera.',
+  'positionDetail.chainHistoryPgHintGeneric':
+    'Jeśli komunikat powyżej jest niejasny, sprawdź log `clmm-lp-api`, proxy Vite → backend (port 8081) oraz czy `GET …/chain-history` i `GET …/health` zwracają spójny stan.',
+  'positionDetail.chainHistoryPgMaterializedLabel': 'Zmaterializowano (Postgres):',
+  'positionDetail.chainHistoryPgRefresh': 'Odśwież zapis w Postgres',
+  'positionDetail.chainHistoryPgRefreshHint':
+    'POST …/chain-history/refresh przelicza lineage jak stream-lineage i nadpisuje wiersze (może potrwać do ~2 min). Jeśli API ma CLMM_CHAIN_HISTORY_REFRESH_SECRET, ustaw to samo w web jako VITE_CHAIN_HISTORY_REFRESH_SECRET.',
+  'positionDetail.chainHistoryPgStaleVsStream':
+    'Łańcuch w Postgresie jest krótszy niż bieżący wynik stream-lineage — snapshot jest prawdopodobnie nieaktualny. Użyj odświeżenia powyżej.',
+  'positionDetail.positionHistory': 'Historia pozycji',
+  'positionDetail.lineageReadBadgePostgres': 'odczyt: Postgres (materializacja)',
+  'positionDetail.lineageReadBadgeCompute': 'odczyt: przeliczane (stream-lineage)',
+  'positionDetail.lineageHistoryApiIntro':
+    'UI najpierw próbuje GET …/chain-history (zapis w Postgresie); przy braku danych lub błędzie używa GET …/stream-lineage.',
+  'positionDetail.openLedgerTabHintBefore': 'Otwórz zakładkę ',
+  'positionDetail.openLedgerTabHintAfter': ', aby zobaczyć surowe wiersze.',
 }
 
 const en: Dictionary = {
   'nav.dashboard': 'Dashboard',
   'nav.wallet': 'Wallet',
+  'nav.walletLedger': 'Wallet ledger',
   'nav.swap': 'Swap',
   'nav.positions': 'Positions',
   'nav.closed': 'Closed',
@@ -254,6 +307,25 @@ const en: Dictionary = {
   'wallet.solPreview': 'SOL (preview)',
   'wallet.quickAmounts': 'Quick amounts',
   'wallet.transferHistory': 'Recent transfers (local log)',
+  'walletLedger.title': 'Wallet ledger (GL-style)',
+  'walletLedger.subtitle':
+    'Append-only JSONL from the API: pending / confirmed / failed for swap-before-open, open, SOL transfer, SOL↔WSOL convert. Not a balance source — operational audit only.',
+  'walletLedger.refresh': 'Refresh',
+  'walletLedger.filters': 'Filters',
+  'walletLedger.ownerFilter': 'Owner filter (substring)',
+  'walletLedger.ownerPlaceholder': 'optional pubkey…',
+  'walletLedger.limit': 'Limit',
+  'walletLedger.filePath': 'File',
+  'walletLedger.empty': 'No events yet (or the file does not exist).',
+  'walletLedger.colTime': 'Time',
+  'walletLedger.colStatus': 'Status',
+  'walletLedger.colKind': 'Kind',
+  'walletLedger.colOwner': 'Owner',
+  'walletLedger.colCorr': 'Correlation',
+  'walletLedger.colSig': 'Signature',
+  'walletLedger.colDeltas': 'Deltas (mint / raw)',
+  'walletLedger.colErr': 'Error',
+  'walletLedger.linkFromWallet': 'Operation ledger',
   'wallet.currentWallet': 'Current wallet',
   'wallet.copy': 'Copy',
   'wallet.onChainTitle': 'On-chain balance (read-only)',
@@ -427,6 +499,38 @@ const en: Dictionary = {
   'positionDetail.info': 'Position info',
   'positionDetail.performance': 'Performance',
   'positionDetail.automation': 'Strategy automation (this position)',
+  'positionDetail.tabLedger': 'Logs / rebalances',
+  'positionDetail.tabChainHistoryPostgres': 'History (Postgres)',
+  'positionDetail.positionHistoryPostgres': 'Position history (Postgres)',
+  'positionDetail.lineageStreamOnlyIntro':
+    'This tab uses GET …/stream-lineage only (compute on read). Compare with the “History (Postgres)” tab.',
+  'positionDetail.chainHistoryPgApiIntro':
+    'This tab uses GET …/chain-history only (materialized rows in Postgres). HTTP 404 means no stored rows for this anchor and metrics mode.',
+  'positionDetail.chainHistoryPgStreamFallbackBanner':
+    'No Postgres materialized chain-history for this position yet — below is the same result as GET …/stream-lineage (compute on read). Use “Refresh Postgres snapshot” to persist rows.',
+  'positionDetail.chainHistoryPgStreamFallbackApiIntro':
+    'This view matches GET …/stream-lineage because there is no chain-history row in Postgres for this PDA yet. After a successful materialize refresh, reads switch back to Postgres-only.',
+  'positionDetail.chainHistoryPgChainHelp':
+    'Rows are written by the chain-history writer (triggers after mutations / refresh). Row semantics match stream-lineage; the read path is Postgres, not live IL-edge compute.',
+  'positionDetail.chainHistoryPgHintDb':
+    'This is a database connectivity issue (usually HTTP 503): the `clmm-lp-api` process has no working Postgres connection. Set `DATABASE_URL` for that process (e.g. repo `.env` — the :8081 start script loads it), ensure PostgreSQL is running, restart the API, and check logs (connect / migrate).',
+  'positionDetail.chainHistoryPgHint404':
+    'This is a missing snapshot (usually HTTP 404): there is no materialized chain-history yet for this anchor/mode. Use “Refresh Postgres snapshot” below (or `POST …/chain-history/refresh` / CLI), or wait for automatic materialization after a position-changing operation. After `git pull`, restart `clmm-lp-api` — PDA→Postgres row mapping is server-side.',
+  'positionDetail.chainHistoryPgHintGeneric':
+    'If the message above is unclear, check the `clmm-lp-api` log, the Vite proxy → backend (port 8081), and whether `GET …/chain-history` vs `GET …/health` look consistent.',
+  'positionDetail.chainHistoryPgMaterializedLabel': 'Materialized at (Postgres):',
+  'positionDetail.chainHistoryPgRefresh': 'Refresh Postgres snapshot',
+  'positionDetail.chainHistoryPgRefreshHint':
+    'POST …/chain-history/refresh recomputes lineage like stream-lineage and overwrites rows (can take up to ~2 minutes). If the API sets CLMM_CHAIN_HISTORY_REFRESH_SECRET, set the same value in the web app as VITE_CHAIN_HISTORY_REFRESH_SECRET.',
+  'positionDetail.chainHistoryPgStaleVsStream':
+    'The Postgres chain is shorter than the current stream-lineage result — the snapshot is likely stale. Use refresh above.',
+  'positionDetail.positionHistory': 'Position history',
+  'positionDetail.lineageReadBadgePostgres': 'read: Postgres (materialized)',
+  'positionDetail.lineageReadBadgeCompute': 'read: live compute (stream-lineage)',
+  'positionDetail.lineageHistoryApiIntro':
+    'The UI tries GET …/chain-history (Postgres) first; on missing rows or errors it falls back to GET …/stream-lineage.',
+  'positionDetail.openLedgerTabHintBefore': 'Open the ',
+  'positionDetail.openLedgerTabHintAfter': ' tab to see raw rows.',
 }
 
 const dictByLocale: Record<Locale, Dictionary> = { pl, en }

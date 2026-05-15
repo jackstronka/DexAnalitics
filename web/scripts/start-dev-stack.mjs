@@ -20,9 +20,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const webDir = path.resolve(__dirname, '..')
 const repoRoot = path.resolve(webDir, '..')
 
-/** Równolegle: taskkill/pkill api + zwolnienie 3000/8080 (krótki sleep na Windows pod plik .exe). */
+/** Równolegle: taskkill/pkill api + zwolnienie 3000 oraz portu API (domyślnie 8081; krótki sleep na Windows pod plik .exe). */
 async function freeDevPorts() {
-  const apiPort = Number.parseInt(process.env.API_PORT || '8080', 10)
+  const apiPort = Number.parseInt(process.env.API_PORT || '8081', 10)
   const jobs = []
   if (process.platform === 'win32') {
     jobs.push(
@@ -57,7 +57,7 @@ const openBrowser =
   process.env.CLMM_OPEN_BROWSER === '1' || process.env.CLMM_OPEN_BROWSER === 'true'
 // Use `npx` so it works even when PATH lacks node_modules/.bin (e.g. direct node invocation).
 const webCmd = openBrowser ? 'npx vite --open' : 'npx vite'
-const apiPort = Number.parseInt(process.env.API_PORT || '8080', 10)
+const apiPort = Number.parseInt(process.env.API_PORT || '8081', 10)
 
 console.log()
 console.log(

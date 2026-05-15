@@ -8,6 +8,7 @@ use crate::services::optimization_runner::{
     apply_optimize_result_json, merge_optimize_result_json_arg, run_optimize_cycle,
     run_optimize_subprocess,
 };
+use crate::services::position_chain_history::spawn_chain_history_materialize_background;
 use crate::state::{AlertUpdate, AppState};
 use clmm_lp_domain::prelude::PositionTruthMode;
 use clmm_lp_execution::prelude::{DecisionConfig, ExecutorConfig, StrategyExecutor, StrategyMode};
@@ -408,6 +409,17 @@ impl StrategyService {
             strategy.config.get("parameters"),
         )
         .await;
+
+        {
+            let st = self.state.clone();
+            executor.set_chain_history_hook(Some(Arc::new(move |anchor: &str| {
+                spawn_chain_history_materialize_background(
+                    &st,
+                    anchor.to_string(),
+                    "strategy_executor",
+                );
+            })));
+        }
 
         // Always enable Tier3 checkpoint ledger by default (append-only JSONL).
         executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(

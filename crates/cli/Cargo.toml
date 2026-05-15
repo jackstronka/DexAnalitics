@@ -20,7 +20,7 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 dotenv =  { workspace = true }
 tracing-subscriber = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 primitive-types = { workspace = true }
@@ -39,6 +39,7 @@ solana-client = { workspace = true }
 solana-transaction-status-client-types = "3.1"
 base64 = "0.22.1"
 orca_whirlpools = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }

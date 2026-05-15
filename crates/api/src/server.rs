@@ -290,6 +290,13 @@ impl ApiServer {
     pub async fn new(config: ServerConfig) -> Self {
         let db = connect_db_best_effort().await;
         let state = AppState::new(config.rpc_config.clone(), config.api_config.clone(), db);
+        if state.db.is_some() {
+            tracing::info!("Postgres connected: chain-history and DB-backed stream paths are enabled");
+        } else {
+            tracing::warn!(
+                "Postgres not available: DATABASE_URL missing, connect/migrate failed, or timed out — GET …/chain-history returns 503; this is unchanged startup behavior (not per-request chain-history code)"
+            );
+        }
         Self { config, state }
     }
 

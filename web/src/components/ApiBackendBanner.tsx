@@ -1,19 +1,22 @@
-import { useQuery } from '@tanstack/react-query'
+import { isCancelledError, useQuery } from '@tanstack/react-query'
 import { AlertTriangle } from 'lucide-react'
 import { getLiveness } from '@/lib/api'
 
 /**
- * Gdy backend nie odpowiada, większość zakładek wygląda na „puste” (Vite proxy na :8080).
+ * Gdy backend nie odpowiada, większość zakładek wygląda na „puste” (Vite proxy `/api` → API_UPSTREAM).
  */
 export default function ApiBackendBanner() {
   const q = useQuery({
     queryKey: ['liveness'],
-    queryFn: getLiveness,
-    retry: 2,
-    retryDelay: (n) => Math.min(500 * 2 ** n, 4000),
+    queryFn: ({ signal }) => getLiveness({ signal }),
+    retry: 4,
+    retryDelay: (n) => Math.min(750 * 2 ** n, 8000),
   })
 
   if (q.isPending || q.isSuccess) {
+    return null
+  }
+  if (q.isError && isCancelledError(q.error)) {
     return null
   }
 

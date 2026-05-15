@@ -27,19 +27,122 @@ export function formatUsdFixed(value: number | string, fractionDigits: number): 
   }).format(num)
 }
 
-/** Backend often uses 0 for “unknown”; lineage tables show that as "—" via `usdOrDash`. */
-export function isUsdValueMissingForLineage(v: string | number): boolean {
-  const n = typeof v === 'string' ? parseFloat(v) : v
-  return !Number.isFinite(n) || n === 0
+/** Qualities where a numeric `0` means “unknown”, not a literal zero-dollar mark. */
+const LINEAGE_USD_MISSING_QUALITIES = new Set(['missing_inputs', 'missing_price'])
+
+/**
+ * Lineage node USD from API: show `—` only when non-finite / empty, or when value is exactly 0
+ * and quality indicates missing valuation (backend uses 0 as sentinel).
+ */
+export function formatLineageStoredValueUsd(
+  usd: string | number | null | undefined,
+  valuationQuality: string | null | undefined,
+  fractionDigits: number,
+): string {
+  if (usd == null) return '—'
+  const s = String(usd).trim()
+  if (s === '') return '—'
+  const num = typeof usd === 'number' ? usd : parseFloat(s)
+  if (!Number.isFinite(num)) return '—'
+  const q = (valuationQuality ?? '').trim().toLowerCase()
+  if (num === 0 && LINEAGE_USD_MISSING_QUALITIES.has(q)) return '—'
+  return formatUsdFixed(num, fractionDigits)
 }
 
-/** Principal Δ = end − start; "—" if either leg is unknown (matches start/end column rules). */
+/** True when principal Δ should be hidden (unknown leg). */
+export function isLineageStoredUsdMissing(
+  usd: string | number | null | undefined,
+  valuationQuality: string | null | undefined,
+): boolean {
+  if (usd == null) return true
+  const s = String(usd).trim()
+  if (s === '') return true
+  const num = typeof usd === 'number' ? usd : parseFloat(s)
+  if (!Number.isFinite(num)) return true
+  const q = (valuationQuality ?? '').trim().toLowerCase()
+  if (num === 0 && LINEAGE_USD_MISSING_QUALITIES.has(q)) return true
+  return false
+}
+
+export type LineageOpeningUsdExtra = {
+  /** When the lineage table has a single node, `totals.baseline_value_usd` may still carry the chain start mark. */
+  singleNodeTotalsBaselineUsd?: string | number | null
+}
+
+/** Start column: API baseline when known; else lifecycle ledger open-quote USD; else single-node `totals.baseline`. */
+export function formatLineageOpeningUsdDisplay(
+  n: { position_address: string; baseline_value_usd: string; baseline_valuation_quality?: string | null },
+  ledgerOpenQuoteUsd: ReadonlyMap<string, number> | undefined,
+  fractionDigits: number,
+  extra?: LineageOpeningUsdExtra,
+): { text: string; source: 'api' | 'ledger' | 'totals' | 'none' } {
+  if (!isLineageStoredUsdMissing(n.baseline_value_usd, n.baseline_valuation_quality)) {
+    return {
+      text: formatLineageStoredValueUsd(n.baseline_value_usd, n.baseline_valuation_quality, fractionDigits),
+      source: 'api',
+    }
+  }
+  const pk = n.position_address.trim()
+  const v = ledgerOpenQuoteUsd?.get(pk)
+  if (v != null && Number.isFinite(v) && v > 0) {
+    return { text: formatUsdFixed(v, fractionDigits), source: 'ledger' }
+  }
+  const tb = extra?.singleNodeTotalsBaselineUsd
+  if (tb != null && String(tb).trim() !== '') {
+    const num = typeof tb === 'number' ? tb : parseFloat(String(tb).trim())
+    if (Number.isFinite(num) && num > 0) {
+      return { text: formatUsdFixed(num, fractionDigits), source: 'totals' }
+    }
+  }
+  return { text: '—', source: 'none' }
+}
+
+/** Principal Δ using ledger open-quote USD as baseline when API baseline is still missing. */
+export function formatPrincipalDeltaForLineageNode(
+  n: {
+    position_address: string
+    baseline_value_usd: string
+    baseline_valuation_quality?: string | null
+    current_value_usd: string
+    current_valuation_quality?: string | null
+  },
+  ledgerOpenQuoteUsd: ReadonlyMap<string, number> | undefined,
+  fractionDigits = 3,
+  extra?: LineageOpeningUsdExtra,
+): string {
+  let bUsd: string | number = n.baseline_value_usd
+  let bQ = n.baseline_valuation_quality
+  if (isLineageStoredUsdMissing(bUsd, bQ)) {
+    const v = ledgerOpenQuoteUsd?.get(n.position_address.trim())
+    if (v != null && Number.isFinite(v) && v > 0) {
+      bUsd = v
+      bQ = 'exact'
+    } else {
+      const t = extra?.singleNodeTotalsBaselineUsd
+      if (t != null && String(t).trim() !== '') {
+        const num = typeof t === 'number' ? t : parseFloat(String(t).trim())
+        if (Number.isFinite(num) && num > 0) {
+          bUsd = num
+          bQ = 'exact'
+        }
+      }
+    }
+  }
+  return formatPrincipalDeltaUsdOrDash(bUsd, bQ, n.current_value_usd, n.current_valuation_quality, fractionDigits)
+}
+
+/** Principal Δ = end − start; "—" if either leg is unknown per lineage quality rules. */
 export function formatPrincipalDeltaUsdOrDash(
   baselineUsd: string | number,
+  baselineQuality: string | null | undefined,
   currentUsd: string | number,
+  currentQuality: string | null | undefined,
   fractionDigits = 3,
 ): string {
-  if (isUsdValueMissingForLineage(baselineUsd) || isUsdValueMissingForLineage(currentUsd)) {
+  if (
+    isLineageStoredUsdMissing(baselineUsd, baselineQuality) ||
+    isLineageStoredUsdMissing(currentUsd, currentQuality)
+  ) {
     return '—'
   }
   const a = typeof baselineUsd === 'string' ? parseFloat(baselineUsd) : baselineUsd

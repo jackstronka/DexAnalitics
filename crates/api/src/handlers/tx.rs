@@ -4,6 +4,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::models::{
     BuildUnsignedTxRequest, BuildUnsignedTxResponse, SubmitSignedTxRequest, SubmitSignedTxResponse,
 };
+use crate::services::position_chain_history::spawn_chain_history_materialize_background;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -516,7 +517,52 @@ pub async fn tx_submit_signed(
         .send_transaction(&tx)
         .await
         .map_err(|e| ApiError::internal(format!("send failed: {e}")))?;
+
+    for anchor in normalized_submit_chain_history_anchors(req.chain_history_anchors.as_ref()) {
+        spawn_chain_history_materialize_background(&state, anchor, "tx_submit_signed");
+    }
+
     Ok(Json(SubmitSignedTxResponse {
         signature: sig.to_string(),
     }))
+}
+
+/// Trims and drops empty entries from `chain_history_anchors` (submit-signed body).
+#[must_use]
+pub(crate) fn normalized_submit_chain_history_anchors(
+    anchors: Option<&Vec<String>>,
+) -> Vec<String> {
+    let Some(anchors) = anchors else {
+        return Vec::new();
+    };
+    anchors
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod submit_signed_anchor_tests {
+    use super::normalized_submit_chain_history_anchors;
+
+    #[test]
+    fn normalized_submit_chain_history_anchors_trims_and_skips_empty() {
+        let v = vec![
+            "  abc  ".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "def".to_string(),
+        ];
+        assert_eq!(
+            normalized_submit_chain_history_anchors(Some(&v)),
+            vec!["abc".to_string(), "def".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalized_submit_chain_history_anchors_none_is_empty() {
+        assert!(normalized_submit_chain_history_anchors(None).is_empty());
+    }
 }

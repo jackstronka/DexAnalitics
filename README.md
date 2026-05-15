@@ -21,7 +21,7 @@ Obsługiwane protokoły:
 
 **Warstwa „agent / AI” w tym repozytorium** (kontrakt `AgentDecision`, Position Agent, reguły live bota): [doc/AI_AGENT_LAYER.md](doc/AI_AGENT_LAYER.md).
 
-**Warstwa decyzyjna / orkiestrator LP** (cele, fazy, shadow, symulacje): [doc/DECISION_LAYER.md](doc/DECISION_LAYER.md).
+**Warstwa decyzyjna / orkiestrator LP** (cele, fazy, shadow, symulacje, **§1b rejestr zdolności** CLI/API vs NO-GO, **plan implementacji**): [doc/DECISION_LAYER.md](doc/DECISION_LAYER.md), [doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md](doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md).
 
 ## Co tu jest najważniejsze dzisiaj
 
@@ -112,6 +112,28 @@ Monitoring/alerty:
 ```bash
 cargo run --bin clmm-lp-cli -- data-health-check --max-age-minutes 30 --min-decode-ok-pct 65 --fail-on-alert
 ```
+
+Materializacja łańcucha rotacji pozycji w Postgres (`POST /api/v1/positions/…/chain-history/refresh` — wymaga działającego API + DB, migracje 007–008; przy `API_KEYS` ustaw `CLMM_X_API_KEY`, przy sekrecie refresh — `CLMM_CHAIN_HISTORY_REFRESH_SECRET`):
+
+```bash
+cargo run --bin clmm-lp-cli -- chain-history-refresh <POSITION_PUBKEY> --mode live
+```
+
+Ten sam test jakości + **jeden wiersz audytu** w `data/agent/agent_decisions.jsonl` (schemat `gate_health` — [`doc/FUNCTIONAL_SPECIFICATION.md`](doc/FUNCTIONAL_SPECIFICATION.md) §8, przykład [`doc/examples/orchestrator-run-v1.example.json`](doc/examples/orchestrator-run-v1.example.json)):
+
+```bash
+cargo run --bin clmm-lp-cli -- orchestrator-gate --max-age-minutes 30 --min-decode-ok-pct 65 --fail-on-no-go
+```
+
+Macierz **`POST /api/v1/backtests/full`** przez API (wymaga działającego `clmm-lp-api`) + audyt w `agent_decisions` (`kind`: `api_backtests_full` — §8); minimalne ciało żądania: [`doc/examples/backtest-full-request.min.json`](doc/examples/backtest-full-request.min.json):
+
+```bash
+cargo run --bin clmm-lp-cli -- orchestrator-backtests-full \
+  --request-json doc/examples/backtest-full-request.min.json \
+  --save-job-json data/reports/orchestrator_full_job_latest.json
+```
+
+(`CLMM_API_BASE_URL`, opcjonalnie `--decisions-via-http`, `--skip-gate`, `--fail-on-no-go`, przed FULL domyślnie `POST /api/v1/backtests/data-readiness` (`--skip-data-readiness`, `--fail-on-data-readiness`), `--poll-timeout-secs` — patrz `--help`.)
 
 ### 4) Backtest na danych historycznych
 

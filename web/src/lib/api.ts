@@ -213,6 +213,16 @@ export interface PositionStreamLineageNode {
     position_share_pct_est?: string | null
     methodology_note: string
   } | null
+  /** `GET …/chain-history` only: Postgres NUMERIC columns as strings — **only when value &gt; 0** (omit zero so UI falls back). */
+  chain_history_start_value_usd?: string | null
+  chain_history_end_value_usd?: string | null
+  chain_history_current_value_usd?: string | null
+  /** Postgres chain-history: pool from snapshots / ledger. */
+  chain_history_pool_address?: string | null
+  chain_history_tick_lower_open?: number | null
+  chain_history_tick_upper_open?: number | null
+  chain_history_event_spot_token_a_usd_open?: string | null
+  chain_history_event_spot_token_a_usd_close?: string | null
 }
 
 /** Sums of per-node network costs vs collected fees across the full rotation chain. */
@@ -234,6 +244,16 @@ export interface PositionStreamLineageResponse {
   totals?: PositionStreamPnLResponse | null
   chain_cost_summary?: LineageChainCostSummary | null
   note?: string | null
+  /** `GET …/chain-history` only: Postgres meta `materialized_ts_utc` (RFC3339). */
+  chain_history_materialized_ts_utc?: string | null
+}
+
+/** Response from `POST /positions/{address}/chain-history/refresh`. */
+export interface MaterializeChainHistoryResponse {
+  ok: boolean
+  chain_anchor_pubkey: string
+  metrics_mode: string
+  nodes_written: number
 }
 
 export interface ClosedPositionEntry {
@@ -1007,19 +1027,48 @@ export async function getJupiterPricesUsd(mints: string[]): Promise<Record<strin
 
 // Health
 export const getHealth = () => fetchJson<HealthResponse>('/health')
-export const getLiveness = async () => {
+
+/** Fast probe for dev banner; uses longer timeout than before — cold Vite proxy / API start can exceed 2s. */
+export async function getLiveness(opts?: { signal?: AbortSignal }): Promise<string> {
+  const timeoutMs = 8000
+  const ext = opts?.signal
   const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), 2000)
+  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  const onExtAbort = () => {
+    ctrl.abort()
+  }
+  if (ext) {
+    if (ext.aborted) {
+      clearTimeout(t)
+      throw new DOMException('aborted', 'AbortError')
+    }
+    ext.addEventListener('abort', onExtAbort, { once: true })
+  }
   try {
     const r = await fetch(`${API_BASE}/health/live`, { signal: ctrl.signal })
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     return await r.text()
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      if (ext?.aborted) {
+        throw e
+      }
+      throw new Error(
+        `Liveness timed out after ${timeoutMs / 1000}s (${API_BASE}/health/live via Vite). ` +
+          `Uruchom API lub ustaw API_UPSTREAM / API_PORT (np. http://127.0.0.1:8081).`,
+      )
+    }
+    throw e
   } finally {
     clearTimeout(t)
+    if (ext) {
+      ext.removeEventListener('abort', onExtAbort)
+    }
   }
 }
 
-/** On-chain Orca scan (`GET /orca/positions-by-owner`); same family as `orca-positions-list` CLI. */
+/** On-chain Orca scan (`GET /orca/positions-by-owner`); same family as `orca-positions-list` CLI.
+ * Uses a 120s UI timeout: API may try multiple RPC endpoints (30s each) plus per-position enrichment. */
 export interface OrcaOwnerPositionEntry {
   kind: string
   position_address: string
@@ -1052,8 +1101,9 @@ export interface OrcaOwnerPositionsResponse {
 }
 
 export const getOrcaPositionsByOwner = (owner: string) =>
-  fetchJson<OrcaOwnerPositionsResponse>(
+  fetchJsonWithTimeout<OrcaOwnerPositionsResponse>(
     `/orca/positions-by-owner?${new URLSearchParams({ owner: owner.trim() })}`,
+    120_000,
   )
 
 export interface MarketSnapshotRow {
@@ -1187,6 +1237,47 @@ export const getPositionStreamLineage = (
     `/positions/${encodeURIComponent(address)}/stream-lineage?${new URLSearchParams({ mode })}`,
     120_000,
   )
+
+/** Postgres chain-history read: can exceed 15s when lineage merge + ledger refresh + many PDAs. */
+export const getPositionChainHistory = (
+  address: string,
+  mode: 'live' | 'settlement_v1' = 'live',
+) =>
+  fetchJsonWithTimeout<PositionStreamLineageResponse>(
+    `/positions/${encodeURIComponent(address)}/chain-history?${new URLSearchParams({ mode })}`,
+    120_000,
+  )
+
+/**
+ * Prefer fast materialized `GET …/chain-history`; on 404 or any other failure, fall back to `GET …/stream-lineage`.
+ * Same response shape; materialized rows may set `totals.note` / per-node hints (e.g. `source=postgres_chain_history`).
+ */
+export async function getPositionLineagePreferMaterialized(
+  address: string,
+  mode: 'live' | 'settlement_v1' = 'live',
+): Promise<PositionStreamLineageResponse> {
+  try {
+    return await getPositionChainHistory(address, mode)
+  } catch {
+    return await getPositionStreamLineage(address, mode)
+  }
+}
+
+/** Recompute lineage + persist to Postgres. If `CLMM_CHAIN_HISTORY_REFRESH_SECRET` is set on the API, pass the same value as `opts.refreshSecret` (sends `Authorization: Bearer …`). */
+export const refreshPositionChainHistory = (
+  address: string,
+  mode: 'live' | 'settlement_v1' = 'live',
+  opts?: { refreshSecret?: string },
+) => {
+  const headers: Record<string, string> = {}
+  if (opts?.refreshSecret) {
+    headers.Authorization = `Bearer ${opts.refreshSecret}`
+  }
+  return fetchJsonLong<MaterializeChainHistoryResponse>(
+    `/positions/${encodeURIComponent(address)}/chain-history/refresh?${new URLSearchParams({ mode })}`,
+    { method: 'POST', headers },
+  )
+}
 export const getPositionLifecycleSummary = (address: string) =>
   fetchJson<PositionLifecycleSummaryResponse>(
     `/positions/${encodeURIComponent(address)}/lifecycle-summary`,
@@ -1279,6 +1370,86 @@ export const swapBeforeOpen = (data: SwapBeforeOpenRequest) =>
     method: 'POST',
     body: JSON.stringify(data),
   })
+
+/** Request body for `POST /api/v1/tx/{op}/build` (matches server `BuildUnsignedTxRequest`). */
+export interface BuildUnsignedTxRequest {
+  wallet_pubkey: string
+  position_address?: string | null
+  pool_address?: string | null
+  amount_a?: number | null
+  amount_b?: number | null
+  /** Serialized as JSON number or string depending on magnitude (server: u128). */
+  liquidity_amount?: string | number | null
+  slippage_bps?: number | null
+  tick_lower?: number | null
+  tick_upper?: number | null
+  full_range?: boolean | null
+}
+
+/** Response from `POST /api/v1/tx/{op}/build`. */
+export interface BuildUnsignedTxResponse {
+  unsigned_tx_base64: string
+  correlation_id: string
+  expected_program_ids: string[]
+  position_mint?: string | null
+  position_address?: string | null
+}
+
+/** Body for `POST /api/v1/tx/submit-signed`. */
+export interface SubmitSignedTxRequest {
+  signed_tx_base64: string
+  /** Position (or chain) pubkeys to refresh materialized chain-history after a successful send. */
+  chain_history_anchors?: string[] | null
+}
+
+export interface SubmitSignedTxResponse {
+  signature: string
+}
+
+export type TxBuildOperation = 'open' | 'increase' | 'decrease' | 'collect' | 'close'
+
+/** Build an unsigned transaction for the given Orca Whirlpool operation. */
+export const txBuildUnsigned = (op: TxBuildOperation, body: BuildUnsignedTxRequest) =>
+  fetchJsonLong<BuildUnsignedTxResponse>(`/tx/${op}/build`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+/**
+ * Pubkeys to send as `chain_history_anchors` after a successful submit when the build response
+ * includes `position_address` (e.g. open / increase flows).
+ */
+export function chainHistoryAnchorsFromTxBuild(build: BuildUnsignedTxResponse): string[] {
+  const a = build.position_address?.trim()
+  return a ? [a] : []
+}
+
+/**
+ * Submit a wallet-signed transaction. Merges {@link chainHistoryAnchorsFromTxBuild}(`build`) with
+ * explicit `chain_history_anchors` (deduped) so materialized chain-history can refresh after send.
+ */
+export async function txSubmitSigned(
+  signedTxBase64: string,
+  opts?: {
+    chain_history_anchors?: string[] | null
+    /** When set, `position_address` from the build response is included as anchors. */
+    build?: BuildUnsignedTxResponse | null
+  },
+): Promise<SubmitSignedTxResponse> {
+  const fromBuild = opts?.build ? chainHistoryAnchorsFromTxBuild(opts.build) : []
+  const explicit = (opts?.chain_history_anchors ?? [])
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .filter(Boolean)
+  const merged = [...new Set([...fromBuild, ...explicit])]
+  const body: SubmitSignedTxRequest = {
+    signed_tx_base64: signedTxBase64,
+    ...(merged.length > 0 ? { chain_history_anchors: merged } : {}),
+  }
+  return fetchJsonLong<SubmitSignedTxResponse>('/tx/submit-signed', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
 
 /** `POST /positions` success body (open position + optional swap metadata). */
 export interface PositionOpenResponse {
@@ -1690,6 +1861,46 @@ export interface WalletTransferLogEntry {
 
 export interface WalletTransfersListResponse {
   transfers: WalletTransferLogEntry[]
+}
+
+export type WalletLedgerStatus = 'pending' | 'confirmed' | 'failed'
+
+export interface WalletLedgerDelta {
+  mint: string
+  decimals: number
+  raw_delta_i128: string
+}
+
+export interface WalletLedgerEvent {
+  schema_version: number
+  ts_utc: string
+  event_id: string
+  correlation_id: string
+  status: WalletLedgerStatus
+  kind: string
+  owner?: string | null
+  signature?: string | null
+  pool_address?: string | null
+  position_pda?: string | null
+  cost_session_id?: string | null
+  dry_run: boolean
+  native_lamports_delta?: string | null
+  deltas: WalletLedgerDelta[]
+  error?: string | null
+  source: string
+}
+
+export interface WalletLedgerEventsResponse {
+  path: string
+  events: WalletLedgerEvent[]
+}
+
+export const getWalletLedgerEvents = (opts?: { owner?: string; limit?: number }) => {
+  const params = new URLSearchParams()
+  if (opts?.owner?.trim()) params.set('owner', opts.owner.trim())
+  if (opts?.limit != null) params.set('limit', String(opts.limit))
+  const q = params.toString()
+  return fetchJson<WalletLedgerEventsResponse>(`/wallets/ledger-events${q ? `?${q}` : ''}`)
 }
 
 export const getWalletTransfers = (limit = 20) =>

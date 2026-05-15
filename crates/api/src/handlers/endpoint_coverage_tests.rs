@@ -65,6 +65,23 @@ async fn request(
     resp.status()
 }
 
+async fn request_with_headers(
+    router: axum::Router,
+    method: Method,
+    path: &str,
+    headers: &[(&'static str, &'static str)],
+) -> StatusCode {
+    let mut req = Request::builder().method(method).uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = router
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    resp.status()
+}
+
 async fn request_body(
     router: axum::Router,
     method: Method,
@@ -909,6 +926,16 @@ async fn wallet_management_endpoints_are_reachable() {
         .await,
         StatusCode::OK
     );
+    assert_eq!(
+        request(
+            test_router(test_state()),
+            Method::GET,
+            "/api/v1/wallets/ledger-events",
+            None,
+        )
+        .await,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -980,4 +1007,89 @@ async fn open_position_endpoint_is_reachable() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn chain_history_refresh_requires_secret_when_configured() {
+    let rpc_config = RpcConfig {
+        primary_url: "http://127.0.0.1:1".to_string(),
+        ..Default::default()
+    };
+    let cfg = ApiConfig {
+        chain_history_refresh_secret: Some("unit-test-secret-alpha".to_string()),
+        ..Default::default()
+    };
+    let state = AppState::new(rpc_config, cfg, None);
+    let router = test_router(state);
+    let pk = Pubkey::new_unique();
+    let path = format!("/api/v1/positions/{}/chain-history/refresh", pk);
+
+    assert_eq!(
+        request(router.clone(), Method::POST, &path, None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request_with_headers(
+            router.clone(),
+            Method::POST,
+            &path,
+            &[("Authorization", "Bearer wrong-token")],
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request_with_headers(
+            router,
+            Method::POST,
+            &path,
+            &[("Authorization", "Bearer unit-test-secret-alpha")],
+        )
+        .await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn chain_history_refresh_requires_db() {
+    let state = test_state();
+    let router = test_router(state);
+    let pk = Pubkey::new_unique();
+    let status = request(
+        router,
+        Method::POST,
+        &format!("/api/v1/positions/{}/chain-history/refresh", pk),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn chain_history_get_requires_db_or_returns_not_found() {
+    let state = test_state();
+    let router = test_router(state);
+    let pk = Pubkey::new_unique();
+    let status = request(
+        router,
+        Method::GET,
+        &format!("/api/v1/positions/{}/chain-history", pk),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn chain_history_refresh_rejects_invalid_pubkey() {
+    let state = test_state();
+    let router = test_router(state);
+    let status = request(
+        router,
+        Method::POST,
+        "/api/v1/positions/not-a-pubkey/chain-history/refresh",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

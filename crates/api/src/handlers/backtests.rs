@@ -929,6 +929,8 @@ struct CuratedBacktestPool {
     mint_b: &'static str,
 }
 
+/// Curated mainnet CLMM pairs (Orca / Raydium / Meteora). Keep in sync with
+/// `crates/data/migrations/009_wallet_gl_curated_tokens_and_pools.sql` and `tools/orca_curated_mainnet_pools.ps1`.
 fn curated_backtest_pools() -> Vec<CuratedBacktestPool> {
     vec![
         CuratedBacktestPool {

@@ -15,7 +15,7 @@ use solana_sdk::signature::Signer;
 use spl_token::solana_program::program_pack::Pack;
 use spl_token::state::Account as SplTokenAccount;
 use spl_token::state::Mint as SplMint;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::str::FromStr;
@@ -46,6 +46,29 @@ fn merge_open_ledger_details(
     } else {
         serde_json::Value::Object(bm)
     }
+}
+
+/// Pubkey strings for optional chain-history materialize hook after successful on-chain steps.
+fn chain_history_hook_anchors_from_success(
+    op_name: &str,
+    position: Option<Pubkey>,
+    result: &clmm_lp_protocols::orca::executor::ExecutionResult,
+) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    match op_name {
+        "open_position" | "open_full_range_position" => {
+            if let Some(p) = result.created_position {
+                out.insert(p.to_string());
+            }
+        }
+        "close_position" | "collect_fees" | "decrease_liquidity" | "swap_exact_in" => {
+            if let Some(p) = position {
+                out.insert(p.to_string());
+            }
+        }
+        _ => {}
+    }
+    out.into_iter().collect()
 }
 
 /// Retries for `open_position` after a successful close (`CLMM_REBALANCE_OPEN_MAX_ATTEMPTS`, 1..=20, default 5).
@@ -807,6 +830,8 @@ pub struct RebalanceExecutor {
     config: RebalanceConfig,
     /// Dry run mode.
     dry_run: AtomicBool,
+    /// Optional hook after successful on-chain steps (e.g. API chain-history materialize).
+    chain_history_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
 
 impl RebalanceExecutor {
@@ -824,6 +849,7 @@ impl RebalanceExecutor {
             lifecycle,
             config,
             dry_run: AtomicBool::new(false),
+            chain_history_hook: Mutex::new(None),
         }
     }
 
@@ -857,6 +883,34 @@ impl RebalanceExecutor {
     /// Enables or disables dry run mode.
     pub fn set_dry_run(&self, dry_run: bool) {
         self.dry_run.store(dry_run, Ordering::SeqCst);
+    }
+
+    /// Optional hook invoked after successful on-chain operations (see [`chain_history_hook_anchors_from_success`]).
+    pub fn set_chain_history_hook(&self, hook: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+        if let Ok(mut g) = self.chain_history_hook.lock() {
+            *g = hook;
+        }
+    }
+
+    fn invoke_chain_history_hook(
+        &self,
+        op_name: &str,
+        position: Option<Pubkey>,
+        result: &clmm_lp_protocols::orca::executor::ExecutionResult,
+    ) {
+        let hook = match self.chain_history_hook.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        let Some(h) = hook else {
+            return;
+        };
+        for a in chain_history_hook_anchors_from_success(op_name, position, result) {
+            let t = a.trim();
+            if !t.is_empty() {
+                h(t);
+            }
+        }
     }
 
     fn require_wallet(&self) -> anyhow::Result<Arc<Wallet>> {
@@ -3804,6 +3858,8 @@ impl RebalanceExecutor {
         validate_execution_result(op_name, result)?;
 
         if result.success {
+            self.invoke_chain_history_hook(op_name, position, result);
+
             let fee_payer = self
                 .wallet
                 .lock()

@@ -96,6 +96,16 @@ fn load_config_from_env() -> ServerConfig {
                 Some(t.to_string())
             }
         }),
+        chain_history_refresh_secret: env::var("CLMM_CHAIN_HISTORY_REFRESH_SECRET").ok().and_then(
+            |s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            },
+        ),
         enable_cors: env::var("API_CORS_ALLOW_ALL")
             .map(|v| v == "true")
             .unwrap_or(true),

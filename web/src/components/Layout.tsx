@@ -14,6 +14,7 @@ import {
   ScrollText,
   BarChart3,
   Database,
+  ClipboardList,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -25,6 +26,13 @@ import { useI18n } from '@/lib/i18n'
 import { APP_VERSION_LABEL } from '@/lib/version'
 import { connectWebSockets, disconnectWebSockets } from '@/lib/websocket'
 
+function navItemIsActive(pathname: string, href: string): boolean {
+  if (href === '/wallet') {
+    return pathname === '/wallet' || pathname === '/wallet/'
+  }
+  return pathname === href || pathname.startsWith(`${href}/`)
+}
+
 export default function Layout() {
   const location = useLocation()
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -34,6 +42,7 @@ export default function Layout() {
   const navigation = [
     { key: 'nav.dashboard', href: '/dashboard', icon: LayoutDashboard },
     { key: 'nav.wallet', href: '/wallet', icon: Wallet },
+    { key: 'nav.walletLedger', href: '/wallet/ledger', icon: ClipboardList },
     { key: 'nav.swap', href: '/swap', icon: ArrowLeftRight },
     { key: 'nav.positions', href: '/positions', icon: Activity },
     { key: 'nav.closed', href: '/positions/closed', icon: History },
@@ -115,7 +124,7 @@ export default function Layout() {
 
         <nav className="flex flex-col gap-1 p-4">
           {navigation.map((item) => {
-            const isActive = location.pathname.startsWith(item.href)
+            const isActive = navItemIsActive(location.pathname, item.href)
             return (
               <Link
                 key={item.key}

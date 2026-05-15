@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
@@ -16,6 +16,8 @@ import {
   getPositionStreamPerformance,
   getPositionStreamPnL,
   getPositionStreamLineage,
+  getPositionChainHistory,
+  refreshPositionChainHistory,
   getBacktestJob,
   closePosition,
   collectFees,
@@ -34,29 +36,28 @@ import {
   suggestPositionStrategy,
   triggerPositionAgentScan,
 } from '@/lib/api'
-import type { Strategy } from '@/lib/api'
+import type { PositionStreamLineageResponse, Strategy } from '@/lib/api'
 import {
-  FEE_BASE_UNITS_TOOLTIP,
   formatDate,
-  formatFeeBaseUnitsClause,
-  formatLineageFeesCollectedUsdMain,
-  formatNumber,
-  formatInvertedTokenPriceRange,
   formatPercentFixed,
-  formatPrincipalDeltaUsdOrDash,
-  formatUsdField,
   formatUsdFixed,
   formatUsdUncollectedFees,
-  formatTokenPriceRange,
   formatUsdcPriceRange,
   shortenAddress,
 } from '@/lib/utils'
-import { tickToPriceRatio, uiPriceFromRawPriceRatio } from '@/lib/whirlpoolTicks'
 import { getMetricsMode } from '@/lib/metricsMode'
 import { useI18n } from '@/lib/i18n'
+import { PositionLineageHistoryPanel } from '@/components/PositionLineageHistoryPanel'
+import { extractLifecycleOpenQuoteUsdByPosition } from '@/lib/lineageLedgerOpenQuote'
 
 /** Wrapped SOL mint — network fees are in native SOL (lamports). */
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
+
+/** Postgres tab: prefer materialized `GET …/chain-history`; never leave the tab empty on 404. */
+type ChainHistoryPgTabPayload = {
+  lineage: PositionStreamLineageResponse
+  readSource: 'postgres_materialized' | 'stream_lineage_fallback'
+}
 
 type LedgerRow = Record<string, unknown>
 
@@ -78,6 +79,37 @@ function mergeLifecycleLedgerRows(
     }
   }
   return out
+}
+
+/** Classify chain-history GET error for hint + optional refresh CTA. */
+function chainHistoryPgErrorKind(err: unknown): 'db' | 'missing' | 'other' {
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
+  const m = msg.toLowerCase()
+  if (
+    m.includes('503') ||
+    m.includes('service unavailable') ||
+    m.includes('postgres') ||
+    m.includes('database_url') ||
+    m.includes('database not configured')
+  ) {
+    return 'db'
+  }
+  if (m.includes('404') || m.includes('not found') || m.includes('no materialized chain-history')) {
+    return 'missing'
+  }
+  return 'other'
+}
+
+/** Hint under ErrorBanner: do not mix “no DB” (503) with “not materialized yet” (404). */
+function chainHistoryPgSecondaryHint(err: unknown, t: (key: string) => string): string {
+  switch (chainHistoryPgErrorKind(err)) {
+    case 'db':
+      return t('positionDetail.chainHistoryPgHintDb')
+    case 'missing':
+      return t('positionDetail.chainHistoryPgHint404')
+    default:
+      return t('positionDetail.chainHistoryPgHintGeneric')
+  }
 }
 
 function normalizeIlTimelineRow(row: LedgerRow): LedgerRow | null {
@@ -228,7 +260,7 @@ function extractOpenCloseRangesByPosition(rows: LedgerRow[]): Map<string, Positi
   return out
 }
 
-function parseCloseEventPriceFromDetails(details: unknown): number | null {
+function parseEventPriceAUsdFromDetails(details: unknown): number | null {
   if (!details || typeof details !== 'object') return null
   const obj = details as Record<string, unknown>
   const raw = obj.event_price_a_usd
@@ -240,6 +272,33 @@ function parseCloseEventPriceFromDetails(details: unknown): number | null {
   return null
 }
 
+function extractOpenEventPriceByPosition(rows: LedgerRow[]): Map<string, number> {
+  const out = new Map<string, { tsMs: number; price: number }>()
+  for (const r of rows) {
+    const position = typeof r.position_pubkey === 'string' ? r.position_pubkey.trim() : ''
+    if (!position) continue
+    const event = typeof r.event === 'string' ? r.event : ''
+    if (
+      event !== 'bot_open_position' &&
+      event !== 'bot_open_position_full_range' &&
+      event !== 'position_open'
+    ) {
+      continue
+    }
+    const price = parseEventPriceAUsdFromDetails(r.details)
+    if (price == null) continue
+    const tsRaw = typeof r.ts_utc === 'string' ? r.ts_utc : ''
+    const tsMs = Date.parse(tsRaw)
+    const existing = out.get(position)
+    if (!existing || (Number.isFinite(tsMs) && tsMs < existing.tsMs)) {
+      out.set(position, { tsMs: Number.isFinite(tsMs) ? tsMs : existing?.tsMs ?? Number.POSITIVE_INFINITY, price })
+    }
+  }
+  const flat = new Map<string, number>()
+  for (const [position, v] of out.entries()) flat.set(position, v.price)
+  return flat
+}
+
 function extractClosePriceByPosition(rows: LedgerRow[]): Map<string, number> {
   const out = new Map<string, { tsMs: number; price: number }>()
   for (const r of rows) {
@@ -247,7 +306,7 @@ function extractClosePriceByPosition(rows: LedgerRow[]): Map<string, number> {
     if (!position) continue
     const event = typeof r.event === 'string' ? r.event : ''
     if (event !== 'bot_close_position' && event !== 'position_close') continue
-    const price = parseCloseEventPriceFromDetails(r.details)
+    const price = parseEventPriceAUsdFromDetails(r.details)
     if (price == null) continue
     const tsRaw = typeof r.ts_utc === 'string' ? r.ts_utc : ''
     const tsMs = Date.parse(tsRaw)
@@ -261,53 +320,6 @@ function extractClosePriceByPosition(rows: LedgerRow[]): Map<string, number> {
   return flat
 }
 
-function formatRangeFromTicks(
-  range: TickRange | undefined,
-  tokenALabel?: string | null,
-  tokenBLabel?: string | null,
-  decimalsA?: number | null,
-  decimalsB?: number | null,
-  invertQuote = false,
-): string {
-  if (!range) return '—'
-  const quote =
-    tokenALabel && tokenBLabel ? `${tokenBLabel} per 1 ${tokenALabel}` : 'token B per 1 token A'
-  const invQuote =
-    tokenALabel && tokenBLabel ? `${tokenALabel} per 1 ${tokenBLabel}` : 'token A per 1 token B'
-  const lowerRaw = tickToPriceRatio(range.lower)
-  const upperRaw = tickToPriceRatio(range.upper)
-  const lower =
-    decimalsA != null && decimalsB != null
-      ? uiPriceFromRawPriceRatio(lowerRaw, decimalsA, decimalsB)
-      : null
-  const upper =
-    decimalsA != null && decimalsB != null
-      ? uiPriceFromRawPriceRatio(upperRaw, decimalsA, decimalsB)
-      : null
-  if (lower == null || upper == null) return `${range.lower} -> ${range.upper} ticks`
-  if (invertQuote) {
-    return (
-      formatInvertedTokenPriceRange(lower, upper, invQuote) ??
-      `${range.lower} -> ${range.upper} ticks`
-    )
-  }
-  return (
-    formatTokenPriceRange(lower, upper, quote) ??
-    `${range.lower} -> ${range.upper} ticks`
-  )
-}
-
-function formatClosePriceAtEvent(
-  price: number | undefined,
-  tokenALabel?: string | null,
-  tokenBLabel?: string | null,
-): string {
-  if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return '—'
-  const base = tokenALabel?.trim() || 'token A'
-  const quote = tokenBLabel?.trim() || 'USD'
-  return `${formatNumber(price, 6)} ${quote} per 1 ${base}`
-}
-
 function parseRangeAdjustmentReason(row: LedgerRow): string | null {
   const direct = row.range_adjustment_reason
   if (typeof direct === 'string' && direct.trim().length > 0) return direct.trim()
@@ -317,19 +329,6 @@ function parseRangeAdjustmentReason(row: LedgerRow): string | null {
     if (typeof nested === 'string' && nested.trim().length > 0) return nested.trim()
   }
   return null
-}
-
-function rangeAdjustmentBadge(reason: string | null): { text: string; className: string } {
-  if (!reason) {
-    return {
-      text: 'as planned',
-      className: 'border-emerald-600/40 bg-emerald-500/10 text-emerald-300',
-    }
-  }
-  return {
-    text: reason.startsWith('recover_plan_') ? 'replanned' : 'adapted',
-    className: 'border-amber-600/40 bg-amber-500/10 text-amber-300',
-  }
 }
 
 function localizeLineageNote(note: string, locale: 'pl' | 'en'): string {
@@ -474,7 +473,7 @@ export default function PositionDetail() {
   const [showOnlyNonZeroBreakdown, setShowOnlyNonZeroBreakdown] = useState(true)
   const [agentInput, setAgentInput] = useState('')
   const [invertRangeQuote, setInvertRangeQuote] = useState(false)
-  const metricsMode = useMemo(() => getMetricsMode(), [])
+  const metricsMode = getMetricsMode()
   const isSettlementMode = metricsMode === 'settlement_v1'
 
   const { data: position, isLoading, isError, error } = useQuery({
@@ -541,7 +540,7 @@ export default function PositionDetail() {
     staleTime: 30_000,
   })
 
-  const lineageQ = useQuery({
+  const streamLineageQ = useQuery({
     queryKey: ['position-stream-lineage', address, metricsMode],
     queryFn: () => getPositionStreamLineage(address!, metricsMode),
     enabled: !!address,
@@ -549,7 +548,94 @@ export default function PositionDetail() {
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   })
-  const shouldFetchStreamFallback = !!address && lineageQ.isError
+
+  const chainHistoryPgQ = useQuery({
+    queryKey: ['position-chain-history-pg', address, metricsMode],
+    queryFn: async (): Promise<ChainHistoryPgTabPayload> => {
+      const addr = address!.trim()
+      const missingMaterialization = (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        const m = msg.toLowerCase()
+        return (
+          m.includes('404') ||
+          m.includes('not found') ||
+          m.includes('no materialized chain-history')
+        )
+      }
+      const chainHistoryModes: readonly ('live' | 'settlement_v1')[] =
+        metricsMode === 'settlement_v1' ? ['settlement_v1', 'live'] : ['live']
+      for (const mode of chainHistoryModes) {
+        try {
+          const lineage = await getPositionChainHistory(addr, mode)
+          return { lineage, readSource: 'postgres_materialized' }
+        } catch (e) {
+          if (!missingMaterialization(e)) throw e
+        }
+      }
+      const streamKey = ['position-stream-lineage', addr, metricsMode] as const
+      const cached = queryClient.getQueryData<PositionStreamLineageResponse>(streamKey)
+      const lineage = cached ?? (await getPositionStreamLineage(addr, metricsMode))
+      return { lineage, readSource: 'stream_lineage_fallback' }
+    },
+    enabled: !!address,
+    retry: 0,
+    /** Postgres snapshot can appear seconds after open; avoid showing a stale first fetch for 60s. */
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
+  })
+
+  const onPositionMainTabChange = useCallback(
+    (value: string) => {
+      if (value !== 'chain-history-pg' || !address?.trim()) return
+      void queryClient.invalidateQueries({
+        queryKey: ['position-chain-history-pg', address.trim(), metricsMode],
+      })
+    },
+    [queryClient, address, metricsMode],
+  )
+
+  const streamLineage = streamLineageQ.data
+  const chainHistoryPgPayload = chainHistoryPgQ.data
+  const pgLineage = chainHistoryPgPayload?.lineage
+  const chainHistoryPgStreamFallback =
+    chainHistoryPgPayload?.readSource === 'stream_lineage_fallback'
+
+  const chainHistoryPgShorterThanStream = useMemo(() => {
+    if (!streamLineageQ.isSuccess || !chainHistoryPgQ.isSuccess) return false
+    if (chainHistoryPgStreamFallback) return false
+    const s = streamLineage?.chain?.length ?? 0
+    const p = pgLineage?.chain?.length ?? 0
+    return p > 0 && s > p
+  }, [
+    streamLineageQ.isSuccess,
+    chainHistoryPgQ.isSuccess,
+    chainHistoryPgStreamFallback,
+    streamLineage?.chain,
+    pgLineage?.chain,
+  ])
+
+  const chainHistoryRefreshM = useMutation({
+    mutationFn: () =>
+      refreshPositionChainHistory(address!, metricsMode, {
+        refreshSecret: (() => {
+          const raw = import.meta.env.VITE_CHAIN_HISTORY_REFRESH_SECRET
+          if (typeof raw !== 'string') return undefined
+          const t = raw.trim()
+          return t.length > 0 ? t : undefined
+        })(),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['position-chain-history-pg', address, metricsMode],
+      })
+      await queryClient.invalidateQueries({
+        queryKey: ['position-stream-lineage', address, metricsMode],
+      })
+    },
+  })
+
+  const shouldFetchStreamFallback = !!address && streamLineageQ.isError
 
   const { data: streamPerf } = useQuery({
     queryKey: ['position-stream-performance', address],
@@ -566,37 +652,20 @@ export default function PositionDetail() {
     retry: 0,
     staleTime: 30_000,
   })
-  const streamLineage = lineageQ.data
-  const totalsSourceBadge = useMemo(() => {
-    const note = (streamLineage?.totals?.note ?? '').toLowerCase()
-    if (isSettlementMode || note.includes('settlement v1') || note.includes('self-seed disabled')) {
-      return {
-        label: 'source: persisted settlement',
-        className: 'border-emerald-600/40 bg-emerald-500/10 text-emerald-300',
-      }
-    }
-    if (note.includes('self-seed')) {
-      return {
-        label: 'source: live seeded',
-        className: 'border-amber-600/40 bg-amber-500/10 text-amber-300',
-      }
-    }
-    return {
-      label: 'source: live snapshots',
-      className: 'border-border/70 bg-background/70 text-muted-foreground',
-    }
-  }, [isSettlementMode, streamLineage?.totals?.note])
-
   const chainSet = useMemo(() => {
     const addr = address?.trim() ?? ''
-    const raw = (streamLineage?.chain ?? [])
-      .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
-      .map((x) => x.trim())
+    const fromStream = (streamLineage?.chain ?? []).filter(
+      (x): x is string => typeof x === 'string' && x.trim().length > 0,
+    )
+    const fromPg = (pgLineage?.chain ?? []).filter(
+      (x): x is string => typeof x === 'string' && x.trim().length > 0,
+    )
+    const raw = [...fromStream, ...fromPg].map((x) => x.trim())
     const uniq = [...new Set(raw)]
     if (uniq.length === 0) return addr ? [addr] : []
     if (addr && !uniq.includes(addr)) return [...uniq, addr]
     return uniq
-  }, [streamLineage?.chain, address])
+  }, [streamLineage?.chain, pgLineage?.chain, address])
 
   const ledgerQueries = useQueries({
     queries: chainSet.map((pda) => ({
@@ -624,6 +693,14 @@ export default function PositionDetail() {
   )
   const closePriceByPosition = useMemo(
     () => extractClosePriceByPosition(mergedLifecycleRows),
+    [mergedLifecycleRows],
+  )
+  const openEventPriceByPosition = useMemo(
+    () => extractOpenEventPriceByPosition(mergedLifecycleRows),
+    [mergedLifecycleRows],
+  )
+  const ledgerOpenQuoteUsdByPosition = useMemo(
+    () => extractLifecycleOpenQuoteUsdByPosition(mergedLifecycleRows),
     [mergedLifecycleRows],
   )
 
@@ -795,6 +872,8 @@ export default function PositionDetail() {
       setActionInfo(data?.message ?? (locale === 'pl' ? 'Wysłano żądanie zamknięcia.' : 'Close requested.'))
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
+      void queryClient.invalidateQueries({ queryKey: ['position-stream-lineage', address] })
+      void queryClient.invalidateQueries({ queryKey: ['position-chain-history-pg', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
       // Real close (not dry-run): brief pause so the success banner is readable, then list.
@@ -816,6 +895,7 @@ export default function PositionDetail() {
       setActionInfo(data?.message ?? (locale === 'pl' ? 'Wysłano żądanie collect.' : 'Collect requested.'))
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['position-stream-lineage', address] })
+      void queryClient.invalidateQueries({ queryKey: ['position-chain-history-pg', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
     },
@@ -843,6 +923,8 @@ export default function PositionDetail() {
       setActionError(null)
       setActionInfo(locale === 'pl' ? 'Wysłano żądanie rebalance.' : 'Rebalance requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
+      void queryClient.invalidateQueries({ queryKey: ['position-stream-lineage', address] })
+      void queryClient.invalidateQueries({ queryKey: ['position-chain-history-pg', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
     },
@@ -867,6 +949,8 @@ export default function PositionDetail() {
       setActionInfo(locale === 'pl' ? 'Wysłano żądanie decrease.' : 'Decrease requested.')
       void queryClient.invalidateQueries({ queryKey: ['position', address] })
       void queryClient.invalidateQueries({ queryKey: ['positions'] })
+      void queryClient.invalidateQueries({ queryKey: ['position-stream-lineage', address] })
+      void queryClient.invalidateQueries({ queryKey: ['position-chain-history-pg', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-ledger', address] })
       void queryClient.invalidateQueries({ queryKey: ['bot-il-ledger', address] })
     },
@@ -1062,7 +1146,7 @@ export default function PositionDetail() {
         </div>
       </div>
 
-      <Tabs.Root defaultValue="overview">
+      <Tabs.Root defaultValue="overview" onValueChange={onPositionMainTabChange}>
         <Tabs.List className="flex gap-2 border-b border-border pb-2">
           <Tabs.Trigger
             value="overview"
@@ -1074,7 +1158,13 @@ export default function PositionDetail() {
             value="ledger"
             className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
           >
-            {locale === 'pl' ? 'Logi / rebalanse' : 'Logs / rebalances'}
+            {t('positionDetail.tabLedger')}
+          </Tabs.Trigger>
+          <Tabs.Trigger
+            value="chain-history-pg"
+            className="px-3 py-1.5 text-sm rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+          >
+            {t('positionDetail.tabChainHistoryPostgres')}
           </Tabs.Trigger>
           <Tabs.Trigger
             value="agent"
@@ -1136,7 +1226,9 @@ export default function PositionDetail() {
                         : ''}
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
-                      {locale === 'pl' ? 'Otwórz zakładkę ' : 'Open the '}<strong>Logs / rebalances</strong>{locale === 'pl' ? ', aby zobaczyć surowe wiersze.' : ' tab to see raw rows.'}
+                      {t('positionDetail.openLedgerTabHintBefore')}
+                      <strong>{t('positionDetail.tabLedger')}</strong>
+                      {t('positionDetail.openLedgerTabHintAfter')}
                     </div>
                   </div>
                 ) : null}
@@ -1755,487 +1847,57 @@ export default function PositionDetail() {
         </Tabs.Content>
 
         <Tabs.Content value="ledger" className="mt-4 space-y-4">
-          {lineageQ.isPending ? (
+          {streamLineageQ.isPending ? (
             <Card>
               <CardHeader>
-                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
+                <CardTitle>{t('positionDetail.positionHistory')}</CardTitle>
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
                 {locale === 'pl' ? 'Ładowanie lineage…' : 'Loading lineage…'}
               </CardContent>
             </Card>
-          ) : lineageQ.isError ? (
+          ) : streamLineageQ.isError ? (
             <Card>
               <CardHeader>
-                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
+                <CardTitle>{t('positionDetail.positionHistory')}</CardTitle>
               </CardHeader>
               <CardContent>
                 <ErrorBanner>
-                  {lineageQ.error instanceof Error ? lineageQ.error.message : String(lineageQ.error)}
+                  {streamLineageQ.error instanceof Error ? streamLineageQ.error.message : String(streamLineageQ.error)}
                 </ErrorBanner>
               </CardContent>
             </Card>
           ) : streamLineage ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  {locale === 'pl'
-                    ? 'Łańcuch best-effort odtworzony z IL edges (old → new). Każdy wiersz to osobna PDA utworzona przez rebalance/rotację strategii.'
-                    : 'Best-effort chain reconstructed from IL edges (old → new). Each row is a distinct PDA created by rebalance/strategy rotation.'}
-                </p>
-                {streamLineage.note ? (
-                  <p className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamLineage.note, locale)}</p>
-                ) : null}
-                <p className="text-[11px] text-muted-foreground leading-snug">
-                  <span className="font-medium">{locale === 'pl' ? 'Fees zebrane:' : 'Fees collected:'}</span>{' '}
-                  {locale === 'pl'
-                    ? 'to prowizje puli (LP) przypisane do pozycji. Preferujemy on-chain snapshot `fee_owed_a/b` (collect/close) gdy dostępny; bez niego liczby są best-effort.'
-                    : 'pool (LP) fees attributed to this position. We prefer on-chain `fee_owed_a/b` snapshots (collect/close) when available; otherwise numbers are best-effort.'}{' '}
-                  <span title={FEE_BASE_UNITS_TOOLTIP} className="cursor-help border-b border-dotted border-muted-foreground/40">
-                    {locale === 'pl' ? 'baz. jedn.' : 'base units'}
-                  </span>{' '}
-                  = {locale === 'pl' ? 'najmniejsze jednostki on-chain (np. lamporty).' : 'smallest on-chain units (e.g. lamports).'}
-                </p>
-
-                {streamLineage.nodes.length > 0 ? (
-                  <div className="space-y-2">
-                    <div className="flex justify-end">
-                      <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border/70 bg-muted/25 px-2.5 py-1 text-[11px] text-muted-foreground">
-                        <input
-                          type="checkbox"
-                          checked={invertRangeQuote}
-                          onChange={(e) => setInvertRangeQuote(e.target.checked)}
-                        />
-                        {locale === 'pl'
-                          ? 'Pokazuj zakres jako A per 1 B (zamiast B per 1 A)'
-                          : 'Show range as A per 1 B (instead of B per 1 A)'}
-                      </label>
-                    </div>
-                    <div className="overflow-x-auto rounded-md border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-muted/50">
-                        <tr>
-                          <th className="px-2 py-1 text-left">#</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'pozycja' : 'position'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'otwarta' : 'opened'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'zamknięta / ostatnia' : 'closed / last'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'zakres @ open' : 'range @ open'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'cena zamknięcia' : 'close price'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość start' : 'start value'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość end' : 'end value'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'wartość current' : 'current value'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'kapitał Δ' : 'principal Δ'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'Sieć (tx)' : 'Network (tx)'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'Fees zebrane' : 'Fees collected'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'cashflow' : 'cashflow'}</th>
-                          <th className="px-2 py-1 text-left">{locale === 'pl' ? 'net PnL' : 'net PnL'}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {streamLineage.nodes.map((n, i) => (
-                          <tr key={n.position_address} className="border-t border-border/60">
-                            <td className="px-2 py-1 font-mono tabular-nums">{i + 1}</td>
-                            <td className="px-2 py-1 font-mono whitespace-nowrap">
-                              <Link
-                                to={
-                                  n.closed_ts_utc
-                                    ? `/positions/closed/${n.position_address}`
-                                    : `/positions/${n.position_address}`
-                                }
-                                className="text-primary hover:underline"
-                                title={n.position_address}
-                              >
-                                {shortenAddress(n.position_address, 8)}
-                              </Link>
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap">
-                              {n.opened_ts_utc ? formatDate(n.opened_ts_utc) : '—'}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap">
-                              {n.closed_ts_utc ? formatDate(n.closed_ts_utc) : '—'}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]" title="Zakres ceny z eventu open w notacji wybranej przełącznikiem.">
-                              {formatRangeFromTicks(
-                                nodeOpenCloseRanges.get(n.position_address)?.open,
-                                n.token_a_label,
-                                n.token_b_label,
-                                tokenDecimalsA,
-                                tokenDecimalsB,
-                                invertRangeQuote,
-                              )}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]" title="Cena bazowa z eventu close (`details.event_price_a_usd`).">
-                              <div className="space-y-1">
-                                <div>
-                                  {formatClosePriceAtEvent(
-                                    closePriceByPosition.get(n.position_address),
-                                    n.token_a_label,
-                                    n.token_b_label,
-                                  )}
-                                </div>
-                                {(() => {
-                                  const reason = rangeAdjustmentReasonByPosition.get(n.position_address) ?? null
-                                  const badge = rangeAdjustmentBadge(reason)
-                                  return (
-                                    <span
-                                      className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] ${badge.className}`}
-                                      title={reason ? `range_adjustment_reason: ${reason}` : 'No range adjustment recorded.'}
-                                    >
-                                      {badge.text}
-                                    </span>
-                                  )
-                                })()}
-                              </div>
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {usdOrDash(n.baseline_value_usd, 3)}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {n.closed_ts_utc ? usdOrDash(n.current_value_usd, 3) : '—'}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {!n.closed_ts_utc ? usdOrDash(n.current_value_usd, 3) : '—'}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {formatPrincipalDeltaUsdOrDash(n.baseline_value_usd, n.current_value_usd, 3)}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px] leading-tight">
-                              {(n.tx_fee_lamports ?? 0).toLocaleString()} λ
-                              <br />
-                              <span className="text-muted-foreground">{formatUsdFixed(parseFloat(String(n.tx_fees_usd)), 4)}</span>
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono text-[11px]">
-                              {(() => {
-                                const events = n.collect_events ?? 0
-                                const usdNum = parseFloat(String(n.fees_collected_usd ?? '').trim() || '0')
-                                const hasTokenVals =
-                                  n.fees_collected_token_a_ui != null ||
-                                  n.fees_collected_token_b_ui != null ||
-                                  n.fees_collected_token_a_raw != null ||
-                                  n.fees_collected_token_b_raw != null
-                                const showLegRows =
-                                  events > 0 && (hasTokenVals || n.token_a_label || n.token_b_label)
-                                return (
-                                  <>
-                                    <span>{formatLineageFeesCollectedUsdMain(n.fees_collected_usd, events)}</span>
-                                    <span className="text-muted-foreground"> · {events}×</span>
-                                    {showLegRows ? (
-                                      <div className="text-muted-foreground mt-1 leading-tight">
-                                        {n.token_a_label ? (
-                                          <div>
-                                            {n.token_a_label}: {String(n.fees_collected_token_a_ui ?? '—')}
-                                            {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw) ? (
-                                              <span title={FEE_BASE_UNITS_TOOLTIP}>
-                                                {' '}
-                                                {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw)}
-                                              </span>
-                                            ) : null}
-                                          </div>
-                                        ) : null}
-                                        {n.token_b_label ? (
-                                          <div>
-                                            {n.token_b_label}: {String(n.fees_collected_token_b_ui ?? '—')}
-                                            {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw) ? (
-                                              <span title={FEE_BASE_UNITS_TOOLTIP}>
-                                                {' '}
-                                                {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw)}
-                                              </span>
-                                            ) : null}
-                                          </div>
-                                        ) : null}
-                                      </div>
-                                    ) : null}
-                                    {events > 0 && usdNum === 0 && !hasTokenVals ? (
-                                      <div className="text-muted-foreground mt-1 leading-tight text-[10px]">
-                                        {locale === 'pl'
-                                          ? 'Brak sumy USD w API (ceny mintów / skala); szczegóły w ledgerze lifecycle.'
-                                          : 'Missing USD total in API (mint pricing / scale); see lifecycle ledger for details.'}
-                                      </div>
-                                    ) : null}
-                                    {n.collect_zero_diagnostics ? (
-                                      <div
-                                        className="text-muted-foreground mt-1 leading-tight text-[10px]"
-                                        title={n.collect_zero_diagnostics.methodology_note}
-                                      >
-                                        {locale === 'pl' ? 'dlaczego 0' : 'why 0'}: in-range~{n.collect_zero_diagnostics.in_range_time_share_pct_est ?? '—'}%
-                                        {' · '}
-                                        {locale === 'pl' ? 'swapy' : 'swaps'}~{n.collect_zero_diagnostics.swap_events_in_window_est}
-                                        {' · '}
-                                        {locale === 'pl' ? 'udział' : 'share'}~{n.collect_zero_diagnostics.position_share_pct_est ?? '—'}%
-                                      </div>
-                                    ) : null}
-                                  </>
-                                )
-                              })()}
-                            </td>
-                            <td className="px-2 py-1 whitespace-nowrap font-mono">
-                              {formatUsdField(n.realized_cashflow_usd, 3)}
-                            </td>
-                            <td
-                              className={
-                                (() => {
-                                  const pct = parseFloat(String(n.net_pnl_pct ?? ''))
-                                  return Number.isFinite(pct) && pct >= 0
-                                    ? 'px-2 py-1 whitespace-nowrap font-mono text-green-500'
-                                    : 'px-2 py-1 whitespace-nowrap font-mono text-red-500'
-                                })()
-                              }
-                            >
-                              {formatUsdField(n.net_pnl_usd, 3)} (
-                              {Number.isFinite(parseFloat(String(n.net_pnl_pct ?? '')))
-                                ? formatPercentFixed(n.net_pnl_pct, 3)
-                                : '—'}
-                              )
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    {locale === 'pl'
-                      ? 'Brak wierszy lineage (brak IL edges / snapshotów DB).'
-                      : 'No lineage rows yet (missing IL edges / DB snapshots).'}
-                  </p>
-                )}
-
-                {streamLineage.totals ? (
-                  <div className="space-y-3">
-                    <div className="flex justify-end">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setShowOnlyNonZeroBreakdown((v) => !v)}
-                      >
-                        {showOnlyNonZeroBreakdown
-                          ? locale === 'pl'
-                            ? 'Pokaż wszystkie pozycje'
-                            : 'Show all positions'
-                          : locale === 'pl'
-                            ? 'Pokaż tylko niezerowe'
-                            : 'Show non-zero only'}
-                      </Button>
-                    </div>
-                    <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                      <div className="text-xs font-medium text-foreground">
-                        {isSettlementMode
-                          ? locale === 'pl'
-                            ? 'Settlement v1 — wynik ekonomiczny łańcucha (net PnL)'
-                            : 'Settlement v1 — chain economic result (net PnL)'
-                          : locale === 'pl'
-                            ? 'Wynik ekonomiczny łańcucha (net PnL)'
-                            : 'Chain economic result (net PnL)'}
-                      </div>
-                      <div
-                        className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${totalsSourceBadge.className}`}
-                      >
-                        {totalsSourceBadge.label}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground leading-snug">
-                        {locale === 'pl'
-                          ? 'End NAV + cashflow z ledgera − baseline − opłaty sieci SOL (USD). To inna metryka niż IL vs HODL.'
-                          : 'End NAV + ledger cashflow − baseline − SOL network fees (USD). This metric is different from IL vs HODL.'}
-                      </p>
-                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-                        <div>
-                          <span className="text-muted-foreground">baseline</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.baseline_value_usd, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">current</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.current_value_usd, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">tx fees</span>{' '}
-                          <span className="font-mono text-[11px] leading-tight inline-block align-top">
-                            {streamLineage.chain_cost_summary != null ? (
-                              <>
-                                <span className="block">
-                                  {streamLineage.chain_cost_summary.tx_fee_lamports_total.toLocaleString()} λ
-                                </span>
-                                <span className="block text-muted-foreground">
-                                  {formatUsdFixed(
-                                    parseFloat(String(streamLineage.chain_cost_summary.tx_fees_usd_total)),
-                                    4,
-                                  )}
-                                </span>
-                              </>
-                            ) : (
-                              formatUsdFixed(streamLineage.totals.tx_fees_usd, 3)
-                            )}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">cashflow</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.realized_cashflow_usd, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">
-                            {locale === 'pl' ? 'Realized LP fees (sum)' : 'Realized LP fees (sum)'}
-                          </span>{' '}
-                          <span className="font-mono text-[11px] leading-tight inline-block align-top">
-                            {streamLineage.chain_cost_summary != null ? (
-                              <>
-                                <span className="block">
-                                  {formatLineageFeesCollectedUsdMain(
-                                    streamLineage.chain_cost_summary.fees_collected_usd_total,
-                                    streamLineage.chain_cost_summary.collect_events_total,
-                                  )}
-                                </span>
-                                <span className="block text-muted-foreground">
-                                  {streamLineage.chain_cost_summary.collect_events_total}x collect
-                                </span>
-                              </>
-                            ) : (
-                              '—'
-                            )}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">net PnL</span>{' '}
-                          <span
-                            className={
-                              parseFloat(streamLineage.totals.net_pnl_pct) >= 0
-                                ? 'font-mono text-green-500'
-                                : 'font-mono text-red-500'
-                            }
-                          >
-                            {formatUsdFixed(streamLineage.totals.net_pnl_usd, 3)} (
-                            {formatPercentFixed(streamLineage.totals.net_pnl_pct, 3)})
-                          </span>
-                        </div>
-                      </div>
-                      {streamLineage.nodes?.length ? (
-                        <div className="mt-1 space-y-1 text-xs text-muted-foreground">
-                          {streamLineage.nodes.map((n) => {
-                            const lam = n.tx_fee_lamports ?? 0
-                            if (showOnlyNonZeroBreakdown && lam <= 0) return null
-                            return (
-                              <div key={`tx-breakdown-${n.position_address}`} className="font-mono">
-                                {shortenAddress(n.position_address, 6)}: {lam.toLocaleString()} λ ·{' '}
-                                {formatUsdField(n.tx_fees_usd, 4)}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                      <div className="text-xs font-medium text-foreground">
-                        {isSettlementMode
-                          ? locale === 'pl'
-                            ? 'Settlement v1 — IL vs koszyk początkowy (benchmark)'
-                            : 'Settlement v1 — IL vs initial basket (benchmark)'
-                          : locale === 'pl'
-                            ? 'IL vs koszyk początkowy (benchmark)'
-                            : 'IL vs initial basket (benchmark)'}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground leading-snug">
-                        {locale === 'pl'
-                          ? 'Wartość LP vs hipotetyczny HODL tokenów depozytu na starcie łańcucha. Dla zamkniętego łańcucha preferuje ceny USD z eventu close; dla aktywnego używa live/fallback.'
-                          : 'LP value vs hypothetical HODL of initial deposit tokens. Closed chains prefer close-event USD prices; active chains use live/fallback prices.'}
-                      </p>
-                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-                        <div>
-                          <span className="text-muted-foreground">HODL USD</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.hodl_value_usd, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Clean IL USD</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.clean_il_usd ?? streamLineage.totals.il_usd, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">Clean IL %</span>{' '}
-                          <span className="font-mono">{formatPercentFixed(streamLineage.totals.clean_il_pct ?? streamLineage.totals.il_pct, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">LP fees</span>{' '}
-                          <span className="font-mono">{formatUsdFixed(streamLineage.totals.lp_fees_total_usd, 3)}</span>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">LP vs HODL incl. fees</span>{' '}
-                          <span className="font-mono">
-                            {formatUsdFixed(streamLineage.totals.lp_vs_hodl_with_fees_usd, 3)} (
-                            {formatPercentFixed(streamLineage.totals.lp_vs_hodl_with_fees_pct, 3)})
-                          </span>
-                        </div>
-                      </div>
-                      {streamLineage.totals.price_basis_note ? (
-                        <div className="text-[10px] text-muted-foreground leading-snug">
-                          <span className="font-medium">{streamLineage.totals.valuation_price_time_kind}</span>: {streamLineage.totals.price_basis_note}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-                      <div className="text-xs font-medium text-foreground">
-                        {locale === 'pl' ? 'Rozbicie Fees zebrane (per PDA)' : 'Fees collected breakdown (per PDA)'}
-                      </div>
-                      <div className="text-[10px] text-muted-foreground leading-snug">
-                        {locale === 'pl'
-                          ? 'Składowe budujące łączną wartość `Fees zebrane` dla całego łańcucha.'
-                          : 'Components building total `Fees collected` value for the whole chain.'}
-                      </div>
-                      <div className="space-y-1 text-xs text-muted-foreground">
-                        {streamLineage.nodes.map((n) => {
-                          const collects = n.collect_events ?? 0
-                          const hasA =
-                            n.fees_collected_token_a_ui != null || n.fees_collected_token_a_raw != null
-                          const hasB =
-                            n.fees_collected_token_b_ui != null || n.fees_collected_token_b_raw != null
-                          if (showOnlyNonZeroBreakdown && collects <= 0 && !hasA && !hasB) return null
-                          return (
-                            <div key={`fee-breakdown-${n.position_address}`} className="space-y-0.5">
-                              <div className="font-mono">
-                                {shortenAddress(n.position_address, 6)}:{' '}
-                                {formatLineageFeesCollectedUsdMain(n.fees_collected_usd, collects)} · {collects}×
-                              </div>
-                              {(n.token_a_label || n.token_b_label) && (hasA || hasB) ? (
-                                <div className="pl-3 font-mono">
-                                  {n.token_a_label ? (
-                                    <div>
-                                      {n.token_a_label}: {String(n.fees_collected_token_a_ui ?? '—')}
-                                      {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw) ? (
-                                        <span title={FEE_BASE_UNITS_TOOLTIP}>
-                                          {' '}
-                                          {formatFeeBaseUnitsClause(n.fees_collected_token_a_raw)}
-                                        </span>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-                                  {n.token_b_label ? (
-                                    <div>
-                                      {n.token_b_label}: {String(n.fees_collected_token_b_ui ?? '—')}
-                                      {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw) ? (
-                                        <span title={FEE_BASE_UNITS_TOOLTIP}>
-                                          {' '}
-                                          {formatFeeBaseUnitsClause(n.fees_collected_token_b_raw)}
-                                        </span>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                    {streamLineage.totals.note ? (
-                      <div className="text-[11px] text-muted-foreground leading-snug">{localizeLineageNote(streamLineage.totals.note, locale)}</div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </CardContent>
-            </Card>
+            <PositionLineageHistoryPanel
+              lineage={streamLineage}
+              badgeMode="stream"
+              cardTitle={t('positionDetail.positionHistory')}
+              apiIntro={t('positionDetail.lineageStreamOnlyIntro')}
+              chainReconstructHelp={
+                locale === 'pl'
+                  ? 'Łańcuch best-effort z IL edges (old → new). API: GET …/stream-lineage (bez fallbacku na chain-history).'
+                  : 'Best-effort chain from IL edges (old → new). API: GET …/stream-lineage (no chain-history fallback).'
+              }
+              locale={locale}
+              isSettlementMode={isSettlementMode}
+              nodeOpenCloseRanges={nodeOpenCloseRanges}
+              closePriceByPosition={closePriceByPosition}
+              openEventPriceByPosition={openEventPriceByPosition}
+              rangeAdjustmentReasonByPosition={rangeAdjustmentReasonByPosition}
+              invertRangeQuote={invertRangeQuote}
+              onInvertRangeQuote={setInvertRangeQuote}
+              showOnlyNonZeroBreakdown={showOnlyNonZeroBreakdown}
+              onToggleShowOnlyNonZeroBreakdown={() => setShowOnlyNonZeroBreakdown((v) => !v)}
+              tokenDecimalsA={tokenDecimalsA}
+              tokenDecimalsB={tokenDecimalsB}
+              readBadgePostgres={t('positionDetail.lineageReadBadgePostgres')}
+              readBadgeStream={t('positionDetail.lineageReadBadgeCompute')}
+              ledgerOpenQuoteUsdByPosition={ledgerOpenQuoteUsdByPosition}
+            />
           ) : (
             <Card>
               <CardHeader>
-                <CardTitle>{locale === 'pl' ? 'Historia pozycji (rotacje)' : 'Position history (rotations)'}</CardTitle>
+                <CardTitle>{t('positionDetail.positionHistory')}</CardTitle>
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
                 {locale === 'pl' ? 'Brak odpowiedzi lineage.' : 'No lineage response.'}
@@ -2250,8 +1912,8 @@ export default function PositionDetail() {
             <CardContent className="text-sm text-muted-foreground space-y-2">
               <p>
                 {locale === 'pl'
-                  ? <>Wiersze z <code className="text-xs">/bot-activity/ledger</code> przefiltrowane do <strong>tej</strong> PDA pozycji (sesje poniżej). Oś <strong>Lifecycle timeline</strong> scala też wszystkie PDA ze <code className="text-xs">stream-lineage</code> oraz IL ledger. Fee (USD) używa SOL/USD z <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).</>
-                  : <>Rows from <code className="text-xs">/bot-activity/ledger</code> filtered to <strong>this</strong> position PDA (sessions below). <strong>Lifecycle timeline</strong> also merges PDAs from <code className="text-xs">stream-lineage</code> and IL ledger. Fee (USD) uses SOL/USD from <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).</>}
+                  ? <>Wiersze z <code className="text-xs">/bot-activity/ledger</code> przefiltrowane do <strong>tej</strong> PDA pozycji (sesje poniżej). Oś <strong>Lifecycle timeline</strong> scala też wszystkie PDA z łańcucha zwróconego przez <code className="text-xs">stream-lineage</code> lub <code className="text-xs">chain-history</code> (unia) oraz IL ledger. Fee (USD) używa SOL/USD z <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).</>
+                  : <>Rows from <code className="text-xs">/bot-activity/ledger</code> filtered to <strong>this</strong> position PDA (sessions below). <strong>Lifecycle timeline</strong> also merges PDAs from the union of <code className="text-xs">stream-lineage</code> and <code className="text-xs">chain-history</code> chains plus IL ledger. Fee (USD) uses SOL/USD from <code className="text-xs">/prices/jupiter</code> (lamports → SOL → USD).</>}
               </p>
               {!ledgerAnyPresent && (
                 <p className="text-yellow-500">
@@ -2374,6 +2036,144 @@ export default function PositionDetail() {
             <p className="text-muted-foreground text-sm">
               {locale === 'pl' ? 'Brak pasujących linii dla tego adresu.' : 'No matching lines yet for this address.'}
             </p>
+          )}
+        </Tabs.Content>
+
+        <Tabs.Content value="chain-history-pg" className="mt-4 space-y-4">
+          {chainHistoryPgQ.isPending ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('positionDetail.positionHistoryPostgres')}</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                {locale === 'pl' ? 'Ładowanie chain-history…' : 'Loading chain-history…'}
+              </CardContent>
+            </Card>
+          ) : chainHistoryPgQ.isError ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('positionDetail.positionHistoryPostgres')}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <ErrorBanner>
+                  {chainHistoryPgQ.error instanceof Error
+                    ? chainHistoryPgQ.error.message
+                    : String(chainHistoryPgQ.error)}
+                </ErrorBanner>
+                <p className="text-sm text-muted-foreground">
+                  {chainHistoryPgSecondaryHint(chainHistoryPgQ.error, t)}
+                </p>
+                {address && chainHistoryPgErrorKind(chainHistoryPgQ.error) === 'missing' ? (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={chainHistoryRefreshM.isPending}
+                      onClick={() => void chainHistoryRefreshM.mutate()}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${chainHistoryRefreshM.isPending ? 'animate-spin' : ''}`} />
+                      {chainHistoryRefreshM.isPending
+                        ? locale === 'pl'
+                          ? 'Materializacja…'
+                          : 'Materializing…'
+                        : t('positionDetail.chainHistoryPgRefresh')}
+                    </Button>
+                  </div>
+                ) : null}
+                {chainHistoryRefreshM.isError ? (
+                  <ErrorBanner>
+                    {chainHistoryRefreshM.error instanceof Error
+                      ? chainHistoryRefreshM.error.message
+                      : String(chainHistoryRefreshM.error)}
+                  </ErrorBanner>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : pgLineage ? (
+            <div className="space-y-3">
+              {chainHistoryPgStreamFallback ? (
+                <div className="rounded-md border border-amber-600/45 bg-amber-500/10 px-3 py-2 text-sm text-amber-100/95 leading-snug">
+                  {t('positionDetail.chainHistoryPgStreamFallbackBanner')}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border/70 bg-muted/15 px-3 py-2">
+                <div className="min-w-0 space-y-1 text-xs text-muted-foreground">
+                  {pgLineage.chain_history_materialized_ts_utc ? (
+                    <div>
+                      <span className="font-medium text-foreground">
+                        {t('positionDetail.chainHistoryPgMaterializedLabel')}
+                      </span>{' '}
+                      <span className="font-mono tabular-nums">
+                        {formatDate(pgLineage.chain_history_materialized_ts_utc)}
+                      </span>
+                    </div>
+                  ) : null}
+                  <p className="leading-snug">{t('positionDetail.chainHistoryPgRefreshHint')}</p>
+                  {chainHistoryPgShorterThanStream ? (
+                    <p className="text-amber-600/95 leading-snug">{t('positionDetail.chainHistoryPgStaleVsStream')}</p>
+                  ) : null}
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="shrink-0 gap-1.5"
+                  disabled={!address || chainHistoryRefreshM.isPending}
+                  onClick={() => chainHistoryRefreshM.mutate()}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${chainHistoryRefreshM.isPending ? 'animate-spin' : ''}`} />
+                  {chainHistoryRefreshM.isPending
+                    ? locale === 'pl'
+                      ? 'Materializacja…'
+                      : 'Materializing…'
+                    : t('positionDetail.chainHistoryPgRefresh')}
+                </Button>
+              </div>
+              {chainHistoryRefreshM.isError ? (
+                <ErrorBanner>
+                  {chainHistoryRefreshM.error instanceof Error
+                    ? chainHistoryRefreshM.error.message
+                    : String(chainHistoryRefreshM.error)}
+                </ErrorBanner>
+              ) : null}
+              <PositionLineageHistoryPanel
+                lineage={pgLineage}
+                badgeMode={chainHistoryPgStreamFallback ? 'stream' : 'postgres'}
+                cardTitle={t('positionDetail.positionHistoryPostgres')}
+                apiIntro={
+                  chainHistoryPgStreamFallback
+                    ? t('positionDetail.chainHistoryPgStreamFallbackApiIntro')
+                    : t('positionDetail.chainHistoryPgApiIntro')
+                }
+                chainReconstructHelp={t('positionDetail.chainHistoryPgChainHelp')}
+                locale={locale}
+                isSettlementMode={isSettlementMode}
+                nodeOpenCloseRanges={nodeOpenCloseRanges}
+                closePriceByPosition={closePriceByPosition}
+                openEventPriceByPosition={openEventPriceByPosition}
+                rangeAdjustmentReasonByPosition={rangeAdjustmentReasonByPosition}
+                invertRangeQuote={invertRangeQuote}
+                onInvertRangeQuote={setInvertRangeQuote}
+                showOnlyNonZeroBreakdown={showOnlyNonZeroBreakdown}
+                onToggleShowOnlyNonZeroBreakdown={() => setShowOnlyNonZeroBreakdown((v) => !v)}
+                tokenDecimalsA={tokenDecimalsA}
+                tokenDecimalsB={tokenDecimalsB}
+                readBadgePostgres={t('positionDetail.lineageReadBadgePostgres')}
+                readBadgeStream={t('positionDetail.lineageReadBadgeCompute')}
+                ledgerOpenQuoteUsdByPosition={ledgerOpenQuoteUsdByPosition}
+              />
+            </div>
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('positionDetail.positionHistoryPostgres')}</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                {locale === 'pl' ? 'Brak danych chain-history.' : 'No chain-history data.'}
+              </CardContent>
+            </Card>
           )}
         </Tabs.Content>
 

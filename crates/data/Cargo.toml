@@ -9,6 +9,14 @@ homepage = { workspace = true }
 documentation = { workspace = true }
 description = { workspace = true }
 
+[[bin]]
+name = "snapshot_probe"
+path = "src/bin/snapshot_probe.rs"
+
+[[bin]]
+name = "chain_history_sql_probe"
+path = "src/bin/chain_history_sql_probe.rs"
+
 [dependencies]
 clmm-lp-domain = { workspace = true }
 serde = { workspace = true }

@@ -45,7 +45,12 @@ $watchdogEnvVars = @(
   "CLMM_IL_LEDGER_PATH",
   "CLMM_PENDING_OPEN_RECOVERY_PATH"
 )
-$envVarsToHydrateFromDotenv = $signerVars + $watchdogEnvVars
+# Chain-history / stream DB / wallet_gl migrations require Postgres; without this the API serves 503 on DB routes.
+$dbEnvVars = @(
+  "DATABASE_URL",
+  "DATABASE_POOL_SIZE"
+)
+$envVarsToHydrateFromDotenv = $signerVars + $watchdogEnvVars + $dbEnvVars
 $envFile = Join-Path $RepoRoot ".env"
 if (Test-Path -LiteralPath $envFile) {
   $envLines = Get-Content -LiteralPath $envFile -ErrorAction SilentlyContinue
@@ -88,6 +93,11 @@ $watchdogSummary = $watchdogEnvVars | ForEach-Object {
   if ($v -and $v.Value -and $v.Value.Trim().Length -gt 0) { "$_=set" } else { "$_=unset" }
 }
 Write-Host ("[Start-ClmmApi-8081] watchdog/IL env: " + ($watchdogSummary -join ", ")) -ForegroundColor DarkGray
+$dbSummary = $dbEnvVars | ForEach-Object {
+  $v = Get-Item -Path "Env:$_" -ErrorAction SilentlyContinue
+  if ($v -and $v.Value -and $v.Value.Trim().Length -gt 0) { "$_=set" } else { "$_=unset" }
+}
+Write-Host ("[Start-ClmmApi-8081] database env: " + ($dbSummary -join ", ")) -ForegroundColor DarkGray
 
 $logDir = Join-Path $RepoRoot "tools\\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -102,7 +112,7 @@ Start-Process -FilePath "pwsh" `
     "-ExecutionPolicy",
     "Bypass",
     "-Command",
-    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; `$env:DRY_RUN='$($env:DRY_RUN)'; `$env:CLMM_API_TARGET_DIR='$($env:CLMM_API_TARGET_DIR)'; `$env:CLMM_LP_CLI_PATH='$($env:CLMM_LP_CLI_PATH)'; `$env:NPM_CONFIG_CACHE='$($env:NPM_CONFIG_CACHE)'; `$env:TEMP='$($env:TEMP)'; `$env:TMP='$($env:TMP)'; `$env:KEYPAIR_PATH='$($env:KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR_PATH='$($env:SOLANA_KEYPAIR_PATH)'; `$env:WALLET_KEYPAIR_PATH='$($env:WALLET_KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR='$($env:SOLANA_KEYPAIR)'; `$env:WALLET_KEYPAIR_BASE58='$($env:WALLET_KEYPAIR_BASE58)'; `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS='$($env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS)'; `$env:CLMM_IL_LEDGER_PATH='$($env:CLMM_IL_LEDGER_PATH)'; `$env:CLMM_PENDING_OPEN_RECOVERY_PATH='$($env:CLMM_PENDING_OPEN_RECOVERY_PATH)'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] cargo target dir: ' + `$env:CLMM_API_TARGET_DIR) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] CLMM_LP_CLI_PATH=' + `$env:CLMM_LP_CLI_PATH) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] DRY_RUN=' + `$env:DRY_RUN) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] TEMP/TMP=' + `$env:TEMP) -ForegroundColor DarkGray; if (`$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS -and `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_STRANDED_RECONCILE_INTERVAL_SECS=' + `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS) -ForegroundColor DarkGray }; if (`$env:CLMM_IL_LEDGER_PATH -and `$env:CLMM_IL_LEDGER_PATH.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_IL_LEDGER_PATH=set') -ForegroundColor DarkGray }; cargo run -q -p clmm-lp-api --bin clmm-lp-api --target-dir `$env:CLMM_API_TARGET_DIR 2>&1 | Tee-Object -FilePath '$logPath' }"
+    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; `$env:DRY_RUN='$($env:DRY_RUN)'; `$env:CLMM_API_TARGET_DIR='$($env:CLMM_API_TARGET_DIR)'; `$env:CLMM_LP_CLI_PATH='$($env:CLMM_LP_CLI_PATH)'; `$env:NPM_CONFIG_CACHE='$($env:NPM_CONFIG_CACHE)'; `$env:TEMP='$($env:TEMP)'; `$env:TMP='$($env:TMP)'; `$env:KEYPAIR_PATH='$($env:KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR_PATH='$($env:SOLANA_KEYPAIR_PATH)'; `$env:WALLET_KEYPAIR_PATH='$($env:WALLET_KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR='$($env:SOLANA_KEYPAIR)'; `$env:WALLET_KEYPAIR_BASE58='$($env:WALLET_KEYPAIR_BASE58)'; `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS='$($env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS)'; `$env:CLMM_IL_LEDGER_PATH='$($env:CLMM_IL_LEDGER_PATH)'; `$env:CLMM_PENDING_OPEN_RECOVERY_PATH='$($env:CLMM_PENDING_OPEN_RECOVERY_PATH)'; `$env:DATABASE_URL='$($env:DATABASE_URL)'; `$env:DATABASE_POOL_SIZE='$($env:DATABASE_POOL_SIZE)'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] cargo target dir: ' + `$env:CLMM_API_TARGET_DIR) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] CLMM_LP_CLI_PATH=' + `$env:CLMM_LP_CLI_PATH) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] DRY_RUN=' + `$env:DRY_RUN) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] TEMP/TMP=' + `$env:TEMP) -ForegroundColor DarkGray; if (`$env:DATABASE_URL -and `$env:DATABASE_URL.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] DATABASE_URL=set (Postgres enabled for chain-history)') -ForegroundColor DarkGray } else { Write-Host ('[clmm-lp-api] DATABASE_URL=unset — chain-history / DB features return 503') -ForegroundColor Yellow }; if (`$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS -and `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_STRANDED_RECONCILE_INTERVAL_SECS=' + `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS) -ForegroundColor DarkGray }; if (`$env:CLMM_IL_LEDGER_PATH -and `$env:CLMM_IL_LEDGER_PATH.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_IL_LEDGER_PATH=set') -ForegroundColor DarkGray }; cargo run -q -p clmm-lp-api --bin clmm-lp-api --target-dir `$env:CLMM_API_TARGET_DIR 2>&1 | Tee-Object -FilePath '$logPath' }"
   ) `
   -WorkingDirectory $RepoRoot `
   -WindowStyle Normal

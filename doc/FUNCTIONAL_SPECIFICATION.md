@@ -14,7 +14,8 @@
 | Incident registry and fixes | [`BUGS.md`](BUGS.md) |
 | API method map / service split | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) |
 | Run steps, env, operational checklists | runbooks in [`README.md`](README.md) *Runbooks and operations* |
-| Decision / orchestration layer (vision, phases, shadow sims — product contract) | [`DECISION_LAYER.md`](DECISION_LAYER.md) — **§8** below is a normative *stub*; details stay there until implementation |
+| Decision / orchestration layer (vision, registry, audit; **implementation phases 0–6+**) | [`DECISION_LAYER.md`](DECISION_LAYER.md); [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) — **§8** below: normative *stub* produktu; kolejność wdrożeń i fazy w planie implementacji do czasu kodu |
+| Wallet GL — plan faz (journal → read model → reconcile); szczegóły poza §5.1 | [`WALLET_GL.md`](WALLET_GL.md) |
 
 ---
 
@@ -343,11 +344,30 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 ### 5. Wallet and funding (API signer, SOL-first, effective balances)
 
-**Goal:** *TODO*
+**Goal:** Operator i executor widzą **spójne salda** portfela API (natywny SOL, SPL w tym projekcje WSOL) z **read-model cache + publicznego RPC**, z ochroną przed **regresją odczytu** (np. pusta lista SPL przy chwilowo złej odpowiedzi endpointu). Szczegóły zmian i znane regresje: [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) (`keywords:` `effective-balances`, `wallet_effective`), [`BUGS.md`](BUGS.md).
 
-**keywords:** wallets, effective-balances, wsol, native_sol, operational_sol
+**Normatywnie — źródło prawdy sald w UI (faza bieżąca):**
 
----
+- Salda w dashboardzie (**w tym ekran otwierania pozycji / swap-before-open**) są wyprowadzane z **`GET /wallets/effective-balances`** (i powiązanych ścieżek odświeżania), **nie** z sumy wierszy **Wallet GL journal** (`§5.1`).
+- On-chain przez RPC pozostaje **„bankiem”** do uzgodnienia; **jawne odświeżenie** operatora (`force=true` tam, gdzie przewidziano w API) może **nadpisać** read-model zgodnie z zasadami monotoniczności opisanymi w kodzie i `BUGS.md`.
+
+**keywords:** wallets, effective-balances, wsol, native_sol, operational_sol, wallet_effective_cache
+
+#### 5.1 Wallet GL — append-only journal (shadow, fazy B–E)
+
+**Cel:** **Osobny** rejestr zdarzeń portfelowych zainicjowanych przez API — plik append-only **`data/wallet-ledger-events.jsonl`** (nadpisanie ścieżki: env **`CLMM_WALLET_LEDGER_PATH`**), przygotowanie pod szerszy model **GL / delty na konta** i reconcile z on-chain, **bez** zastąpienia źródła prawdy sald z **`§5`** dopóki nie nastąpi świadoma zmiana produktowa i rozszerzenie normy.
+
+**Plan implementacji i założenia docelowe (jedno miejsce):** [`WALLET_GL.md`](WALLET_GL.md) — m.in. wizja księgowa vs **faza A** (journal), checklisty faz **B–E**.
+
+**Normatywnie — faza A (obowiązuje w kodzie dziś):**
+
+- Dla zaimplementowanych `kind` obowiązuje śledzenie **`pending` → `confirmed` / `failed`** z **`correlation_id`** wiążącym serię, o ile dana ścieżka jest w kodzie podpięta pod `wallet_ledger`.
+- Rejestr służy **audytowi** i podłożu pod przyszłe fazy z `WALLET_GL.md`; **nie** blokuje wykonania transakcji ani **nie** zastępuje wyświetlania sald z **`§5`**.
+- Podgląd operatora: **`GET /api/v1/wallets/ledger-events`**, UI **`/wallet/ledger`**.
+
+**Poza zakresem fazy A (wdrożenie wg checklisty w `WALLET_GL.md`, bez zmiany normy `§5` bez decyzji):** księgowanie **każdej** transakcji on-chain spoza kontrolowanych ścieżek API; **saldo wyłącznie z sumy journalu**; pełny **chart of accounts** — do dopisania w kodzie i tu, gdy produkt uzna to za normę.
+
+**keywords:** wallet_gl, wallet_ledger, WALLET_GL.md, journal, correlation_id, shadow-ledger, ledger-events
 
 ### 6. Fees and PnL presentation (collect vs close, principal vs fees in UI)
 
@@ -412,15 +432,15 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 ### 8. Decision layer (orchestrator LP) — draft
 
-**Status:** **Draft** — funkcje opisane częściowo; pełny kontrakt produktowy i architektura: [`DECISION_LAYER.md`](DECISION_LAYER.md). Po wdrożeniu kodu rozszerz tutaj **Inputs / Happy path / Invariants** i dopisz wskaźniki do plików Rust.
+**Status:** **Draft** — pełna pętla orkiestratora (ranking wariantów, shadow) nadal w rozwoju; **faza gate:** subcommand `orchestrator-gate` + schemat `gate_health` w polu `decision` (§8 poniżej, [`doc/examples/orchestrator-run-v1.example.json`](examples/orchestrator-run-v1.example.json)). Architektura i rejestr narzędzi: [`DECISION_LAYER.md`](DECISION_LAYER.md).
 
 **Goal:** Warstwa ponad istniejącymi narzędziami zbiera sygnały (dane, metryki ciągu pozycji, jakość danych), uruchamia **te same** ścieżki symulacji/backtestu dla wariantów (w tym shadow / what-if), wydaje **rekomendacje lub decyzje pomocnicze** z pełnym audytem, a w późniejszej fazie może być spięta z wykonaniem (tx, apply optimize). Pierwsza faza produktowa: **analiza i informowanie operatora** — bez samowolnego wykonywania transakcji.
 
-**Mapowanie szczegółowego celu operatora (wolumen, wiele par, jeden ciąg PnL, kapitał):** [`DECISION_LAYER.md`](DECISION_LAYER.md) §1a — tam wskazane, co jest już rozpisane, a co jest szkicem do doprecyzowania przy implementacji.
+**Mapowanie szczegółowego celu operatora (wolumen, wiele par, jeden ciąg PnL, kapitał):** [`DECISION_LAYER.md`](DECISION_LAYER.md) §1a — tam wskazane, co jest już rozpisane, a co jest szkicem do doprecyzowania przy implementacji. **Rejestr zdolności (narzędzia, cele, NO-GO):** [`DECISION_LAYER.md`](DECISION_LAYER.md) §1b. **Plan implementacji (fazy, kryteria sukcesu, kolejność PR):** [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md).
 
 **Inputs (docelowo, nie wszystkie dziś spięte):** lokalne snapshoty/swapy i ich jakość; wyniki `backtest` / `backtest-optimize`; metryki ciągu (m.in. IL, fees, koszty) z API/stream; polityki operatora; opcjonalnie envelope [`AgentDecision`](AI_AGENT_LAYER.md) przy apply siatki.
 
-**Outputs:** rekomendacje i/lub strukturalny log decyzji (co, dlaczego, na jakich danych, wersja/kompletność danych); kanał audytu możliwy przez [`GET`/`POST /api/v1/data/agent/decisions`](AI_AGENT_LAYER.md) lub osobny strumień — **do ustalenia przy implementacji**.
+**Outputs:** rekomendacje i/lub strukturalny log decyzji (co, dlaczego, na jakich danych, wersja/kompletność danych); kanał audytu: [`GET`/`POST /api/v1/data/agent/decisions`](AI_AGENT_LAYER.md) zapisuje wiersze do `data/agent/agent_decisions.jsonl` (pole `decision` jest ogólne JSON — dla bramki jakości z CLI używany jest schemat poniżej).
 
 **Happy path (faza 1 — informowanie):**
 
@@ -436,11 +456,29 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 - Shadow / what-if: **wspólna metodologia metryk** z pozycją realną; ten sam silnik backtestu/symulacji co w researchu.
 - Faza 1: **brak** automatycznego wysyłania transakcji bez osobnego Go/No-Go i sekcji normatywnej.
 
-**Observability:** każda decyzja musi być **powtarzalna z logu** (wejścia + wersje danych + parametry runów); pola dokładne — przy implementacji.
+**Observability:** każda decyzja musi być **powtarzalna z logu** (wejścia + wersje danych + parametry runów). Dla **fazy 1 (gate)** wiersz JSONL zawiera m.in. `ts_utc`, `source`, opcjonalnie `chain_id`, oraz pole **`decision`** z typem runu opisanym poniżej.
 
-**Code pointers:** *TBD* — po dodaniu crate/modułu lub CLI orchestratora.
+**`decision` — orchestrator run v1 (`kind: "gate_health"`):** jeden przebieg bramki jakości (ta sama logika co `data-health-check` na curated poolach). Pola w `decision`:
 
-**keywords:** decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, NO-GO, advisory-phase, DECISION_LAYER
+| Pole | Typ / wartości | Znaczenie |
+| ---- | -------------- | --------- |
+| `schema_version` | `1` | Wersja kontraktu tego obiektu |
+| `run_id` | string (np. prefiks `gate-` + UUID) | Identyfikator przebiegu |
+| `kind` | `"gate_health"` | Rodzaj runu |
+| `tools_invoked` | tablica stringów | Narzędzia Rust/CLI użyte w przebiegu (np. `health_check_curated_all_collect`) |
+| `data_quality` | obiekt JSON | Skrót wyniku health: `alerts`, `alert_count`, `health_report_path` (ścieżka do `data/reports/health_alerts_*.json` gdy są alerty, inaczej `null`), `summary_ts_utc` |
+| `outcome` | `"ok"` \| `"no_go"` | `no_go` gdy `alerts` niepuste |
+| `no_go_reason` | string, opcjonalnie | Obecny przy `outcome === "no_go"` |
+| `inputs` | obiekt JSON | Progi przebiegu, np. `max_age_minutes`, `min_decode_ok_pct` |
+| `inputs_ref` | obiekt JSON | **Faza 0 — audyt plików:** `schema_version` (1), `role` (`curated_dataset_file_stats`), `curated_pool_list_source` (stat `STARTUP.md`: `path`, `mtime_unix_secs`, `size_bytes`), `pool_data_files` — posortowane leksykograficznie po (`protocol`, `pool`); każdy element: `swaps_raw`, `decoded_swaps`, `snapshots_jsonl` z tymi samymi polami statystyk (brak pliku → `mtime_unix_secs` / `size_bytes` = `null`). **Bez** skrótu treści pliku (hash zawartości — opcjonalnie później). |
+
+**`decision` — orchestrator run v1 (`kind: "api_backtests_full"`):** przebieg „API-first” nad macierzą `POST /api/v1/backtests/full` (CLI `orchestrator-backtests-full`). Domyślnie przed FULL: `POST /api/v1/backtests/data-readiness` z `pool_ids` / `snapshot_variants` skopiowanymi z pliku żądania (pomijanie: `--skip-data-readiness`; `--fail-on-data-readiness` domyślnie włączone). Pola (skrót): `schema_version`, `run_id`, `kind`, `tools_invoked` (`POST`/`GET` jak wyżej, w tym readiness), `data_quality` (`job_id`, `job_status`, `metric_rows`, `window_count`, `stderr_preview`, opcjonalnie `gate` jeśli nie `--skip-gate`, `data_readiness` — pełna odpowiedź readiness gdy krok wykonany), `outcome` (`ok` / `no_go` wg statusu joba i flag `--fail-on-job-partial`), `no_go_reason`, `inputs` (= ciało żądania `BacktestFullRequest`), `inputs_ref` (`request_json_path`, `api_base`), opcjonalnie `job` (pełna odpowiedź — tylko z `--decision-include-full-job`). Przykładowe ciało żądania: [`doc/examples/backtest-full-request.min.json`](examples/backtest-full-request.min.json).
+
+**Przykładowy wiersz JSONL:** [`doc/examples/orchestrator-run-v1.example.json`](examples/orchestrator-run-v1.example.json).
+
+**Code pointers:** `crates/cli/src/orchestrator_gate.rs` (`OrchestratorRunV1`, `run_gate_and_log`, `append_agent_decision_row`); subcommand `orchestrator-gate` w `crates/cli/src/main.rs`; `crates/cli/src/orchestrator_api_full.rs` + subcommand `orchestrator-backtests-full`; zbiór danych health: `crates/cli/src/swap_sync.rs` (`health_check_curated_all_collect`).
+
+**keywords:** decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, NO-GO, advisory-phase, DECISION_LAYER, orchestrator-gate, gate_health, agent_decisions, inputs_ref, curated_dataset_file_stats, api_backtests_full, orchestrator-backtests-full, backtests/data-readiness, data_readiness
 
 **Audyt stanu implementacji (fakty z repo, bez zgadywania):** [`DECISION_LAYER.md`](DECISION_LAYER.md) §11.
 

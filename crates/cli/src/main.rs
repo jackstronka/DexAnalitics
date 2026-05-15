@@ -4,6 +4,8 @@ pub mod backtest_engine;
 pub mod commands;
 pub mod engine;
 mod local_swap_fees;
+mod orchestrator_api_full;
+mod orchestrator_gate;
 pub mod output;
 mod snapshots;
 mod swap_sync;
@@ -140,6 +142,23 @@ enum FeeSwapDecodeStatusArg {
     Ok,
     /// Any successful tx with `amount_in_raw` (older / looser; may mix non-swap txs).
     Loose,
+}
+
+/// `mode` query for `POST …/chain-history/refresh` (matches API `StreamModeQuery`).
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum ChainHistoryMetricsModeArg {
+    #[default]
+    Live,
+    SettlementV1,
+}
+
+impl ChainHistoryMetricsModeArg {
+    fn as_query_mode(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::SettlementV1 => "settlement_v1",
+        }
+    }
 }
 
 type OptimizeGridRow = (f64, f64, f64, String, TrackerSummary, Decimal);
@@ -832,6 +851,84 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         fail_on_alert: bool,
     },
+    /// Decision layer (phase 1): curated health pass + append `orchestrator_run_v1` to agent decisions JSONL.
+    ///
+    /// Same health logic as `data-health-check`, then writes one API-compatible line to
+    /// `data/agent/agent_decisions.jsonl` (override with `--jsonl-out` or `CLMM_AGENT_DECISIONS_JSONL_PATH`).
+    OrchestratorGate {
+        /// Alert if file age is above this threshold.
+        #[arg(long, default_value_t = 30)]
+        max_age_minutes: i64,
+        /// Alert if decoded ok percentage drops below this threshold.
+        #[arg(long, default_value_t = 65.0)]
+        min_decode_ok_pct: f64,
+        /// Exit with code 1 when outcome is `no_go` (alerts present).
+        #[arg(long, default_value_t = false)]
+        fail_on_no_go: bool,
+        /// Append target JSONL (default: `data/agent/agent_decisions.jsonl` or `CLMM_AGENT_DECISIONS_JSONL_PATH`).
+        #[arg(long, value_name = "PATH")]
+        jsonl_out: Option<std::path::PathBuf>,
+        /// `source` field on the JSONL row (default: `orchestrator-gate`).
+        #[arg(long, default_value = "orchestrator-gate")]
+        source: String,
+        /// Optional `chain_id` on the JSONL row.
+        #[arg(long)]
+        chain_id: Option<String>,
+    },
+    /// Decision layer (phase 2, API-first): optional curated gate → `POST /api/v1/backtests/data-readiness`
+    /// (subset of FULL JSON: `pool_ids`, `snapshot_variants`) → `POST /api/v1/backtests/full` → poll
+    /// → append decision row (`kind`: `api_backtests_full`) via local JSONL or `POST /data/agent/decisions`.
+    OrchestratorBacktestsFull {
+        /// API root (no trailing `/` required), e.g. `http://127.0.0.1:8081`.
+        #[arg(
+            long,
+            env = "CLMM_API_BASE_URL",
+            default_value = "http://127.0.0.1:8081"
+        )]
+        api_base: String,
+        /// JSON file body for `BacktestFullRequest` (same shape as `POST /api/v1/backtests/full`).
+        #[arg(long, value_name = "PATH")]
+        request_json: std::path::PathBuf,
+        /// Skip `health_check_curated_all_collect` before calling the API.
+        #[arg(long, default_value_t = false)]
+        skip_gate: bool,
+        /// When gate reports alerts, exit before `POST /backtests/full` (same idea as `orchestrator-gate --fail-on-no-go`).
+        #[arg(long, default_value_t = false)]
+        fail_on_no_go: bool,
+        #[arg(long, default_value_t = 30)]
+        gate_max_age_minutes: i64,
+        #[arg(long, default_value_t = 65.0)]
+        gate_min_decode_ok_pct: f64,
+        /// Skip `POST /api/v1/backtests/data-readiness` before starting FULL.
+        #[arg(long, default_value_t = false)]
+        skip_data_readiness: bool,
+        /// Exit before `POST /backtests/full` when data-readiness `aggregate.status` ≠ `ok`.
+        #[arg(long, default_value_t = true)]
+        fail_on_data_readiness: bool,
+        #[arg(long, default_value_t = 2000)]
+        poll_interval_ms: u64,
+        #[arg(long, default_value_t = 14_400)]
+        poll_timeout_secs: u64,
+        /// Write full `BacktestFullJobResponse` JSON (pretty) to this path (e.g. under `data/reports/`).
+        #[arg(long, value_name = "PATH")]
+        save_job_json: Option<std::path::PathBuf>,
+        /// Append audit row via `POST /api/v1/data/agent/decisions` instead of local JSONL.
+        #[arg(long, default_value_t = false)]
+        decisions_via_http: bool,
+        #[arg(long, value_name = "PATH")]
+        jsonl_out: Option<std::path::PathBuf>,
+        #[arg(long, default_value = "orchestrator-backtests-full")]
+        source: String,
+        #[arg(long)]
+        chain_id: Option<String>,
+        #[arg(long, default_value_t = true)]
+        fail_on_job_failed: bool,
+        #[arg(long, default_value_t = false)]
+        fail_on_job_partial: bool,
+        /// Embed full job JSON inside `decision` (large; default off — use `--save-job-json` instead).
+        #[arg(long, default_value_t = false)]
+        decision_include_full_job: bool,
+    },
     /// One-shot ops cycle: snapshots -> swaps sync -> enrich -> audit -> health-check.
     /// Intended for automation (Task Scheduler / cron).
     OpsIngestCycle {
@@ -1256,6 +1353,31 @@ enum Commands {
         /// Max number of items to turn into segments.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+
+    /// Materialize position rotation chain into Postgres via running API (`POST /api/v1/positions/{address}/chain-history/refresh`).
+    ///
+    /// Requires API with DB and migrations 007–008. When `CLMM_CHAIN_HISTORY_REFRESH_SECRET` is set on the API, pass the same token
+    /// (`--refresh-secret` or env). When `API_KEYS` is non-empty, set `--x-api-key` or `CLMM_X_API_KEY`.
+    #[command(name = "chain-history-refresh")]
+    ChainHistoryRefresh {
+        /// Chain anchor / position pubkey (base58).
+        address: String,
+        #[arg(long, value_enum, default_value_t = ChainHistoryMetricsModeArg::Live)]
+        mode: ChainHistoryMetricsModeArg,
+        #[arg(
+            long,
+            env = "CLMM_API_BASE_URL",
+            default_value = "http://127.0.0.1:8081"
+        )]
+        api_base_url: String,
+        #[arg(long, env = "CLMM_CHAIN_HISTORY_REFRESH_SECRET")]
+        refresh_secret: Option<String>,
+        #[arg(long, env = "CLMM_X_API_KEY")]
+        x_api_key: Option<String>,
+        /// HTTP client timeout (materialization can be slow on long chains).
+        #[arg(long, default_value_t = 600)]
+        timeout_secs: u64,
     },
 }
 
@@ -5533,6 +5655,80 @@ async fn main() -> Result<()> {
                 *fail_on_alert,
             )?;
         }
+        Commands::OrchestratorGate {
+            max_age_minutes,
+            min_decode_ok_pct,
+            fail_on_no_go,
+            jsonl_out,
+            source,
+            chain_id,
+        } => {
+            let path = jsonl_out
+                .clone()
+                .or_else(|| {
+                    std::env::var("CLMM_AGENT_DECISIONS_JSONL_PATH")
+                        .ok()
+                        .map(std::path::PathBuf::from)
+                })
+                .unwrap_or_else(crate::orchestrator_gate::default_agent_decisions_path);
+            crate::orchestrator_gate::run_gate_and_log(
+                *max_age_minutes,
+                *min_decode_ok_pct,
+                *fail_on_no_go,
+                &path,
+                source,
+                chain_id.as_deref(),
+            )?;
+        }
+        Commands::OrchestratorBacktestsFull {
+            api_base,
+            request_json,
+            skip_gate,
+            fail_on_no_go,
+            gate_max_age_minutes,
+            gate_min_decode_ok_pct,
+            skip_data_readiness,
+            fail_on_data_readiness,
+            poll_interval_ms,
+            poll_timeout_secs,
+            save_job_json,
+            decisions_via_http,
+            jsonl_out,
+            source,
+            chain_id,
+            fail_on_job_failed,
+            fail_on_job_partial,
+            decision_include_full_job,
+        } => {
+            let poll_interval = std::time::Duration::from_millis((*poll_interval_ms).max(250));
+            let poll_timeout = std::time::Duration::from_secs(*poll_timeout_secs);
+            let jsonl = jsonl_out.clone().or_else(|| {
+                std::env::var("CLMM_AGENT_DECISIONS_JSONL_PATH")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+            });
+            crate::orchestrator_api_full::run_backtests_full_via_api(
+                api_base,
+                request_json,
+                *skip_gate,
+                *fail_on_no_go,
+                *gate_max_age_minutes,
+                *gate_min_decode_ok_pct,
+                *skip_data_readiness,
+                *fail_on_data_readiness,
+                poll_interval,
+                poll_timeout,
+                save_job_json.as_deref(),
+                *decisions_via_http,
+                jsonl.as_deref(),
+                source,
+                chain_id.as_deref(),
+                *fail_on_job_failed,
+                *fail_on_job_partial,
+                *decision_include_full_job,
+            )
+            .await?;
+        }
         Commands::OpsIngestCycle {
             limit,
             run_snapshots,
@@ -6466,6 +6662,27 @@ async fn main() -> Result<()> {
                 *pause_secs,
                 *limit,
             )?;
+        }
+        Commands::ChainHistoryRefresh {
+            address,
+            mode,
+            api_base_url,
+            refresh_secret,
+            x_api_key,
+            timeout_secs,
+        } => {
+            let mode_s = mode.as_query_mode();
+            let sec = refresh_secret.as_deref().filter(|s| !s.trim().is_empty());
+            let key = x_api_key.as_deref().filter(|s| !s.trim().is_empty());
+            crate::commands::position_chain_history::run_chain_history_refresh(
+                api_base_url,
+                address,
+                mode_s,
+                sec,
+                key,
+                *timeout_secs,
+            )
+            .await?;
         }
     }
 

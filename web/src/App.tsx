@@ -19,6 +19,7 @@ import BotActivity from '@/pages/BotActivity'
 import Logs from '@/pages/Logs'
 import Scripts from '@/pages/Scripts'
 import Wallet from '@/pages/Wallet'
+import WalletLedger from '@/pages/WalletLedger'
 import Swap from '@/pages/Swap'
 import Backtests from '@/pages/Backtests'
 import DataQuality from '@/pages/DataQuality'
@@ -32,6 +33,7 @@ function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="wallet" element={<Wallet />} />
+            <Route path="wallet/ledger" element={<WalletLedger />} />
             <Route path="swap" element={<Swap />} />
             <Route path="scripts" element={<Scripts />} />
             <Route path="positions" element={<Positions />} />

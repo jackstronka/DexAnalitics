@@ -251,6 +251,10 @@ fn create_base_http_router(state: AppState) -> Router {
             "/wallets/reconcile",
             post(handlers::reconcile_wallet_stores),
         )
+        .route(
+            "/wallets/ledger-events",
+            get(handlers::get_wallet_ledger_events),
+        )
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
@@ -302,6 +306,14 @@ fn create_onchain_router(state: AppState) -> Router {
             post(handlers::rebalance_position),
         )
         // Long-running reads (JSONL scans / lineage reconstruction)
+        .route(
+            "/positions/{address}/chain-history/refresh",
+            post(handlers::refresh_position_chain_history),
+        )
+        .route(
+            "/positions/{address}/chain-history",
+            get(handlers::get_position_chain_history),
+        )
         .route(
             "/positions/{address}/stream-lineage",
             get(handlers::get_position_stream_lineage),
