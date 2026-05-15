@@ -287,10 +287,10 @@ pub async fn run_backtests_full_via_api(
             "api_base": normalize_api_base(api_base),
         },
     });
-    if decision_include_full_job {
-        if let Some(m) = decision_payload.as_object_mut() {
-            m.insert("job".to_string(), job.clone());
-        }
+    if decision_include_full_job
+        && let Some(m) = decision_payload.as_object_mut()
+    {
+        m.insert("job".to_string(), job.clone());
     }
 
     if decisions_via_http {

@@ -145,12 +145,11 @@ fn json_decimal_amount_field(
     key: &str,
 ) -> Decimal {
     obj.get(key)
-        .map(|v| match v {
+        .and_then(|v| match v {
             serde_json::Value::String(s) => Decimal::from_str(s.as_str()).ok(),
             serde_json::Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
             _ => None,
         })
-        .flatten()
         .unwrap_or(Decimal::ZERO)
 }
 
@@ -204,24 +203,22 @@ async fn collect_fees_ledger_deltas_from_op_data(
     let mut out = Vec::new();
     let col_a = (pre_a - post_a).max(Decimal::ZERO);
     let col_b = (pre_b - post_b).max(Decimal::ZERO);
-    if col_a > Decimal::ZERO {
-        if let Some(s) = decimal_ui_to_positive_raw_i128_string(col_a, dec_a) {
+    if col_a > Decimal::ZERO
+        && let Some(s) = decimal_ui_to_positive_raw_i128_string(col_a, dec_a) {
             out.push(WalletLedgerDelta {
                 mint: mint_a,
                 decimals: dec_a,
                 raw_delta_i128: s,
             });
         }
-    }
-    if col_b > Decimal::ZERO {
-        if let Some(s) = decimal_ui_to_positive_raw_i128_string(col_b, dec_b) {
+    if col_b > Decimal::ZERO
+        && let Some(s) = decimal_ui_to_positive_raw_i128_string(col_b, dec_b) {
             out.push(WalletLedgerDelta {
                 mint: mint_b,
                 decimals: dec_b,
                 raw_delta_i128: s,
             });
         }
-    }
     out
 }
 
@@ -1836,8 +1833,8 @@ pub async fn swap_before_open(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    if !state.dry_run {
-        if let Some(ref owner) = ledger_owner {
+    if !state.dry_run
+        && let Some(ref owner) = ledger_owner {
             let dec = fetch_mint_decimals_best_effort(
                 state.provider.as_ref(),
                 request.specified_mint.trim(),
@@ -1867,7 +1864,6 @@ pub async fn swap_before_open(
             );
             wallet_ledger::append_wallet_ledger_event(&state, pending).await;
         }
-    }
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
@@ -2038,9 +2034,9 @@ pub async fn open_position(
         open_position_ledger_deltas(&state, &request).await
     };
 
-    if !state.dry_run {
-        if let Some(ref owner) = ledger_owner {
-            if !open_deltas.is_empty() {
+    if !state.dry_run
+        && let Some(ref owner) = ledger_owner
+            && !open_deltas.is_empty() {
                 let pending = wallet_ledger::new_ledger_event(
                     &correlation_id,
                     WalletLedgerStatus::Pending,
@@ -2058,8 +2054,6 @@ pub async fn open_position(
                 );
                 wallet_ledger::append_wallet_ledger_event(&state, pending).await;
             }
-        }
-    }
 
     let op = match svc.open_position(&request).await {
         Ok(o) => o,
@@ -2656,8 +2650,8 @@ pub async fn decrease_liquidity(
     };
     let pool_str = position_pool_address_best_effort(&state, &pubkey).await;
 
-    if !state.dry_run {
-        if let Some(ref owner) = ledger_owner {
+    if !state.dry_run
+        && let Some(ref owner) = ledger_owner {
             let pending = wallet_ledger::new_ledger_event(
                 &correlation_id,
                 WalletLedgerStatus::Pending,
@@ -2675,7 +2669,6 @@ pub async fn decrease_liquidity(
             );
             wallet_ledger::append_wallet_ledger_event(&state, pending).await;
         }
-    }
 
     let op = match svc.decrease_liquidity(&address, liquidity_amount).await {
         Ok(o) => o,
@@ -2793,8 +2786,8 @@ pub async fn rebalance_position(
     };
     let pool_str = position_pool_address_best_effort(&state, &pubkey).await;
 
-    if !state.dry_run {
-        if let Some(ref owner) = ledger_owner {
+    if !state.dry_run
+        && let Some(ref owner) = ledger_owner {
             let pending = wallet_ledger::new_ledger_event(
                 &correlation_id,
                 WalletLedgerStatus::Pending,
@@ -2812,7 +2805,6 @@ pub async fn rebalance_position(
             );
             wallet_ledger::append_wallet_ledger_event(&state, pending).await;
         }
-    }
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);

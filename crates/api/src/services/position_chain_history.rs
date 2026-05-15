@@ -144,17 +144,15 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
     .bind(pos)
     .fetch_optional(pool)
     .await
-    {
-        if let Some(Some(s)) = r {
+        && let Some(Some(s)) = r {
             let t = s.trim();
             if !t.is_empty() {
                 out.pool_address = Some(t.to_string());
             }
         }
-    }
 
-    if out.pool_address.is_none() {
-        if let Ok(r) = sqlx::query_scalar::<_, Option<String>>(
+    if out.pool_address.is_none()
+        && let Ok(r) = sqlx::query_scalar::<_, Option<String>>(
             r#"SELECT pool_pubkey FROM position_stream_ledger_rows
                WHERE position_pubkey = $1 AND pool_pubkey IS NOT NULL AND TRIM(pool_pubkey) <> ''
                ORDER BY ts_utc DESC NULLS LAST
@@ -163,15 +161,12 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
         .bind(pos)
         .fetch_optional(pool)
         .await
-        {
-            if let Some(Some(s)) = r {
+            && let Some(Some(s)) = r {
                 let t = s.trim();
                 if !t.is_empty() {
                     out.pool_address = Some(t.to_string());
                 }
             }
-        }
-    }
 
     if let Ok(Some(raw)) = sqlx::query_scalar::<_, JsonValue>(
         r#"SELECT raw_json FROM position_stream_ledger_rows
@@ -190,11 +185,10 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
             out.tick_upper_open = Some(hi);
             out.range_label_at_open = Some(format!("{lo}→{hi} ticks"));
         }
-        if let Some(d) = ch_details_from_ledger_raw(&raw) {
-            if let Some(px) = ch_decimal_event_price_a_from_details(d) {
+        if let Some(d) = ch_details_from_ledger_raw(&raw)
+            && let Some(px) = ch_decimal_event_price_a_from_details(d) {
                 out.event_price_a_usd = Some(px);
             }
-        }
     }
 
     if let Ok(Some(raw)) = sqlx::query_scalar::<_, JsonValue>(
@@ -207,13 +201,10 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
     .bind(pos)
     .fetch_optional(pool)
     .await
-    {
-        if let Some(d) = ch_details_from_ledger_raw(&raw) {
-            if let Some(px) = ch_decimal_event_price_a_from_details(d) {
+        && let Some(d) = ch_details_from_ledger_raw(&raw)
+            && let Some(px) = ch_decimal_event_price_a_from_details(d) {
                 out.event_price_close_a_usd = Some(px);
             }
-        }
-    }
 
     out
 }
@@ -240,26 +231,22 @@ fn overlay_chain_history_node_from_persisted_columns(
     end_value_usd: Option<Decimal>,
     current_value_usd_col: Option<Decimal>,
 ) {
-    if let Some(s) = start_value_usd.filter(|x| *x > Decimal::ZERO) {
-        if node.baseline_value_usd.is_zero() {
+    if let Some(s) = start_value_usd.filter(|x| *x > Decimal::ZERO)
+        && node.baseline_value_usd.is_zero() {
             node.baseline_value_usd = s;
             node.baseline_valuation_quality = Some("exact".to_string());
         }
-    }
-    if let Some(c) = current_value_usd_col.filter(|x| *x > Decimal::ZERO) {
-        if node.current_value_usd.is_zero() {
+    if let Some(c) = current_value_usd_col.filter(|x| *x > Decimal::ZERO)
+        && node.current_value_usd.is_zero() {
             node.current_value_usd = c;
             node.current_valuation_quality = Some("exact".to_string());
         }
-    }
-    if node.closed_ts_utc.is_some() {
-        if let Some(e) = end_value_usd.filter(|x| *x > Decimal::ZERO) {
-            if node.current_value_usd.is_zero() {
+    if node.closed_ts_utc.is_some()
+        && let Some(e) = end_value_usd.filter(|x| *x > Decimal::ZERO)
+            && node.current_value_usd.is_zero() {
                 node.current_value_usd = e;
                 node.current_valuation_quality = Some("exact".to_string());
             }
-        }
-    }
     node.net_pnl_usd = node.current_value_usd + node.realized_cashflow_usd
         - node.baseline_value_usd
         - node.tx_fees_usd;
@@ -285,12 +272,11 @@ fn overlay_chain_history_node_from_persisted_display_columns(
             node.chain_history_pool_address = Some(t.to_string());
         }
     }
-    if let (Some(lo), Some(hi)) = (tick_lower_open, tick_upper_open) {
-        if lo < hi {
+    if let (Some(lo), Some(hi)) = (tick_lower_open, tick_upper_open)
+        && lo < hi {
             node.chain_history_tick_lower_open = Some(lo);
             node.chain_history_tick_upper_open = Some(hi);
         }
-    }
     if let Some(s) = chain_history_decimal_column_string_positive(event_price_a_usd) {
         node.chain_history_event_spot_token_a_usd_open = Some(s);
     }
@@ -798,7 +784,7 @@ pub async fn load_chain_history_from_db(
         .map_err(|e| ApiError::internal(format!("chain-history meta totals_json: {e}")))?;
     let totals: Option<PositionStreamPnLResponse> = totals_json
         .filter(|v| !v.is_null())
-        .map(|v| serde_json::from_value(v))
+        .map(serde_json::from_value)
         .transpose()
         .map_err(|e| ApiError::internal(format!("chain-history meta totals_json parse: {e}")))?;
 
@@ -809,7 +795,7 @@ pub async fn load_chain_history_from_db(
         })?;
     let chain_cost_summary_from_meta: Option<LineageChainCostSummary> = cost_json
         .filter(|v| !v.is_null())
-        .map(|v| serde_json::from_value(v))
+        .map(serde_json::from_value)
         .transpose()
         .map_err(|e| {
             ApiError::internal(format!(
@@ -891,23 +877,18 @@ pub async fn load_chain_history_from_db(
     }
 
     let mut chain = meta_chain.clone();
-    match compute_position_stream_performance(state, effective_anchor.as_str(), true).await {
-        Ok(perf) => {
-            let resolved = resolve_lineage_chain_for_stream_pnl(
-                state,
-                &perf,
-                effective_anchor.as_str(),
-            )
-            .await;
-            chain = merge_meta_chain_with_resolved_for_read(meta_chain.clone(), resolved);
-        }
-        Err(_) => {}
+    if let Ok(perf) = compute_position_stream_performance(state, effective_anchor.as_str(), true).await {
+        let resolved = resolve_lineage_chain_for_stream_pnl(
+            state,
+            &perf,
+            effective_anchor.as_str(),
+        )
+        .await;
+        chain = merge_meta_chain_with_resolved_for_read(meta_chain.clone(), resolved);
     }
 
     let missing: Vec<String> = chain
-        .iter()
-        .cloned()
-        .filter(|p| !node_by_pos.contains_key(p.as_str()))
+        .iter().filter(|&p| !node_by_pos.contains_key(p.as_str())).cloned()
         .collect();
     if !missing.is_empty() {
         let futs: Vec<_> = missing
@@ -1022,8 +1003,10 @@ mod tests {
 
     #[test]
     fn require_auth_accepts_bearer_case_insensitive_prefix() {
-        let mut cfg = ApiConfig::default();
-        cfg.chain_history_refresh_secret = Some("mysecret".to_string());
+        let cfg = ApiConfig {
+            chain_history_refresh_secret: Some("mysecret".to_string()),
+            ..Default::default()
+        };
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -1034,8 +1017,10 @@ mod tests {
 
     #[test]
     fn require_auth_accepts_x_chain_history_refresh_header() {
-        let mut cfg = ApiConfig::default();
-        cfg.chain_history_refresh_secret = Some("tok".to_string());
+        let cfg = ApiConfig {
+            chain_history_refresh_secret: Some("tok".to_string()),
+            ..Default::default()
+        };
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("x-chain-history-refresh"),
@@ -1046,8 +1031,10 @@ mod tests {
 
     #[test]
     fn require_auth_rejects_wrong_token() {
-        let mut cfg = ApiConfig::default();
-        cfg.chain_history_refresh_secret = Some("a".to_string());
+        let cfg = ApiConfig {
+            chain_history_refresh_secret: Some("a".to_string()),
+            ..Default::default()
+        };
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,

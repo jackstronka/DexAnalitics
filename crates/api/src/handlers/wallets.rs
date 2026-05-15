@@ -2182,12 +2182,11 @@ fn merge_tokens_from_prev_where_regressive(
         if *prev_ui < MONOTONIC_PREV_MIN {
             continue;
         }
-        if let Some(next_ui) = next_by_mint.get_mut(mint) {
-            if *next_ui <= MONOTONIC_ZERO_EPS {
+        if let Some(next_ui) = next_by_mint.get_mut(mint)
+            && *next_ui <= MONOTONIC_ZERO_EPS {
                 *next_ui = *prev_ui;
                 changed = true;
             }
-        }
     }
 
     if !changed {
@@ -2656,8 +2655,8 @@ pub async fn convert_sol(
         }
     };
 
-    if !state.dry_run {
-        if let Some(ref sig_s) = signature {
+    if !state.dry_run
+        && let Some(ref sig_s) = signature {
             let n_delta = post_native_lamports as i64 - pre_native_lamports as i64;
             let w_delta = post_wsol_raw as i128 - pre_wsol_raw as i128;
             let deltas = vec![WalletLedgerDelta {
@@ -2682,7 +2681,6 @@ pub async fn convert_sol(
             );
             wallet_ledger::append_wallet_ledger_event(&state, ev).await;
         }
-    }
 
     let op_id = Uuid::new_v4().to_string();
     let mut reconciliation_status = WalletReconciliationStatus::ConfirmedUnreconciled;

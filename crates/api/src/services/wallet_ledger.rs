@@ -34,6 +34,7 @@ pub async fn fetch_mint_decimals_best_effort(provider: &RpcProvider, mint: &Pubk
 }
 
 /// Build a new ledger line (caller fills `deltas`, `error`, etc.).
+#[allow(clippy::too_many_arguments)]
 pub fn new_ledger_event(
     correlation_id: &str,
     status: WalletLedgerStatus,
@@ -72,12 +73,11 @@ pub fn new_ledger_event(
 pub async fn append_wallet_ledger_event(state: &AppState, ev: WalletLedgerEvent) {
     let path = wallet_ledger_events_path();
     let _guard = state.wallet_ledger_append_lock.lock().await;
-    if let Some(dir) = path.parent() {
-        if let Err(e) = fs::create_dir_all(dir).await {
+    if let Some(dir) = path.parent()
+        && let Err(e) = fs::create_dir_all(dir).await {
             tracing::warn!(error = %e, dir = %dir.display(), "wallet_ledger: create_dir_all failed");
             return;
         }
-    }
     let line = match serde_json::to_string(&ev) {
         Ok(s) => s,
         Err(e) => {
@@ -112,7 +112,7 @@ pub async fn read_wallet_ledger_tail(
     owner_filter: Option<&str>,
 ) -> (PathBuf, Vec<WalletLedgerEvent>) {
     let path = wallet_ledger_events_path();
-    let cap = limit.min(500).max(1);
+    let cap = limit.clamp(1, 500);
     let body = match fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(_) => return (path, Vec::new()),
