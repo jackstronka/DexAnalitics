@@ -27,6 +27,9 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Optional hook after successful on-chain steps; argument is chain-history anchor pubkey (base58).
+pub type ChainHistoryMaterializeHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Shallow-merge optional operator fields (e.g. `open_origin`) into open `details` for lifecycle.
 fn merge_open_ledger_details(
     base: serde_json::Value,
@@ -831,7 +834,7 @@ pub struct RebalanceExecutor {
     /// Dry run mode.
     dry_run: AtomicBool,
     /// Optional hook after successful on-chain steps (e.g. API chain-history materialize).
-    chain_history_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    chain_history_hook: Mutex<Option<ChainHistoryMaterializeHook>>,
 }
 
 impl RebalanceExecutor {
@@ -886,7 +889,7 @@ impl RebalanceExecutor {
     }
 
     /// Optional hook invoked after successful on-chain operations (see [`chain_history_hook_anchors_from_success`]).
-    pub fn set_chain_history_hook(&self, hook: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+    pub fn set_chain_history_hook(&self, hook: Option<ChainHistoryMaterializeHook>) {
         if let Ok(mut g) = self.chain_history_hook.lock() {
             *g = hook;
         }

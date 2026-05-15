@@ -2,8 +2,8 @@
 
 use super::pending_open;
 use super::{
-    Decision, DecisionConfig, DecisionContext, DecisionEngine, RebalanceConfig, RebalanceExecutor,
-    RebalanceParams, RecoverOpenParams, StrategyMode,
+    ChainHistoryMaterializeHook, Decision, DecisionConfig, DecisionContext, DecisionEngine,
+    RebalanceConfig, RebalanceExecutor, RebalanceParams, RecoverOpenParams, StrategyMode,
 };
 use crate::alerts::{Alert, AlertLevel, AlertType, MultiNotifier};
 use crate::emergency::CircuitBreaker;
@@ -388,7 +388,7 @@ impl StrategyExecutor {
     }
 
     /// Optional hook after successful on-chain steps in [`RebalanceExecutor`] (e.g. chain-history refresh).
-    pub fn set_chain_history_hook(&self, hook: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+    pub fn set_chain_history_hook(&self, hook: Option<ChainHistoryMaterializeHook>) {
         self.rebalance_executor.set_chain_history_hook(hook);
     }
 
