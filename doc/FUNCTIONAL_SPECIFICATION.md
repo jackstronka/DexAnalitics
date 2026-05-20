@@ -369,6 +369,21 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 **keywords:** wallet_gl, wallet_ledger, WALLET_GL.md, journal, correlation_id, shadow-ledger, ledger-events
 
+#### 5.2 Konto logiczne sesji (`rebalance_session_id`) — norma docelowa (nie zastępuje §5 ani 3A)
+
+**Cel:** przy starcie cyklu życia pozycji (ręczny open / bot reopen) operator i bot mają **jawny inwentarz tokenów przypisany do sesji**, a nie wyłącznie saldo całego portfela — zgodnie z [`WALLET_GL.md` §2.2](WALLET_GL.md#22-konto-logiczne-per-cykl-życia-pozycji-rebalance_session_id--norma-docelowa).
+
+**Normatywnie (docelowo, po fazach C–D GL):**
+
+- **Identyfikator:** `rebalance_session_id` (rotacja bot) lub `cost_session_id` (ręczny swap+open) — spina lifecycle i wpisy wallet journal.
+- **Źródło prawdy inwentarza sesji (tokeny):** lifecycle `bot_close_position` → `returned_*_raw` (**§6.1**); swapy i collect dopisują ruchy; read model GL `SESSION:{id}` per mint (shadow → produkt).
+- **Decyzja reopen:** `T` z §6.1; porównanie z **sesją** (preferowane) lub z `W` (**§2.2**) dopóki read model sesji nie jest produkcyjny.
+- **Fee w cyklu:** zebrane fee zwiększają inwentarz tej samej sesji (nie „giną” w globalnym portfelu bez śladu).
+
+**Stan dziś:** sesja i `T` są w **lifecycle**; salda UI i executor przy open nadal używają **`§5` (`effective-balances`)** i **policy 3A** (**§2.1** — brak twardej rezerwacji SPL). Konto logiczne SESSION w GL — **do wdrożenia** (patrz checklista w `WALLET_GL.md` §2.2).
+
+**keywords:** rebalance_session_id, cost_session_id, session-account, WALLET_GL, policy-3A, returned_raw, session-notional
+
 ### 6. Fees and PnL presentation (collect vs close, principal vs fees in UI)
 
 **Goal:** Provide consistent accounting semantics for “what returned from a close” and how fees are represented in ledger/UI, without blocking execution on perfect fee attribution.

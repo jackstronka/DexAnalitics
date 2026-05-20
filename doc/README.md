@@ -12,7 +12,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Plan implementacji (świadomość środowiska → gate → symulacje → raport → apply):** [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md).
 
-**Wallet GL — wizja księgowa vs journal, plan faz (kompletność zdarzeń → konta → read model → reconcile):** [`WALLET_GL.md`](WALLET_GL.md).
+**Wallet GL — wizja księgowa vs journal, §2.2 konto sesji per cykl pozycji, plan faz B–E:** [`WALLET_GL.md`](WALLET_GL.md).
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
 

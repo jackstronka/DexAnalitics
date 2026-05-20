@@ -1,3 +1,10 @@
+## 2026-05-20 — Wallet GL §2.2 + Functional spec §5.2: norma konta logicznego per cykl pozycji
+
+keywords: WALLET_GL, rebalance_session_id, SESSION account, policy-3A, FUNCTIONAL_SPECIFICATION, cost_session_id, returned_raw
+
+- **What:** Doc-only norm: logical sub-account `SESSION:{rebalance_session_id}` for position lifecycle capital (close → swap → open, fees to session inventory). Maps to existing lifecycle `T`/`returned_*_raw`; distinguishes from on-chain multi-wallet and from policy 3A (no hard SPL reservation today). Implementation checklist in phases C–D.
+- **paths:** `doc/WALLET_GL.md`, `doc/FUNCTIONAL_SPECIFICATION.md`, `doc/README.md`
+
 ## 2026-05-20 — Positions list display regression tests (API contract + UI fee/value helpers)
 
 keywords: list_positions, position_list_row_value_display_ready, positionListDisplay, vitest, monitored_position_list_row
