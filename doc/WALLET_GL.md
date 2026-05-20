@@ -35,7 +35,8 @@
 
 - Append-only **dziennik zdarzeń** API: `schema_version`, `ts_utc`, `event_id`, `correlation_id`, `status` (`pending` / `confirmed` / `failed`), `kind`, `owner`, `signature`, opcjonalnie `pool_address`, `cost_session_id`, `native_lamports_delta`, `deltas[]`, `error`, `source`.
 - **Spięte ścieżki (nie „każda transakcja”):** m.in. `swap_before_open`, `open_position`, `close_position`, `collect_fees` (delty z pre/post snapshotów UI → raw mint), `decrease_liquidity`, `rebalance_position` (journal zdarzenia; delty tokenów dopiero gdy będzie dekodowanie/sim), `transfer_sol`, `convert_sol` (w tym pending → outcome dla transfer/convert tam, gdzie wdrożone).
-- **Odczyt:** `GET /api/v1/wallets/ledger-events`; **UI:** `/wallet/ledger`.
+- **Odczyt:** `GET /api/v1/wallets/ledger-events` (query: `owner`, `kind`, `status`, `limit`; pole `storage`: `postgres` | `jsonl` | `jsonl_fallback`); **UI:** `/wallet/ledger`.
+- **Dual-write (2026-05-15):** każdy append idzie do JSONL **i** (gdy Postgres połączony) do tabeli **`wallet_gl_journal_event`** (migracja `010_*`). Odczyt preferuje Postgres gdy są wiersze, inaczej JSONL.
 
 **Czego świadomie *nie* robi obecny kod:**
 
@@ -110,6 +111,7 @@ Szczegóły migracji (nazwy tabel, kolejność rollout) dopisujemy przy pierwszy
 
 | Data | Zmiana |
 | ---- | ------ |
+| 2026-05-15 | **Postgres journal:** `wallet_gl_journal_event` (migracja `010_*`), dual-write przy append, odczyt z PG + fallback JSONL. |
 | 2026-05-14 | **Postgres seed:** `wallet_gl_token_account` + `wallet_gl_curated_pool` (migracja `009_*`) — konta per mint i pary z `curated_backtest_pools()`. |
 | 2026-05-14 | **Decyzja:** docelowy magazyn GL (plan kont, journal, read model sald, reconcile) → **PostgreSQL**; JSONL do migracji. Zaktualizowane opisy Faz C–E. |
 | 2026-05-14 | Faza B (część): `close_position`, `collect_fees`, `decrease_liquidity`, `rebalance_position` → wpisy w `wallet-ledger-events.jsonl` (pending→confirmed/failed); `collect_fees` ma delty SPL z różnicy pre/post. |

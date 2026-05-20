@@ -1,28 +1,57 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { ClipboardList, RefreshCw } from 'lucide-react'
+import { ClipboardList, ExternalLink, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
-import { getWalletLedgerEvents } from '@/lib/api'
+import { getWalletLedgerEvents, type WalletLedgerStatus } from '@/lib/api'
+import { getDevWalletPubkey } from '@/lib/devWallet'
+import { solscanAccountUrl, solscanTxUrl } from '@/lib/explorer'
 import { useI18n } from '@/lib/i18n'
 import { shortenAddress } from '@/lib/utils'
 
+const LEDGER_KINDS = [
+  '',
+  'swap_before_open',
+  'open_position',
+  'close_position',
+  'collect_fees',
+  'decrease_liquidity',
+  'rebalance_position',
+  'transfer_sol',
+  'convert_sol',
+] as const
+
+const LEDGER_STATUSES: Array<'' | WalletLedgerStatus> = ['', 'pending', 'confirmed', 'failed']
+
 export default function WalletLedger() {
   const { t } = useI18n()
-  const [owner, setOwner] = useState('')
+  const [owner, setOwner] = useState(() => getDevWalletPubkey() ?? '')
+  const [kind, setKind] = useState('')
+  const [status, setStatus] = useState<'' | WalletLedgerStatus>('')
   const [limit, setLimit] = useState(200)
+
   const q = useQuery({
-    queryKey: ['wallet-ledger-events', owner.trim(), limit],
+    queryKey: ['wallet-ledger-events', owner.trim(), kind, status, limit],
     queryFn: () =>
       getWalletLedgerEvents({
         owner: owner.trim() || undefined,
+        kind: kind || undefined,
+        status: status || undefined,
         limit,
       }),
     staleTime: 10_000,
     refetchInterval: 30_000,
   })
+
+  const kindCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const ev of q.data?.events ?? []) {
+      m.set(ev.kind, (m.get(ev.kind) ?? 0) + 1)
+    }
+    return m
+  }, [q.data?.events])
 
   const statusClass = (s: string) => {
     switch (s) {
@@ -46,6 +75,7 @@ export default function WalletLedger() {
             {t('walletLedger.title')}
           </h1>
           <p className="text-muted-foreground text-sm mt-1 max-w-3xl">{t('walletLedger.subtitle')}</p>
+          <p className="text-muted-foreground text-xs mt-2 max-w-3xl">{t('walletLedger.glNote')}</p>
           <p className="mt-2 text-sm">
             <Link to="/wallet" className="text-primary underline-offset-4 hover:underline">
               ← {t('nav.wallet')}
@@ -79,6 +109,36 @@ export default function WalletLedger() {
               placeholder={t('walletLedger.ownerPlaceholder')}
             />
           </label>
+          <label className="flex flex-col gap-1 text-sm min-w-[10rem]">
+            <span className="text-muted-foreground">{t('walletLedger.kindFilter')}</span>
+            <select
+              className="flex h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm"
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+            >
+              <option value="">{t('walletLedger.kindAll')}</option>
+              {LEDGER_KINDS.filter(Boolean).map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-sm min-w-[8rem]">
+            <span className="text-muted-foreground">{t('walletLedger.statusFilter')}</span>
+            <select
+              className="flex h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm"
+              value={status}
+              onChange={(e) => setStatus(e.target.value as '' | WalletLedgerStatus)}
+            >
+              <option value="">{t('walletLedger.statusAll')}</option>
+              {LEDGER_STATUSES.filter(Boolean).map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-muted-foreground">{t('walletLedger.limit')}</span>
             <select
@@ -93,6 +153,17 @@ export default function WalletLedger() {
               ))}
             </select>
           </label>
+          {getDevWalletPubkey() ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-9"
+              onClick={() => setOwner(getDevWalletPubkey() ?? '')}
+            >
+              {t('walletLedger.useDevWallet')}
+            </Button>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -101,10 +172,31 @@ export default function WalletLedger() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-base">{t('walletLedger.filePath')}</CardTitle>
+          {q.data && q.data.events.length > 0 ? (
+            <span className="text-xs text-muted-foreground">
+              {t('walletLedger.rowCount').replace('{n}', String(q.data.events.length))}
+            </span>
+          ) : null}
         </CardHeader>
         <CardContent className="space-y-3">
           {q.data ? (
-            <p className="text-xs font-mono break-all text-muted-foreground">{q.data.path}</p>
+            <div className="space-y-1">
+              <p className="text-xs font-mono break-all text-muted-foreground">{q.data.path}</p>
+              {q.data.storage ? (
+                <p className="text-xs text-muted-foreground">
+                  {t('walletLedger.storage')}:{' '}
+                  <code className="rounded bg-muted px-1 py-0.5">{q.data.storage}</code>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {kindCounts.size > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {t('walletLedger.kindSummary')}:{' '}
+              {[...kindCounts.entries()]
+                .map(([k, n]) => `${k} (${n})`)
+                .join(' · ')}
+            </p>
           ) : null}
           {q.isLoading ? (
             <p className="text-sm text-muted-foreground">…</p>
@@ -138,7 +230,19 @@ export default function WalletLedger() {
                       </td>
                       <td className="px-3 py-2 text-xs">{ev.kind}</td>
                       <td className="px-3 py-2 text-xs font-mono" title={ev.owner ?? ''}>
-                        {ev.owner && ev.owner.length > 12 ? shortenAddress(ev.owner, 4) : ev.owner || '—'}
+                        {ev.owner ? (
+                          <a
+                            href={solscanAccountUrl(ev.owner)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-0.5 text-primary hover:underline"
+                          >
+                            {ev.owner.length > 12 ? shortenAddress(ev.owner, 4) : ev.owner}
+                            <ExternalLink className="h-3 w-3 shrink-0 opacity-70" />
+                          </a>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td
                         className="px-3 py-2 max-w-[8rem] truncate text-xs font-mono"
@@ -150,9 +254,19 @@ export default function WalletLedger() {
                         className="px-3 py-2 max-w-[10rem] truncate text-xs font-mono"
                         title={ev.signature ?? ''}
                       >
-                        {ev.signature && ev.signature.length > 12
-                          ? shortenAddress(ev.signature, 4)
-                          : ev.signature || '—'}
+                        {ev.signature && ev.signature.length > 12 ? (
+                          <a
+                            href={solscanTxUrl(ev.signature)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-0.5 text-primary hover:underline"
+                          >
+                            {shortenAddress(ev.signature, 4)}
+                            <ExternalLink className="h-3 w-3 shrink-0 opacity-70" />
+                          </a>
+                        ) : (
+                          ev.signature || '—'
+                        )}
                       </td>
                       <td
                         className="px-3 py-2 max-w-[18rem] truncate text-xs font-mono"
@@ -161,7 +275,9 @@ export default function WalletLedger() {
                         {ev.deltas.length > 0
                           ? ev.deltas
                               .map((d) =>
-                                d.mint.length > 10 ? `${shortenAddress(d.mint, 4)}:${d.raw_delta_i128}` : `${d.mint}:${d.raw_delta_i128}`,
+                                d.mint.length > 10
+                                  ? `${shortenAddress(d.mint, 4)}:${d.raw_delta_i128}`
+                                  : `${d.mint}:${d.raw_delta_i128}`,
                               )
                               .join('; ')
                           : ev.native_lamports_delta

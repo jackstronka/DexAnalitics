@@ -3,6 +3,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     ApplyOptimizeResultRequest, CreateStrategyRequest, ListStrategiesResponse, MessageResponse,
+    StaleReconcileReportResponse,
     OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse,
     StrategyPositionExecutorRequest, StrategyResponse, StrategyType,
 };
@@ -1079,6 +1080,29 @@ pub async fn set_strategy_position_executor(
     } else {
         "Automation disabled for this position".to_string()
     })))
+}
+
+/// Prune stale `position_addresses` (404 on-chain) for one strategy.
+#[utoipa::path(
+    post,
+    path = "/strategies/{id}/prune-stale-positions",
+    tag = "Strategies",
+    params(
+        ("id" = String, Path, description = "Strategy ID")
+    ),
+    responses(
+        (status = 200, description = "Prune report", body = StaleReconcileReportResponse),
+        (status = 404, description = "Strategy not found")
+    )
+)]
+pub async fn prune_stale_strategy_positions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<StaleReconcileReportResponse>> {
+    let report =
+        crate::services::registry_stale_reconcile::prune_stale_addresses_in_strategy(&state, &id)
+            .await?;
+    Ok(Json(report.into()))
 }
 
 /// Stop a strategy.

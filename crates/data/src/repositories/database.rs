@@ -78,7 +78,7 @@ impl Database {
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
         // Keep migrations simple: include fixed SQL files and run each statement idempotently.
         // (No migration table yet; statements are written with IF NOT EXISTS.)
-        let migrations: [&str; 9] = [
+        let migrations: [&str; 10] = [
             include_str!("../../migrations/001_initial_schema.sql"),
             include_str!("../../migrations/002_position_stream_performance.sql"),
             include_str!("../../migrations/003_stream_pnl_snapshots.sql"),
@@ -88,6 +88,7 @@ impl Database {
             include_str!("../../migrations/007_position_chain_history_nodes.sql"),
             include_str!("../../migrations/008_position_chain_history_meta.sql"),
             include_str!("../../migrations/009_wallet_gl_curated_tokens_and_pools.sql"),
+            include_str!("../../migrations/010_wallet_gl_journal_events.sql"),
         ];
 
         for migration_sql in migrations {

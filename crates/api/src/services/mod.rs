@@ -16,6 +16,8 @@ pub mod position_service;
 pub mod position_stream_lineage;
 pub mod position_stream_performance;
 pub mod position_stream_pnl;
+pub mod position_on_chain_cache;
+pub mod registry_stale_reconcile;
 pub mod position_valuation;
 pub mod price_fetch;
 pub mod simulation_analytics;

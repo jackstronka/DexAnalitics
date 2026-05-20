@@ -5,7 +5,9 @@
 //! We replay `data/positions/registry.jsonl` to re-add currently open positions.
 
 use clmm_lp_protocols::ledger::position_registry::registry_path;
+use clmm_lp_protocols::prelude::RpcProvider;
 use solana_sdk::pubkey::Pubkey;
+use std::sync::Arc;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -128,22 +130,43 @@ fn replay_registry_open_map() -> HashMap<Pubkey, bool> {
     out
 }
 
-/// Best-effort: replay registry and re-add open positions into the monitor.
+/// Best-effort: replay registry and re-add **on-chain** open positions into the monitor.
 pub async fn seed_monitor_from_registry(
     monitor: std::sync::Arc<clmm_lp_execution::prelude::PositionMonitor>,
+    provider: Arc<RpcProvider>,
 ) {
+    use crate::services::position_on_chain_cache::api_error_is_account_absent;
+    use crate::services::position_valuation::monitored_position_from_chain;
+    use crate::services::registry_stale_reconcile::try_reconcile_stale_registry_open;
+
     let open = replay_registry_open_positions();
     if open.is_empty() {
         return;
     }
 
     let mut ok = 0usize;
+    let mut stale = 0usize;
     for pk in open {
-        if let Err(e) = monitor.add_position(&pk.to_string()).await {
-            warn!(position = %pk, error = %e, "monitor seed: add_position failed");
-        } else {
-            ok += 1;
+        match monitored_position_from_chain(provider.clone(), &pk).await {
+            Ok(_) => {
+                if monitor.add_position(&pk.to_string()).await.is_ok() {
+                    ok += 1;
+                } else {
+                    warn!(position = %pk, "monitor seed: add_position failed after on-chain ok");
+                }
+            }
+            Err(e) if api_error_is_account_absent(&e) => {
+                stale += 1;
+                let _ = try_reconcile_stale_registry_open(&provider, &pk).await;
+            }
+            Err(e) => {
+                warn!(position = %pk, error = %e, "monitor seed: on-chain check failed");
+            }
         }
     }
-    info!(count = ok, "monitor seeded from position registry");
+    info!(
+        count = ok,
+        stale_reconciled = stale,
+        "monitor seeded from position registry (on-chain confirmed)"
+    );
 }

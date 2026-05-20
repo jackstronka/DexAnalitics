@@ -660,6 +660,47 @@ pub enum PositionStatus {
     Pending,
 }
 
+/// Best-effort stats for `GET /positions` supplement merge (registry + running strategies).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ListPositionsMeta {
+    /// Skipped because a recent fetch returned on-chain 404.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_absent_cached: u32,
+    /// Skipped because `registry.jsonl` marks the PDA closed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_registry_closed: u32,
+    /// Supplement RPC attempts that failed (non-cacheable errors included).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_chain_error: u32,
+    /// Successfully merged from `registry_open` not already in monitor.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub merged_from_registry: u32,
+    /// Successfully merged from running strategies' `position_addresses`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub merged_from_strategies: u32,
+    /// `true` when response used the fast list path (no per-row full valuation).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub light: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// Result of stale position reconcile / strategy prune (registry + strategy links).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StaleReconcileReportResponse {
+    pub checked: u32,
+    pub registry_closed: Vec<String>,
+    pub strategy_links_removed: u32,
+    pub still_on_chain: u32,
+    pub rpc_errors: u32,
+}
+
 /// List positions response.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ListPositionsResponse {
@@ -667,6 +708,9 @@ pub struct ListPositionsResponse {
     pub positions: Vec<PositionResponse>,
     /// Total count.
     pub total: usize,
+    /// Optional merge diagnostics for operators/UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ListPositionsMeta>,
 }
 
 /// One closed position entry from the append-only registry (`data/positions/registry.jsonl`).
@@ -3161,7 +3205,7 @@ pub struct AgentDecisionWriteResponse {
 // ============================================================================
 
 /// Status of a ledger line: in-flight, confirmed on-chain, or failed before/at submit.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WalletLedgerStatus {
     Pending,
@@ -3213,7 +3257,14 @@ pub struct WalletLedgerEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletLedgerEventsResponse {
     pub path: String,
+    /// `postgres`, `jsonl`, or `jsonl_fallback` (Postgres connected but no rows yet).
+    #[serde(default = "default_wallet_ledger_storage")]
+    pub storage: String,
     pub events: Vec<WalletLedgerEvent>,
+}
+
+fn default_wallet_ledger_storage() -> String {
+    "jsonl".to_string()
 }
 
 #[cfg(test)]

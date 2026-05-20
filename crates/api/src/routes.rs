@@ -32,6 +32,10 @@ fn create_base_http_router(state: AppState) -> Router {
         .route("/auth/phantom/verify", post(handlers::phantom_verify))
         // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
+        .route(
+            "/positions/reconcile-stale",
+            post(handlers::reconcile_stale_positions),
+        )
         .route("/positions/closed", get(handlers::list_closed_positions))
         .route(
             "/positions/{address}/agent-chat",
@@ -106,6 +110,10 @@ fn create_base_http_router(state: AppState) -> Router {
             post(handlers::set_strategy_position_executor),
         )
         .route("/strategies/{id}/stop", post(handlers::stop_strategy))
+        .route(
+            "/strategies/{id}/prune-stale-positions",
+            post(handlers::prune_stale_strategy_positions),
+        )
         .route(
             "/strategies/{id}/apply-optimize-result",
             post(handlers::apply_optimize_result),

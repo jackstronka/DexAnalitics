@@ -1,3 +1,38 @@
+## 2026-05-20 — Positions list display regression tests (API contract + UI fee/value helpers)
+
+keywords: list_positions, position_list_row_value_display_ready, positionListDisplay, vitest, monitored_position_list_row
+
+- **What:** Rust tests assert `monitored_position_list_row` with valuation yields non-zero `value_usd`, fees, mint prices (`list_positions_display_tests`). Web `positionListDisplay.ts` + Vitest cover Value/Fee column readiness and SOL price fallback when `token_price_a_usd` missing.
+- **paths:** `crates/api/src/handlers/positions.rs`, `web/src/lib/positionListDisplay.ts`, `web/src/lib/positionListDisplay.test.ts`, `web/package.json`
+
+## 2026-05-20 — Positions list: light path restores value/fees; UI stream-PnL for % column
+
+keywords: list_positions, list_light, compute_position_usd_valuation, monitored_position_list_row, Positions.tsx, stream-pnl, uncollected_fees
+
+- **What:** `GET /positions?light=1` again runs batched mint prices + parallel `compute_position_usd_valuation` (shared row builder with `light=false`). Fixes `$0` value and empty fee USD from monitor zeros / enrich-only path. Web: restore background `stream-pnl` for PnL %; fee source label `lista API (szybka)`; SOL USD fallback from `range_lower_usdc` when mint price missing.
+- **paths:** `crates/api/src/handlers/positions.rs`, `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`
+
+## 2026-05-20 — Monitored positions: phase D+E (stale registry reconcile, boot seed, operator endpoints)
+
+keywords: registry_stale_reconcile, reconcile-stale, prune-stale-positions, registry_close, CLMM_REGISTRY_AUTO_CLOSE_STALE, position_registry_seed, Positions.tsx
+
+- **What:** Auto **`registry_close`** (`close_kind=stale_reconcile`) when supplement/list sees 404 for still-`registry_open` PDAs (`CLMM_REGISTRY_AUTO_CLOSE_STALE`, default on). Boot **`seed_monitor_from_registry`** only adds on-chain positions and reconciles stale opens. **`POST /positions/reconcile-stale`** scans all registry opens; **`POST /strategies/{id}/prune-stale-positions`** drops 404 `position_addresses`. Web: reconcile button when list `meta` reports skipped stale addresses.
+- **paths:** `crates/api/src/services/registry_stale_reconcile.rs`, `crates/api/src/position_registry_seed.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/handlers/strategies.rs`, `crates/api/src/routes.rs`, `web/src/lib/api.ts`, `web/src/pages/Positions.tsx`
+
+## 2026-05-20 — Monitored positions: phase B4 light list + phase C (no stream-pnl on Positions page)
+
+keywords: list_positions, light, enrich_pool_ticks_for_display, Positions.tsx, stream-pnl, GET /positions
+
+- **What:** `GET /positions?light=1` (default) skips per-row `compute_position_usd_valuation`; parallel `enrich_pool_ticks_for_display` per row + monitor PnL/value (`valuation_source=list_light`). `light=0` keeps full valuation path. Web Positions: no `stream-pnl` / `pool-state` N+1; PnL from list only. Detail page unchanged for stream PnL.
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/models.rs`, `web/src/lib/api.ts`, `web/src/pages/Positions.tsx`
+
+## 2026-05-20 — Monitored positions (API): running-strategy union, parallel supplement, absent cache, faster UI PnL
+
+keywords: clmm-lp-api, list_positions, monitored-positions, position_on_chain_cache, running strategies, position_addresses, registry_open, stream-pnl, Positions.tsx, GET /positions
+
+- **What:** `GET /positions` now merges **monitor** + **`registry_open`** + **`parameters.position_addresses` of `running` strategies** (parallel RPC, default concurrency 6). **Negative cache** (`CLMM_POSITION_ABSENT_CACHE_SECS`, default 600s) skips repeat 404s for stale registry/strategy PDAs. Response optional **`meta`** (skipped/merged counts). Web: error banner vs empty list; PnL column uses **list response first**; `stream-pnl` loads in background (`refetchOnMount: false`); `getPositions` timeout 60s.
+- **paths:** `crates/api/src/services/position_on_chain_cache.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/models.rs`, `crates/api/src/state.rs`, `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`
+
 ## 2026-05-14 — Chain-history Postgres: wypełnianie kolumn display (pool, ticki open, event spot A) + UI
 
 keywords: clmm-lp-api, position_chain_history_nodes, materialize_chain_history_for_anchor, load_chain_history_from_db, PositionStreamLineageNode, PositionLineageHistoryPanel, position_stream_ledger_rows, position_stream_valuation_snapshots
@@ -46,6 +81,20 @@ keywords: chain-history, position_chain_history_nodes, chain_anchor_pubkey, posi
 
 - **What:** `GET …/chain-history`: (1) kotwica przez `nodes` / `meta.entry` / `chain_json @> [pda]`; (2) gdy zapis w Postgres **nie zawiera jeszcze ogona** rotacji, **spacer po łańcuchu** z `resolve_lineage_chain_for_stream_pnl` (jak w stream-lineage) aż do pierwszego PDA z materializacją — naprawia 404 dla „najnowszej” pozycji w łańcuchu.
 - **paths:** `crates/api/src/services/position_chain_history.rs`, `doc/BUGS.md` **BUG-20260514-05**
+
+## 2026-05-15 — Wallet GL journal: Postgres `wallet_gl_journal_event` + dual-write, migrate timeout 60s
+
+keywords: wallet_gl, wallet_ledger, wallet_gl_journal_event, migration 010, dual-write, read_wallet_ledger_events, connect_db_best_effort
+
+- **What:** Migracja **`010_wallet_gl_journal_events.sql`**. `append_wallet_ledger_event` zapisuje JSONL **oraz** INSERT do Postgres (`ON CONFLICT DO NOTHING`). `GET /wallets/ledger-events` zwraca **`storage`**: `postgres` gdy są wiersze w PG, inaczej `jsonl` / `jsonl_fallback`. Start API: **migrate timeout 60s** (connect nadal 3s) — mniej fałszywych startów bez DB po migracji 009/010.
+- **paths:** `crates/data/migrations/010_wallet_gl_journal_events.sql`, `crates/data/src/repositories/database.rs`, `crates/api/src/services/wallet_ledger.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/models.rs`, `crates/api/src/server.rs`, `web/src/pages/WalletLedger.tsx`, `doc/WALLET_GL.md`
+
+## 2026-05-14 — Dziennik portfela: filtry API (`kind`, `status`) + UI (dev wallet, Solscan)
+
+keywords: wallet_ledger, wallet_gl, ledger-events, WalletLedger, getWalletLedgerEvents, read_wallet_ledger_tail
+
+- **What:** `GET /wallets/ledger-events` przyjmuje **`kind`** i **`status`** (oprócz `owner`, `limit`). `read_wallet_ledger_tail` + test `wallet_ledger_event_matches_filters_*`. UI `/wallet/ledger`: domyślny owner z **`VITE_DEV_WALLET_PUBKEY`**, selecty kind/status, podsumowanie kindów, linki **Solscan** (tx/owner), zaktualizowany podtytuł PL/EN.
+- **paths:** `crates/api/src/services/wallet_ledger.rs`, `crates/api/src/handlers/wallets.rs`, `web/src/pages/WalletLedger.tsx`, `web/src/lib/explorer.ts`, `web/src/lib/api.ts`, `doc/WALLET_GL.md`
 
 ## 2026-05-14 — Web dev: Vite proxy domyślnie 8081; liveness banner mniej fałszywych alarmów (Abort / timeout)
 

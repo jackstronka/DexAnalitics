@@ -356,7 +356,11 @@ impl ApiServer {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
 
         // Best-effort: re-add open positions into monitor after restart.
-        seed_monitor_from_registry(self.state.monitor.clone()).await;
+        seed_monitor_from_registry(
+            self.state.monitor.clone(),
+            self.state.provider.clone(),
+        )
+        .await;
         match crate::handlers::wallets::hydrate_wallet_effective_cache_from_disk(&self.state).await
         {
             Ok(n) if n > 0 => info!(owners = n, "Hydrated wallet effective cache from disk"),
@@ -392,7 +396,11 @@ impl ApiServer {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
 
         // Best-effort: re-add open positions into monitor after restart.
-        seed_monitor_from_registry(self.state.monitor.clone()).await;
+        seed_monitor_from_registry(
+            self.state.monitor.clone(),
+            self.state.provider.clone(),
+        )
+        .await;
         match crate::handlers::wallets::hydrate_wallet_effective_cache_from_disk(&self.state).await
         {
             Ok(n) if n > 0 => info!(owners = n, "Hydrated wallet effective cache from disk"),
@@ -450,7 +458,8 @@ async fn connect_db_best_effort() -> Option<Database> {
         }
     };
 
-    match timeout(connect_timeout, db.migrate()).await {
+    let migrate_timeout = Duration::from_secs(60);
+    match timeout(migrate_timeout, db.migrate()).await {
         Ok(Ok(())) => Some(db),
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "DB migrate failed (continuing without DB)");
@@ -458,7 +467,7 @@ async fn connect_db_best_effort() -> Option<Database> {
         }
         Err(_) => {
             tracing::warn!(
-                timeout_secs = connect_timeout.as_secs(),
+                timeout_secs = migrate_timeout.as_secs(),
                 "DB migrate timed out (continuing without DB)"
             );
             None

@@ -5,7 +5,9 @@ use crate::handlers::strategies::ensure_strategy_running_after_position_link;
 use crate::models::{
     BackfillValuationSnapshotsRequest, BackfillValuationSnapshotsResponse, ClosedPositionEntry,
     ClosedPositionsResponse, DecreaseLiquidityRequest, LinkPositionStrategyRequest,
-    ListPositionsResponse, MaterializeChainHistoryResponse, MessageResponse, OpenPositionRequest,
+    ListPositionsMeta, ListPositionsResponse, MaterializeChainHistoryResponse, MessageResponse,
+    StaleReconcileReportResponse,
+    OpenPositionRequest,
     PnLResponse, PositionDiagnosticsResponse, PositionExperimentConfigResponse,
     PositionLastEvalSnapshot, PositionLifecycleEvent, PositionLifecycleSessionSummary,
     PositionLifecycleSummaryResponse, PositionOpenResponse, PositionResponse, PositionStatus,
@@ -51,8 +53,10 @@ use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
     range_usdc_and_in_range_for_pool_ticks, refresh_position_fees_from_chain,
-    uncollected_fees_info_for_position,
+    uncollected_fees_info_for_position, PositionUsdValuation,
 };
+use crate::state::CachedUncollectedFees;
+use clmm_lp_execution::monitor::MonitoredPosition;
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::services::wallet_ledger;
 use axum::extract::Query;
@@ -470,6 +474,17 @@ pub async fn get_position_experiment_config(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListPositionsQuery {
+    /// When `true` (default), parallel live USD valuation (batched mint prices). `light=false` is sequential (same fields).
+    #[serde(default = "default_list_positions_light")]
+    light: bool,
+}
+
+fn default_list_positions_light() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ClosedPositionsQuery {
     #[serde(default = "default_closed_limit")]
     limit: usize,
@@ -493,6 +508,152 @@ fn clamp_closed_limit(n: usize) -> usize {
     n.clamp(1, 2000)
 }
 
+/// One row for `GET /positions` from monitor state + optional live USD valuation.
+async fn monitored_position_list_row(
+    state: &AppState,
+    p: &MonitoredPosition,
+    valuation: Option<PositionUsdValuation>,
+    valuation_source: Option<String>,
+    fees_cache: &HashMap<String, CachedUncollectedFees>,
+) -> PositionResponse {
+    let value_usd = valuation
+        .as_ref()
+        .map(|v| v.value_usd)
+        .unwrap_or(p.pnl.current_value_usd);
+    let fees_usd = valuation
+        .as_ref()
+        .map(|v| v.fees_usd)
+        .unwrap_or(p.pnl.fees_usd);
+
+    let (range_usdc, in_range_fresh) = match valuation.as_ref() {
+        Some(v) => (v.range_usdc.as_ref().cloned(), v.in_range),
+        None => {
+            let (range, in_range) = range_usdc_and_in_range_for_pool_ticks(
+                state.provider.clone(),
+                &p.pool,
+                p.on_chain.tick_lower,
+                p.on_chain.tick_upper,
+            )
+            .await;
+            (range, in_range)
+        }
+    };
+
+    let base_uncollected_fees = match valuation.as_ref() {
+        Some(v) => Some(UncollectedFeesInfo {
+            token_a_label: v.token_a_label.clone(),
+            token_b_label: v.token_b_label.clone(),
+            amount_a: v.fees_owed_a_ui,
+            amount_b: v.fees_owed_b_ui,
+        }),
+        None => uncollected_fees_info_for_position(state.provider.clone(), p).await,
+    };
+
+    let (
+        token_a_label,
+        token_b_label,
+        token_mint_a,
+        token_mint_b,
+        token_price_a_usd,
+        token_price_b_usd,
+    ) = match valuation.as_ref() {
+        Some(v) => (
+            Some(v.token_a_label.clone()),
+            Some(v.token_b_label.clone()),
+            Some(v.token_mint_a.to_string()),
+            Some(v.token_mint_b.to_string()),
+            Some(v.price_a_usd),
+            Some(v.price_b_usd),
+        ),
+        None => (None, None, None, None, None, None),
+    };
+    let (range_lower_price, range_upper_price, range_price_quote) = match valuation.as_ref() {
+        Some(v) => (
+            Some(v.range_price.lower),
+            Some(v.range_price.upper),
+            Some(v.range_price.quote.clone()),
+        ),
+        None => (None, None, None),
+    };
+
+    let cached_uncollected = fees_cache.get(&p.address.to_string()).cloned();
+    let uncollected_fees = match cached_uncollected {
+        Some(c) => {
+            let (a_label, b_label) = match valuation.as_ref() {
+                Some(v) => (v.token_a_label.clone(), v.token_b_label.clone()),
+                None => ("A".to_string(), "B".to_string()),
+            };
+            Some(UncollectedFeesInfo {
+                token_a_label: a_label,
+                token_b_label: b_label,
+                amount_a: c.amount_a,
+                amount_b: c.amount_b,
+            })
+        }
+        None => base_uncollected_fees,
+    };
+
+    PositionResponse {
+        address: p.address.to_string(),
+        pool_address: p.pool.to_string(),
+        owner: p.on_chain.owner.to_string(),
+        tick_lower: p.on_chain.tick_lower,
+        tick_upper: p.on_chain.tick_upper,
+        range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
+        range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
+        range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
+        range_lower_price,
+        range_upper_price,
+        range_price_quote,
+        token_a_label,
+        token_b_label,
+        token_mint_a,
+        token_mint_b,
+        token_price_a_usd,
+        token_price_b_usd,
+        uncollected_fees,
+        liquidity: p.on_chain.liquidity.to_string(),
+        in_range: in_range_fresh,
+        value_usd,
+        valuation_source,
+        pnl: PnLResponse {
+            unrealized_pnl_usd: p.pnl.net_pnl_usd,
+            unrealized_pnl_pct: p.pnl.net_pnl_pct,
+            fees_earned_a: p.pnl.fees_earned_a,
+            fees_earned_b: p.pnl.fees_earned_b,
+            fees_earned_usd: fees_usd,
+            il_pct: p.pnl.il_pct,
+            net_pnl_usd: p.pnl.net_pnl_usd,
+            net_pnl_pct: p.pnl.net_pnl_pct,
+        },
+        status: if in_range_fresh {
+            PositionStatus::Active
+        } else {
+            PositionStatus::OutOfRange
+        },
+        created_at: None,
+    }
+}
+
+/// `true` when dashboard **Value** column should show non-zero USD (not monitor placeholder).
+#[must_use]
+pub fn position_list_row_value_display_ready(row: &PositionResponse) -> bool {
+    row.value_usd > Decimal::ZERO
+}
+
+/// `true` when dashboard **Fee** column has claimable amounts and a USD pricing hint.
+#[must_use]
+pub fn position_list_row_fee_display_ready(row: &PositionResponse) -> bool {
+    let Some(fees) = row.uncollected_fees.as_ref() else {
+        return false;
+    };
+    let has_fees = fees.amount_a > Decimal::ZERO || fees.amount_b > Decimal::ZERO;
+    let has_price_hint = row.token_price_a_usd.is_some()
+        || row.token_price_b_usd.is_some()
+        || row.range_lower_usdc.is_some();
+    has_fees && has_price_hint
+}
+
 /// List all positions.
 #[utoipa::path(
     get,
@@ -504,7 +665,12 @@ fn clamp_closed_limit(n: usize) -> usize {
 )]
 pub async fn list_positions(
     State(state): State<AppState>,
+    Query(q): Query<ListPositionsQuery>,
 ) -> ApiResult<Json<ListPositionsResponse>> {
+    use crate::services::position_on_chain_cache::{
+        fetch_supplement_positions_parallel, running_strategy_position_pubkeys,
+    };
+
     let mut positions = state.monitor.get_positions().await;
 
     // If a position is explicitly marked as closed in the registry, do not show it as "monitored/open"
@@ -513,179 +679,195 @@ pub async fn list_positions(
     if !reg_state.is_empty() {
         positions.retain(|p| reg_state.get(&p.address).copied().unwrap_or(true));
     }
-    let monitored: HashSet<Pubkey> = positions.iter().map(|p| p.address).collect();
+    let mut monitored: HashSet<Pubkey> = positions.iter().map(|p| p.address).collect();
 
-    // Registry remembers opens across restarts; monitor can be empty or miss a PDA. Merge chain state
-    // for registry opens not yet in monitor so `GET /positions` matches what users see on-chain.
-    for pk in registry_open_position_pubkeys() {
-        if monitored.contains(&pk) {
-            continue;
+    let registry_candidates: HashSet<Pubkey> =
+        registry_open_position_pubkeys().into_iter().collect();
+    let strategy_candidates: HashSet<Pubkey> =
+        running_strategy_position_pubkeys(&state).await.into_iter().collect();
+    let mut supplemental: Vec<Pubkey> = registry_candidates
+        .iter()
+        .chain(strategy_candidates.iter())
+        .copied()
+        .collect();
+    supplemental.sort_unstable_by_key(|p| p.to_string());
+    supplemental.dedup();
+
+    let concurrency = std::env::var("CLMM_LIST_POSITIONS_FETCH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(6);
+
+    let (supplement, fetch_stats) = fetch_supplement_positions_parallel(
+        &state,
+        &monitored,
+        supplemental,
+        &registry_candidates,
+        &strategy_candidates,
+        &reg_state,
+        concurrency,
+    )
+    .await;
+
+    let mut merged_from_registry = 0u32;
+    let mut merged_from_strategies = 0u32;
+    for p in supplement {
+        if registry_candidates.contains(&p.address) {
+            merged_from_registry += 1;
         }
-        match monitored_position_from_chain(state.provider.clone(), &pk).await {
-            Ok(p) => {
-                positions.push(p);
-            }
-            Err(e) => {
-                warn!(
-                    position = %pk,
-                    error = %e,
-                    "list_positions: registry open but not on-chain or RPC error; skipping"
-                );
-            }
+        if strategy_candidates.contains(&p.address) {
+            merged_from_strategies += 1;
         }
+        monitored.insert(p.address);
+        positions.push(p);
     }
 
-    let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
+    let mut meta = ListPositionsMeta {
+        skipped_absent_cached: fetch_stats.skipped_absent_cached,
+        skipped_registry_closed: fetch_stats.skipped_registry_closed,
+        skipped_chain_error: fetch_stats.chain_error,
+        merged_from_registry,
+        merged_from_strategies,
+        light: q.light,
+    };
 
     let mut responses: Vec<PositionResponse> = Vec::with_capacity(positions.len());
-    for p in &positions {
-        let valuation =
-            match compute_position_usd_valuation(state.provider.clone(), p, &prices).await {
-                Ok(v) => Some(v),
+
+    let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
+    let fees_cache = state.uncollected_fees_cache.read().await;
+
+    if q.light {
+        use futures::{stream, StreamExt};
+
+        let concurrency = std::env::var("CLMM_LIST_POSITIONS_LIGHT_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(6);
+        let provider = state.provider.clone();
+
+        let valuation_outcomes = stream::iter(positions.iter().cloned())
+            .map(|p| {
+                let provider = provider.clone();
+                let prices = prices.clone();
+                async move {
+                    let addr = p.address;
+                    let val =
+                        compute_position_usd_valuation(provider, &p, &prices).await;
+                    (addr, val)
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut valuation_by_addr: HashMap<Pubkey, Option<PositionUsdValuation>> =
+            HashMap::with_capacity(valuation_outcomes.len());
+        for (addr, res) in valuation_outcomes {
+            match res {
+                Ok(v) => {
+                    valuation_by_addr.insert(addr, Some(v));
+                }
                 Err(e) => {
                     warn!(
-                        position = %p.address,
-                        pool = %p.pool,
+                        position = %addr,
                         error = %e,
-                        "USD valuation failed; falling back to monitor zeros"
+                        "USD valuation failed (light list); falling back to monitor zeros"
                     );
-                    None
+                    valuation_by_addr.insert(addr, None);
                 }
-            };
-
-        let value_usd = valuation
-            .as_ref()
-            .map(|v| v.value_usd)
-            .unwrap_or(p.pnl.current_value_usd);
-        let valuation_source = if valuation.is_some() {
-            Some("live_valuation".to_string())
-        } else {
-            Some("fallback_monitor".to_string())
-        };
-        let fees_usd = valuation
-            .as_ref()
-            .map(|v| v.fees_usd)
-            .unwrap_or(p.pnl.fees_usd);
-
-        let (range_usdc, in_range_fresh) = match valuation.as_ref() {
-            Some(v) => (v.range_usdc.as_ref().cloned(), v.in_range),
-            None => {
-                let (range, in_range) = range_usdc_and_in_range_for_pool_ticks(
-                    state.provider.clone(),
-                    &p.pool,
-                    p.on_chain.tick_lower,
-                    p.on_chain.tick_upper,
-                )
-                .await;
-                (range, in_range)
             }
-        };
+        }
 
-        let base_uncollected_fees = match valuation.as_ref() {
-            Some(v) => Some(UncollectedFeesInfo {
-                token_a_label: v.token_a_label.clone(),
-                token_b_label: v.token_b_label.clone(),
-                amount_a: v.fees_owed_a_ui,
-                amount_b: v.fees_owed_b_ui,
-            }),
-            None => uncollected_fees_info_for_position(state.provider.clone(), p).await,
-        };
-
-        let (
-            token_a_label,
-            token_b_label,
-            token_mint_a,
-            token_mint_b,
-            token_price_a_usd,
-            token_price_b_usd,
-        ) = match valuation.as_ref() {
-            Some(v) => (
-                Some(v.token_a_label.clone()),
-                Some(v.token_b_label.clone()),
-                Some(v.token_mint_a.to_string()),
-                Some(v.token_mint_b.to_string()),
-                Some(v.price_a_usd),
-                Some(v.price_b_usd),
-            ),
-            None => (None, None, None, None, None, None),
-        };
-        let (range_lower_price, range_upper_price, range_price_quote) = match valuation.as_ref() {
-            Some(v) => (
-                Some(v.range_price.lower),
-                Some(v.range_price.upper),
-                Some(v.range_price.quote.clone()),
-            ),
-            None => (None, None, None),
-        };
-
-        // Prefer cached "claimable now" uncollected fees (background refreshed).
-        let cached_uncollected = {
-            let g = state.uncollected_fees_cache.read().await;
-            g.get(&p.address.to_string()).cloned()
-        };
-        let uncollected_fees = match cached_uncollected {
-            Some(c) => {
-                // Labels come from valuation if available; otherwise fall back to whatever we already computed.
-                let (a_label, b_label) = match valuation.as_ref() {
-                    Some(v) => (v.token_a_label.clone(), v.token_b_label.clone()),
-                    None => ("A".to_string(), "B".to_string()),
-                };
-                Some(UncollectedFeesInfo {
-                    token_a_label: a_label,
-                    token_b_label: b_label,
-                    amount_a: c.amount_a,
-                    amount_b: c.amount_b,
-                })
-            }
-            None => base_uncollected_fees,
-        };
-
-        responses.push(PositionResponse {
-            address: p.address.to_string(),
-            pool_address: p.pool.to_string(),
-            owner: p.on_chain.owner.to_string(),
-            tick_lower: p.on_chain.tick_lower,
-            tick_upper: p.on_chain.tick_upper,
-            range_lower_usdc: range_usdc.as_ref().map(|r| r.lower),
-            range_upper_usdc: range_usdc.as_ref().map(|r| r.upper),
-            range_usdc_quote: range_usdc.as_ref().map(|r| r.quote.clone()),
-            range_lower_price,
-            range_upper_price,
-            range_price_quote,
-            token_a_label,
-            token_b_label,
-            token_mint_a,
-            token_mint_b,
-            token_price_a_usd,
-            token_price_b_usd,
-            uncollected_fees,
-            liquidity: p.on_chain.liquidity.to_string(),
-            in_range: in_range_fresh,
-            value_usd,
-            valuation_source,
-            pnl: PnLResponse {
-                unrealized_pnl_usd: p.pnl.net_pnl_usd,
-                unrealized_pnl_pct: p.pnl.net_pnl_pct,
-                fees_earned_a: p.pnl.fees_earned_a,
-                fees_earned_b: p.pnl.fees_earned_b,
-                fees_earned_usd: fees_usd,
-                il_pct: p.pnl.il_pct,
-                net_pnl_usd: p.pnl.net_pnl_usd,
-                net_pnl_pct: p.pnl.net_pnl_pct,
-            },
-            status: if in_range_fresh {
-                PositionStatus::Active
+        for p in &positions {
+            let valuation = valuation_by_addr
+                .get(&p.address)
+                .and_then(|o| o.clone());
+            let valuation_source = if valuation.is_some() {
+                Some("list_light".to_string())
             } else {
-                PositionStatus::OutOfRange
-            },
-            created_at: None,
-        });
+                Some("fallback_monitor".to_string())
+            };
+            responses.push(
+                monitored_position_list_row(
+                    &state,
+                    p,
+                    valuation,
+                    valuation_source,
+                    &fees_cache,
+                )
+                .await,
+            );
+        }
+    } else {
+        for p in &positions {
+            let valuation =
+                match compute_position_usd_valuation(state.provider.clone(), p, &prices).await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            position = %p.address,
+                            pool = %p.pool,
+                            error = %e,
+                            "USD valuation failed; falling back to monitor zeros"
+                        );
+                        None
+                    }
+                };
+            let valuation_source = if valuation.is_some() {
+                Some("live_valuation".to_string())
+            } else {
+                Some("fallback_monitor".to_string())
+            };
+            responses.push(
+                monitored_position_list_row(
+                    &state,
+                    p,
+                    valuation,
+                    valuation_source,
+                    &fees_cache,
+                )
+                .await,
+            );
+        }
+        meta.light = false;
     }
+
+    let meta = if meta.skipped_absent_cached > 0
+        || meta.skipped_registry_closed > 0
+        || meta.skipped_chain_error > 0
+        || meta.merged_from_registry > 0
+        || meta.merged_from_strategies > 0
+        || meta.light
+    {
+        Some(meta)
+    } else {
+        None
+    };
 
     Ok(Json(ListPositionsResponse {
         total: responses.len(),
         positions: responses,
+        meta,
     }))
+}
+
+/// Close stale `registry_open` rows (on-chain 404) and prune dead links from all strategies.
+#[utoipa::path(
+    post,
+    path = "/positions/reconcile-stale",
+    tag = "Positions",
+    responses(
+        (status = 200, description = "Stale reconcile report", body = StaleReconcileReportResponse)
+    )
+)]
+pub async fn reconcile_stale_positions(
+    State(state): State<AppState>,
+) -> ApiResult<Json<StaleReconcileReportResponse>> {
+    let report =
+        crate::services::registry_stale_reconcile::reconcile_all_stale_registry_opens(&state).await;
+    Ok(Json(report.into()))
 }
 
 /// List closed positions from the append-only registry (`registry.jsonl`).
@@ -3069,6 +3251,182 @@ pub async fn suggest_position_strategy(
             "Inferred parent PDA {parent} but no strategy contains it in parameters.position_addresses."
         ),
     }))
+}
+
+#[cfg(test)]
+mod list_positions_display_tests {
+    use super::{
+        default_list_positions_light, monitored_position_list_row,
+        position_list_row_fee_display_ready, position_list_row_value_display_ready,
+        ListPositionsQuery,
+    };
+    use crate::models::PositionResponse;
+    use crate::state::{ApiConfig, AppState};
+    use chrono::Utc;
+    use clmm_lp_execution::monitor::{MonitoredPosition, PositionPnL};
+    use clmm_lp_protocols::prelude::OnChainPosition;
+    use clmm_lp_protocols::prelude::RpcConfig;
+    use rust_decimal::Decimal;
+    use solana_sdk::pubkey::Pubkey;
+    use std::collections::HashMap;
+    use std::str::FromStr;
+
+    use crate::services::position_valuation::{PositionUsdValuation, TickRangePrice};
+
+    fn test_state() -> AppState {
+        AppState::new(RpcConfig::default(), ApiConfig::default(), None)
+    }
+
+    fn sample_monitored_zero_value() -> MonitoredPosition {
+        let addr = Pubkey::new_unique();
+        let pool = Pubkey::new_unique();
+        MonitoredPosition {
+            address: addr,
+            pool,
+            on_chain: OnChainPosition {
+                address: addr,
+                pool,
+                owner: Pubkey::default(),
+                tick_lower: -24_544,
+                tick_upper: -24_340,
+                liquidity: 2_586_249_892,
+                fee_growth_inside_a: 0,
+                fee_growth_inside_b: 0,
+                fees_owed_a: 414_388,
+                fees_owed_b: 35_265,
+            },
+            pnl: PositionPnL::default(),
+            in_range: true,
+            last_updated: Utc::now(),
+        }
+    }
+
+    fn sample_valuation() -> PositionUsdValuation {
+        let sol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let usdc = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
+        PositionUsdValuation {
+            value_usd: Decimal::new(772_798_192, 8),
+            fees_usd: Decimal::new(4, 2),
+            amount_a_raw: 1,
+            amount_b_raw: 1,
+            amount_a_ui: Decimal::new(52_410_078, 9),
+            amount_b_ui: Decimal::new(502_418_7, 6),
+            token_mint_a: sol,
+            token_mint_b: usdc,
+            price_a_usd: 86.37,
+            price_b_usd: 1.0,
+            range_usdc: None,
+            range_price: TickRangePrice {
+                lower: Decimal::new(859_252_722_164_843, 12),
+                upper: Decimal::new(876_960_598_583_213, 12),
+                quote: "USDC per 1 SOL".to_string(),
+            },
+            in_range: true,
+            fees_owed_a_ui: Decimal::new(414_388, 6),
+            fees_owed_b_ui: Decimal::new(352_65, 5),
+            token_a_label: "SOL".to_string(),
+            token_b_label: "USDC".to_string(),
+        }
+    }
+
+    #[test]
+    fn default_list_query_uses_light_true() {
+        assert!(default_list_positions_light());
+        let _: ListPositionsQuery = serde_json::from_str("{}").expect("default light deserializes");
+    }
+
+    #[tokio::test]
+    async fn list_row_with_valuation_populates_value_and_fee_display_fields() {
+        let state = test_state();
+        let p = sample_monitored_zero_value();
+        let row = monitored_position_list_row(
+            &state,
+            &p,
+            Some(sample_valuation()),
+            Some("list_light".to_string()),
+            &HashMap::new(),
+        )
+        .await;
+
+        assert_eq!(row.valuation_source.as_deref(), Some("list_light"));
+        assert!(position_list_row_value_display_ready(&row));
+        assert!(position_list_row_fee_display_ready(&row));
+        assert!(row.token_price_a_usd.is_some());
+        assert!(row.token_price_b_usd.is_some());
+        assert!(row.uncollected_fees.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_row_without_valuation_keeps_monitor_zeros_not_display_ready() {
+        let state = test_state();
+        let p = sample_monitored_zero_value();
+        let row = monitored_position_list_row(
+            &state,
+            &p,
+            None,
+            Some("fallback_monitor".to_string()),
+            &HashMap::new(),
+        )
+        .await;
+
+        assert!(!position_list_row_value_display_ready(&row));
+    }
+
+    #[test]
+    fn list_light_json_serializes_value_and_mint_prices_for_ui() {
+        let row = PositionResponse {
+            address: "HTtpWVsnoctjiZqrYjkhan2RcYEnpxW3ueqns3PFJJQK".to_string(),
+            pool_address: "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE".to_string(),
+            owner: "11111111111111111111111111111111".to_string(),
+            tick_lower: -24_544,
+            tick_upper: -24_340,
+            range_lower_usdc: None,
+            range_upper_usdc: None,
+            range_usdc_quote: None,
+            range_lower_price: None,
+            range_upper_price: None,
+            range_price_quote: None,
+            token_a_label: Some("SOL".to_string()),
+            token_b_label: Some("USDC".to_string()),
+            token_mint_a: Some(
+                "So11111111111111111111111111111111111111112".to_string(),
+            ),
+            token_mint_b: Some(
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            ),
+            token_price_a_usd: Some(86.37),
+            token_price_b_usd: Some(1.0),
+            uncollected_fees: Some(crate::models::UncollectedFeesInfo {
+                token_a_label: "SOL".to_string(),
+                token_b_label: "USDC".to_string(),
+                amount_a: Decimal::new(414_388, 6),
+                amount_b: Decimal::new(352_65, 5),
+            }),
+            liquidity: "1".to_string(),
+            in_range: true,
+            value_usd: Decimal::new(772_798_192, 8),
+            valuation_source: Some("list_light".to_string()),
+            pnl: crate::models::PnLResponse {
+                unrealized_pnl_usd: Decimal::ZERO,
+                unrealized_pnl_pct: Decimal::ZERO,
+                fees_earned_a: 0,
+                fees_earned_b: 0,
+                fees_earned_usd: Decimal::ZERO,
+                il_pct: Decimal::ZERO,
+                net_pnl_usd: Decimal::ZERO,
+                net_pnl_pct: Decimal::ZERO,
+            },
+            status: crate::models::PositionStatus::Active,
+            created_at: None,
+        };
+
+        let json = serde_json::to_string(&row).expect("serialize");
+        assert!(json.contains("\"value_usd\":\"7."));
+        assert!(json.contains("token_price_a_usd"));
+        assert!(json.contains("uncollected_fees"));
+        assert!(position_list_row_value_display_ready(&row));
+        assert!(position_list_row_fee_display_ready(&row));
+    }
 }
 
 #[cfg(test)]

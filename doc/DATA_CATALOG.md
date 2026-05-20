@@ -28,6 +28,11 @@ tags: domain=wallet; source=postgres; freshness=static(curated); quality=authori
 
 - Jedno wierszowe **konto księgowe per mint SPL** z listy tokenów występujących w **curated** parach (`mint`, `symbol`, `account_code` = `SPL:{mint}`, `decimals`). Seed: migracja `009_wallet_gl_curated_tokens_and_pools.sql` — **zsynchronizuj** z `crates/api/src/handlers/backtests.rs::curated_backtest_pools()`.
 
+### `wallet_gl_journal_event` (Postgres)
+
+- **Tag:** `wallet_gl`, `wallet_ledger`, `journal`, `postgres`
+- Append-only journal rows (dual-write z `data/wallet-ledger-events.jsonl`). Migracja `010_wallet_gl_journal_events.sql`. Odczyt: `GET /api/v1/wallets/ledger-events` (`storage`: `postgres` | `jsonl` | `jsonl_fallback`).
+
 ### `wallet_gl_curated_pool` (Postgres)
 
 tags: domain=wallet; source=postgres; freshness=static(curated); quality=authoritative(config); cost=free

@@ -9,10 +9,10 @@ import ApiDataHint from '@/components/ApiDataHint'
 import {
   getPositionAgentChatUi,
   getOrcaPositionsByOwner,
-  getPoolState,
   getPositionDiagnostics,
-  getPositionStreamPnL,
   getPositions,
+  getPositionStreamPnL,
+  reconcileStalePositions,
   getStrategies,
   getStrandedRebalances,
   dismissStrandedRebalance,
@@ -26,11 +26,14 @@ import {
   shortenAddress,
   formatUsdcPriceRange,
   formatInvertedTokenPriceRange,
-  formatUsdUncollectedFees,
 } from '@/lib/utils'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
 import { useI18n } from '@/lib/i18n'
 import { getMetricsMode } from '@/lib/metricsMode'
+import {
+  feeSourceLabel,
+  formatUncollectedFeesCell,
+} from '@/lib/positionListDisplay'
 
 function rangeCellClass(inRange: boolean | undefined) {
   if (inRange === true) {
@@ -125,14 +128,16 @@ export default function Positions() {
   const { t, locale } = useI18n()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const metricsMode = getMetricsMode()
   const devPk = getDevWalletPubkey()
   const [ownerInput, setOwnerInput] = useState(() => devPk ?? '')
   const [appliedOwner, setAppliedOwner] = useState(() => devPk ?? '')
+  const [reconcileMessage, setReconcileMessage] = useState<string | null>(null)
+  const metricsMode = getMetricsMode()
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['positions'],
     queryFn: getPositions,
+    staleTime: 20_000,
   })
   const strategiesQ = useQuery({
     queryKey: ['strategies'],
@@ -158,26 +163,23 @@ export default function Positions() {
   })
 
   const positions = data?.positions || []
-  const monitoredPools = useMemo(
-    () => Array.from(new Set(positions.map((p) => p.pool_address).filter((v) => !!v))),
-    [positions],
-  )
-  const poolStateQueries = useQueries({
-    queries: monitoredPools.map((poolAddress) => ({
-      queryKey: ['pool-state', poolAddress],
-      queryFn: () => getPoolState(poolAddress),
+  const positionStreamPnlQueries = useQueries({
+    queries: positions.map((position) => ({
+      queryKey: ['position-stream-pnl', position.address, metricsMode],
+      queryFn: () => getPositionStreamPnL(position.address, metricsMode),
       staleTime: 30_000,
-      retry: 1,
+      refetchOnMount: false,
+      refetchOnWindowFocus: false,
+      retry: 0,
     })),
   })
   const positionDiagnosticsQueries = useQueries({
     queries: positions.map((position) => ({
       queryKey: ['position-diagnostics', position.address],
       queryFn: () => getPositionDiagnostics(position.address),
-      staleTime: 0,
-      refetchOnMount: 'always' as const,
-      refetchOnWindowFocus: true,
-      refetchInterval: 15_000,
+      staleTime: 30_000,
+      refetchOnMount: false,
+      refetchOnWindowFocus: false,
       retry: 0,
     })),
   })
@@ -186,14 +188,6 @@ export default function Positions() {
       queryKey: ['position-agent-ui', position.address],
       queryFn: () => getPositionAgentChatUi(position.address),
       staleTime: 15_000,
-      retry: 0,
-    })),
-  })
-  const positionStreamPnlQueries = useQueries({
-    queries: positions.map((position) => ({
-      queryKey: ['position-stream-pnl', position.address, metricsMode],
-      queryFn: () => getPositionStreamPnL(position.address, metricsMode),
-      staleTime: 30_000,
       retry: 0,
     })),
   })
@@ -208,14 +202,6 @@ export default function Positions() {
     })
     return map
   }, [positions, positionDiagnosticsQueries])
-  const poolSpotByAddress = useMemo(() => {
-    const m = new Map<string, number>()
-    monitoredPools.forEach((poolAddress, idx) => {
-      const n = parseNum(poolStateQueries[idx]?.data?.price)
-      if (n !== null) m.set(poolAddress, n)
-    })
-    return m
-  }, [monitoredPools, poolStateQueries])
   const poolLabelByAddress = useMemo(() => {
     const m = new Map<string, string>()
     for (const p of positions) {
@@ -255,6 +241,25 @@ export default function Positions() {
     },
   })
 
+  const reconcileMutation = useMutation({
+    mutationFn: reconcileStalePositions,
+    onSuccess: (report) => {
+      queryClient.invalidateQueries({ queryKey: ['positions'] })
+      setReconcileMessage(
+        locale === 'pl'
+          ? `Reconcile: sprawdzono ${report.checked}, zamknięto registry ${report.registry_closed.length}, usunięto linki strategii ${report.strategy_links_removed}, nadal on-chain ${report.still_on_chain}, błędy RPC ${report.rpc_errors}.`
+          : `Reconcile: checked ${report.checked}, registry closed ${report.registry_closed.length}, strategy links removed ${report.strategy_links_removed}, still on-chain ${report.still_on_chain}, RPC errors ${report.rpc_errors}.`,
+      )
+    },
+    onError: (e: Error) => setReconcileMessage(e.message),
+  })
+
+  const showReconcileCta =
+    !!data?.meta &&
+    ((data.meta.skipped_absent_cached ?? 0) > 0 ||
+      (data.meta.skipped_registry_closed ?? 0) > 0 ||
+      (data.meta.skipped_chain_error ?? 0) > 0)
+
   return (
     <div className="space-y-6">
       <ApiDataHint />
@@ -262,6 +267,19 @@ export default function Positions() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">{t('positions.title')}</h1>
         <div className="flex gap-2">
+          {showReconcileCta ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={reconcileMutation.isPending}
+              onClick={() => {
+                setReconcileMessage(null)
+                reconcileMutation.mutate()
+              }}
+            >
+              {locale === 'pl' ? 'Wyczyść martwe registry' : 'Reconcile stale registry'}
+            </Button>
+          ) : null}
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             <RefreshCw className="h-4 w-4 mr-2" />
             {t('positions.refresh')}
@@ -278,14 +296,37 @@ export default function Positions() {
           <CardTitle>{t('positions.monitoredTitle')}</CardTitle>
           <p className="text-sm text-muted-foreground font-normal">
             {locale === 'pl'
-              ? 'Z monitora w pamięci procesu — szczegóły i PnL tylko dla tych adresów.'
-              : 'From in-process monitor — details and PnL only for these addresses.'}
+              ? 'Monitor API + otwarte wpisy registry + adresy ze strategii w stanie running (tylko żywe on-chain).'
+              : 'API monitor + registry opens + running strategy position_addresses (on-chain only).'}
           </p>
         </CardHeader>
         <CardContent>
+          {isError ? (
+            <ErrorBanner className="mb-4">
+              {(error as Error).message}
+              <div className="mt-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => refetch()}>
+                  {t('positions.refresh')}
+                </Button>
+              </div>
+            </ErrorBanner>
+          ) : null}
+          {data?.meta &&
+          (data.meta.skipped_absent_cached ||
+            data.meta.skipped_chain_error ||
+            data.meta.skipped_registry_closed) ? (
+            <p className="text-xs text-muted-foreground mb-4">
+              {locale === 'pl'
+                ? `Część adresów pominięta (martwe registry/strategia lub RPC): cache=${data.meta.skipped_absent_cached ?? 0}, registry zamknięte=${data.meta.skipped_registry_closed ?? 0}, błąd RPC=${data.meta.skipped_chain_error ?? 0}.`
+                : `Some addresses skipped (stale registry/strategy or RPC): cached absent=${data.meta.skipped_absent_cached ?? 0}, registry closed=${data.meta.skipped_registry_closed ?? 0}, RPC error=${data.meta.skipped_chain_error ?? 0}.`}
+            </p>
+          ) : null}
+          {reconcileMessage ? (
+            <p className="text-xs text-muted-foreground mb-4">{reconcileMessage}</p>
+          ) : null}
           {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">{t('positions.loading')}</div>
-          ) : positions.length === 0 ? (
+          ) : !isError && positions.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground space-y-2 max-w-xl mx-auto">
               <p>
                 {locale === 'pl'
@@ -428,7 +469,8 @@ export default function Positions() {
                             const upper = useUsdc ? upperUsdc : upperGeneric
                             const now = useUsdc
                               ? estimateNowUsdcFromPosition(position)
-                              : (poolSpotByAddress.get(position.pool_address) ?? null)
+                              : parseNum(position.token_price_a_usd) ??
+                                parseNum(position.token_price_b_usd)
                             if (lower === null || upper === null || now === null || upper <= lower) return null
                             const markerPct = Math.max(0, Math.min(100, ((now - lower) / (upper - lower)) * 100))
                             return (
@@ -453,15 +495,15 @@ export default function Positions() {
                       <td className="py-4 text-right font-medium">
                         {formatUSD(position.value_usd)}
                       </td>
-                      <td className={`py-4 text-right ${
-                        (() => {
+                      <td
+                        className={`py-4 text-right ${(() => {
                           const pnlQ = positionStreamPnlQueries[idx]
                           const streamPct = parseNum(pnlQ?.data?.net_pnl_pct)
                           const fallbackPct = parseNum(position.pnl.net_pnl_pct)
                           const pct = streamPct ?? fallbackPct ?? 0
                           return pct >= 0 ? 'text-green-500' : 'text-red-500'
-                        })()
-                      }`}>
+                        })()}`}
+                      >
                         {(() => {
                           const pnlQ = positionStreamPnlQueries[idx]
                           const streamPct = parseNum(pnlQ?.data?.net_pnl_pct)
@@ -480,7 +522,13 @@ export default function Positions() {
                             <div className="space-y-0.5">
                               <div>{formatPercentFixed(fallbackPct ?? 0, 3)}</div>
                               <div className="text-[10px] text-muted-foreground">
-                                {locale === 'pl' ? 'źródło: cache monitora' : 'source: monitor cache'}
+                                {pnlQ?.isFetching
+                                  ? locale === 'pl'
+                                    ? 'źródło: stream (ładowanie…)'
+                                    : 'source: stream (loading…)'
+                                  : locale === 'pl'
+                                    ? 'źródło: lista API'
+                                    : 'source: API list'}
                               </div>
                             </div>
                           )
@@ -488,47 +536,10 @@ export default function Positions() {
                       </td>
                       <td className="py-4 text-right text-green-500">
                         <div className="space-y-0.5">
-                          <div>
-                            {(() => {
-                              const f = position.uncollected_fees
-                              if (!f) return '—'
-                              const a = parseFloat(String(f.amount_a))
-                              const b = parseFloat(String(f.amount_b))
-                              const labelA = (position.token_a_label ?? f.token_a_label ?? '').toUpperCase()
-                              const labelB = (position.token_b_label ?? f.token_b_label ?? '').toUpperCase()
-                              const priceA =
-                                typeof position.token_price_a_usd === 'number'
-                                  ? position.token_price_a_usd
-                                  : labelA.includes('USDC')
-                                    ? 1
-                                    : NaN
-                              const priceB =
-                                typeof position.token_price_b_usd === 'number'
-                                  ? position.token_price_b_usd
-                                  : labelB.includes('USDC')
-                                    ? 1
-                                    : NaN
-
-                              let usd = 0
-                              let ok = false
-                              if (Number.isFinite(a) && Number.isFinite(priceA)) {
-                                usd += a * priceA
-                                ok = true
-                              }
-                              if (Number.isFinite(b) && Number.isFinite(priceB)) {
-                                usd += b * priceB
-                                ok = true
-                              }
-                              return ok ? formatUsdUncollectedFees(usd) : '—'
-                            })()}
-                          </div>
+                          <div>{formatUncollectedFeesCell(position)}</div>
                           <div className="text-[10px] text-muted-foreground">
                             {locale === 'pl' ? 'źródło:' : 'source:'}{' '}
-                            {position.valuation_source === 'live_valuation'
-                              ? (locale === 'pl' ? 'wycena live' : 'live valuation')
-                              : position.valuation_source === 'fallback_monitor'
-                                ? (locale === 'pl' ? 'fallback monitor' : 'fallback monitor')
-                                : (locale === 'pl' ? 'nieznane' : 'unknown')}
+                            {feeSourceLabel(position.valuation_source, locale)}
                           </div>
                           {position.uncollected_fees ? (
                             <div className="text-[10px] text-muted-foreground font-mono">

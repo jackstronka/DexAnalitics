@@ -92,6 +92,7 @@ use utoipa::OpenApi;
         handlers::phantom_verify,
         // Position endpoints
         handlers::list_positions,
+        handlers::reconcile_stale_positions,
         handlers::list_closed_positions,
         handlers::get_position,
         handlers::get_position_agent_chat,
@@ -129,6 +130,7 @@ use utoipa::OpenApi;
         handlers::delete_strategy,
         handlers::start_strategy,
         handlers::set_strategy_position_executor,
+        handlers::prune_stale_strategy_positions,
         handlers::stop_strategy,
         handlers::apply_optimize_result,
         handlers::get_strategy_performance,

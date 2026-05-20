@@ -1228,6 +1228,10 @@ pub struct WalletLedgerEventsQuery {
     #[serde(default)]
     pub owner: Option<String>,
     #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
     pub limit: Option<usize>,
 }
 
@@ -1238,6 +1242,8 @@ pub struct WalletLedgerEventsQuery {
     tag = "Wallets",
     params(
         ("owner" = Option<String>, Query, description = "Filter by owner pubkey (substring match)"),
+        ("kind" = Option<String>, Query, description = "Filter by event kind (exact or substring)"),
+        ("status" = Option<String>, Query, description = "Filter by status: pending, confirmed, failed"),
         ("limit" = Option<usize>, Query, description = "Max events (default 200, max 500)")
     ),
     responses((status = 200, description = "Recent ledger events", body = WalletLedgerEventsResponse))
@@ -1248,9 +1254,17 @@ pub async fn get_wallet_ledger_events(
 ) -> ApiResult<Json<WalletLedgerEventsResponse>> {
     let _ = &state;
     let limit = q.limit.unwrap_or(200).clamp(1, 500);
-    let (path, events) = wallet_ledger::read_wallet_ledger_tail(limit, q.owner.as_deref()).await;
+    let (path, storage, events) = wallet_ledger::read_wallet_ledger_events(
+        &state,
+        limit,
+        q.owner.as_deref(),
+        q.kind.as_deref(),
+        q.status.as_deref(),
+    )
+    .await;
     Ok(Json(WalletLedgerEventsResponse {
         path: path.to_string_lossy().to_string(),
+        storage: storage.to_string(),
         events,
     }))
 }

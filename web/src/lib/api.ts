@@ -1138,8 +1138,49 @@ export const getDataSnapshots = (params: MarketDataQueryParams) =>
     )}`,
   )
 
-// Positions
-export const getPositions = () => fetchJson<{ positions: Position[] }>('/positions')
+/** `GET /positions` merge diagnostics (registry + running strategies). */
+export interface StaleReconcileReport {
+  checked: number
+  registry_closed: string[]
+  strategy_links_removed: number
+  still_on_chain: number
+  rpc_errors: number
+}
+
+export interface ListPositionsMeta {
+  skipped_absent_cached?: number
+  skipped_registry_closed?: number
+  skipped_chain_error?: number
+  merged_from_registry?: number
+  merged_from_strategies?: number
+  /** Fast list path (default); use `light=0` for full per-row valuation. */
+  light?: boolean
+}
+
+export interface ListPositionsResponse {
+  positions: Position[]
+  total: number
+  meta?: ListPositionsMeta
+}
+
+// Positions — API defaults to `light=1` (fast list). Use getPositionsFull() for heavy valuation.
+export const getPositions = () =>
+  fetchJsonWithTimeout<ListPositionsResponse>('/positions', 60_000)
+
+export const getPositionsFull = () =>
+  fetchJsonWithTimeout<ListPositionsResponse>('/positions?light=0', 60_000)
+
+export const reconcileStalePositions = () =>
+  fetchJsonWithTimeout<StaleReconcileReport>('/positions/reconcile-stale', 120_000, {
+    method: 'POST',
+  })
+
+export const pruneStaleStrategyPositions = (strategyId: string) =>
+  fetchJsonWithTimeout<StaleReconcileReport>(
+    `/strategies/${encodeURIComponent(strategyId)}/prune-stale-positions`,
+    120_000,
+    { method: 'POST' },
+  )
 // Registry replay is fast; pool mint enrichment is one RPC per unique pool on this page only,
 // but keep UI timeout above default 15s for slow RPC / large offsets.
 export const getClosedPositions = (
@@ -1224,8 +1265,9 @@ export const getPositionStreamPerformance = (address: string) =>
     `/positions/${encodeURIComponent(address)}/stream-performance`,
   )
 export const getPositionStreamPnL = (address: string, mode: 'live' | 'settlement_v1' = 'live') =>
-  fetchJson<PositionStreamPnLResponse>(
+  fetchJsonWithTimeout<PositionStreamPnLResponse>(
     `/positions/${encodeURIComponent(address)}/stream-pnl?${new URLSearchParams({ mode })}`,
+    90_000,
   )
 export const getPositionStreamLineage = (
   address: string,
@@ -1892,12 +1934,21 @@ export interface WalletLedgerEvent {
 
 export interface WalletLedgerEventsResponse {
   path: string
+  /** `postgres`, `jsonl`, or `jsonl_fallback` */
+  storage?: string
   events: WalletLedgerEvent[]
 }
 
-export const getWalletLedgerEvents = (opts?: { owner?: string; limit?: number }) => {
+export const getWalletLedgerEvents = (opts?: {
+  owner?: string
+  kind?: string
+  status?: WalletLedgerStatus | string
+  limit?: number
+}) => {
   const params = new URLSearchParams()
   if (opts?.owner?.trim()) params.set('owner', opts.owner.trim())
+  if (opts?.kind?.trim()) params.set('kind', opts.kind.trim())
+  if (opts?.status?.trim()) params.set('status', String(opts.status).trim())
   if (opts?.limit != null) params.set('limit', String(opts.limit))
   const q = params.toString()
   return fetchJson<WalletLedgerEventsResponse>(`/wallets/ledger-events${q ? `?${q}` : ''}`)

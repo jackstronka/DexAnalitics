@@ -81,6 +81,8 @@ pub struct AppState {
     pub wallet_ws_refresh_failures_total: Arc<AtomicU64>,
     /// Best-effort cached per-position **uncollected fees** (claimable now).
     pub uncollected_fees_cache: Arc<RwLock<HashMap<String, CachedUncollectedFees>>>,
+    /// PDAs recently confirmed absent on-chain (skip repeat RPC on list endpoints).
+    pub position_absent_cache: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +194,7 @@ impl AppState {
             wallet_ws_reconnects_total: Arc::new(AtomicU64::new(0)),
             wallet_ws_refresh_failures_total: Arc::new(AtomicU64::new(0)),
             uncollected_fees_cache: Arc::new(RwLock::new(HashMap::new())),
+            position_absent_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
