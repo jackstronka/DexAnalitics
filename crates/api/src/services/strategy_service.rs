@@ -426,6 +426,12 @@ impl StrategyService {
             "data/position-fee-checkpoints.jsonl",
         )));
 
+        if let Some(db) = self.state.db.clone() {
+            executor
+                .rebalance_executor_handle()
+                .set_session_database(std::sync::Arc::new(db));
+        }
+
         if !dry_run {
             match crate::services::position_executor::load_wallet_from_env() {
                 Ok(Some(wallet)) => executor.set_wallet(wallet),
@@ -1007,6 +1013,52 @@ async fn strategy_ids_holding_position_address(state: &AppState, pda: &str) -> V
         }
     }
     out
+}
+
+/// Append each address to `executor_disabled_position_addresses` on linked strategies (batch close guard).
+pub async fn disable_automation_for_positions(
+    state: &AppState,
+    addresses: &[String],
+) -> Result<(), ApiError> {
+    use crate::handlers::strategies::sync_executor_disabled_from_config;
+
+    let mut touched: HashSet<String> = HashSet::new();
+    for addr in addresses {
+        let pda = addr.trim();
+        if pda.is_empty() {
+            continue;
+        }
+        for sid in strategy_ids_holding_position_address(state, pda).await {
+            if !touched.insert(sid.clone()) {
+                continue;
+            }
+            {
+                let mut strategies = state.strategies.write().await;
+                let Some(strategy) = strategies.get_mut(&sid) else {
+                    continue;
+                };
+                let params = strategy
+                    .config
+                    .get_mut("parameters")
+                    .and_then(|p| p.as_object_mut())
+                    .ok_or_else(|| ApiError::bad_request("strategy parameters missing"))?;
+                let arr_val = params
+                    .entry("executor_disabled_position_addresses".to_string())
+                    .or_insert_with(|| serde_json::json!([]));
+                let list = arr_val.as_array_mut().ok_or_else(|| {
+                    ApiError::bad_request("executor_disabled_position_addresses must be a JSON array")
+                })?;
+                if !list.iter().any(|v| v.as_str() == Some(pda)) {
+                    list.push(serde_json::Value::String(pda.to_string()));
+                }
+                strategy.updated_at = chrono::Utc::now();
+            }
+            sync_executor_disabled_from_config(state, &sid).await?;
+        }
+    }
+    let snapshot = state.strategies.read().await.clone();
+    crate::state::try_persist_strategies_best_effort(&snapshot);
+    Ok(())
 }
 
 /// If [`parameters.position_addresses`] references mints that are **closed** in `registry.jsonl`,

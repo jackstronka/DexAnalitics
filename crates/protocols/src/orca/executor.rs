@@ -250,6 +250,20 @@ impl ExecutionResult {
         }
     }
 
+    /// Tx broadcast without confirmation (send-first bulk close).
+    #[must_use]
+    pub fn submitted(signature: Signature) -> Self {
+        Self {
+            signature,
+            success: true,
+            slot: None,
+            error: None,
+            created_position: None,
+            collect_fee_owed_a_raw: None,
+            collect_fee_owed_b_raw: None,
+        }
+    }
+
     /// Creates a failed result.
     #[must_use]
     pub fn failure(signature: Signature, error: String) -> Self {
@@ -484,7 +498,7 @@ impl WhirlpoolExecutor {
         let mut all_ix = pre_ix;
         all_ix.extend(opened.instructions);
         let mut res = self
-            .send_transaction_with_signers(&all_ix, payer, &opened.additional_signers)
+            .send_transaction_with_signers(&all_ix, payer, &opened.additional_signers, true)
             .await?;
         if res.success {
             res.created_position = Some(position_pda);
@@ -567,7 +581,7 @@ impl WhirlpoolExecutor {
         let mut all_ix = pre_ix;
         all_ix.extend(opened.instructions);
         let mut res = self
-            .send_transaction_with_signers(&all_ix, payer, &opened.additional_signers)
+            .send_transaction_with_signers(&all_ix, payer, &opened.additional_signers, true)
             .await?;
         if res.success {
             res.created_position = Some(position_pda);
@@ -772,7 +786,7 @@ impl WhirlpoolExecutor {
         if ixs.is_empty() {
             return Ok(None);
         }
-        let res = match self.send_transaction_with_signers(&ixs, payer, &[]).await {
+        let res = match self.send_transaction_with_signers(&ixs, payer, &[], true).await {
             Ok(res) => res,
             Err(e) => {
                 let msg = e.to_string();
@@ -790,7 +804,7 @@ impl WhirlpoolExecutor {
                 if fallback_ixs.is_empty() {
                     return Ok(None);
                 }
-                self.send_transaction_with_signers(&fallback_ixs, payer, &[])
+                self.send_transaction_with_signers(&fallback_ixs, payer, &[], true)
                     .await
                     .map_err(|e2| anyhow::anyhow!("wsol wrap send (fallback): {e2}"))?
             }
@@ -845,7 +859,7 @@ impl WhirlpoolExecutor {
         let ix = spl_token::instruction::close_account(&spl_token::id(), &ata, &owner, &owner, &[])
             .context("build close_account for WSOL ATA")?;
         let res = self
-            .send_transaction_with_signers(&[ix], payer, &[])
+            .send_transaction_with_signers(&[ix], payer, &[], true)
             .await
             .map_err(|e| anyhow::anyhow!("wsol unwrap send: {e}"))?;
         if !res.success {
@@ -861,7 +875,7 @@ impl WhirlpoolExecutor {
                 .context("prepare partial unwrap remainder re-wrap")?;
             if !ixs.is_empty() {
                 let rewrap_res = self
-                    .send_transaction_with_signers(&ixs, payer, &[])
+                    .send_transaction_with_signers(&ixs, payer, &[], true)
                     .await
                     .map_err(|e| anyhow::anyhow!("wsol partial re-wrap send: {e}"))?;
                 if !rewrap_res.success {
@@ -958,7 +972,7 @@ impl WhirlpoolExecutor {
             all_ix.extend(swap_ix.instructions);
 
             let res = self
-                .send_transaction_with_signers(&all_ix, payer, &swap_ix.additional_signers)
+                .send_transaction_with_signers(&all_ix, payer, &swap_ix.additional_signers, true)
                 .await?;
 
             if res.success {
@@ -1036,7 +1050,7 @@ impl WhirlpoolExecutor {
         .await
         .map_err(|e| anyhow::anyhow!("orca increase_liquidity_instructions failed: {e}"))?;
 
-        self.send_transaction_with_signers(&inc.instructions, payer, &inc.additional_signers)
+        self.send_transaction_with_signers(&inc.instructions, payer, &inc.additional_signers, true)
             .await
     }
 
@@ -1079,7 +1093,7 @@ impl WhirlpoolExecutor {
         .await
         .map_err(|e| anyhow::anyhow!("orca decrease_liquidity_instructions failed: {e}"))?;
 
-        self.send_transaction_with_signers(&dec.instructions, payer, &dec.additional_signers)
+        self.send_transaction_with_signers(&dec.instructions, payer, &dec.additional_signers, true)
             .await
     }
 
@@ -1118,6 +1132,7 @@ impl WhirlpoolExecutor {
                 &harvested.instructions,
                 payer,
                 &harvested.additional_signers,
+                true,
             )
             .await?;
         exec.collect_fee_owed_a_raw = Some(harvested.fees_quote.fee_owed_a);
@@ -1134,9 +1149,33 @@ impl WhirlpoolExecutor {
     pub async fn close_position(
         &self,
         position: &Pubkey,
+        pool: &Pubkey,
+        payer: &Keypair,
+        slippage_bps: Option<u16>,
+    ) -> Result<ExecutionResult> {
+        self.close_position_with_confirm(position, pool, payer, slippage_bps, true)
+            .await
+    }
+
+    /// Close position: build + sign + **send only** (no RPC confirm wait).
+    pub async fn close_position_submit_only(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        payer: &Keypair,
+        slippage_bps: Option<u16>,
+    ) -> Result<ExecutionResult> {
+        self.close_position_with_confirm(position, pool, payer, slippage_bps, false)
+            .await
+    }
+
+    async fn close_position_with_confirm(
+        &self,
+        position: &Pubkey,
         _pool: &Pubkey,
         payer: &Keypair,
         slippage_bps: Option<u16>,
+        confirm: bool,
     ) -> Result<ExecutionResult> {
         info!(position = %position, "Closing position");
         let endpoint = self.provider.current_endpoint().await;
@@ -1175,6 +1214,7 @@ impl WhirlpoolExecutor {
                     &closed.instructions,
                     payer,
                     &closed.additional_signers,
+                    confirm,
                 )
                 .await?;
 
@@ -1190,9 +1230,11 @@ impl WhirlpoolExecutor {
             res.collect_fee_owed_b_raw = Some(closed.fees_quote.fee_owed_b);
 
             if res.success {
-                let _ = self
-                    .maybe_auto_unwrap_wsol_to_native(payer, "close_position")
-                    .await;
+                if confirm {
+                    let _ = self
+                        .maybe_auto_unwrap_wsol_to_native(payer, "close_position")
+                        .await;
+                }
                 return Ok(res);
             }
 
@@ -1261,6 +1303,7 @@ impl WhirlpoolExecutor {
         instructions: &[Instruction],
         payer: &Keypair,
         additional_signers: &[Keypair],
+        confirm: bool,
     ) -> Result<ExecutionResult> {
         let recent_blockhash = self
             .provider
@@ -1276,51 +1319,71 @@ impl WhirlpoolExecutor {
         }
         transaction.sign(&signers, recent_blockhash);
 
-        if let Ok(sim) = self.provider.simulate_transaction(&transaction).await
-            && let Some(logs) = sim.logs
-        {
-            let parsed = logs
-                .iter()
-                .find_map(|line| parse_insufficient_lamports_from_log_line(line));
-            if let Some((have_lamports, need_lamports)) = parsed {
-                let required_with_margin =
-                    need_lamports.saturating_mul(101).saturating_add(99) / 100;
-                let payer_pubkey = payer.pubkey();
-                let native_balance = self
-                    .provider
-                    .get_balance(&payer_pubkey)
-                    .await
-                    .unwrap_or(have_lamports);
-                if native_balance < required_with_margin {
-                    let signature = transaction.signatures.first().copied().unwrap_or_default();
-                    return Ok(ExecutionResult::failure(
-                        signature,
-                        format!(
-                            "open preflight exact-plan: insufficient native SOL. \
-                             Runtime simulation requires {need_lamports} lamports; with 1% safety margin require {required_with_margin}. \
-                             Current native balance {native_balance}. Top up SOL or lower Amount."
-                        ),
-                    ));
+        // Send-first bulk close: skip pre-send simulation (saves 1+ RPC round-trips per attempt).
+        if confirm {
+            if let Ok(sim) = self.provider.simulate_transaction(&transaction).await
+                && let Some(logs) = sim.logs
+            {
+                let parsed = logs
+                    .iter()
+                    .find_map(|line| parse_insufficient_lamports_from_log_line(line));
+                if let Some((have_lamports, need_lamports)) = parsed {
+                    let required_with_margin =
+                        need_lamports.saturating_mul(101).saturating_add(99) / 100;
+                    let payer_pubkey = payer.pubkey();
+                    let native_balance = self
+                        .provider
+                        .get_balance(&payer_pubkey)
+                        .await
+                        .unwrap_or(have_lamports);
+                    if native_balance < required_with_margin {
+                        let signature =
+                            transaction.signatures.first().copied().unwrap_or_default();
+                        return Ok(ExecutionResult::failure(
+                            signature,
+                            format!(
+                                "open preflight exact-plan: insufficient native SOL. \
+                                 Runtime simulation requires {need_lamports} lamports; with 1% safety margin require {required_with_margin}. \
+                                 Current native balance {native_balance}. Top up SOL or lower Amount."
+                            ),
+                        ));
+                    }
                 }
             }
         }
 
-        debug!("Sending transaction...");
+        debug!(
+            confirm,
+            "Sending transaction{}",
+            if confirm { " (await confirm)" } else { " (submit only)" }
+        );
 
-        match self
-            .provider
-            .send_and_confirm_transaction(&transaction)
-            .await
-        {
-            Ok(signature) => {
-                info!(signature = %signature, "Transaction confirmed");
-                // Get slot from transaction status
-                let slot = self.provider.get_slot().await.unwrap_or(0);
-                Ok(ExecutionResult::success(signature, slot))
+        if confirm {
+            match self
+                .provider
+                .send_and_confirm_transaction(&transaction)
+                .await
+            {
+                Ok(signature) => {
+                    info!(signature = %signature, "Transaction confirmed");
+                    let slot = self.provider.get_slot().await.unwrap_or(0);
+                    Ok(ExecutionResult::success(signature, slot))
+                }
+                Err(e) => {
+                    let signature = transaction.signatures.first().copied().unwrap_or_default();
+                    Ok(ExecutionResult::failure(signature, e.to_string()))
+                }
             }
-            Err(e) => {
-                let signature = transaction.signatures.first().copied().unwrap_or_default();
-                Ok(ExecutionResult::failure(signature, e.to_string()))
+        } else {
+            match self.provider.send_transaction(&transaction).await {
+                Ok(signature) => {
+                    info!(signature = %signature, "Transaction submitted (no confirm wait)");
+                    Ok(ExecutionResult::submitted(signature))
+                }
+                Err(e) => {
+                    let signature = transaction.signatures.first().copied().unwrap_or_default();
+                    Ok(ExecutionResult::failure(signature, e.to_string()))
+                }
             }
         }
     }

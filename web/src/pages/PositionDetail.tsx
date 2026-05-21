@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
 import { PositionLifecycleTimeline } from '@/components/PositionLifecycleTimeline'
+import { SessionBalancesPanel } from '@/components/SessionBalancesPanel'
 import {
   getPosition,
   getPositionAgentChatUi,
@@ -1178,7 +1179,9 @@ export default function PositionDetail() {
           {(lastRebalanceIncomplete || lastRebalanceSession) && (
             <Card>
               <CardHeader>
-                <CardTitle>{locale === 'pl' ? 'Diagnostyka ostatniego rebalance' : 'Last rebalance diagnostics'}</CardTitle>
+                <CardTitle>
+                  {locale === 'pl' ? 'Ostatni rebalance — sesja i kapitał' : 'Last rebalance — session & capital'}
+                </CardTitle>
               </CardHeader>
               <CardContent className="text-sm space-y-2">
                 {lastRebalanceIncomplete ? (
@@ -1208,28 +1211,39 @@ export default function PositionDetail() {
                 ) : null}
 
                 {!lastRebalanceIncomplete && lastRebalanceSession ? (
-                  <div className="rounded-md border border-border bg-muted/10 px-3 py-2">
-                    <div className="font-medium">{locale === 'pl' ? 'Najnowsza sesja tx (z lifecycle ledger)' : 'Latest tx session (from lifecycle ledger)'}</div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      session:{' '}
-                      <span className="font-mono">
-                        {lastRebalanceSession.session === '_no_session'
+                  <div className="space-y-3">
+                    <div className="rounded-md border border-border bg-muted/10 px-3 py-2">
+                      <div className="font-medium">
+                        {locale === 'pl' ? 'Sesja rebalance (ID z lifecycle)' : 'Rebalance session (ID from lifecycle)'}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        session:{' '}
+                        <span className="font-mono">
+                          {lastRebalanceSession.session === '_no_session'
+                            ? locale === 'pl'
+                              ? '(brak rebalance_session_id)'
+                              : '(no rebalance_session_id)'
+                            : String(lastRebalanceSession.session)}
+                        </span>
+                        {lastRebalanceSession.hasClose && !lastRebalanceSession.hasOpen
                           ? locale === 'pl'
-                            ? '(brak rebalance_session_id)'
-                            : '(no rebalance_session_id)'
-                          : String(lastRebalanceSession.session)}
-                      </span>
-                      {lastRebalanceSession.hasClose && !lastRebalanceSession.hasOpen
-                        ? locale === 'pl'
-                          ? ' · close bez open (prawdopodobnie niepełne)'
-                          : ' · close without open (likely incomplete)'
-                        : ''}
+                            ? ' · close bez open (prawdopodobnie niepełne)'
+                            : ' · close without open (likely incomplete)'
+                          : ''}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {t('positionDetail.openLedgerTabHintBefore')}
+                        <strong>{t('positionDetail.tabLedger')}</strong>
+                        {t('positionDetail.openLedgerTabHintAfter')}
+                      </div>
                     </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {t('positionDetail.openLedgerTabHintBefore')}
-                      <strong>{t('positionDetail.tabLedger')}</strong>
-                      {t('positionDetail.openLedgerTabHintAfter')}
-                    </div>
+                    {lastRebalanceSession.session !== '_no_session' ? (
+                      <SessionBalancesPanel
+                        embedded
+                        sessionId={String(lastRebalanceSession.session)}
+                        className="rounded-md border border-dashed border-border px-3 py-2"
+                      />
+                    ) : null}
                   </div>
                 ) : null}
 

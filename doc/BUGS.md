@@ -28,6 +28,106 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260521-03 — Bulk send-first close: 6018 po confirm mimo „wysłane”
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-21  
+fixed_in: local  
+keywords: close-all, send-first, 6018, slippage, bulk-close, TokenMinSubceeded
+
+- **Symptom:** Batch `1/2 potwierdzone · 1 błąd` — pozycja z sygnaturą tx, błąd `close confirm: … Custom(6018)`; pozycja nadal otwarta on-chain.
+- **Root cause:** Send-first traktował broadcast jako sukces (bez symulacji); domyślne **100 bps** close slippage + brak retry w ścieżce bulk; 6018 ujawniał się dopiero w `finalize_bulk_close_after_confirm`.
+- **Fix:** Bulk default **200 bps** (`options.slippage_bps`, UI); poll po submit + jeden retry przy 6018 (≥500 bps); finalize też jeden retry submit; hint UI „pozycja nadal otwarta”.
+- **Guards/tests:** `position_close_ops::tests` (`resolve_bulk_close_slippage`, `bump_close_slippage_for_6018_retry`, `is_close_slippage_6018`).
+- **Paths:** `position_close_ops.rs`, `position_close_all.rs`, `position_service.rs`, `rebalance.rs`, `Positions.tsx`
+
+### BUG-20260521-02 — Close-all preview: pełny skan monitora przy 2 zaznaczonych PDA
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-21  
+fixed_in: local  
+keywords: close-all-preview, explicit-scope, collect_monitored, positions-ui, slow-load, PERF-PR1
+
+- **Symptom:** Po dodaniu zamknięcia zbiorczego panel confirm / lista pozycji wydają się bardzo wolne; preview close-all timeout do 60 s.
+- **Root cause:** `resolve_close_all_addresses` zawsze wołało `collect_monitored_position_addresses` (ten sam koszt RPC co `GET /positions`) nawet przy `scope=explicit` i kilku adresach.
+- **Fix:** `explicit` → tylko `req.addresses`; debounce preview 300 ms; mniej refetch strategii; batch poll 8 s + visibility pause.
+- **Guards/tests:** `explicit_scope_uses_request_addresses_without_monitored_union` (`cargo test -p clmm-lp-api position_close_all::tests`).
+- **Paths:** `crates/api/src/services/position_close_all.rs`, `web/src/pages/Positions.tsx`
+
+---
+
+### BUG-20260521-01 — Close-all banner: „2 w toku” bez widocznego postępu
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-21  
+fixed_in: local  
+keywords: close-all, bulk-close, positions-ui, pending, slow-rpc, batch-polling, UX
+
+- **Symptom:** Po starcie zamknięcia wybranych pozycji banner pokazuje `0/2 zamknięte · 2 w toku` przez długi czas; operator ma wrażenie, że „nic się nie dzieje”.
+- **Root cause:** Worker zamyka **sekwencyjnie** z synchronicznym `send+confirm` (collect fees + close ≈ 2× do 90 s na tx). Status batcha (`items[]`) aktualizuje się dopiero po **zakończeniu** danej pozycji; UI pokazywało tylko agregat summary, bez listy pozycji, czasu trwania ani komunikatu o wolnym RPC. Po restarcie API batch w pamięci znika → polling 404 bez jawnego komunikatu.
+- **Fix:** Banner: lista `items` ze statusem per PDA, elapsed timer, hint o 2–5 min/pozycję; błąd gdy batch not found. Log `close-all: closing position` w workerze.
+- **Guards/tests:** Ręcznie: 2 pozycje → widać `on-chain (collect + close)…` i rosnący elapsed; po zakończeniu `zamknięte` / błąd z `error`.
+- **Paths:** `web/src/pages/Positions.tsx`, `web/src/lib/i18n.tsx`, `crates/api/src/services/position_close_all.rs`
+
+---
+
+### BUG-20260520-03 — Backfill SESSION GL: `wartość zbyt długa dla typu znakowego zmiennego (64)`
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-20  
+fixed_in: local  
+keywords: wallet_gl_posting, session-balances, backfill, event_id, VARCHAR(64), lifecycle, signature, migrate 012
+
+- **Symptom:** `POST /wallets/session-balances/backfill` → `Internal error: session backfill failed: … wartość zbyt długa dla typu znakowego zmiennego (64)` przy „Zapisz lifecycle do księgi GL”.
+- **Root cause:** `wallet_gl_posting.event_id` i `wallet_gl_balance.last_event_id` były `VARCHAR(64)`; idempotentny klucz to `lifecycle:{signature}` (~98 znaków dla base58 Solana).
+- **Fix:** Migracja `012_wallet_gl_event_id_widen.sql` → `VARCHAR(128)`; test długości `lifecycle_posting_event_id_fits_wallet_gl_column`.
+- **Guards/tests:** `cargo test -p clmm-lp-data lifecycle_posting_event_id_fits_wallet_gl_column`; po restarcie API (migrate) ponowić backfill.
+- **Paths:** `crates/data/migrations/012_wallet_gl_event_id_widen.sql`, `crates/data/src/repositories/database.rs`
+
+---
+
+### BUG-20260520-02 — Kapitał sesji: ~$97 „przed open” przy portfelu &lt; $80 (SOL raw zaksięgowany jako USDC)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-20  
+fixed_in: local  
+keywords: wallet_session, session-balances, pre_open_value_usd, close_amount_a_raw, token_mint_a, pool_address, fee_payer_token_deltas, 5hb7waSR, 72a3fbc5, SESSION GL, phantom USDC
+
+- **Symptom:** Panel „Kapitał sesji rebalance” pokazywał „Sesja tuż przed open” ~$97 i Δ ~−$8 vs portfel on-chain ~$35–40 (kilka USDC + ~0.3 SOL + LP ~$8). Wcześniejsza analiza AI uznała liczby za spójne — bez weryfikacji RPC.
+- **Root cause:** Wiersz `bot_close_position` bez `details.token_mint_a/b`; `pool_mints_from_lifecycle` brał kolejność kluczy z `fee_payer_token_deltas` (USDC pierwszy) i księgował `close_amount_a_raw` (lamports SOL, np. 94 165 873) na mint USDC → ~94 USDC fantom + swap ≈ $97. Open/close w executorze nie zapisywały mintów puli w `details`.
+- **Fix:** `wallet_session`: mapa curated `pool_address` → minty; **brak** fallbacku z `fee_payer_token_deltas` dla close/open/collect principal; `metrics_trusted` + `mint_resolution` w API; ostrzeżenie w `SessionBalancesPanel`. `enrich_open_close_ledger_details` dopisuje `token_mint_a/b` z odczytu puli (open i close).
+- **Guards/tests:** `close_without_details_mints_uses_pool_address_not_fee_payer_deltas` (`cargo test -p clmm-lp-data wallet_session`); regresja: porównać `GET /wallets/session-balances?session_id=72a3fbc5-…` z `effective-balances` — pre_open USD &lt; ~20 dla tego close.
+- **Paths:** `crates/data/src/wallet_session.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/models.rs`, `crates/api/src/services/wallet_gl_posting.rs`, `web/src/components/SessionBalancesPanel.tsx`
+
+---
+
+### BUG-20260520-01 — Stream-lineage totals: zły HODL/cashflow/PnL po operator_api open (~$10 → HODL ~$4.86)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-20  
+fixed_in: local  
+keywords: stream-lineage, wartość start, hodl_value_usd, realized_cashflow_usd, net_pnl_usd, operator_api, open_quote_estimated_value_usd, baseline_open, fee_payer_token_deltas, position_stream_pnl, 7UhNx5sqobK6Cefc9bhLNzpas5wJyRCH1iMBhHJt2TGu
+
+- **Symptom:** Dla PDA otwartego z experiment/operator API (~$10 SOL/USDC) kolumna węzła **wartość start** ≈ $10 była OK, ale sumy stream-lineage: `hodl_value_usd` ≈ $4.86 (tylko USDC), `realized_cashflow_usd` ≈ −$4.86, `net_pnl_usd` ≈ −$4.86, `current_value_usd` utknął na baseline.
+- **Root cause:** (1) Brak `open_quote_estimated_value_usd` / `open_target_usd` w lifecycle operator open. (2) Baseline snapshot z samych `fee_payer_token_deltas` pomijał nogę SOL. (3) `stream_pnl` cashflow sumował delty open/close jako realized cashflow. (4) Totals liczone przed persist snapshotów; brak live `current` gdy jedyny wiersz to `baseline_open`.
+- **Fix:** `enrich_open_close_ledger_details` zapisuje quote USD z on-chain `open_amount_*_raw`; baseline preferuje `open_amount_raw` / quote caps; cashflow pomija open/close principal; lineage await persist przed totals + self-seed `live_current`; **totals liczone po węzłach** z `reconcile_stream_pnl_totals_with_nodes` gdy HODL/current z DB odbiegają od wierszy tabeli.
+- **Guards/tests:** `cashflow_skips_open_and_close_principal_events`, `current_snapshot_stale_when_baseline_open_or_same_ts` (`cargo test -p clmm-lp-api position_stream_pnl`); `baseline_open_prefers_open_amount_raw_over_fee_payer_deltas`, `reconcile_stream_pnl_totals_with_nodes_repairs_degraded_hodl_and_stale_current` (`stream_lineage`); `insert_open_quote_usd_fields_from_onchain_amounts` (`cargo test -p clmm-lp-execution insert_open_quote`).
+- **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+---
+
 ### BUG-20260514-06 — Logs/rebalances: „Fees zebrane” bez nogi SOL (tylko USDC / brak rozbicia) przy długim łańcuchu
 
 status: fixed  

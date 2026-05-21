@@ -9,6 +9,8 @@
 
 To **nie zastępuje** ledgera kosztów (`orca_position_lifecycle.jsonl`) ani IL/fee JSONL — uzupełnia je o **stan życia pozycji** pod automatyzację.
 
+**Powiązane:** masowe zamknięcie z UI (owner per pozycja, batch job) — [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md).
+
 ## Plik i zmienne
 
 | | |

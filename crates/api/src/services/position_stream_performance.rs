@@ -5,6 +5,7 @@
 
 use crate::models::PositionStreamPerformanceResponse;
 use crate::services::price_fetch::fetch_mint_prices_usd;
+use crate::services::wallet_gl_posting;
 use crate::state::AppState;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -218,9 +219,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .bind(token_deltas)
             .bind(lp_a)
             .bind(lp_b)
-            .bind(v)
+            .bind(&v)
             .execute(db.pool())
             .await?;
+            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, lp_a, lp_b)
+                .await;
         } else if schema_caps.has_fee_payer_token_deltas {
             sqlx::query(
                 r#"
@@ -254,9 +257,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .bind(fee_a)
             .bind(fee_b)
             .bind(token_deltas)
-            .bind(v)
+            .bind(&v)
             .execute(db.pool())
             .await?;
+            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None)
+                .await;
         } else {
             sqlx::query(
                 r#"
@@ -288,9 +293,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .bind(tx_fee_lamports)
             .bind(fee_a)
             .bind(fee_b)
-            .bind(v)
+            .bind(&v)
             .execute(db.pool())
             .await?;
+            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None)
+                .await;
         }
     }
     Ok(())

@@ -33,6 +33,17 @@ tags: domain=wallet; source=postgres; freshness=static(curated); quality=authori
 - **Tag:** `wallet_gl`, `wallet_ledger`, `journal`, `postgres`
 - Append-only journal rows (dual-write z `data/wallet-ledger-events.jsonl`). Migracja `010_wallet_gl_journal_events.sql`. Odczyt: `GET /api/v1/wallets/ledger-events` (`storage`: `postgres` | `jsonl` | `jsonl_fallback`).
 
+### `wallet_gl_account` / `wallet_gl_balance` / `wallet_gl_posting` (Postgres)
+
+- **Tag:** `wallet_gl`, `SESSION`, `shadow`, `postgres`
+- Logical GL sub-ledger per `SESSION:{session_id}` (mint dimension in `wallet_gl_balance`). Migracja `011_wallet_gl_session_accounts.sql`. Posting: best-effort on each `confirmed` journal row with `cost_session_id` + `deltas[]` (`CLMM_WALLET_GL_SESSION_POSTING`, default on). **Retention:** session accounts are **not** closed or liquidated after manual close — balances kept for analytics.
+- Odczyt: `GET /api/v1/wallets/session-balances?session_id=&owner=` (`source=gl_session_shadow` lub `gl_session_shadow_pslr_fallback`; `CLMM_WALLET_GL_SESSION_READ`).
+- Backfill: `POST /api/v1/wallets/session-balances/backfill?session_id=&limit=` — replay PSLR → GL (idempotent).
+- Reconcile: `POST /api/v1/wallets/reconcile-session-gl?session_id=` — GL vs PSLR vs ostatni close (`CLMM_WALLET_GL_SESSION_RECONCILE`).
+- Executor reopen (5a): `CLMM_REOPEN_USE_SESSION_CAPITAL=1` (default **off**) — kapsy `min(RPC, SESSION)`; `CLMM_REOPEN_SESSION_STRICT_EMPTY` (default on); `CLMM_REOPEN_SESSION_REQUIRE_RECONCILE` (default off). Rollout: [`WALLET_GL.md` §6](WALLET_GL.md#6-rollout-operatora--session-gl--reopen-5a).
+- GL SESSION env: `CLMM_WALLET_GL_SESSION_POSTING`, `CLMM_WALLET_GL_SESSION_LIFECYCLE_POSTING`, `CLMM_WALLET_GL_SESSION_READ`, `CLMM_WALLET_GL_SESSION_RECONCILE` (domyślnie read/posting on, reconcile on dla endpointu).
+- UI: `SessionBalancesPanel`, `PositionCreate` preflight (`cost_session_id`) — nie zastępują `effective-balances` (§5 spec).
+
 ### `wallet_gl_curated_pool` (Postgres)
 
 tags: domain=wallet; source=postgres; freshness=static(curated); quality=authoritative(config); cost=free

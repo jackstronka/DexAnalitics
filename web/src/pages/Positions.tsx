@@ -1,23 +1,34 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, RefreshCw } from 'lucide-react'
+import { Plus, RefreshCw, FlaskConical, XCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
 import ApiDataHint from '@/components/ApiDataHint'
 import {
-  getPositionAgentChatUi,
   getOrcaPositionsByOwner,
-  getPositionDiagnostics,
   getPositions,
-  getPositionStreamPnL,
+  getPositionsFast,
+  postPositionsListExtras,
+  postCloseAllPositions,
+  postCloseAllPositionsPreview,
+  getCloseAllBatchStatus,
   reconcileStalePositions,
   getStrategies,
   getStrandedRebalances,
   dismissStrandedRebalance,
 } from '@/lib/api'
-import type { Position, PositionStrategyDiagnostics, Strategy } from '@/lib/api'
+import type {
+  CloseAllBatchStatusResponse,
+  CloseAllItemStatus,
+  CloseAllPositionsPreviewResponse,
+  CloseAllPositionsStartResponse,
+  Position,
+  PositionListExtrasEntry,
+  PositionStrategyDiagnostics,
+  Strategy,
+} from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import {
   formatUSD,
@@ -28,8 +39,10 @@ import {
   formatInvertedTokenPriceRange,
 } from '@/lib/utils'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
+import { SessionBalancesPanel } from '@/components/SessionBalancesPanel'
 import { useI18n } from '@/lib/i18n'
 import { getMetricsMode } from '@/lib/metricsMode'
+import { useThrottledPositionStreamPnl } from '@/hooks/useThrottledPositionStreamPnl'
 import {
   feeSourceLabel,
   formatUncollectedFeesCell,
@@ -90,6 +103,47 @@ function strategyParamsSummary(s: Strategy, locale: 'pl' | 'en') {
   return bits.length ? bits.join(' · ') : locale === 'pl' ? 'brak jawnych przełączników' : 'no explicit toggles'
 }
 
+function isCloseAll6018Error(err: string | null | undefined): boolean {
+  if (!err) return false
+  const s = err.toLowerCase()
+  return s.includes('6018') || s.includes('tokenminsubceeded') || s.includes('0x1782')
+}
+
+function closeAllItemStatusLabel(
+  status: CloseAllItemStatus,
+  t: (key: string) => string,
+): string {
+  switch (status) {
+    case 'queued':
+      return t('positions.closeAllItemQueued')
+    case 'submitted':
+      return t('positions.closeAllItemSubmitted')
+    case 'pending_on_chain':
+      return t('positions.closeAllItemPending')
+    case 'confirmed':
+      return t('positions.closeAllItemConfirmed')
+    case 'failed':
+      return t('positions.closeAllItemFailed')
+    case 'skipped_unmanaged_signer':
+      return t('positions.closeAllItemSkipped')
+    case 'already_closed':
+      return t('positions.closeAllItemAlreadyClosed')
+    default:
+      return status
+  }
+}
+
+function formatElapsedSinceStart(startedIso: string | undefined): string | null {
+  if (!startedIso) return null
+  const start = Date.parse(startedIso)
+  if (!Number.isFinite(start)) return null
+  const sec = Math.max(0, Math.floor((Date.now() - start) / 1000))
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  const r = sec % 60
+  return r > 0 ? `${m}m ${r}s` : `${m}m`
+}
+
 function parseNum(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v
   if (typeof v === 'string') {
@@ -132,20 +186,60 @@ export default function Positions() {
   const [ownerInput, setOwnerInput] = useState(() => devPk ?? '')
   const [appliedOwner, setAppliedOwner] = useState(() => devPk ?? '')
   const [reconcileMessage, setReconcileMessage] = useState<string | null>(null)
+  const [selectedForClose, setSelectedForClose] = useState<Set<string>>(() => new Set())
+  const [showCloseAllConfirm, setShowCloseAllConfirm] = useState(false)
+  const [closeAllBatchId, setCloseAllBatchId] = useState<string | null>(null)
+  const [closeAllStart, setCloseAllStart] = useState<CloseAllPositionsStartResponse | null>(null)
+  const [closeAllBannerDismissed, setCloseAllBannerDismissed] = useState(false)
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === 'undefined' || document.visibilityState === 'visible',
+  )
+  const [debouncedPreviewAddresses, setDebouncedPreviewAddresses] = useState<string[]>([])
   const metricsMode = getMetricsMode()
 
-  const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ['positions'],
-    queryFn: getPositions,
+  useEffect(() => {
+    const onVisibility = () => setPageVisible(document.visibilityState === 'visible')
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
+  const positionsFastQ = useQuery({
+    queryKey: ['positions', 'fast'],
+    queryFn: getPositionsFast,
     staleTime: 20_000,
   })
+  const positionsValuedQ = useQuery({
+    queryKey: ['positions', 'valued'],
+    queryFn: getPositions,
+    enabled: !!positionsFastQ.data,
+    staleTime: 20_000,
+  })
+  const data = positionsValuedQ.data ?? positionsFastQ.data
+  const isLoading = positionsFastQ.isLoading && !positionsFastQ.data
+  const positionsEnriching =
+    !!positionsFastQ.data && (positionsValuedQ.isFetching || positionsValuedQ.isLoading)
+  const isError = positionsFastQ.isError || positionsValuedQ.isError
+  const error = positionsValuedQ.error ?? positionsFastQ.error
+  const refetchPositions = useCallback(() => {
+    void positionsFastQ.refetch()
+    void positionsValuedQ.refetch()
+  }, [positionsFastQ, positionsValuedQ])
+  const [visibleAddresses, setVisibleAddresses] = useState<Set<string>>(() => new Set())
+  const markRowVisible = useCallback((address: string) => {
+    const a = address.trim()
+    if (!a) return
+    setVisibleAddresses((prev) => {
+      if (prev.has(a)) return prev
+      const next = new Set(prev)
+      next.add(a)
+      return next
+    })
+  }, [])
   const strategiesQ = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
-    staleTime: 0,
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    refetchInterval: 15_000,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   const chainQ = useQuery({
@@ -163,45 +257,102 @@ export default function Positions() {
   })
 
   const positions = data?.positions || []
-  const positionStreamPnlQueries = useQueries({
-    queries: positions.map((position) => ({
-      queryKey: ['position-stream-pnl', position.address, metricsMode],
-      queryFn: () => getPositionStreamPnL(position.address, metricsMode),
-      staleTime: 30_000,
-      refetchOnMount: false,
-      refetchOnWindowFocus: false,
-      retry: 0,
-    })),
+  const positionAddressKey = useMemo(
+    () => positions.map((p) => p.address.trim()).join(','),
+    [positions],
+  )
+  const tbodyRef = useRef<HTMLTableSectionElement>(null)
+
+  useEffect(() => {
+    if (!positionAddressKey) {
+      setVisibleAddresses(new Set())
+      return
+    }
+    setVisibleAddresses((prev) => {
+      const next = new Set(prev)
+      for (const p of positions.slice(0, 5)) {
+        next.add(p.address.trim())
+      }
+      return next
+    })
+  }, [positionAddressKey, positions])
+
+  useEffect(() => {
+    const tbody = tbodyRef.current
+    if (!tbody || positions.length === 0) return
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue
+          const addr = (entry.target as HTMLElement).dataset.positionAddress?.trim()
+          if (addr) markRowVisible(addr)
+        }
+      },
+      { rootMargin: '120px', threshold: 0.05 },
+    )
+    tbody.querySelectorAll('tr[data-position-address]').forEach((row) => obs.observe(row))
+    return () => obs.disconnect()
+  }, [positionAddressKey, markRowVisible, positions.length])
+  const monitoredAddressSet = useMemo(
+    () => new Set(positions.map((p) => p.address.trim())),
+    [positions],
+  )
+  const selectedCloseAddresses = useMemo(
+    () => [...selectedForClose].filter((a) => monitoredAddressSet.has(a)),
+    [selectedForClose, monitoredAddressSet],
+  )
+  const selectedCloseCount = selectedCloseAddresses.length
+  const allPositionsSelectedForClose =
+    positions.length > 0 && selectedCloseCount === positions.length
+
+  useEffect(() => {
+    setSelectedForClose((prev) => {
+      const next = new Set([...prev].filter((a) => monitoredAddressSet.has(a)))
+      if (next.size === prev.size && [...next].every((a) => prev.has(a))) return prev
+      return next
+    })
+  }, [monitoredAddressSet])
+
+  const visibleAddressKey = useMemo(
+    () => [...visibleAddresses].sort().join(','),
+    [visibleAddresses],
+  )
+
+  const listExtrasQ = useQuery({
+    queryKey: ['positions-list-extras', visibleAddressKey],
+    queryFn: () => postPositionsListExtras([...visibleAddresses].sort()),
+    enabled: visibleAddresses.size > 0,
+    staleTime: 30_000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    retry: 0,
   })
-  const positionDiagnosticsQueries = useQueries({
-    queries: positions.map((position) => ({
-      queryKey: ['position-diagnostics', position.address],
-      queryFn: () => getPositionDiagnostics(position.address),
-      staleTime: 30_000,
-      refetchOnMount: false,
-      refetchOnWindowFocus: false,
-      retry: 0,
-    })),
-  })
-  const positionAgentUiQueries = useQueries({
-    queries: positions.map((position) => ({
-      queryKey: ['position-agent-ui', position.address],
-      queryFn: () => getPositionAgentChatUi(position.address),
-      staleTime: 15_000,
-      retry: 0,
-    })),
-  })
+
+  const listExtrasByAddress = useMemo(() => {
+    const map = new Map<string, PositionListExtrasEntry>()
+    for (const item of listExtrasQ.data?.items ?? []) {
+      map.set(item.address.trim(), item)
+    }
+    return map
+  }, [listExtrasQ.data])
+
   const diagnosticsLinkedByPosition = useMemo(() => {
     const map = new Map<string, PositionStrategyDiagnostics[]>()
-    positions.forEach((position, idx) => {
-      const linked = (positionDiagnosticsQueries[idx]?.data?.linked_strategies ?? []).filter(
+    for (const [addr, item] of listExtrasByAddress) {
+      const linked = (item.linked_strategies ?? []).filter(
         (s): s is PositionStrategyDiagnostics =>
           !!s && typeof s.strategy_id === 'string' && s.strategy_id.trim().length > 0,
       )
-      map.set(position.address.trim(), linked)
-    })
+      map.set(addr, linked)
+    }
     return map
-  }, [positions, positionDiagnosticsQueries])
+  }, [listExtrasByAddress])
+
+  const streamPnlByAddress = useThrottledPositionStreamPnl(
+    positions,
+    visibleAddresses,
+    metricsMode,
+  )
   const poolLabelByAddress = useMemo(() => {
     const m = new Map<string, string>()
     for (const p of positions) {
@@ -234,6 +385,13 @@ export default function Positions() {
       ),
     [strandedQ.data],
   )
+  const [strandedSessionPick, setStrandedSessionPick] = useState('')
+  const activeStrandedSession = useMemo(() => {
+    const pick = strandedSessionPick.trim()
+    if (pick) return pick
+    return pendingReopenItems[0]?.rebalance_session_id?.trim() ?? ''
+  }, [strandedSessionPick, pendingReopenItems])
+  const devWalletOwner = getDevWalletPubkey() ?? ''
   const dismissStrandedM = useMutation({
     mutationFn: (sessionId: string) => dismissStrandedRebalance(sessionId),
     onSuccess: () => {
@@ -244,7 +402,8 @@ export default function Positions() {
   const reconcileMutation = useMutation({
     mutationFn: reconcileStalePositions,
     onSuccess: (report) => {
-      queryClient.invalidateQueries({ queryKey: ['positions'] })
+      queryClient.invalidateQueries({ queryKey: ['positions', 'fast'] })
+      queryClient.invalidateQueries({ queryKey: ['positions', 'valued'] })
       setReconcileMessage(
         locale === 'pl'
           ? `Reconcile: sprawdzono ${report.checked}, zamknięto registry ${report.registry_closed.length}, usunięto linki strategii ${report.strategy_links_removed}, nadal on-chain ${report.still_on_chain}, błędy RPC ${report.rpc_errors}.`
@@ -253,6 +412,106 @@ export default function Positions() {
     },
     onError: (e: Error) => setReconcileMessage(e.message),
   })
+
+  useEffect(() => {
+    if (!showCloseAllConfirm || selectedCloseCount === 0) {
+      setDebouncedPreviewAddresses([])
+      return
+    }
+    const id = window.setTimeout(() => {
+      setDebouncedPreviewAddresses(selectedCloseAddresses)
+    }, 300)
+    return () => window.clearTimeout(id)
+  }, [showCloseAllConfirm, selectedCloseCount, selectedCloseAddresses])
+
+  const closeSelectedRequest = useMemo(
+    () =>
+      ({
+        scope: 'explicit' as const,
+        addresses: selectedCloseAddresses,
+        pause_linked_strategies: true,
+        options: { skip_pre_collect: true, send_mode: 'send_first', slippage_bps: 200 },
+      }) satisfies Parameters<typeof postCloseAllPositions>[0],
+    [selectedCloseAddresses],
+  )
+
+  const closePreviewRequest = useMemo(
+    () =>
+      ({
+        scope: 'explicit' as const,
+        addresses: debouncedPreviewAddresses,
+        pause_linked_strategies: true,
+        options: { skip_pre_collect: true, send_mode: 'send_first', slippage_bps: 200 },
+      }) satisfies Parameters<typeof postCloseAllPositions>[0],
+    [debouncedPreviewAddresses],
+  )
+
+  const closeAllMutation = useMutation({
+    mutationFn: () => postCloseAllPositions(closeSelectedRequest),
+    onSuccess: (resp) => {
+      setShowCloseAllConfirm(false)
+      setSelectedForClose(new Set())
+      setCloseAllBatchId(resp.batch_id)
+      setCloseAllStart(resp)
+      setCloseAllBannerDismissed(false)
+      queryClient.invalidateQueries({ queryKey: ['close-all-batch', resp.batch_id] })
+    },
+  })
+
+  const closeAllPreviewQ = useQuery({
+    queryKey: ['close-all-preview', debouncedPreviewAddresses.join(',')],
+    queryFn: () => postCloseAllPositionsPreview(closePreviewRequest),
+    enabled: showCloseAllConfirm && debouncedPreviewAddresses.length > 0,
+    staleTime: 30_000,
+    retry: 1,
+  })
+
+  const closeAllPreview: CloseAllPositionsPreviewResponse | undefined = closeAllPreviewQ.data
+  const closeAllPreviewBusy =
+    showCloseAllConfirm &&
+    selectedCloseCount > 0 &&
+    (debouncedPreviewAddresses.length !== selectedCloseCount ||
+      closeAllPreviewQ.isLoading ||
+      closeAllPreviewQ.isFetching)
+
+  const closeAllBatchQ = useQuery({
+    queryKey: ['close-all-batch', closeAllBatchId],
+    queryFn: () => getCloseAllBatchStatus(closeAllBatchId!),
+    enabled: !!closeAllBatchId,
+    refetchInterval: (q) => {
+      if (!pageVisible) return false
+      const status = q.state.data?.status
+      if (status === 'done' || status === 'failed') return false
+      return 8000
+    },
+  })
+
+  const closeAllBatch: CloseAllBatchStatusResponse | undefined = closeAllBatchQ.data
+  const closeAllRunning =
+    !!closeAllBatchId &&
+    !closeAllBatchQ.isError &&
+    closeAllBatchQ.data?.status !== 'done' &&
+    closeAllBatchQ.data?.status !== 'failed'
+
+  const [closeAllElapsedTick, setCloseAllElapsedTick] = useState(0)
+  useEffect(() => {
+    if (!closeAllRunning) return
+    const id = window.setInterval(() => setCloseAllElapsedTick((n) => n + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [closeAllRunning])
+
+  const closeAllElapsedLabel = useMemo(
+    () => formatElapsedSinceStart(closeAllBatch?.started_ts_utc),
+    [closeAllBatch?.started_ts_utc, closeAllElapsedTick],
+  )
+
+  const prevCloseAllDone = closeAllBatch?.status === 'done'
+  useEffect(() => {
+    if (prevCloseAllDone) {
+      queryClient.invalidateQueries({ queryKey: ['positions', 'fast'] })
+      queryClient.invalidateQueries({ queryKey: ['positions', 'valued'] })
+    }
+  }, [prevCloseAllDone, queryClient])
 
   const showReconcileCta =
     !!data?.meta &&
@@ -280,9 +539,24 @@ export default function Positions() {
               {locale === 'pl' ? 'Wyczyść martwe registry' : 'Reconcile stale registry'}
             </Button>
           ) : null}
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
+          <Button variant="outline" size="sm" onClick={() => refetchPositions()}>
             <RefreshCw className="h-4 w-4 mr-2" />
             {t('positions.refresh')}
+          </Button>
+          {selectedCloseCount > 0 ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={closeAllRunning || closeAllMutation.isPending || isLoading}
+              onClick={() => setShowCloseAllConfirm(true)}
+            >
+              <XCircle className="h-4 w-4 mr-2" />
+              {t('positions.closeSelectedCount').replace('{n}', String(selectedCloseCount))}
+            </Button>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={() => navigate('/experiments/new')}>
+            <FlaskConical className="h-4 w-4 mr-2" />
+            {t('positions.newExperiment')}
           </Button>
           <Button size="sm" onClick={() => navigate('/positions/new')}>
             <Plus className="h-4 w-4 mr-2" />
@@ -290,6 +564,241 @@ export default function Positions() {
           </Button>
         </div>
       </div>
+
+      {showCloseAllConfirm ? (
+        <Card className="border-destructive/40">
+          <CardHeader>
+            <CardTitle className="text-destructive">{t('positions.closeSelectedConfirmTitle')}</CardTitle>
+            <p className="text-sm text-muted-foreground font-normal">
+              {t('positions.closeSelectedConfirmBody').replace('{n}', String(selectedCloseCount))}
+            </p>
+            {closeAllPreviewBusy ? (
+              <p className="text-sm text-muted-foreground font-normal mt-2">
+                {t('positions.closeAllPreviewLoading')}
+              </p>
+            ) : null}
+            {closeAllPreviewQ.isError ? (
+              <p className="text-sm text-destructive font-normal mt-2">
+                {t('positions.closeAllPreviewError')}{' '}
+                {(closeAllPreviewQ.error as Error)?.message ?? ''}
+              </p>
+            ) : null}
+            {closeAllPreview ? (
+              <p className="text-sm font-medium mt-2">
+                {t('positions.closeAllClosableCount')
+                  .replace('{n}', String(closeAllPreview.closable))
+                  .replace('{total}', String(closeAllPreview.total))}
+              </p>
+            ) : null}
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {closeAllPreview && closeAllPreview.groups.length > 0 ? (
+              <div className="text-sm">
+                <div className="font-medium mb-1">{t('positions.closeAllGroups')}</div>
+                <ul className="list-disc pl-5 space-y-0.5 text-muted-foreground">
+                  {closeAllPreview.groups.map((g) => (
+                    <li key={`${g.wallet_id}-${g.owner_pubkey}`}>
+                      {g.wallet_id} · {g.count}{' '}
+                      {locale === 'pl' ? 'poz.' : 'pos.'} · {shortenAddress(g.owner_pubkey, 4)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {closeAllPreview && (closeAllPreview.skipped_preview?.length ?? 0) > 0 ? (
+              <div className="text-sm">
+                <div className="font-medium mb-1">{t('positions.closeAllSkipped')}</div>
+                <ul className="list-disc pl-5 space-y-0.5 text-muted-foreground">
+                  {closeAllPreview.skipped_preview!.map((s) => (
+                    <li key={s.address}>
+                      {shortenAddress(s.address, 4)}
+                      {s.owner_pubkey ? ` (${shortenAddress(s.owner_pubkey, 4)})` : ''} — {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {closeAllPreview && closeAllPreview.closable === 0 ? (
+              <p className="text-sm text-amber-600 dark:text-amber-400">
+                {t('positions.closeAllNoneClosable')}
+              </p>
+            ) : null}
+            {closeAllPreview && closeAllPreview.closable > 0 ? (
+              <p className="text-sm text-muted-foreground">{t('positions.closeAllBulkSlippageHint')}</p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="destructive"
+                disabled={
+                  closeAllMutation.isPending ||
+                  closeAllPreviewQ.isLoading ||
+                  closeAllPreviewQ.isFetching ||
+                  closeAllPreviewQ.isError ||
+                  debouncedPreviewAddresses.length !== selectedCloseCount ||
+                  !closeAllPreview ||
+                  closeAllPreview.closable === 0
+                }
+                onClick={() => closeAllMutation.mutate()}
+              >
+                {closeAllMutation.isPending
+                  ? t('positions.closeAllStarting')
+                  : t('positions.closeSelectedConfirmAction')}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={closeAllMutation.isPending}
+                onClick={() => setShowCloseAllConfirm(false)}
+              >
+                {t('positions.closeAllCancel')}
+              </Button>
+              {closeAllMutation.isError ? (
+                <p className="w-full text-sm text-destructive">
+                  {(closeAllMutation.error as Error).message}
+                </p>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {closeAllBatchId && !closeAllBannerDismissed ? (
+        <Card className="border-amber-500/40">
+          <CardHeader className="flex flex-row items-start justify-between gap-4">
+            <div>
+              <CardTitle>
+                {closeAllBatch?.status === 'done'
+                  ? t('positions.closeAllDone')
+                  : closeAllRunning
+                    ? t('positions.closeAllBackgroundTitle')
+                    : t('positions.closeAllProgress')}
+              </CardTitle>
+              <p className="text-sm text-muted-foreground font-normal mt-1">
+                batch {closeAllBatchId.slice(0, 8)}…
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => setCloseAllBannerDismissed(true)}>
+              {t('positions.closeAllDismiss')}
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {closeAllBatchQ.isError ? (
+              <ErrorBanner>
+                {t('positions.closeAllBatchNotFound')}{' '}
+                {(closeAllBatchQ.error as Error)?.message ?? ''}
+              </ErrorBanner>
+            ) : null}
+            {closeAllRunning ? (
+              <p className="text-muted-foreground">{t('positions.closeAllSendFirstHint')}</p>
+            ) : null}
+            {closeAllElapsedLabel && closeAllRunning ? (
+              <p className="text-muted-foreground">
+                {t('positions.closeAllElapsed').replace('{s}', closeAllElapsedLabel)}
+              </p>
+            ) : null}
+            {closeAllBatch?.summary ? (
+              <p>
+                {(() => {
+                  const submittedN =
+                    closeAllBatch.items?.filter((i) => i.status === 'submitted').length ?? 0
+                  return t('positions.closeAllSummarySendFirst')
+                    .replace('{confirmed}', String(closeAllBatch.summary.closed))
+                    .replace('{total}', String(closeAllBatch.summary.total))
+                    .replace('{submitted}', String(submittedN))
+                    .replace('{failed}', String(closeAllBatch.summary.failed))
+                    .replace('{pending}', String(closeAllBatch.summary.pending))
+                })()}
+              </p>
+            ) : closeAllStart ? (
+              <p>
+                {locale === 'pl'
+                  ? `Zakolejkowano ${closeAllStart.total} pozycji.`
+                  : `Queued ${closeAllStart.total} positions.`}
+              </p>
+            ) : null}
+            {(closeAllStart?.groups?.length ?? 0) > 0 ? (
+              <div>
+                <div className="font-medium mb-1">{t('positions.closeAllGroups')}</div>
+                <ul className="list-disc pl-5 space-y-0.5 text-muted-foreground">
+                  {(closeAllStart?.groups ?? []).map((g) => (
+                    <li key={`${g.wallet_id}-${g.owner_pubkey}`}>
+                      {g.wallet_id} · {g.count} · {shortenAddress(g.owner_pubkey, 4)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {(closeAllStart?.skipped_preview?.length ?? 0) > 0 ? (
+              <div>
+                <div className="font-medium mb-1">{t('positions.closeAllSkipped')}</div>
+                <ul className="list-disc pl-5 space-y-0.5 text-muted-foreground">
+                  {closeAllStart!.skipped_preview!.map((s) => (
+                    <li key={s.address}>
+                      {shortenAddress(s.address, 4)}
+                      {s.owner_pubkey ? ` (${shortenAddress(s.owner_pubkey, 4)})` : ''} — {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {(closeAllBatch?.items?.length ?? 0) > 0 ? (
+              <div>
+                <div className="font-medium mb-1">{t('positions.closeAllItemList')}</div>
+                <ul className="space-y-1.5">
+                  {closeAllBatch!.items.map((item) => (
+                    <li
+                      key={item.address}
+                      className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono text-xs"
+                    >
+                      <Link
+                        to={`/positions/${item.address}`}
+                        className="text-primary hover:underline"
+                      >
+                        {shortenAddress(item.address, 4)}
+                      </Link>
+                      <span
+                        className={
+                          item.status === 'confirmed' || item.status === 'already_closed'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : item.status === 'failed'
+                              ? 'text-destructive'
+                              : item.status === 'pending_on_chain'
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : item.status === 'submitted'
+                                ? 'text-sky-600 dark:text-sky-400'
+                              : 'text-muted-foreground'
+                        }
+                      >
+                        {closeAllItemStatusLabel(item.status, t)}
+                      </span>
+                      {item.signature ? (
+                        <a
+                          href={`https://solscan.io/tx/${item.signature}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-primary hover:underline font-sans"
+                        >
+                          {shortenAddress(item.signature, 4)}
+                        </a>
+                      ) : null}
+                      {item.error ? (
+                        <span className="text-destructive font-sans break-all">{item.error}</span>
+                      ) : null}
+                      {item.status === 'failed' && isCloseAll6018Error(item.error) ? (
+                        <span className="text-amber-700 dark:text-amber-400 font-sans w-full">
+                          {t('positions.closeAll6018FailedHint')}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {closeAllBatchQ.isFetching && closeAllRunning ? (
+              <p className="text-muted-foreground">{t('positions.loading')}</p>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -305,7 +814,7 @@ export default function Positions() {
             <ErrorBanner className="mb-4">
               {(error as Error).message}
               <div className="mt-2">
-                <Button type="button" variant="outline" size="sm" onClick={() => refetch()}>
+                <Button type="button" variant="outline" size="sm" onClick={() => refetchPositions()}>
                   {t('positions.refresh')}
                 </Button>
               </div>
@@ -323,6 +832,9 @@ export default function Positions() {
           ) : null}
           {reconcileMessage ? (
             <p className="text-xs text-muted-foreground mb-4">{reconcileMessage}</p>
+          ) : null}
+          {positionsEnriching ? (
+            <p className="text-xs text-muted-foreground mb-4">{t('positions.listEnriching')}</p>
           ) : null}
           {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">{t('positions.loading')}</div>
@@ -345,6 +857,27 @@ export default function Positions() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b text-left text-sm text-muted-foreground">
+                    <th className="pb-3 w-10 pr-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-input"
+                        checked={allPositionsSelectedForClose}
+                        aria-label={
+                          allPositionsSelectedForClose
+                            ? t('positions.closeDeselectAll')
+                            : t('positions.closeSelectAll')
+                        }
+                        onChange={() => {
+                          if (allPositionsSelectedForClose) {
+                            setSelectedForClose(new Set())
+                          } else {
+                            setSelectedForClose(
+                              new Set(positions.map((p) => p.address.trim())),
+                            )
+                          }
+                        }}
+                      />
+                    </th>
                     <th className="pb-3 font-medium">{locale === 'pl' ? 'Pozycja' : 'Position'}</th>
                     <th className="pb-3 font-medium">{locale === 'pl' ? 'Strategia' : 'Strategy'}</th>
                     <th className="pb-3 font-medium">{locale === 'pl' ? 'Agent' : 'Agent'}</th>
@@ -355,9 +888,32 @@ export default function Positions() {
                     <th className="pb-3 font-medium text-center">{locale === 'pl' ? 'Status' : 'Status'}</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {positions.map((position, idx) => (
-                    <tr key={position.address} className="border-b last:border-0">
+                <tbody ref={tbodyRef}>
+                  {positions.map((position) => {
+                    const addr = position.address.trim()
+                    const isSelectedForClose = selectedForClose.has(addr)
+                    return (
+                    <tr
+                      key={position.address}
+                      className="border-b last:border-0"
+                      data-position-address={addr}
+                    >
+                      <td className="py-4 w-10 pr-2 align-top">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded border-input mt-1"
+                          checked={isSelectedForClose}
+                          aria-label={t('positions.closeSelectRow')}
+                          onChange={() => {
+                            setSelectedForClose((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(addr)) next.delete(addr)
+                              else next.add(addr)
+                              return next
+                            })
+                          }}
+                        />
+                      </td>
                       <td className="py-4 max-w-[14rem]">
                         <Link
                           to={`/positions/${position.address}`}
@@ -380,8 +936,7 @@ export default function Positions() {
                         {(() => {
                           const backendLinked = diagnosticsLinkedByPosition.get(position.address.trim()) ?? []
                           const diagnosticsPending =
-                            positionDiagnosticsQueries[idx]?.isLoading ||
-                            positionDiagnosticsQueries[idx]?.isFetching
+                            listExtrasQ.isLoading || listExtrasQ.isFetching
                           if (diagnosticsPending) {
                             return <span className="text-xs text-muted-foreground">{t('positions.checking')}</span>
                           }
@@ -416,11 +971,11 @@ export default function Positions() {
                       </td>
                       <td className="py-4">
                         {(() => {
-                          const agentQ = positionAgentUiQueries[idx]
-                          if (agentQ?.isLoading || agentQ?.isFetching) {
+                          const extras = listExtrasByAddress.get(position.address.trim())
+                          if (listExtrasQ.isLoading || listExtrasQ.isFetching) {
                             return <span className="text-xs text-muted-foreground">{locale === 'pl' ? 'Sprawdzanie…' : 'Checking…'}</span>
                           }
-                          const session = agentQ?.data?.session
+                          const session = extras?.agent_session
                           if (!session) {
                             return (
                               <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground">
@@ -497,7 +1052,7 @@ export default function Positions() {
                       </td>
                       <td
                         className={`py-4 text-right ${(() => {
-                          const pnlQ = positionStreamPnlQueries[idx]
+                          const pnlQ = streamPnlByAddress.get(position.address.trim())
                           const streamPct = parseNum(pnlQ?.data?.net_pnl_pct)
                           const fallbackPct = parseNum(position.pnl.net_pnl_pct)
                           const pct = streamPct ?? fallbackPct ?? 0
@@ -505,7 +1060,7 @@ export default function Positions() {
                         })()}`}
                       >
                         {(() => {
-                          const pnlQ = positionStreamPnlQueries[idx]
+                          const pnlQ = streamPnlByAddress.get(position.address.trim())
                           const streamPct = parseNum(pnlQ?.data?.net_pnl_pct)
                           if (streamPct !== null) {
                             return (
@@ -570,7 +1125,8 @@ export default function Positions() {
                         </span>
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -595,6 +1151,30 @@ export default function Positions() {
           ) : pendingReopenItems.length === 0 ? (
             <div className="text-muted-foreground text-sm">{t('positions.pendingEmpty')}</div>
           ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="flex flex-col gap-1 text-sm min-w-[12rem]">
+                  <span className="text-muted-foreground">{t('positions.sessionCapitalTitle')}</span>
+                  <select
+                    className="flex h-9 rounded-md border border-input bg-background px-2 text-sm font-mono shadow-sm"
+                    value={activeStrandedSession}
+                    onChange={(e) => setStrandedSessionPick(e.target.value)}
+                  >
+                    {pendingReopenItems.map((it) => (
+                      <option key={it.rebalance_session_id} value={it.rebalance_session_id}>
+                        {shortenAddress(it.rebalance_session_id)}
+                        {it.old_position ? ` · ${shortenAddress(it.old_position)}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {activeStrandedSession ? (
+                <SessionBalancesPanel
+                  sessionId={activeStrandedSession}
+                  owner={devWalletOwner || undefined}
+                />
+              ) : null}
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
@@ -655,6 +1235,7 @@ export default function Positions() {
                   ))}
                 </tbody>
               </table>
+            </div>
             </div>
           )}
         </CardContent>

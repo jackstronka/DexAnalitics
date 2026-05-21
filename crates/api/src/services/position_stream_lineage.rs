@@ -961,7 +961,7 @@ fn closed_ts_for_snapshot_kind(
 
 /// Bot rows use `bot_open_*` / `bot_close_*`; CLI `orca-position-open/close` uses `position_open` / `position_close`.
 #[inline]
-fn is_lifecycle_open_event(ev: Option<&str>) -> bool {
+pub(crate) fn is_lifecycle_open_event(ev: Option<&str>) -> bool {
     matches!(
         ev,
         Some("bot_open_position") | Some("bot_open_position_full_range") | Some("position_open")
@@ -969,7 +969,7 @@ fn is_lifecycle_open_event(ev: Option<&str>) -> bool {
 }
 
 #[inline]
-fn is_lifecycle_close_event(ev: Option<&str>) -> bool {
+pub(crate) fn is_lifecycle_close_event(ev: Option<&str>) -> bool {
     matches!(ev, Some("bot_close_position") | Some("position_close"))
 }
 
@@ -5103,34 +5103,12 @@ pub async fn compute_position_stream_lineage_opts(
     let stitch_suppressed = suppress_jsonl_rotation_stitch(&rows, entry);
     let chain = resolve_lineage_chain_for_stream_pnl(state, &perf, entry).await;
 
-    totals = compute_position_stream_pnl_for_stream_members(
-        state,
-        entry,
-        perf.positions.clone(),
-        perf.sessions.clone(),
-        Some(chain.as_slice()),
-        false,
-        false,
-    )
-    .await
-    .ok();
-
+    // Persist open/close valuation snapshots before stream PnL totals so baseline baskets use
+    // `open_amount_*_raw` (not fee_payer deltas alone) and upsert can repair one-leg baselines.
     if state.db.is_some() && chain.len() <= 8 {
-        if opts.await_valuation_snapshot_persist {
-            persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await?;
-        } else {
-            let st_bg = state.clone();
-            let rows_bg = rows.clone();
-            let chain_bg = chain.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    persist_event_valuation_snapshots_for_positions(&st_bg, &rows_bg, &chain_bg)
-                        .await
-                {
-                    tracing::warn!(error = %e, "stream lineage: background snapshot persist failed");
-                }
-            });
-        }
+        persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await?;
+    } else if opts.await_valuation_snapshot_persist && state.db.is_some() {
+        persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await?;
     }
 
     let mut nodes: Vec<PositionStreamLineageNode> = if chain.len() > 8 {
@@ -5170,8 +5148,24 @@ pub async fn compute_position_stream_lineage_opts(
     let cps = fee_checkpoint_rows_cached_best_effort().await;
     attach_collect_zero_diagnostics(&rows, &cps, &mut nodes);
 
-    // If stream PnL has no valuation snapshots yet (common soon after enabling DB),
-    // provide a consistent totals row derived from lineage nodes.
+    // Refresh totals after nodes + snapshot persist (live current mark, repaired baseline basket).
+    if state.db.is_some() {
+        totals = compute_position_stream_pnl_for_stream_members(
+            state,
+            entry,
+            perf.positions.clone(),
+            perf.sessions.clone(),
+            Some(chain.as_slice()),
+            true,
+            false,
+        )
+        .await
+        .ok();
+        if let Some(t) = totals.as_mut() {
+            reconcile_stream_pnl_totals_with_nodes(t, &nodes);
+        }
+    }
+
     totals = maybe_compute_totals_from_nodes(
         entry,
         &totals,
@@ -5336,6 +5330,65 @@ fn apply_baseline_fallback_from_prev_end(nodes: &mut [PositionStreamLineageNode]
             }
         }
     }
+}
+
+/// When DB stream PnL totals disagree with per-node lineage marks (e.g. one-leg baseline snapshot
+/// before `open_amount_*_raw` enrichment), align headline totals with node rows best-effort.
+fn reconcile_stream_pnl_totals_with_nodes(
+    totals: &mut crate::models::PositionStreamPnLResponse,
+    nodes: &[PositionStreamLineageNode],
+) {
+    let (Some(first), Some(last)) = (nodes.first(), nodes.last()) else {
+        return;
+    };
+    let baseline = first.baseline_value_usd;
+    if baseline.is_zero() {
+        return;
+    }
+
+    let hodl_degraded = totals.hodl_value_usd < baseline * Decimal::new(8, 1);
+    let current_stale = totals.current_ts_utc.is_none()
+        || totals.current_ts_utc == totals.baseline_ts_utc
+        || totals.current_value_usd == totals.baseline_value_usd;
+
+    if !hodl_degraded && !current_stale {
+        return;
+    }
+
+    totals.baseline_value_usd = baseline;
+    totals.baseline_ts_utc = first.opened_ts_utc.clone();
+    totals.current_value_usd = last.current_value_usd;
+    totals.current_ts_utc = last
+        .closed_ts_utc
+        .clone()
+        .or_else(|| last.opened_ts_utc.clone());
+
+    if hodl_degraded {
+        totals.hodl_value_usd = baseline;
+        totals.il_usd = totals.current_value_usd - totals.hodl_value_usd;
+        totals.il_pct = if totals.hodl_value_usd.is_zero() {
+            Decimal::ZERO
+        } else {
+            totals.il_usd / totals.hodl_value_usd
+        };
+        totals.clean_il_usd = totals.il_usd;
+        totals.clean_il_pct = totals.il_pct;
+        totals.lp_vs_hodl_with_fees_usd = totals.il_usd + totals.lp_fees_total_usd;
+        totals.lp_vs_hodl_with_fees_pct = if totals.hodl_value_usd.is_zero() {
+            Decimal::ZERO
+        } else {
+            totals.lp_vs_hodl_with_fees_usd / totals.hodl_value_usd
+        };
+    }
+
+    totals.net_pnl_usd = totals.current_value_usd + totals.realized_cashflow_usd
+        - totals.baseline_value_usd
+        - totals.tx_fees_usd;
+    totals.net_pnl_pct = if totals.baseline_value_usd.is_zero() {
+        Decimal::ZERO
+    } else {
+        totals.net_pnl_usd / totals.baseline_value_usd
+    };
 }
 
 fn maybe_compute_totals_from_nodes(
@@ -5518,24 +5571,56 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
 
         // Baseline snapshot at open ts.
         if let Some(open) = open_by_pos.get(pos)
-            && let (Some(ts), Some(obj)) = (
-                open.ts_utc,
-                open.fee_payer_token_deltas
-                    .as_ref()
-                    .and_then(|v| v.as_object()),
-            )
+            && let Some(ts) = open.ts_utc
         {
-            let da = obj
-                .get(&mint_a)
-                .and_then(dec_from_any)
-                .unwrap_or(Decimal::ZERO);
-            let dbb = obj
-                .get(&mint_b)
-                .and_then(dec_from_any)
-                .unwrap_or(Decimal::ZERO);
-            // For opens, deltas are typically negative (spent). Convert to positive basket.
-            let amount_a_ui = (-da).max(Decimal::ZERO);
-            let amount_b_ui = (-dbb).max(Decimal::ZERO);
+            let details_obj = open.details.as_ref().and_then(|v| v.as_object());
+            let deltas_obj = open
+                .fee_payer_token_deltas
+                .as_ref()
+                .and_then(|v| v.as_object());
+
+            let mut mint_a_decimals: Option<u8> = None;
+            let mut mint_b_decimals: Option<u8> = None;
+            if details_obj.is_some_and(|d| {
+                (d.get("open_amount_a_raw")
+                    .and_then(parse_u64_from_json)
+                    .is_some()
+                    && d
+                        .get("open_amount_b_raw")
+                        .and_then(parse_u64_from_json)
+                        .is_some())
+                    || (d.get("open_quote_token_max_a")
+                        .and_then(parse_u64_from_json)
+                        .is_some()
+                        && d
+                            .get("open_quote_token_max_b")
+                            .and_then(parse_u64_from_json)
+                            .is_some())
+                    || (d.get("amount_a_cap")
+                        .and_then(parse_u64_from_json)
+                        .is_some()
+                        && d.get("amount_b_cap").and_then(parse_u64_from_json).is_some())
+            }) {
+                let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
+                let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
+                if let (Some(a_pk), Some(b_pk)) = (a_pk, b_pk) {
+                    mint_a_decimals =
+                        fetch_mint_decimals_best_effort(state.provider.as_ref(), &a_pk).await;
+                    mint_b_decimals =
+                        fetch_mint_decimals_best_effort(state.provider.as_ref(), &b_pk).await;
+                }
+            }
+
+            let (amount_a_ui, amount_b_ui, _baseline_amounts_source) =
+                baseline_open_amounts_ui_from_details_or_deltas(
+                    details_obj,
+                    deltas_obj,
+                    &mint_a,
+                    &mint_b,
+                    mint_a_decimals,
+                    mint_b_decimals,
+                );
+
             if !amount_a_ui.is_zero() || !amount_b_ui.is_zero() {
                 with_open += 1;
                 let value_usd = amount_a_ui * pa_d + amount_b_ui * pb_d;
@@ -6746,4 +6831,44 @@ mod tests {
     }
 
     // NOTE: legacy open-caps heuristics tests removed intentionally.
+
+    #[test]
+    fn reconcile_stream_pnl_totals_with_nodes_repairs_degraded_hodl_and_stale_current() {
+        use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
+
+        let mut totals = PositionStreamPnLResponse {
+            position_address: "PDA".to_string(),
+            baseline_ts_utc: Some("2026-05-20T20:49:54Z".to_string()),
+            current_ts_utc: Some("2026-05-20T20:49:54Z".to_string()),
+            baseline_value_usd: Decimal::from_str("10.004").unwrap(),
+            current_value_usd: Decimal::from_str("10.004").unwrap(),
+            hodl_value_usd: Decimal::from_str("4.859").unwrap(),
+            il_usd: Decimal::from_str("5.145").unwrap(),
+            il_pct: Decimal::ONE,
+            clean_il_usd: Decimal::from_str("5.145").unwrap(),
+            clean_il_pct: Decimal::ONE,
+            realized_lp_fees_usd: Decimal::ZERO,
+            uncollected_lp_fees_usd: Decimal::ZERO,
+            lp_fees_total_usd: Decimal::ZERO,
+            lp_vs_hodl_with_fees_usd: Decimal::from_str("5.145").unwrap(),
+            lp_vs_hodl_with_fees_pct: Decimal::ONE,
+            valuation_price_time_kind: "live_price".to_string(),
+            price_basis_note: None,
+            tx_fees_usd: Decimal::ZERO,
+            realized_cashflow_usd: Decimal::ZERO,
+            net_pnl_usd: Decimal::ZERO,
+            net_pnl_pct: Decimal::ZERO,
+            interpretation: StreamPnLInterpretation {
+                economic_net_pnl_caption_pl: String::new(),
+                il_vs_initial_hodl_caption_pl: String::new(),
+            },
+            note: None,
+        };
+        let mut node = mk_node("PDA", Decimal::from_str("10.004").unwrap(), Decimal::from_str("10.011").unwrap());
+        node.opened_ts_utc = Some("2026-05-20T20:49:54Z".to_string());
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.hodl_value_usd, Decimal::from_str("10.004").unwrap());
+        assert_eq!(totals.current_value_usd, Decimal::from_str("10.011").unwrap());
+        assert_eq!(totals.net_pnl_usd, Decimal::from_str("0.007").unwrap());
+    }
 }

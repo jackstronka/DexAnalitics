@@ -38,6 +38,9 @@ export function feeSourceLabel(
   if (valuationSource === 'list_light') {
     return locale === 'pl' ? 'lista API (szybka)' : 'API list (fast)'
   }
+  if (valuationSource === 'list_fast') {
+    return locale === 'pl' ? 'lista API (szybka, wstępna)' : 'API list (fast, initial)'
+  }
   if (valuationSource === 'fallback_monitor') {
     return locale === 'pl' ? 'fallback monitor' : 'fallback monitor'
   }

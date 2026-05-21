@@ -83,6 +83,9 @@ pub struct AppState {
     pub uncollected_fees_cache: Arc<RwLock<HashMap<String, CachedUncollectedFees>>>,
     /// PDAs recently confirmed absent on-chain (skip repeat RPC on list endpoints).
     pub position_absent_cache: Arc<RwLock<HashMap<String, Instant>>>,
+    /// Shared supplement fetch cache (`GET /positions` + close-all `collect_monitored`).
+    pub supplement_batch_cache:
+        Arc<RwLock<Option<crate::services::position_on_chain_cache::CachedSupplementBatch>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +198,7 @@ impl AppState {
             wallet_ws_refresh_failures_total: Arc::new(AtomicU64::new(0)),
             uncollected_fees_cache: Arc::new(RwLock::new(HashMap::new())),
             position_absent_cache: Arc::new(RwLock::new(HashMap::new())),
+            supplement_batch_cache: Arc::new(RwLock::new(None)),
         }
     }
 

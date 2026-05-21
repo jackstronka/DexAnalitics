@@ -32,6 +32,15 @@ fn create_base_http_router(state: AppState) -> Router {
         .route("/auth/phantom/verify", post(handlers::phantom_verify))
         // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
+        .route("/positions/close-all", post(handlers::post_close_all_positions))
+        .route(
+            "/positions/close-all/preview",
+            post(handlers::post_close_all_positions_preview),
+        )
+        .route(
+            "/positions/close-all/{batch_id}",
+            get(handlers::get_close_all_positions_batch),
+        )
         .route(
             "/positions/reconcile-stale",
             post(handlers::reconcile_stale_positions),
@@ -89,6 +98,10 @@ fn create_base_http_router(state: AppState) -> Router {
         .route(
             "/positions/{address}/stream-pnl",
             get(handlers::get_position_stream_pnl),
+        )
+        .route(
+            "/positions/list-extras",
+            post(handlers::post_positions_list_extras),
         )
         .route(
             "/positions/{address}/diagnostics",
@@ -262,6 +275,18 @@ fn create_base_http_router(state: AppState) -> Router {
         .route(
             "/wallets/ledger-events",
             get(handlers::get_wallet_ledger_events),
+        )
+        .route(
+            "/wallets/session-balances",
+            get(handlers::get_wallet_session_balances),
+        )
+        .route(
+            "/wallets/session-balances/backfill",
+            post(handlers::post_wallet_session_balances_backfill),
+        )
+        .route(
+            "/wallets/reconcile-session-gl",
+            post(handlers::post_wallet_reconcile_session_gl),
         )
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))

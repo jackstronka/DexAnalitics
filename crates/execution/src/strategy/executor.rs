@@ -647,6 +647,52 @@ impl StrategyExecutor {
         Ok(())
     }
 
+    /// Bulk close path: single tx, no separate pre-collect (faster; fees in close tx).
+    pub async fn execute_bulk_close_only(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &solana_sdk::pubkey::Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.rebalance_executor
+            .execute_bulk_close_only(position, pool, ledger_session_id, ledger_details)
+            .await
+    }
+
+    /// Bulk close send-first: returns after tx broadcast.
+    pub async fn execute_bulk_close_submit_only(
+        &self,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &solana_sdk::pubkey::Pubkey,
+        ledger_details: Option<serde_json::Value>,
+        slippage_bps: Option<u16>,
+    ) -> anyhow::Result<clmm_lp_protocols::orca::executor::ExecutionResult> {
+        self.rebalance_executor
+            .execute_bulk_close_submit_only(position, pool, ledger_details, slippage_bps)
+            .await
+    }
+
+    /// Finalize bulk close after background confirmation.
+    pub async fn finalize_bulk_close_after_confirm(
+        &self,
+        submitted: &clmm_lp_protocols::orca::executor::ExecutionResult,
+        position: &solana_sdk::pubkey::Pubkey,
+        pool: &solana_sdk::pubkey::Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.rebalance_executor
+            .finalize_bulk_close_after_confirm(
+                submitted,
+                position,
+                pool,
+                ledger_session_id,
+                ledger_details,
+            )
+            .await
+    }
+
     /// Starts the strategy execution loop.
     pub async fn start(&self) {
         self.running

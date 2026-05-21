@@ -42,6 +42,7 @@ To jest pod **orchestrację zewnętrzną** i przyszłe agregaty — same endpoin
 
 ## 4. Roadmap: „prawdziwsza” warstwa decyzyjna
 
+- **Rolling memory (pamięć operacyjna poza LLM, restart-safe):** [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md) — fazy O1 → M1 → M2 → M3; kontrakt `data/agent/memory/*`.
 - **Orkiestrator LP, shadow/symulacje równoległe, fazy analiza → wykonanie:** [`DECISION_LAYER.md`](DECISION_LAYER.md) — główny dokument wizji i kontraktu (nie mylić z samym Position Agentem).
 - **Plan produktowy** warstwy wykresu / wielu agentów / konsensusu: [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) (profil `agent_layer_profile`, reguły, ewaluacja).
 - **Event bus / miks async:** [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md).

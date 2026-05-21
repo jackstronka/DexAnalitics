@@ -222,6 +222,30 @@ pub struct PositionResponse {
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Request for batch list row extras (strategy link + agent session).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionsListExtrasRequest {
+    pub addresses: Vec<String>,
+}
+
+/// Per-position extras for the Positions table (replaces N× diagnostics + N× agent UI).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionListExtrasEntry {
+    pub address: String,
+    pub in_monitor: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_in_range: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_strategies: Vec<PositionStrategyDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<AgentPositionSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PositionsListExtrasResponse {
+    pub items: Vec<PositionListExtrasEntry>,
+}
+
 /// Diagnostics for "why didn't this position rebalance?" (best-effort, read-only).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PositionDiagnosticsResponse {
@@ -669,6 +693,9 @@ pub struct ListPositionsMeta {
     /// Skipped because `registry.jsonl` marks the PDA closed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped_registry_closed: u32,
+    /// Supplement rows served from shared batch cache (no RPC).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_supplement_cache: u32,
     /// Supplement RPC attempts that failed (non-cacheable errors included).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped_chain_error: u32,
@@ -699,6 +726,156 @@ pub struct StaleReconcileReportResponse {
     pub strategy_links_removed: u32,
     pub still_on_chain: u32,
     pub rpc_errors: u32,
+}
+
+fn default_bulk_skip_pre_collect() -> bool {
+    true
+}
+
+/// Max close slippage (min-out) for bulk close requests.
+pub const CLOSE_ALL_MAX_SLIPPAGE_BPS: u16 = 2000;
+
+/// Default bulk close slippage when the client omits `slippage_bps` (higher than single-close 100 bps).
+pub const CLOSE_ALL_DEFAULT_SLIPPAGE_BPS: u16 = 200;
+
+/// Options for bulk close (`POST /positions/close-all`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllPositionsOptions {
+    /// When true (default for bulk): one Orca close tx instead of separate collect + close.
+    #[serde(default = "default_bulk_skip_pre_collect")]
+    pub skip_pre_collect: bool,
+    #[serde(default = "default_send_mode")]
+    pub send_mode: String,
+    /// Min-out slippage for Orca close (basis points). Default **200** when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u16>,
+}
+
+impl Default for CloseAllPositionsOptions {
+    fn default() -> Self {
+        Self {
+            skip_pre_collect: default_bulk_skip_pre_collect(),
+            send_mode: default_send_mode(),
+            slippage_bps: None,
+        }
+    }
+}
+
+fn default_send_mode() -> String {
+    "confirm_sync".to_string()
+}
+
+/// Request body for `POST /positions/close-all`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllPositionsRequest {
+    #[serde(default = "default_close_all_scope")]
+    pub scope: String,
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub exclude_addresses: Vec<String>,
+    #[serde(default = "default_pause_linked_strategies")]
+    pub pause_linked_strategies: bool,
+    #[serde(default)]
+    pub options: CloseAllPositionsOptions,
+}
+
+fn default_close_all_scope() -> String {
+    "monitored".to_string()
+}
+
+fn default_pause_linked_strategies() -> bool {
+    true
+}
+
+/// Wallet group preview in close-all start response.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllWalletGroup {
+    pub wallet_id: String,
+    pub owner_pubkey: String,
+    pub count: u32,
+}
+
+/// Skipped position preview before batch starts.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllSkippedPreview {
+    pub address: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pubkey: Option<String>,
+}
+
+/// `202` response from `POST /positions/close-all`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllPositionsStartResponse {
+    pub batch_id: String,
+    pub status: String,
+    pub total: u32,
+    pub groups: Vec<CloseAllWalletGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_preview: Vec<CloseAllSkippedPreview>,
+}
+
+/// Preview before starting bulk close (`POST /positions/close-all/preview`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllPositionsPreviewResponse {
+    pub total: u32,
+    /// Positions that will receive on-chain close (have API wallet for owner).
+    pub closable: u32,
+    pub groups: Vec<CloseAllWalletGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_preview: Vec<CloseAllSkippedPreview>,
+}
+
+/// Per-item status in close-all batch polling.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseAllItemStatus {
+    Queued,
+    /// Tx broadcast; confirmation and registry finalize run in background.
+    Submitted,
+    PendingOnChain,
+    Confirmed,
+    Failed,
+    SkippedUnmanagedSigner,
+    AlreadyClosed,
+}
+
+/// One position row in close-all batch status.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllBatchItem {
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_signer_wallet_id: Option<String>,
+    pub status: CloseAllItemStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregate counters for close-all batch.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct CloseAllBatchSummary {
+    pub total: u32,
+    pub closed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub pending: u32,
+}
+
+/// Full batch status (`GET /positions/close-all/{batch_id}`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseAllBatchStatusResponse {
+    pub batch_id: String,
+    pub status: String,
+    pub started_ts_utc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ts_utc: Option<String>,
+    pub summary: CloseAllBatchSummary,
+    pub items: Vec<CloseAllBatchItem>,
 }
 
 /// List positions response.
@@ -3265,6 +3442,95 @@ pub struct WalletLedgerEventsResponse {
 
 fn default_wallet_ledger_storage() -> String {
     "jsonl".to_string()
+}
+
+/// One mint balance on a logical `SESSION:{session_id}` account (analytics shadow GL).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionBalanceRow {
+    pub mint: String,
+    pub amount_raw: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
+}
+
+/// Response for `GET /wallets/session-balances`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionBalancesResponse {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// `gl_session_shadow` until reconcile/product switch.
+    pub source: String,
+    pub balances: Vec<WalletSessionBalanceRow>,
+    /// Cycle-start reference from first open row in lifecycle (when Postgres + PSLR rows exist).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<WalletSessionMetrics>,
+}
+
+/// First **open** in session: deployed capital + pre-open session inventory (USD at event prices).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionOpenStartSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts_utc: Option<String>,
+    pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_pubkey: Option<String>,
+    pub event: String,
+    /// Positive raw amounts deployed into the LP at cycle start.
+    pub deployed_balances: Vec<WalletSessionBalanceRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_usd: Option<String>,
+    pub value_usd_source: String,
+    pub pre_open_balances: Vec<WalletSessionBalanceRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_open_value_usd: Option<String>,
+    /// `details` | `pool_address` | `incomplete` — pool leg mint resolution for open row.
+    pub mint_resolution: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionMetrics {
+    pub open_start: WalletSessionOpenStartSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_value_usd: Option<String>,
+    /// Current session USD minus pre-open USD (open event prices).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_vs_pre_open_usd: Option<String>,
+    /// False when lifecycle rows lack resolvable pool mints (legacy close rows); USD session metrics may be wrong.
+    pub metrics_trusted: bool,
+}
+
+/// Report for `POST /wallets/session-balances/backfill`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionGlBackfillReport {
+    pub sessions_processed: u32,
+    pub rows_scanned: u32,
+    pub postings_applied: u32,
+    pub rows_skipped_already: u32,
+    pub rows_skipped_no_deltas: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionGlReconcileGap {
+    pub mint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gl_amount_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pslr_amount_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_close_returned_raw: Option<String>,
+}
+
+/// Response for `POST /wallets/reconcile-session-gl`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionGlReconcileResponse {
+    pub session_id: String,
+    pub gl_balances: Vec<WalletSessionBalanceRow>,
+    pub pslr_balances: Vec<WalletSessionBalanceRow>,
+    pub last_close_returned: Vec<WalletSessionBalanceRow>,
+    pub gaps: Vec<WalletSessionGlReconcileGap>,
+    pub gl_matches_pslr: bool,
+    pub note: String,
 }
 
 #[cfg(test)]

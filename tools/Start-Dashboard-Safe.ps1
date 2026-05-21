@@ -132,7 +132,7 @@ $apiHealthUrl = "http://127.0.0.1:8081/api/v1/health"
 $maxWaitSec = 180
 $intervalSec = 2
 $deadline = (Get-Date).AddSeconds($maxWaitSec)
-Write-Host "[Start-Dashboard-Safe] Czekam na API (pierwszy build Rusta może trwać kilka minut): $apiHealthUrl" -ForegroundColor Cyan
+Write-Host "[Start-Dashboard-Safe] Czekam na API (build już w Start-ClmmApi-8081; typ. 30–60s do health): $apiHealthUrl" -ForegroundColor Cyan
 $apiUp = $false
 $elapsed = 0
 while ((Get-Date) -lt $deadline) {

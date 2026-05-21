@@ -7,11 +7,13 @@ use crate::models::{
     WalletBalanceConfidence, WalletBalancesResponse, WalletConvertOpResponse,
     WalletEffectiveBalancesResponse, WalletEntry, WalletLedgerDelta, WalletLedgerEventsResponse,
     WalletLedgerStatus, WalletOpsStatsResponse, WalletReconcileItem, WalletReconcileResponse,
+    WalletSessionBalancesResponse, WalletSessionGlBackfillReport, WalletSessionGlReconcileResponse,
     WalletReconciliationStatus, WalletReplicationStatus, WalletTokenBalance,
     WalletTransferLogEntry, WalletTransferRequest, WalletTransferResponse,
     WalletTransfersListResponse, WalletWsStatusResponse, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
+use crate::services::wallet_gl_posting;
 use crate::services::wallet_ledger;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
@@ -1267,6 +1269,147 @@ pub async fn get_wallet_ledger_events(
         storage: storage.to_string(),
         events,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletSessionBalancesQuery {
+    pub session_id: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// `GET /wallets/session-balances` — shadow GL balances for `SESSION:{session_id}` (analytics).
+///
+/// Session accounts are **never** closed or liquidated after manual close; balances accumulate
+/// for operator analysis.
+#[utoipa::path(
+    get,
+    path = "/wallets/session-balances",
+    tag = "Wallets",
+    params(
+        ("session_id" = String, Query, description = "rebalance_session_id / cost_session_id UUID"),
+        ("owner" = Option<String>, Query, description = "Optional owner pubkey filter")
+    ),
+    responses((status = 200, description = "SESSION mint balances", body = WalletSessionBalancesResponse))
+)]
+pub async fn get_wallet_session_balances(
+    State(state): State<AppState>,
+    Query(q): Query<WalletSessionBalancesQuery>,
+) -> ApiResult<Json<WalletSessionBalancesResponse>> {
+    let session_id = q.session_id.trim();
+    if session_id.is_empty() {
+        return Err(ApiError::bad_request("session_id is required"));
+    }
+    if !wallet_gl_posting::session_read_enabled() {
+        return Ok(Json(WalletSessionBalancesResponse {
+            session_id: session_id.to_string(),
+            owner: q.owner.clone(),
+            source: "gl_session_shadow_disabled".to_string(),
+            balances: vec![],
+            metrics: None,
+        }));
+    }
+    let Some(db) = state.db.as_ref() else {
+        return Ok(Json(WalletSessionBalancesResponse {
+            session_id: session_id.to_string(),
+            owner: q.owner.clone(),
+            source: "gl_session_shadow_no_db".to_string(),
+            balances: vec![],
+            metrics: None,
+        }));
+    };
+    let owner = q.owner.as_deref();
+    let (balances, source) =
+        wallet_gl_posting::read_session_balances_resolved(db, session_id, owner)
+            .await
+            .map_err(|e| ApiError::internal(format!("session balances read failed: {e}")))?;
+    let metrics = wallet_gl_posting::resolve_session_metrics(db, session_id, &balances)
+        .await
+        .map_err(|e| ApiError::internal(format!("session metrics read failed: {e}")))?;
+    Ok(Json(WalletSessionBalancesResponse {
+        session_id: session_id.to_string(),
+        owner: q.owner.clone(),
+        source,
+        balances,
+        metrics,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletSessionBackfillQuery {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `POST /wallets/session-balances/backfill` — replay PSLR rows into SESSION GL (idempotent).
+#[utoipa::path(
+    post,
+    path = "/wallets/session-balances/backfill",
+    tag = "Wallets",
+    params(
+        ("session_id" = Option<String>, Query, description = "One session UUID; omit to backfill up to `limit` distinct sessions"),
+        ("limit" = Option<usize>, Query, description = "Max sessions when session_id omitted (default 50, max 500)")
+    ),
+    responses((status = 200, description = "Backfill report", body = WalletSessionGlBackfillReport))
+)]
+pub async fn post_wallet_session_balances_backfill(
+    State(state): State<AppState>,
+    Query(q): Query<WalletSessionBackfillQuery>,
+) -> ApiResult<Json<WalletSessionGlBackfillReport>> {
+    let Some(db) = state.db.as_ref() else {
+        return Err(ApiError::internal("database not connected"));
+    };
+    let limit = q.limit.unwrap_or(50);
+    let report = wallet_gl_posting::backfill_session_postings_from_pslr(
+        db,
+        q.session_id.as_deref(),
+        limit,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("session backfill failed: {e}")))?;
+    Ok(Json(report))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletSessionReconcileQuery {
+    pub session_id: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// `POST /wallets/reconcile-session-gl` — compare GL SESSION vs PSLR aggregate vs last close row.
+#[utoipa::path(
+    post,
+    path = "/wallets/reconcile-session-gl",
+    tag = "Wallets",
+    params(
+        ("session_id" = String, Query, description = "rebalance_session_id / cost_session_id"),
+        ("owner" = Option<String>, Query, description = "Optional owner filter for GL read")
+    ),
+    responses((status = 200, description = "Reconcile report", body = WalletSessionGlReconcileResponse))
+)]
+pub async fn post_wallet_reconcile_session_gl(
+    State(state): State<AppState>,
+    Query(q): Query<WalletSessionReconcileQuery>,
+) -> ApiResult<Json<WalletSessionGlReconcileResponse>> {
+    if !wallet_gl_posting::session_reconcile_enabled() {
+        return Err(ApiError::bad_request(
+            "session reconcile disabled (CLMM_WALLET_GL_SESSION_RECONCILE=0)",
+        ));
+    }
+    let session_id = q.session_id.trim();
+    if session_id.is_empty() {
+        return Err(ApiError::bad_request("session_id is required"));
+    }
+    let Some(db) = state.db.as_ref() else {
+        return Err(ApiError::internal("database not connected"));
+    };
+    let resp = wallet_gl_posting::reconcile_session_gl(db, session_id, q.owner.as_deref())
+        .await
+        .map_err(|e| ApiError::internal(format!("session reconcile failed: {e}")))?;
+    Ok(Json(resp))
 }
 
 #[derive(Debug, Deserialize)]

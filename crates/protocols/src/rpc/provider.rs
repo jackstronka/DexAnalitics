@@ -257,6 +257,21 @@ impl RpcProvider {
         .await
     }
 
+    /// Largest token accounts holding `mint` (for NFT owner resolution).
+    pub async fn get_token_largest_accounts(
+        &self,
+        mint: &Pubkey,
+    ) -> Result<Vec<solana_client::rpc_response::RpcTokenAccountBalance>> {
+        let mint = *mint;
+        self.execute_with_retry(|client| async move {
+            client
+                .get_token_largest_accounts(&mint)
+                .await
+                .context("Failed to get token largest accounts")
+        })
+        .await
+    }
+
     /// Gets account data for a given address.
     pub async fn get_account(&self, address: &Pubkey) -> Result<Account> {
         let addr = *address;

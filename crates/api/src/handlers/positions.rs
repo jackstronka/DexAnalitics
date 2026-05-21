@@ -8,7 +8,8 @@ use crate::models::{
     ListPositionsMeta, ListPositionsResponse, MaterializeChainHistoryResponse, MessageResponse,
     StaleReconcileReportResponse,
     OpenPositionRequest,
-    PnLResponse, PositionDiagnosticsResponse, PositionExperimentConfigResponse,
+    PnLResponse, PositionDiagnosticsResponse, PositionExperimentConfigResponse, PositionListExtrasEntry,
+    PositionsListExtrasRequest, PositionsListExtrasResponse,
     PositionLastEvalSnapshot, PositionLifecycleEvent, PositionLifecycleSessionSummary,
     PositionLifecycleSummaryResponse, PositionOpenResponse, PositionResponse, PositionStatus,
     PositionStrategyDiagnostics, PositionStreamLineageResponse, PositionStreamPerformanceResponse,
@@ -28,6 +29,7 @@ use crate::services::position_stream_performance::compute_position_stream_perfor
 use crate::services::position_stream_pnl::{
     compute_position_stream_pnl, compute_position_stream_pnl_settlement_v1,
 };
+use crate::services::position_agent_service;
 use crate::services::strategy_service::{
     append_position_address_to_strategy, heal_rotated_strategy_link_best_effort,
     remove_position_address_from_all_strategies,
@@ -49,11 +51,15 @@ use tracing::{info, warn};
 
 use crate::position_registry_seed::{registry_open_position_pubkeys, registry_position_open_map};
 use crate::services::PositionService;
+use crate::services::position_close_ops::{execute_manual_close_with_wallet, ManualCloseLedgerContext};
+use crate::services::position_close_signer::resolve_close_signer_for_position;
 use crate::services::position_executor::resolve_executor_for_position_ops;
+use crate::services::position_wallet_store::load_api_wallet_by_id;
 use crate::services::position_valuation::{
-    compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
-    range_usdc_and_in_range_for_pool_ticks, refresh_position_fees_from_chain,
-    uncollected_fees_info_for_position, PositionUsdValuation,
+    compute_position_usd_valuation, enrich_pool_ticks_for_display, fetch_prices_for_positions,
+    monitored_position_from_chain, range_usdc_and_in_range_for_pool_ticks,
+    refresh_position_fees_from_chain, uncollected_fees_info_for_position, PoolTicksEnrichment,
+    PositionUsdValuation,
 };
 use crate::state::CachedUncollectedFees;
 use clmm_lp_execution::monitor::MonitoredPosition;
@@ -473,15 +479,33 @@ pub async fn get_position_experiment_config(
     }))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ListPositionsQuery {
-    /// When `true` (default), parallel live USD valuation (batched mint prices). `light=false` is sequential (same fields).
-    #[serde(default = "default_list_positions_light")]
-    light: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListPositionsLightMode {
+    /// Pool tick enrichment only — no per-position USD valuation (fastest).
+    Fast,
+    /// Parallel `compute_position_usd_valuation` (default).
+    Valuation,
+    /// Sequential full valuation (`light=0`).
+    Full,
 }
 
-fn default_list_positions_light() -> bool {
-    true
+#[derive(Debug, Deserialize)]
+pub struct ListPositionsQuery {
+    /// `fast` = tick/range enrichment only; `1`/`true` (default) = parallel valuation; `0`/`false` = sequential full.
+    #[serde(default = "default_list_positions_light_param")]
+    light: String,
+}
+
+fn default_list_positions_light_param() -> String {
+    "1".to_string()
+}
+
+fn parse_list_positions_light_mode(light: &str) -> ListPositionsLightMode {
+    match light.trim().to_ascii_lowercase().as_str() {
+        "fast" => ListPositionsLightMode::Fast,
+        "0" | "false" | "full" => ListPositionsLightMode::Full,
+        _ => ListPositionsLightMode::Valuation,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,6 +533,71 @@ fn clamp_closed_limit(n: usize) -> usize {
 }
 
 /// One row for `GET /positions` from monitor state + optional live USD valuation.
+fn monitored_position_list_row_from_enrichment(
+    p: &MonitoredPosition,
+    e: &PoolTicksEnrichment,
+    fees_cache: &HashMap<String, CachedUncollectedFees>,
+    valuation_source: &str,
+) -> PositionResponse {
+    let value_usd = p.pnl.current_value_usd;
+    let fees_usd = p.pnl.fees_usd;
+    let cached_uncollected = fees_cache.get(&p.address.to_string()).cloned();
+    let uncollected_fees = cached_uncollected.map(|c| {
+        UncollectedFeesInfo {
+            token_a_label: e.token_a_label.clone().unwrap_or_else(|| "A".to_string()),
+            token_b_label: e.token_b_label.clone().unwrap_or_else(|| "B".to_string()),
+            amount_a: c.amount_a,
+            amount_b: c.amount_b,
+        }
+    });
+    let (range_lower_price, range_upper_price, range_price_quote) = e
+        .range_price
+        .as_ref()
+        .map(|r| (Some(r.lower), Some(r.upper), Some(r.quote.clone())))
+        .unwrap_or((None, None, None));
+
+    PositionResponse {
+        address: p.address.to_string(),
+        pool_address: p.pool.to_string(),
+        owner: p.on_chain.owner.to_string(),
+        tick_lower: p.on_chain.tick_lower,
+        tick_upper: p.on_chain.tick_upper,
+        range_lower_usdc: e.range_usdc.as_ref().map(|r| r.lower),
+        range_upper_usdc: e.range_usdc.as_ref().map(|r| r.upper),
+        range_usdc_quote: e.range_usdc.as_ref().map(|r| r.quote.clone()),
+        range_lower_price,
+        range_upper_price,
+        range_price_quote,
+        token_a_label: e.token_a_label.clone(),
+        token_b_label: e.token_b_label.clone(),
+        token_mint_a: e.token_mint_a.clone(),
+        token_mint_b: e.token_mint_b.clone(),
+        token_price_a_usd: e.token_price_a_usd,
+        token_price_b_usd: e.token_price_b_usd,
+        uncollected_fees,
+        liquidity: p.on_chain.liquidity.to_string(),
+        in_range: e.in_range,
+        value_usd,
+        valuation_source: Some(valuation_source.to_string()),
+        pnl: PnLResponse {
+            unrealized_pnl_usd: p.pnl.net_pnl_usd,
+            unrealized_pnl_pct: p.pnl.net_pnl_pct,
+            fees_earned_a: p.pnl.fees_earned_a,
+            fees_earned_b: p.pnl.fees_earned_b,
+            fees_earned_usd: fees_usd,
+            il_pct: p.pnl.il_pct,
+            net_pnl_usd: p.pnl.net_pnl_usd,
+            net_pnl_pct: p.pnl.net_pnl_pct,
+        },
+        status: if e.in_range {
+            PositionStatus::Active
+        } else {
+            PositionStatus::OutOfRange
+        },
+        created_at: None,
+    }
+}
+
 async fn monitored_position_list_row(
     state: &AppState,
     p: &MonitoredPosition,
@@ -723,21 +812,67 @@ pub async fn list_positions(
         positions.push(p);
     }
 
+    let light_mode = parse_list_positions_light_mode(&q.light);
     let mut meta = ListPositionsMeta {
         skipped_absent_cached: fetch_stats.skipped_absent_cached,
         skipped_registry_closed: fetch_stats.skipped_registry_closed,
+        skipped_supplement_cache: fetch_stats.skipped_supplement_cache,
         skipped_chain_error: fetch_stats.chain_error,
         merged_from_registry,
         merged_from_strategies,
-        light: q.light,
+        light: light_mode != ListPositionsLightMode::Full,
     };
 
     let mut responses: Vec<PositionResponse> = Vec::with_capacity(positions.len());
 
-    let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
     let fees_cache = state.uncollected_fees_cache.read().await;
 
-    if q.light {
+    if light_mode == ListPositionsLightMode::Fast {
+        use futures::{stream, StreamExt};
+
+        let concurrency = std::env::var("CLMM_LIST_POSITIONS_FAST_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(6);
+        let provider = state.provider.clone();
+
+        let enrich_outcomes = stream::iter(positions.iter().cloned())
+            .map(|p| {
+                let provider = provider.clone();
+                async move {
+                    let addr = p.address;
+                    let enrich = enrich_pool_ticks_for_display(
+                        provider,
+                        &p.pool,
+                        p.on_chain.tick_lower,
+                        p.on_chain.tick_upper,
+                    )
+                    .await;
+                    (addr, enrich)
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+
+        let enrich_by_addr: HashMap<Pubkey, PoolTicksEnrichment> =
+            enrich_outcomes.into_iter().collect();
+        let default_enrich = PoolTicksEnrichment::default();
+
+        for p in &positions {
+            let enrich = enrich_by_addr
+                .get(&p.address)
+                .unwrap_or(&default_enrich);
+            responses.push(monitored_position_list_row_from_enrichment(
+                p,
+                enrich,
+                &fees_cache,
+                "list_fast",
+            ));
+        }
+    } else if light_mode == ListPositionsLightMode::Valuation {
+        let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
         use futures::{stream, StreamExt};
 
         let concurrency = std::env::var("CLMM_LIST_POSITIONS_LIGHT_CONCURRENCY")
@@ -801,6 +936,7 @@ pub async fn list_positions(
             );
         }
     } else {
+        let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
         for p in &positions {
             let valuation =
                 match compute_position_usd_valuation(state.provider.clone(), p, &prices).await {
@@ -1664,6 +1800,69 @@ pub async fn get_position(
     Ok(Json(response))
 }
 
+async fn strategy_diag_entry_for_link(
+    state: &AppState,
+    s: &crate::state::StrategyState, // strategy row from in-memory store
+    pubkey: &Pubkey,
+    address_trim: &str,
+) -> PositionStrategyDiagnostics {
+    let params = s.config.get("parameters");
+    let disabled = params
+        .and_then(|p| p.get("executor_disabled_position_addresses"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|v| v.as_str().map(str::trim) == Some(address_trim))
+        });
+    let strategy_type = s
+        .config
+        .get("strategy_type")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(crate::models::StrategyType::StaticRange);
+    let dry_run = s
+        .config
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let auto_execute = s
+        .config
+        .get("auto_execute")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let last_eval = if s.running {
+        let exec_opt = { state.executors.read().await.get(&s.id).cloned() };
+        if let Some(exec) = exec_opt {
+            let g = exec.read().await;
+            g.last_evaluation_for_position(pubkey)
+                .await
+                .map(|snap| PositionLastEvalSnapshot {
+                    ts_utc: snap.ts_utc,
+                    in_range: snap.in_range,
+                    pool_tick_current: snap.pool_tick_current,
+                    decision: snap.decision,
+                    requires_transaction: snap.requires_transaction,
+                    auto_execute: snap.auto_execute,
+                    hours_since_rebalance: snap.hours_since_rebalance,
+                    minutes_since_rebalance: snap.minutes_since_rebalance,
+                })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    PositionStrategyDiagnostics {
+        strategy_id: s.id.clone(),
+        name: s.name.clone(),
+        strategy_type,
+        running: s.running,
+        dry_run,
+        auto_execute,
+        automation_disabled_for_position: disabled,
+        last_eval,
+    }
+}
+
 async fn linked_strategies_for_position_diagnostics(
     state: &AppState,
     pubkey: &Pubkey,
@@ -1683,66 +1882,99 @@ async fn linked_strategies_for_position_diagnostics(
         if !is_linked {
             continue;
         }
-
-        let disabled = params
-            .and_then(|p| p.get("executor_disabled_position_addresses"))
-            .and_then(|v| v.as_array())
-            .is_some_and(|arr| {
-                arr.iter()
-                    .any(|v| v.as_str().map(str::trim) == Some(address_trim))
-            });
-
-        let strategy_type = s
-            .config
-            .get("strategy_type")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or(crate::models::StrategyType::StaticRange);
-        let dry_run = s
-            .config
-            .get("dry_run")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let auto_execute = s
-            .config
-            .get("auto_execute")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let last_eval = if s.running {
-            let exec_opt = { state.executors.read().await.get(&s.id).cloned() };
-            if let Some(exec) = exec_opt {
-                let g = exec.read().await;
-                g.last_evaluation_for_position(pubkey)
-                    .await
-                    .map(|snap| PositionLastEvalSnapshot {
-                        ts_utc: snap.ts_utc,
-                        in_range: snap.in_range,
-                        pool_tick_current: snap.pool_tick_current,
-                        decision: snap.decision,
-                        requires_transaction: snap.requires_transaction,
-                        auto_execute: snap.auto_execute,
-                        hours_since_rebalance: snap.hours_since_rebalance,
-                        minutes_since_rebalance: snap.minutes_since_rebalance,
-                    })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        linked.push(PositionStrategyDiagnostics {
-            strategy_id: s.id.clone(),
-            name: s.name.clone(),
-            strategy_type,
-            running: s.running,
-            dry_run,
-            auto_execute,
-            automation_disabled_for_position: disabled,
-            last_eval,
-        });
+        linked.push(strategy_diag_entry_for_link(state, s, pubkey, address_trim).await);
     }
     linked
+}
+
+async fn linked_strategies_batch(
+    state: &AppState,
+    addresses: &[String],
+) -> std::collections::HashMap<String, Vec<PositionStrategyDiagnostics>> {
+    use std::collections::HashMap;
+    let mut out: HashMap<String, Vec<PositionStrategyDiagnostics>> = addresses
+        .iter()
+        .map(|a| (a.trim().to_string(), Vec::new()))
+        .collect();
+    let mut pubkeys: HashMap<String, Pubkey> = HashMap::new();
+    for a in addresses {
+        let t = a.trim();
+        if let Ok(pk) = Pubkey::from_str(t) {
+            pubkeys.insert(t.to_string(), pk);
+        }
+    }
+    let strategies = state.strategies.read().await;
+    for s in strategies.values() {
+        let params = s.config.get("parameters");
+        let Some(arr) = params
+            .and_then(|p| p.get("position_addresses"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for v in arr {
+            let Some(addr) = v.as_str().map(str::trim) else {
+                continue;
+            };
+            let Some(linked) = out.get_mut(addr) else {
+                continue;
+            };
+            let Some(pubkey) = pubkeys.get(addr) else {
+                continue;
+            };
+            linked.push(strategy_diag_entry_for_link(state, s, pubkey, addr).await);
+        }
+    }
+    out
+}
+
+/// Batch extras for Positions list rows (linked strategies + agent session).
+#[utoipa::path(
+    post,
+    path = "/positions/list-extras",
+    tag = "Positions",
+    request_body = PositionsListExtrasRequest,
+    responses(
+        (status = 200, description = "List extras", body = PositionsListExtrasResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
+pub async fn post_positions_list_extras(
+    State(state): State<AppState>,
+    Json(req): Json<PositionsListExtrasRequest>,
+) -> ApiResult<Json<PositionsListExtrasResponse>> {
+    const MAX_ADDRESSES: usize = 64;
+    let addresses: Vec<String> = req
+        .addresses
+        .iter()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .take(MAX_ADDRESSES)
+        .collect();
+    if addresses.is_empty() {
+        return Ok(Json(PositionsListExtrasResponse { items: vec![] }));
+    }
+
+    let linked_batch = linked_strategies_batch(&state, &addresses).await;
+    let agent_map = position_agent_service::agent_sessions_for_addresses(&addresses)?;
+
+    let mut items = Vec::with_capacity(addresses.len());
+    for addr in addresses {
+        let (in_monitor, monitor_in_range) = if let Ok(pk) = Pubkey::from_str(&addr) {
+            let m = state.monitor.get_position(&pk).await;
+            (m.is_some(), m.as_ref().map(|p| p.in_range))
+        } else {
+            (false, None)
+        };
+        items.push(PositionListExtrasEntry {
+            address: addr.clone(),
+            in_monitor,
+            monitor_in_range,
+            linked_strategies: linked_batch.get(&addr).cloned().unwrap_or_default(),
+            agent_session: agent_map.get(&addr).cloned().flatten(),
+        });
+    }
+    Ok(Json(PositionsListExtrasResponse { items }))
 }
 
 /// Get "why didn't this position rebalance?" diagnostics.
@@ -2442,25 +2674,24 @@ pub async fn close_position(
     Path(address): Path<String>,
     Query(q): Query<CostSessionQuery>,
 ) -> ApiResult<Json<MessageResponse>> {
-    let pubkey = Pubkey::from_str(&address)
+    Pubkey::from_str(&address)
         .map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
     info!(position = %address, dry_run = state.dry_run, "Closing position");
 
-    // Match `GET /positions/:address`: allow close when the PDA is on-chain even if the in-memory
-    // monitor has not finished `add_position` yet (race after opening the detail page) or after
-    // restart before registry seed.
-    let positions = state.monitor.get_positions().await;
-    let position_snapshot = if let Some(p) = positions.iter().find(|p| p.address == pubkey) {
-        p.clone()
-    } else {
-        monitored_position_from_chain(state.provider.clone(), &pubkey).await?
-    };
+    let sid = q
+        .cost_session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     if state.dry_run {
-        info!("Dry-run mode: would close position");
-
-        // Broadcast simulated update
+        let pubkey = Pubkey::from_str(&address).expect("validated above");
+        let position_snapshot = if let Some(p) = state.monitor.get_position(&pubkey).await {
+            p
+        } else {
+            monitored_position_from_chain(state.provider.clone(), &pubkey).await?
+        };
         state
             .broadcast_position_update(PositionUpdate {
                 update_type: "close_simulated".to_string(),
@@ -2472,145 +2703,35 @@ pub async fn close_position(
                 }),
             })
             .await;
-
         return Ok(Json(MessageResponse::new(format!(
             "[DRY-RUN] Would close position {} with liquidity {}",
             address, position_snapshot.on_chain.liquidity
         ))));
     }
 
-    let sid = q
-        .cost_session_id
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let correlation_id = Uuid::new_v4().to_string();
-    let ledger_owner = position_ops_wallet_owner(&state).await;
-    let pool_str = position_snapshot.pool.to_string();
-    let pos_pda = address.trim().to_string();
-
-    if let Some(ref owner) = ledger_owner {
-        let pending = wallet_ledger::new_ledger_event(
-            &correlation_id,
-            WalletLedgerStatus::Pending,
-            "close_position",
-            Some(owner.clone()),
-            None,
-            Some(pool_str.clone()),
-            Some(pos_pda.clone()),
-            sid.clone(),
-            false,
-            None,
-            vec![],
-            None,
-            "api:positions",
-        );
-        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
-    }
-
-    let mut svc = PositionService::new(state.clone());
-    svc.set_dry_run(false);
-    if let Some(exec) = resolve_executor_for_position_ops(&state).await {
-        svc.set_executor(exec);
-    }
-
-    let op = match svc.close_position(&address, sid.clone()).await {
-        Ok(o) => o,
-        Err(e) => {
-            if ledger_owner.is_some() {
-                let fail = wallet_ledger::new_ledger_event(
-                    &correlation_id,
-                    WalletLedgerStatus::Failed,
-                    "close_position",
-                    ledger_owner.clone(),
-                    None,
-                    Some(pool_str.clone()),
-                    Some(pos_pda.clone()),
-                    sid.clone(),
-                    false,
-                    None,
-                    vec![],
-                    Some(e.to_string()),
-                    "api:positions",
-                );
-                wallet_ledger::append_wallet_ledger_event(&state, fail).await;
-            }
-            return Err(e);
+    let resolved = resolve_close_signer_for_position(&state, &address)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let resolved = match resolved {
+        Ok(r) => r,
+        Err(skip) => {
+            return Err(ApiError::bad_request(format!(
+                "Cannot close position server-side: no API-managed wallet for owner {} (address {})",
+                skip
+                    .owner_pubkey
+                    .unwrap_or_else(|| "unknown".to_string()),
+                skip.address
+            )));
         }
     };
 
-    if op.success {
-        if ledger_owner.is_some() {
-            let sig = op.signature.clone();
-            let conf = wallet_ledger::new_ledger_event(
-                &correlation_id,
-                WalletLedgerStatus::Confirmed,
-                "close_position",
-                ledger_owner.clone(),
-                sig,
-                Some(pool_str.clone()),
-                Some(pos_pda.clone()),
-                sid.clone(),
-                false,
-                None,
-                vec![],
-                None,
-                "api:positions",
-            );
-            wallet_ledger::append_wallet_ledger_event(&state, conf).await;
-        }
-        // Manual close is an explicit end-of-history decision by operator.
-        // Detach this PDA from all strategies so it cannot be managed/reopened via stale links.
-        if let Err(e) = remove_position_address_from_all_strategies(&state, &address).await {
-            warn!(
-                position = %address,
-                error = %e,
-                "close_position: strategy unlink failed after manual close (continuing)"
-            );
-        }
-        // Remove immediately so UI doesn't keep showing stale monitored entry.
-        state.monitor.remove_position(&pubkey).await;
-        state
-            .broadcast_position_update(PositionUpdate {
-                update_type: "closed".to_string(),
-                position_address: address.clone(),
-                timestamp: chrono::Utc::now(),
-                data: serde_json::json!({}),
-            })
-            .await;
+    let wallet = load_api_wallet_by_id(&state, &resolved.close_signer_wallet_id)?;
+    let mut ctx = ManualCloseLedgerContext::new_single();
+    ctx.ledger_owner = resolved.close_signer_pubkey;
 
-        spawn_chain_history_materialize_background(&state, address.clone(), "close_position");
-
-        Ok(Json(MessageResponse::new(format!(
-            "Position closed: {address}"
-        ))))
-    } else {
-        if ledger_owner.is_some() {
-            let fail = wallet_ledger::new_ledger_event(
-                &correlation_id,
-                WalletLedgerStatus::Failed,
-                "close_position",
-                ledger_owner.clone(),
-                None,
-                Some(pool_str.clone()),
-                Some(pos_pda.clone()),
-                sid.clone(),
-                false,
-                None,
-                vec![],
-                op.error
-                    .clone()
-                    .or_else(|| Some("Position closing failed".to_string())),
-                "api:positions",
-            );
-            wallet_ledger::append_wallet_ledger_event(&state, fail).await;
-        }
-        Err(ApiError::ServiceUnavailable(
-            op.error
-                .unwrap_or_else(|| "Position closing failed".to_string()),
-        ))
-    }
+    let msg =
+        execute_manual_close_with_wallet(&state, &address, sid, wallet, ctx).await?;
+    Ok(Json(msg))
 }
 
 /// Collect fees from a position.
@@ -3256,9 +3377,9 @@ pub async fn suggest_position_strategy(
 #[cfg(test)]
 mod list_positions_display_tests {
     use super::{
-        default_list_positions_light, monitored_position_list_row,
+        monitored_position_list_row, parse_list_positions_light_mode,
         position_list_row_fee_display_ready, position_list_row_value_display_ready,
-        ListPositionsQuery,
+        ListPositionsLightMode, ListPositionsQuery,
     };
     use crate::models::PositionResponse;
     use crate::state::{ApiConfig, AppState};
@@ -3330,9 +3451,17 @@ mod list_positions_display_tests {
     }
 
     #[test]
-    fn default_list_query_uses_light_true() {
-        assert!(default_list_positions_light());
-        let _: ListPositionsQuery = serde_json::from_str("{}").expect("default light deserializes");
+    fn default_list_query_uses_valuation_mode() {
+        let q: ListPositionsQuery = serde_json::from_str("{}").expect("default light deserializes");
+        assert_eq!(parse_list_positions_light_mode(&q.light), ListPositionsLightMode::Valuation);
+    }
+
+    #[test]
+    fn parse_light_fast_mode() {
+        let q = ListPositionsQuery {
+            light: "fast".to_string(),
+        };
+        assert_eq!(parse_list_positions_light_mode(&q.light), ListPositionsLightMode::Fast);
     }
 
     #[tokio::test]

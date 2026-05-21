@@ -274,7 +274,7 @@ pub async fn range_usdc_and_in_range_for_pool_ticks(
     (range, in_range)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 /// One pool RPC read: USDC range + in-range + token labels, mints, and USD spot prices (for user-friendly tables).
 pub struct PoolTicksEnrichment {
     pub range_usdc: Option<TickRangeUsdc>,

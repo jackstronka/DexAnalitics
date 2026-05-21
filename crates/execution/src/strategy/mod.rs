@@ -9,6 +9,7 @@ mod decision;
 mod executor;
 mod pending_open;
 mod rebalance;
+mod session_capital;
 mod types;
 
 pub use decision::*;

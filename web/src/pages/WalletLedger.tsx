@@ -5,6 +5,7 @@ import { ClipboardList, ExternalLink, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
+import { SessionBalancesPanel } from '@/components/SessionBalancesPanel'
 import { getWalletLedgerEvents, type WalletLedgerStatus } from '@/lib/api'
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import { solscanAccountUrl, solscanTxUrl } from '@/lib/explorer'
@@ -31,6 +32,7 @@ export default function WalletLedger() {
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState<'' | WalletLedgerStatus>('')
   const [limit, setLimit] = useState(200)
+  const [sessionId, setSessionId] = useState('')
 
   const q = useQuery({
     queryKey: ['wallet-ledger-events', owner.trim(), kind, status, limit],
@@ -51,6 +53,14 @@ export default function WalletLedger() {
       m.set(ev.kind, (m.get(ev.kind) ?? 0) + 1)
     }
     return m
+  }, [q.data?.events])
+
+  const latestSessionFromEvents = useMemo(() => {
+    for (const ev of q.data?.events ?? []) {
+      const sid = ev.cost_session_id?.trim()
+      if (sid) return sid
+    }
+    return ''
   }, [q.data?.events])
 
   const statusClass = (s: string) => {
@@ -164,8 +174,32 @@ export default function WalletLedger() {
               {t('walletLedger.useDevWallet')}
             </Button>
           ) : null}
+          <label className="flex flex-col gap-1 text-sm min-w-[14rem] flex-1">
+            <span className="text-muted-foreground">{t('walletLedger.sessionFilter')}</span>
+            <input
+              className="flex h-9 w-full max-w-md rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm font-mono"
+              value={sessionId}
+              onChange={(e) => setSessionId(e.target.value)}
+              placeholder={t('walletLedger.sessionPlaceholder')}
+            />
+          </label>
+          {latestSessionFromEvents ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9"
+              onClick={() => setSessionId(latestSessionFromEvents)}
+            >
+              {t('walletLedger.pickSessionFromEvents')}
+            </Button>
+          ) : null}
         </CardContent>
       </Card>
+
+      {sessionId.trim() ? (
+        <SessionBalancesPanel sessionId={sessionId.trim()} owner={owner.trim() || undefined} />
+      ) : null}
 
       {q.error ? <ErrorBanner>{(q.error as Error).message}</ErrorBanner> : null}
 

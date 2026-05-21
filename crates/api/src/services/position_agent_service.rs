@@ -207,6 +207,27 @@ pub fn get_or_create_session(
     })
 }
 
+/// Agent sessions for many PDAs in one state load (Positions list batch extras).
+pub fn agent_sessions_for_addresses(
+    addresses: &[String],
+) -> ApiResult<std::collections::HashMap<String, Option<AgentPositionSession>>> {
+    with_state_lock(|| {
+        let state = load_state()?;
+        let want: std::collections::HashSet<&str> =
+            addresses.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect();
+        let mut out: std::collections::HashMap<String, Option<AgentPositionSession>> = want
+            .iter()
+            .map(|&a| (a.to_string(), None))
+            .collect();
+        for session in state.sessions {
+            if want.contains(session.position_address.as_str()) {
+                out.insert(session.position_address.clone(), Some(session));
+            }
+        }
+        Ok(out)
+    })
+}
+
 pub fn list_chat(
     position_address: &str,
 ) -> ApiResult<(Option<AgentPositionSession>, Vec<AgentChatMessage>)> {

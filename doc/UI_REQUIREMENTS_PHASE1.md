@@ -17,9 +17,9 @@ Dokument zamraża zakres produktowy dla dashboardu operatora (bot CLMM / Orca + 
 |--------|------|-------------------------|
 | **§1 Skrypty** | Zrealizowane (szczegóły → poniżej) | [`web/src/pages/Scripts.tsx`](../web/src/pages/Scripts.tsx), [`GET /api/v1/scripts`](../crates/api/src/handlers/scripts.rs), [`tools/script_runner/`](../tools/script_runner/README.md). |
 | **§2 Portfel USD** | Zrealizowane | [`Wallet.tsx`](../web/src/pages/Wallet.tsx), `GET /analytics/portfolio`, ApiDataHint o niepełności danych. |
-| **§3 Pozycje** | Częściowo | Lista monitora + szczegóły z API; on-chain skan: [`Positions.tsx`](../web/src/pages/Positions.tsx), `GET /orca/positions-by-owner`. `logical_position_id` — roadmap (§7). |
+| **§3 Pozycje** | Częściowo | Lista monitora + szczegóły z API; on-chain skan: [`Positions.tsx`](../web/src/pages/Positions.tsx), `GET /orca/positions-by-owner`. **Zamknij wszystkie** — plan: [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md). `logical_position_id` — roadmap (§7). |
 | **§4 Koszty / ledger** | Częściowo | [`PositionDetail.tsx`](../web/src/pages/PositionDetail.tsx) — zakładka ledger: `tx_fee_lamports`, sesje; IL ledger: `tx_cost_lamports`. Pełne `fee_payer_net_lamports_delta` w tabeli — do rozszycenia przy bogatszym API/JSONL. Szacunki IL z PnL oznaczone jako metryki z monitora, nie „księgowość”. |
-| **§5 Akcje** | Częściowo | Collect / rebalance / decrease / close przez REST; **zamknięcie z `window.confirm`**. Flow **unsigned tx + Phantom** — tam gdzie API to eksponuje (roadmap / endpointy tx). |
+| **§5 Akcje** | Częściowo | Collect / rebalance / decrease / close przez REST; **zamknięcie z `window.confirm`**. **Bulk close all** (lista pozycji, job w tle, multi-wallet) — [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md). Flow **unsigned tx + Phantom** — tam gdzie API to eksponuje (roadmap / endpointy tx). |
 | **§6 Runner** | Dokumentacja + API | [`tools/script_runner/README.md`](../tools/script_runner/README.md), env na API. |
 | **§7 Roadmap** | Otwarte | Agregacja lifecycle, PL/EN — poza faza 1. |
 
@@ -67,6 +67,7 @@ Dokument zamraża zakres produktowy dla dashboardu operatora (bot CLMM / Orca + 
 
 - Zbieranie opłat, rebalance, zmniejszenie płynności, zamknięcie; flow **unsigned tx + podpis** tam, gdzie API to eksponuje.
 - Akcje destruktywne z potwierdzeniem.
+- **Zamknij wybrane (monitor API):** checkboxy na liście pozycji, przycisk „Zamknij wybrane (N)” gdy coś zaznaczone; job serwerowy `POST /positions/close-all` z `scope=explicit` + `addresses`, postęp bez blokowania UI; **grupowanie zamknięć per portfel-owner** (patrz [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md) §4).
 
 ## 6. Runner skryptów
 

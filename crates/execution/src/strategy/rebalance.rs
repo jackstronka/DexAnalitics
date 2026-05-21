@@ -183,6 +183,28 @@ fn swap_mix_wallet_ui_sol_first(inputs: &SwapMixWalletInputs<'_>) -> (f64, f64) 
 /// When opening on a WSOL pool leg, treat spendable native SOL as available on that leg.
 ///
 /// This matches upstream Whirlpool bot behavior (native SOL vs WSOL ATA) and our swap-mix sizing.
+fn apply_session_caps_to_wallet_raw(
+    balance_a_raw: u64,
+    balance_b_raw: u64,
+    spendable_lamports: u64,
+    token_mint_a: &Pubkey,
+    token_mint_b: &Pubkey,
+    wsol_mint_pk: &Pubkey,
+    session: Option<&super::session_capital::SessionMintCaps>,
+) -> (u64, u64, u64) {
+    use super::session_capital::cap_rpc_with_session;
+    let wa = cap_rpc_with_session(balance_a_raw, token_mint_a, session);
+    let wb = cap_rpc_with_session(balance_b_raw, token_mint_b, session);
+    let spend = if token_mint_a == wsol_mint_pk {
+        cap_rpc_with_session(spendable_lamports, token_mint_a, session)
+    } else if token_mint_b == wsol_mint_pk {
+        cap_rpc_with_session(spendable_lamports, token_mint_b, session)
+    } else {
+        spendable_lamports
+    };
+    (wa, wb, spend)
+}
+
 fn open_wallet_notional_and_caps_sol_first(
     inputs: &SwapMixWalletInputs<'_>,
     price_a_usd: f64,
@@ -835,6 +857,8 @@ pub struct RebalanceExecutor {
     dry_run: AtomicBool,
     /// Optional hook after successful on-chain steps (e.g. API chain-history materialize).
     chain_history_hook: Mutex<Option<ChainHistoryMaterializeHook>>,
+    /// Optional Postgres for SESSION cap resolution (API bot path).
+    session_db: std::sync::Mutex<Option<std::sync::Arc<clmm_lp_data::repositories::Database>>>,
 }
 
 impl RebalanceExecutor {
@@ -853,6 +877,14 @@ impl RebalanceExecutor {
             config,
             dry_run: AtomicBool::new(false),
             chain_history_hook: Mutex::new(None),
+            session_db: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Attach Postgres for `SESSION:{id}` cap reads (`CLMM_REOPEN_USE_SESSION_CAPITAL=1`).
+    pub fn set_session_database(&self, db: std::sync::Arc<clmm_lp_data::repositories::Database>) {
+        if let Ok(mut g) = self.session_db.lock() {
+            *g = Some(db);
         }
     }
 
@@ -922,6 +954,38 @@ impl RebalanceExecutor {
             .map_err(|_| anyhow::anyhow!("wallet mutex poisoned"))?
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Wallet not set on RebalanceExecutor"))
+    }
+
+    async fn session_caps_for_reopen(
+        &self,
+        ledger_session_id: Option<&str>,
+    ) -> Option<super::session_capital::SessionMintCaps> {
+        let sid = ledger_session_id.map(str::trim).filter(|s| !s.is_empty())?;
+        let owner = self.wallet_pubkey().map(|p| p.to_string());
+        let db = self
+            .session_db
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+        super::session_capital::load_session_mint_caps(db.as_deref(), sid, owner.as_deref()).await
+    }
+
+    fn session_capital_error_if_strict(session: &super::session_capital::SessionMintCaps) -> Option<String> {
+        if !super::session_capital::reopen_use_session_capital() {
+            return None;
+        }
+        if !super::session_capital::reopen_session_strict_empty() {
+            return None;
+        }
+        if session.is_empty() {
+            Some(format!(
+                "session_capital_unknown: no SESSION inventory for {} (source={})",
+                session.session_id,
+                super::session_capital::session_caps_source_label(session.source)
+            ))
+        } else {
+            None
+        }
     }
 
     /// Checks if a rebalance is profitable.
@@ -1011,6 +1075,15 @@ impl RebalanceExecutor {
         log_position: &Pubkey,
         ledger_session_id: Option<String>,
     ) -> Result<(), String> {
+        let session_caps = self
+            .session_caps_for_reopen(ledger_session_id.as_deref())
+            .await;
+        if let Some(ref sc) = session_caps
+            && let Some(err) = Self::session_capital_error_if_strict(sc)
+        {
+            return Err(err);
+        }
+
         let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
             .parse()
             .expect("WSOL mint");
@@ -1022,6 +1095,7 @@ impl RebalanceExecutor {
         let mut last_prev_end = 0.0_f64;
         let mut last_wallet = 0.0_f64;
         let mut last_threshold = 0.0_f64;
+        let session_mode = session_caps.is_some();
 
         for attempt in 0..attempts {
             let pool_live = pool_reader
@@ -1040,6 +1114,15 @@ impl RebalanceExecutor {
                 spl_token_balance_raw(self.provider.as_ref(), owner, &pool_live.token_mint_b).await;
             let native_lamports = self.provider.get_balance(owner).await.unwrap_or(0);
             let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
+            let (wa, wb, native_spendable) = apply_session_caps_to_wallet_raw(
+                wa,
+                wb,
+                native_spendable,
+                &pool_live.token_mint_a,
+                &pool_live.token_mint_b,
+                &wsol_mint_pk,
+                session_caps.as_ref(),
+            );
             let (pa, pb, _) = synthetic_prices_for_deposit_quote(
                 pool_live.price,
                 &pool_live.token_mint_a,
@@ -1084,12 +1167,18 @@ impl RebalanceExecutor {
                         wallet_notional,
                         prev_end_usd,
                         threshold,
+                        session_mode,
                         position = %log_position,
                         "Wallet notional met reopen target after refresh"
                     );
                 }
                 return Ok(());
             }
+            let diag_event = if session_mode {
+                "bot_reopen_session_below_target"
+            } else {
+                "bot_reopen_wallet_below_target"
+            };
             warn!(
                 op = "orca_rebalance",
                 stage = "reopen_wallet_refresh",
@@ -1098,12 +1187,13 @@ impl RebalanceExecutor {
                 wallet_notional,
                 prev_end_usd,
                 threshold,
+                session_mode,
                 position = %log_position,
-                "Wallet notional below reopen target (may be stale read or contention)"
+                "Wallet/session notional below reopen target (may be stale read or contention)"
             );
             clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                 self.provider.as_ref(),
-                "bot_reopen_wallet_below_target",
+                diag_event,
                 "reopen_wallet_check",
                 Some(*pool),
                 Some(*log_position),
@@ -1123,8 +1213,13 @@ impl RebalanceExecutor {
             }
         }
 
+        let err_prefix = if session_mode {
+            "session_below_target_after_refresh"
+        } else {
+            "wallet_below_target_after_refresh"
+        };
         Err(format!(
-            "wallet_below_target_after_refresh: wallet_notional={last_wallet:.8} still below threshold={last_threshold:.8} (prev_end_usd={last_prev_end:.8} after {attempts} reads, spec §2.2)"
+            "{err_prefix}: notional={last_wallet:.8} still below threshold={last_threshold:.8} (prev_end_usd={last_prev_end:.8} after {attempts} reads, spec §2.2)"
         ))
     }
 
@@ -1144,6 +1239,7 @@ impl RebalanceExecutor {
         amount_b_before_raw: u64,
         log_position: &Pubkey,
         ledger_session_id: Option<String>,
+        session_caps: Option<super::session_capital::SessionMintCaps>,
     ) -> anyhow::Result<u32> {
         if self.is_dry_run() {
             return Ok(0);
@@ -1221,6 +1317,15 @@ impl RebalanceExecutor {
                 .parse()
                 .expect("WSOL mint");
             let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
+            let (wa, wb, native_spendable) = apply_session_caps_to_wallet_raw(
+                wa,
+                wb,
+                native_spendable,
+                &pool_state.token_mint_a,
+                &pool_state.token_mint_b,
+                &wsol_mint_pk,
+                session_caps.as_ref(),
+            );
             let pool_has_wsol =
                 pool_state.token_mint_a == wsol_mint_pk || pool_state.token_mint_b == wsol_mint_pk;
             if wa == 0 && wb == 0 {
@@ -1953,6 +2058,15 @@ impl RebalanceExecutor {
             );
         };
 
+        let session_caps = self
+            .session_caps_for_reopen(ledger_session_id.as_deref())
+            .await;
+        if let Some(ref sc) = session_caps
+            && let Some(err) = Self::session_capital_error_if_strict(sc)
+        {
+            return Err(err);
+        }
+
         if let Some(sid) = ledger_session_id
             .as_deref()
             .map(str::trim)
@@ -2025,6 +2139,7 @@ impl RebalanceExecutor {
                 amount_b_before_calc,
                 log_position,
                 ledger_session_id.clone(),
+                session_caps.clone(),
             )
             .await;
         let swap_rounds = match swap_rounds {
@@ -2080,6 +2195,15 @@ impl RebalanceExecutor {
             let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
                 .parse()
                 .expect("WSOL mint");
+            let (wa, wb, native_spendable) = apply_session_caps_to_wallet_raw(
+                wa,
+                wb,
+                native_spendable,
+                &pool_live.token_mint_a,
+                &pool_live.token_mint_b,
+                &wsol_mint_pk,
+                session_caps.as_ref(),
+            );
 
             let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_live.token_mint_a)
                 .await
@@ -2137,6 +2261,16 @@ impl RebalanceExecutor {
             if cap_a == 0 && cap_b == 0 {
                 cap_a = amount_a_before_calc.max(1);
                 cap_b = amount_b_before_calc.max(1);
+                cap_a = super::session_capital::cap_rpc_with_session(
+                    cap_a,
+                    &pool_live.token_mint_a,
+                    session_caps.as_ref(),
+                );
+                cap_b = super::session_capital::cap_rpc_with_session(
+                    cap_b,
+                    &pool_live.token_mint_b,
+                    session_caps.as_ref(),
+                );
                 if attempt == 1 {
                     warn!(
                         op = "orca_rebalance",
@@ -3373,6 +3507,90 @@ impl RebalanceExecutor {
         Ok(())
     }
 
+    /// Bulk close: one on-chain tx (Orca close includes fee collection). Skips separate `collect_fees`.
+    pub async fn execute_bulk_close_only(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        if self.is_dry_run() {
+            info!("Dry run: would bulk-close position");
+            return Ok(());
+        }
+        let (close_amount_a_raw, close_amount_b_raw) = self
+            .read_close_amounts_best_effort(position, pool)
+            .await
+            .unwrap_or((0, 0));
+        let close_details =
+            with_close_amounts_in_details(ledger_details, close_amount_a_raw, close_amount_b_raw);
+        let _lp_on_close = self
+            .close_position(position, pool, ledger_session_id, close_details)
+            .await?;
+        Ok(())
+    }
+
+    /// Bulk close send-first: broadcast close tx, return before confirmation.
+    pub async fn execute_bulk_close_submit_only(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        ledger_details: Option<serde_json::Value>,
+        slippage_bps: Option<u16>,
+    ) -> anyhow::Result<clmm_lp_protocols::orca::executor::ExecutionResult> {
+        if self.is_dry_run() {
+            info!("Dry run: would bulk-close position (submit only)");
+            return Ok(clmm_lp_protocols::orca::executor::ExecutionResult::submitted(
+                solana_sdk::signature::Signature::default(),
+            ));
+        }
+        let (close_amount_a_raw, close_amount_b_raw) = self
+            .read_close_amounts_best_effort(position, pool)
+            .await
+            .unwrap_or((0, 0));
+        let close_details =
+            with_close_amounts_in_details(ledger_details, close_amount_a_raw, close_amount_b_raw);
+        self.close_position_submit_only(position, pool, close_details, slippage_bps)
+            .await
+    }
+
+    /// After send-first: wait for confirm, then lifecycle/registry/ledger hooks.
+    pub async fn finalize_bulk_close_after_confirm(
+        &self,
+        submitted: &clmm_lp_protocols::orca::executor::ExecutionResult,
+        position: &Pubkey,
+        pool: &Pubkey,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let tx_res = self
+            .tx_manager
+            .wait_for_confirmation(&submitted.signature)
+            .await
+            .map_err(|e| anyhow::anyhow!("close confirm: {e}"))?;
+        let confirmed = clmm_lp_protocols::orca::executor::ExecutionResult {
+            signature: submitted.signature,
+            success: true,
+            slot: Some(tx_res.slot),
+            error: None,
+            created_position: None,
+            collect_fee_owed_a_raw: submitted.collect_fee_owed_a_raw,
+            collect_fee_owed_b_raw: submitted.collect_fee_owed_b_raw,
+        };
+        self.record_execution_success(
+            "close_position",
+            &confirmed,
+            Some(*pool),
+            Some(*position),
+            ledger_session_id,
+            ledger_details,
+            submitted.collect_fee_owed_a_raw,
+            submitted.collect_fee_owed_b_raw,
+        )
+        .await
+    }
+
     /// Remove `liquidity_amount` from an existing position (partial exit). `token_min_*` = 0 (max slippage).
     pub async fn execute_partial_decrease(
         &self,
@@ -3515,6 +3733,30 @@ impl RebalanceExecutor {
         .await?;
         debug!(position = %position, "Close position submitted");
         Ok((lp_a, lp_b))
+    }
+
+    /// Send-only close (bulk send-first); caller must `finalize_bulk_close_after_confirm`.
+    async fn close_position_submit_only(
+        &self,
+        position: &Pubkey,
+        pool: &Pubkey,
+        ledger_details: Option<serde_json::Value>,
+        slippage_bps: Option<u16>,
+    ) -> anyhow::Result<clmm_lp_protocols::orca::executor::ExecutionResult> {
+        let wallet = self.require_wallet()?;
+        let orca = WhirlpoolExecutor::new(self.provider.clone());
+        let payer = wallet.keypair();
+        let res = orca
+            .close_position_submit_only(position, pool, payer, slippage_bps)
+            .await?;
+        validate_execution_result("close_position", &res)?;
+        debug!(
+            position = %position,
+            signature = %res.signature,
+            "Close position submitted (send-first)"
+        );
+        let _ = ledger_details;
+        Ok(res)
     }
 
     /// Best-effort authoritative position leg amounts (raw) immediately before close.
@@ -3847,7 +4089,7 @@ impl RebalanceExecutor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn ensure_execution_success(
+    async fn record_execution_success(
         &self,
         op_name: &str,
         result: &clmm_lp_protocols::orca::executor::ExecutionResult,
@@ -3941,6 +4183,33 @@ impl RebalanceExecutor {
             }
         }
 
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure_execution_success(
+        &self,
+        op_name: &str,
+        result: &clmm_lp_protocols::orca::executor::ExecutionResult,
+        pool: Option<Pubkey>,
+        position: Option<Pubkey>,
+        ledger_session_id: Option<String>,
+        ledger_details: Option<serde_json::Value>,
+        lp_collected_token_a_raw: Option<u64>,
+        lp_collected_token_b_raw: Option<u64>,
+    ) -> anyhow::Result<()> {
+        self.record_execution_success(
+            op_name,
+            result,
+            pool,
+            position,
+            ledger_session_id,
+            ledger_details,
+            lp_collected_token_a_raw,
+            lp_collected_token_b_raw,
+        )
+        .await?;
+
         // Best-effort post-check through the common transaction manager path.
         // Some providers may not return status immediately for very fresh signatures.
         match tokio::time::timeout(
@@ -3993,6 +4262,23 @@ async fn enrich_open_close_ledger_details(
         obj.insert("event_slot".to_string(), slot.into());
     }
     if let Some(pool_pk) = pool {
+        if let Ok(Ok(pool_state)) = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            WhirlpoolReader::new(provider.clone()).get_pool_state(&pool_pk.to_string()),
+        )
+        .await
+        {
+            if let Some(obj) = base.as_object_mut() {
+                obj.insert(
+                    "token_mint_a".to_string(),
+                    serde_json::json!(pool_state.token_mint_a.to_string()),
+                );
+                obj.insert(
+                    "token_mint_b".to_string(),
+                    serde_json::json!(pool_state.token_mint_b.to_string()),
+                );
+            }
+        }
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
             clmm_lp_protocols::orca::event_pool_mint_usd::fetch_event_pool_mint_usd_prices(
@@ -4068,13 +4354,22 @@ async fn enrich_open_close_ledger_details(
                     pool_state.tick_current,
                     pool_state.sqrt_price,
                 );
-                return Ok::<(u64, u64), anyhow::Error>((a_raw, b_raw));
+                return Ok::<(u64, u64, Pubkey, Pubkey), anyhow::Error>((
+                    a_raw,
+                    b_raw,
+                    pool_state.token_mint_a,
+                    pool_state.token_mint_b,
+                ));
             }
             Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown RPC error")))
         })
         .await
         {
-            Ok(Ok((a_raw, b_raw))) => {
+            Ok(Ok((a_raw, b_raw, mint_a, mint_b))) => {
+                let dec_a =
+                    fetch_mint_decimals_best_effort(provider.as_ref(), &mint_a).await;
+                let dec_b =
+                    fetch_mint_decimals_best_effort(provider.as_ref(), &mint_b).await;
                 if let Some(obj) = base.as_object_mut() {
                     obj.insert("open_amount_a_raw".to_string(), serde_json::json!(a_raw));
                     obj.insert("open_amount_b_raw".to_string(), serde_json::json!(b_raw));
@@ -4082,6 +4377,7 @@ async fn enrich_open_close_ledger_details(
                         "open_amounts_source".to_string(),
                         serde_json::json!("onchain_after_open"),
                     );
+                    insert_open_quote_usd_fields(obj, dec_a, dec_b);
                 }
             }
             Ok(Err(e)) => {
@@ -4099,6 +4395,60 @@ async fn enrich_open_close_ledger_details(
         }
     }
     base
+}
+
+async fn fetch_mint_decimals_best_effort(provider: &RpcProvider, mint: &Pubkey) -> u8 {
+    match provider.get_account(mint).await {
+        Ok(account) => SplMint::unpack(&account.data)
+            .map(|m| m.decimals)
+            .unwrap_or(9),
+        Err(_) => 9,
+    }
+}
+
+fn raw_token_ui(raw: u64, decimals: u8) -> f64 {
+    raw as f64 / 10f64.powi(i32::from(decimals))
+}
+
+fn insert_open_quote_usd_fields(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    decimals_a: u8,
+    decimals_b: u8,
+) {
+    let pa = obj
+        .get("event_price_a_usd")
+        .and_then(|v| v.as_f64())
+        .filter(|x| x.is_finite() && *x > 0.0);
+    let pb = obj
+        .get("event_price_b_usd")
+        .and_then(|v| v.as_f64())
+        .filter(|x| x.is_finite() && *x > 0.0);
+    let (Some(pa), Some(pb)) = (pa, pb) else {
+        return;
+    };
+
+    let usd_from_amounts = || -> Option<f64> {
+        let a_raw = obj.get("open_amount_a_raw")?.as_u64()?;
+        let b_raw = obj.get("open_amount_b_raw")?.as_u64()?;
+        Some(raw_token_ui(a_raw, decimals_a) * pa + raw_token_ui(b_raw, decimals_b) * pb)
+    };
+    let usd_from_caps = || -> Option<f64> {
+        let a_raw = obj.get("amount_a_cap")?.as_u64()?;
+        let b_raw = obj.get("amount_b_cap")?.as_u64()?;
+        Some(raw_token_ui(a_raw, decimals_a) * pa + raw_token_ui(b_raw, decimals_b) * pb)
+    };
+
+    if let Some(usd) = usd_from_amounts()
+        .or_else(usd_from_caps)
+        .filter(|x| x.is_finite() && *x > 0.0)
+    {
+        obj.insert(
+            "open_quote_estimated_value_usd".to_string(),
+            serde_json::json!(usd),
+        );
+        obj.entry("open_target_usd".to_string())
+            .or_insert(serde_json::json!(usd));
+    }
 }
 
 fn with_close_amounts_in_details(
@@ -4244,6 +4594,25 @@ mod tests {
     use super::*;
     use clmm_lp_protocols::orca::executor::ExecutionResult;
     use solana_sdk::signature::Signature;
+
+    #[test]
+    fn insert_open_quote_usd_fields_from_onchain_amounts() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("open_amount_a_raw".to_string(), serde_json::json!(50_000_000u64));
+        obj.insert("open_amount_b_raw".to_string(), serde_json::json!(5_000_000u64));
+        obj.insert("event_price_a_usd".to_string(), serde_json::json!(100.0));
+        obj.insert("event_price_b_usd".to_string(), serde_json::json!(1.0));
+        insert_open_quote_usd_fields(&mut obj, 9, 6);
+        let usd = obj
+            .get("open_quote_estimated_value_usd")
+            .and_then(|v| v.as_f64())
+            .expect("quote usd");
+        assert!((usd - 10.0).abs() < 1e-6);
+        assert_eq!(
+            obj.get("open_target_usd").and_then(|v| v.as_f64()),
+            Some(usd)
+        );
+    }
 
     #[tokio::test]
     async fn test_rebalance_config_default() {
@@ -4412,6 +4781,72 @@ mod tests {
         // 1.5 * $2 + 3.0 * $1 = $6
         let v = prev_end_value_usd_from_close_amounts(1_500_000, 3_000_000, 6, 6, 2.0, 1.0);
         assert!((v - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_session_caps_to_wallet_raw_limits_per_mint() {
+        let wsol: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL");
+        let usdc = Pubkey::new_unique();
+        let mut caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-cap");
+        caps.caps_by_mint.insert(wsol.to_string(), 50);
+        caps.caps_by_mint.insert(usdc.to_string(), 200);
+        unsafe {
+            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
+        }
+        let (wa, wb, spend) = apply_session_caps_to_wallet_raw(
+            1_000,
+            500,
+            2_000_000_000,
+            &wsol,
+            &usdc,
+            &wsol,
+            Some(&caps),
+        );
+        assert_eq!(wa, 50);
+        assert_eq!(wb, 200);
+        assert_eq!(spend, 50); // native capped to WSOL session leg
+        unsafe {
+            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
+        }
+    }
+
+    #[test]
+    fn session_capital_error_if_strict_on_empty_session() {
+        let empty = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-empty");
+        unsafe {
+            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
+            std::env::set_var("CLMM_REOPEN_SESSION_STRICT_EMPTY", "1");
+        }
+        let err = RebalanceExecutor::session_capital_error_if_strict(&empty).expect("err");
+        assert!(err.contains("session_capital_unknown"));
+        assert!(err.contains("sess-empty"));
+        unsafe {
+            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
+            std::env::remove_var("CLMM_REOPEN_SESSION_STRICT_EMPTY");
+        }
+    }
+
+    #[test]
+    fn session_cap_rpc_min_when_env_on_off() {
+        let mint = Pubkey::new_unique();
+        let mut caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-1");
+        caps.caps_by_mint.insert(mint.to_string(), 40);
+        unsafe {
+            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
+        }
+        assert_eq!(
+            crate::strategy::session_capital::cap_rpc_with_session(100, &mint, Some(&caps)),
+            40
+        );
+        unsafe {
+            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
+        }
+        assert_eq!(
+            crate::strategy::session_capital::cap_rpc_with_session(100, &mint, Some(&caps)),
+            100
+        );
     }
 
     #[test]

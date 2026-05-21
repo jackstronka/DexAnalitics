@@ -5,6 +5,7 @@
 //! **Read:** Postgres when rows exist, else JSONL tail (see `read_wallet_ledger_events`).
 
 use crate::models::{WalletLedgerDelta, WalletLedgerEvent, WalletLedgerStatus};
+use crate::services::wallet_gl_posting;
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use clmm_lp_data::repositories::Database;
@@ -245,6 +246,7 @@ pub async fn append_wallet_ledger_event(state: &AppState, ev: WalletLedgerEvent)
 
     if let Some(db) = state.db.as_ref() {
         persist_wallet_ledger_event_pg(db, &ev).await;
+        wallet_gl_posting::apply_session_postings_from_journal(db, &ev).await;
     }
 }
 

@@ -1,3 +1,318 @@
+## 2026-05-21 — Fix: experiment launch funding używa SOL-first (native SOL na nodze WSOL)
+
+keywords: experiment-launch, web, sol-first, wsol, native-sol, PositionCreate, funding
+
+- **What:** `ExperimentCapitalStep` / launch liczyły saldo nogi WSOL tylko z SPL token row (często 0), zamiast native SOL + pre-wrap jak `PositionCreate`. Wspólny helper `computeSolFirstFundingBalances` (`web/src/lib/solFirstFunding.ts`); UI portfela pokazuje native SOL dla nogi WSOL.
+- **paths:** `web/src/lib/solFirstFunding.ts`, `web/src/components/ExperimentCapitalStep.tsx`, `web/src/pages/ExperimentLaunch.tsx`
+
+## 2026-05-21 — Fix: auto-ticki eksperymentu przy parametrach strategii jako string
+
+keywords: experiment-launch, web, tick-sync, formStateFromStrategy, range_width_pct
+
+- **What:** API zwraca `parameters.range_width_pct` (i inne pola) często jako string (`"2"`). `formStateFromStrategy` → `numOrEmpty` traktowało tylko `number`, więc `rangeWidthPct` było puste, `computeArmTicksFromForm` zwracało `null` mimo wybranej pary. Naprawa: parsowanie stringów liczbowych; tick sync używa ref na bieżący arm (bez nadpisywania stanu).
+- **paths:** `web/src/lib/experimentArm.ts`, `web/src/hooks/useExperimentArmTickSync.ts`, `web/src/lib/experimentArm.test.ts`
+
+## 2026-05-21 — Close-all: slippage 200 bps + auto-retry 6018 (send-first)
+
+keywords: close-all, 6018, slippage_bps, send-first, TokenMinSubceeded
+
+- **What:** Bulk close accepts `options.slippage_bps` (default **200**, max 2000). Send-first polls failed on-chain 6018 and retries once at **≥500 bps**; finalize path also retries submit on 6018 confirm failure. UI sends `slippage_bps: 200` and shows hint when close still open after 6018.
+- **paths:** `position_close_ops.rs`, `position_close_all.rs`, `position_service.rs`, `rebalance.rs`, `Positions.tsx`, `models.rs`
+
+## 2026-05-21 — Close-all send-first UX: status podczas wysyłki + szybszy submit
+
+keywords: close-all, send-first, batch-ui, skip-simulate, PendingOnChain
+
+- **What:** Send-first nie trzyma już statusu `queued` podczas wysyłki (→ `pending_on_chain` / potem `submitted`). Submit-only Orca pomija pre-send `simulate_transaction`. UI: licznik „wysłane”, hint że „zamknięte” = po confirm. Domyślny inter-tx wait 4s.
+- **paths:** `position_close_all.rs`, `orca/executor.rs`, `Positions.tsx`, `i18n.tsx`
+
+## 2026-05-21 — Start dashboard: pre-build API w Start-ClmmApi-8081
+
+keywords: Start-ClmmApi-8081, Start-Dashboard-Safe, target-dev-api, startup, compile, ECONNREFUSED
+
+- **What:** Po zmianach Rust pierwszy `cargo run -q` w osobnym oknie kompilował >180s (pusty log, Vite → ECONNREFUSED). Skrypt najpierw robi blokujący `cargo build`, potem uruchamia `target-dev-api/debug/clmm-lp-api.exe` (bez drugiej kompilacji). Runtime start nadal ~30–40s.
+- **paths:** `tools/Start-ClmmApi-8081.ps1`, `tools/Start-Dashboard-Safe.ps1`
+
+## 2026-05-21 — PERF-PR9: współdzielony cache supplement RPC
+
+keywords: PERF-PR9, supplement, list_positions, close-all, position_on_chain_cache, CLMM_SUPPLEMENT_BATCH_CACHE_SECS
+
+- **What:** `supplement_batch_cache` na `AppState` — fingerprint kandydatów registry+strategy; TTL domyślnie 25 s (`CLMM_SUPPLEMENT_BATCH_CACHE_SECS`). `fetch_supplement_positions_parallel` serwuje trafienia bez RPC; drugie wywołanie (lista + `collect_monitored` close-all) współdzieli wynik. Meta listy: `skipped_supplement_cache`.
+- **paths:** `crates/api/src/services/position_on_chain_cache.rs`, `crates/api/src/state.rs`, `handlers/positions.rs`, `models.rs`
+
+## 2026-05-21 — PERF-PR7 list-extras + PERF-PR8 stream-pnl throttle
+
+keywords: positions-ui, list-extras, PERF-PR7, PERF-PR8, stream-pnl, diagnostics, agent, N+1
+
+- **What:** `POST /positions/list-extras` — jeden request dla widocznych wierszy (linked strategies + agent session); batch scan strategii + jeden load agent state. UI: zamiast 2N× GET diagnostics/agent. Stream-pnl: hook `useThrottledPositionStreamPnl` max 3 równoległe fetch dla visible rows.
+- **paths:** `crates/api/src/handlers/positions.rs`, `position_agent_service.rs`, `web/src/pages/Positions.tsx`, `web/src/hooks/useThrottledPositionStreamPnl.ts`, `web/src/lib/api.ts`
+
+## 2026-05-21 — Close-all send-first (SF-PR1–4)
+
+keywords: close-all, send-first, send_mode, submitted, WhirlpoolExecutor, rebalance, position_close_all, Positions.tsx
+
+- **What:** `options.send_mode=send_first` — bulk close wysyła tx bez `send_and_confirm` w workerze; status batch `submitted` + sygnatura; confirm + lifecycle/registry/ledger w tle (`finalize_manual_close_send_first`). Między sendami ten sam portfel: wait `processed` (`CLMM_SEND_FIRST_INTER_TX_SECS`, default 8). UI domyślnie `send_first` + link Solscan. Single `DELETE /positions/{addr}` bez zmian (`confirm_sync`).
+- **paths:** `crates/protocols/src/orca/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_close_ops.rs`, `position_close_all.rs`, `position_service.rs`, `web/src/pages/Positions.tsx`
+
+## 2026-05-21 — UX: roster strategii (widok „z lotu ptaka” jak wybór postaci)
+
+keywords: experiment-launch, web, ExperimentStrategyRoster, strategy-comparison
+
+- **What:** Po dodaniu strategii — siatka kompaktowych kart (`ExperimentStrategyRoster`) z całym składem (do 8) widocznym naraz; sticky u góry. Klik w kartę → panel szczegółów poniżej (jedna `ExperimentStrategyCard`). Status: ✓ gotowa / zapis / wyłączona / uwaga.
+- **paths:** `web/src/components/ExperimentStrategyRoster.tsx`, `ExperimentStrategyRosterTile.tsx`, `web/src/pages/ExperimentLaunch.tsx`
+
+## 2026-05-21 — UX: porównanie — tylko zapisane strategie + obowiązkowy zapis edycji
+
+keywords: experiment-launch, web, strategy-comparison, updateStrategy, experimentArmDirty
+
+- **What:** Picker `/experiments/new` — wyłącznie lista zapisanych strategii (bez presetów). Edycja parametrów/pary na karcie zostaje powiązana z `reuseStrategyId`; zmiany wymagają **Zapisz strategię** (`updateStrategy`) przed launch. Footer blokuje launch przy niezapisanych diffach (`isArmDirty`).
+- **paths:** `web/src/components/ExperimentStrategyPicker.tsx`, `ExperimentStrategyCard.tsx`, `web/src/lib/experimentArmDirty.ts`
+
+## 2026-05-21 — UX: porównanie strategii — para per karta, prostszy picker
+
+keywords: experiment-launch, web, strategy-comparison, pool-per-arm, ExperimentLaunch
+
+- **What:** Usunięto globalny wybór puli na wejściu `/experiments/new`. Każda strategia ma `poolAddress` + select pary na karcie (`ExperimentStrategyCard`, hook `useArmPool`). Picker strategii bez „Zestaw porównawczy (3 ramy)”. Flow: 3 kroki (Strategie → Kapitał → Launch); kapitał/launch wymagają tej samej pary u wszystkich włączonych strategii.
+- **paths:** `web/src/pages/ExperimentLaunch.tsx`, `web/src/components/ExperimentStrategyCard.tsx`, `web/src/components/ExperimentStrategyPicker.tsx`, `web/src/lib/experimentArm.ts`, `web/src/hooks/useArmPool.ts`
+
+## 2026-05-21 — PERF-B: lista pozycji `light=fast` + lazy kolumny (PR5–PR6)
+
+keywords: list_positions, light=fast, Positions.tsx, lazy-load, stream-pnl, diagnostics, staged-fetch
+
+- **What:** `GET /positions?light=fast` — tylko `enrich_pool_ticks_for_display` (bez valuation). UI: najpierw fast (30 s), potem `light=1` w tle; komunikat „Uzupełnianie wartości…”. Diagnostics/agent/stream-pnl tylko dla wierszy w viewport (+ pierwsze 5 od razu).
+- **paths:** `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_valuation.rs`, `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`
+
+## 2026-05-21 — PERF-A: close-all explicit bez full scan + UI debounce/polling
+
+keywords: close-all, explicit-scope, PERF-PR1, positions-ui, preview, debounce, list_positions
+
+- **What:** `scope=explicit` nie woła `collect_monitored_position_addresses` (preview/start tylko zaznaczone PDA). UI: debounce preview 300 ms, strategie `staleTime` 60 s bez interval 15 s, batch poll 8 s + stop gdy karta ukryta; preview HTTP timeout 30 s.
+- **paths:** `crates/api/src/services/position_close_all.rs`, `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`, `doc/POSITIONS_PAGE_PERFORMANCE_PLAN.md`
+
+## 2026-05-21 — Plan: wydajność ekranu Pozycje (lista + close-all preview)
+
+keywords: positions-ui, list_positions, light, N+1, close-all-preview, PERFORMANCE, PERF-PR1
+
+- **What:** Plan `POSITIONS_PAGE_PERFORMANCE_PLAN.md` — diagnoza wolnego ładowania (light valuation + N× stream-pnl/diagnostics/agent; preview close-all zawsze `collect_monitored`); PERF-PR1–10; PERF-PR1 przed send-first worker.
+- **paths:** `doc/POSITIONS_PAGE_PERFORMANCE_PLAN.md`, `doc/CLOSE_ALL_SEND_FIRST_IMPLEMENTATION_PLAN.md` §6
+
+## 2026-05-21 — Plan: close-all send-first (faza B)
+
+keywords: close-all, send-first, send_mode, CLOSE_ALL_SEND_FIRST_IMPLEMENTATION_PLAN, confirm_async
+
+- **What:** Plan implementacji `options.send_mode=send_first` — send tx natychmiast, confirm + registry/ledger w watcherze; PR SF-PR1…SF-PR5; single close bez zmian.
+- **paths:** `doc/CLOSE_ALL_SEND_FIRST_IMPLEMENTATION_PLAN.md`, `doc/POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md` §P3
+
+## 2026-05-21 — Close-all szybka ścieżka: `skip_pre_collect` + portfele równolegle
+
+keywords: close-all, skip_pre_collect, execute_bulk_close_only, parallel-wallet-groups, background-close
+
+- **What:** Bulk close domyślnie **1 tx/pozycję** (`execute_bulk_close_only`, bez osobnego `collect_fees`); grupy portfeli zamykane **równolegle**; UI: tytuł „Zamykanie w tle”, hint że można opuścić stronę. Pojedyncze `DELETE /positions/{addr}` bez zmian (2 tx).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `executor.rs`, `crates/api/src/services/position_close_all.rs`, `position_service.rs`, `position_close_ops.rs`, `models.rs`, `web/src/pages/Positions.tsx`
+
+## 2026-05-21 — Close-all UX: postęp per pozycja + elapsed (wolny RPC)
+
+keywords: close-all, positions-ui, batch-polling, slow-rpc, UX
+
+- **What:** Banner batcha pokazuje `items[]` (status per PDA), czas trwania, hint 2–5 min/pozycję; 404 batch → komunikat (restart API). Worker loguje start close per pozycja.
+- **paths:** `web/src/pages/Positions.tsx`, `web/src/lib/i18n.tsx`, `crates/api/src/services/position_close_all.rs`, `doc/BUGS.md` BUG-20260521-01
+
+## 2026-05-21 — Close selected: checkboxy na `/positions` + `scope=explicit`
+
+keywords: close-all, positions-ui, explicit-scope, checkbox, bulk-close, Positions.tsx
+
+- **What:** Lista monitora — kolumna checkboxów, „Zaznacz wszystkie”, przycisk „Zamknij wybrane (N)”; preview i `POST /positions/close-all` wysyłają `scope: explicit` + `addresses` (bez zmian backendu).
+- **paths:** `web/src/pages/Positions.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — Wallet GL: `event_id` VARCHAR(128) dla `lifecycle:{signature}`
+
+keywords: wallet_gl_posting, session-balances, backfill, event_id, migration 012, BUG-20260520-03
+
+- **What:** Migration 012 widens `wallet_gl_posting.event_id` and `wallet_gl_balance.last_event_id` to VARCHAR(128) so SESSION lifecycle backfill no longer fails on Solana signature length (~88 + `lifecycle:` prefix).
+- **paths:** `crates/data/migrations/012_wallet_gl_event_id_widen.sql`, `crates/data/src/repositories/database.rs`
+
+## 2026-05-20 — SESSION kapitał: minty puli z `pool_address` (fix phantom ~$97 USDC)
+
+keywords: wallet_session, session-balances, pool_mints_from_lifecycle, close_amount_a_raw, metrics_trusted, enrich_open_close_ledger_details, BUG-20260520-02
+
+- **What:** Close/open lifecycle bez `token_mint_*` nie używa już kolejności `fee_payer_token_deltas` do mapowania nóg puli (SOL lamports → fałszywe ~94 USDC). Minty z `details` lub curated `pool_address`; principal pomijany gdy nierozpoznane. API/UI: `metrics_trusted`, `mint_resolution`, banner ostrzegawczy. Executor zapisuje `token_mint_a/b` przy enrich open/close.
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/components/SessionBalancesPanel.tsx`
+
+## 2026-05-20 — Plan implementacji wykonawczy (backlog PR)
+
+keywords: IMPLEMENTATION_PLAN, execution-backlog, PR-slices, F1-F5, sprint, acceptance-criteria
+
+- **What:** Konkretny backlog PR-01–PR-30: fale F1–F5, kryteria done, macierz zależności, plan na 2 tygodnie (F1 ops + F2 reopen/lineage). Uzupełnia MASTER (analiza).
+- **paths:** `doc/IMPLEMENTATION_PLAN.md`, `doc/README.md`
+
+## 2026-05-20 — Master implementation plan (analiza całego repo)
+
+keywords: master-plan, MASTER_IMPLEMENTATION_PLAN, implementation-roadmap, maturity, five-waves, F1-F5, priorities, lineage, ingest, decision-layer
+
+- **What:** Po analizie 8 crate’ów, web (22 trasy), doc i BUGS.md — skonsolidowany plan 5 fal: (1) fundament danych/ingest, (2) stabilność live/reopen/lineage, (3) decision layer MVP, (4) rolling memory + experiment **lub** shadow, (5) research depth. Kolejność ~10 PR na 90 dni.
+- **paths:** `doc/MASTER_IMPLEMENTATION_PLAN.md`, linki w `doc/README.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`, `doc/AGENT_ROLLING_MEMORY_PLAN.md`
+
+## 2026-05-20 — Plan rolling memory (pamięć operacyjna poza LLM)
+
+keywords: rolling-memory, agent-memory, AGENT_ROLLING_MEMORY_PLAN, global.json, events.jsonl, AgentLlmContext, orchestrator, position-agent, restart-safe
+
+- **What:** Dokument planu: fazy O1 (orkiestrator) → M1 (memory global + pozycja) → M2 (LLM pack) → M3 (strategia + shadow); kontrakt `data/agent/memory/*`, macierz scope, anti-patterns (RAG/fine-tuning/LLM w rebalance).
+- **paths:** `doc/AGENT_ROLLING_MEMORY_PLAN.md`, linki w `doc/README.md`, `doc/AI_AGENT_LAYER.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`
+
+## 2026-05-20 — Close All: preview grup przed confirm (`POST /positions/close-all/preview`)
+
+keywords: close-all, preview, positions-ui, confirm, wallet groups
+
+- **What:** `POST /positions/close-all/preview` — ten sam resolver co batch, bez tx; UI `/positions` ładuje preview przy otwarciu confirm i pokazuje `groups` / `skipped_preview` / `closable` przed startem.
+- **paths:** `crates/api/src/services/position_close_all.rs`, `handlers/position_close_all.rs`, `web/src/pages/Positions.tsx`
+
+## 2026-05-20 — Close All (P2 frontend): przycisk + confirm + polling batch
+
+keywords: close-all, positions-ui, Positions.tsx, bulk-close, batch polling
+
+- **What:** Ekran `/positions` — przycisk „Zamknij wszystkie”, panel confirm (liczba z monitora), banner postępu z `groups` / `skipped_preview` z odpowiedzi 202, polling `GET /positions/close-all/{batch_id}` co 4 s do `done`.
+- **paths:** `web/src/pages/Positions.tsx`, `web/src/lib/api.ts`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — Close All (P1 backend): batch job + per-wallet signer resolver
+
+keywords: close-all, bulk-close, positions, batch-job, multi-wallet, position_close_signer, position_wallet_store, POST /positions/close-all
+
+- **What:** `POST /positions/close-all` (202 + `batch_id`) and `GET /positions/close-all/{batch_id}` on the **base** HTTP router (short timeout). In-memory worker closes monitored positions grouped by API wallet; resolver order: registry → lifecycle → running strategy executor → RPC NFT owner. `DELETE /positions/{address}` refactored to the same resolver + ephemeral executor (fixes active-signer ≠ owner). `pause_linked_strategies` appends `executor_disabled_position_addresses` on linked strategies before batch.
+- **paths:** `crates/api/src/services/position_close_signer.rs`, `position_close_all.rs`, `position_close_ops.rs`, `position_wallet_store.rs`, `handlers/position_close_all.rs`, `handlers/positions.rs`, `crates/protocols/src/rpc/provider.rs` (`get_token_largest_accounts`), `doc/POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`
+
+## 2026-05-20 — Experiment launcher UI: pionowy stack strategii (+ / karty / staty)
+
+keywords: experiment-launcher, ExperimentLaunch, ExperimentStrategyCard, ExperimentAddStrategySlot, UI stack, web
+
+- **What:** Ekran `/experiments/new` bez kroków 1–4 dla ram: wybór puli u góry, duży **+** → picker strategii → karta ze statami + edycja parametrów → **+** pod spodem na kolejną strategię. Kapitał i launch na dole po dodaniu co najmniej jednej strategii. **UX pass:** modal pickera (bez zastępowania karty), timeline, status walidacji, zwijane parametry, wyszukiwarka strategii, zestaw 3×, sticky footer z launch, pasek postępu.
+- **paths:** `web/src/pages/ExperimentLaunch.tsx`, `web/src/components/ExperimentStrategyCard.tsx`, `web/src/components/ExperimentAddStrategySlot.tsx`, `web/src/components/ExperimentStrategyPicker.tsx`, `web/src/lib/experimentArmStats.ts`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — Stream-lineage: poprawne HODL/cashflow/PnL po operator_api open
+
+keywords: stream-lineage, stream_pnl, hodl_value_usd, realized_cashflow_usd, operator_api, open_quote_estimated_value_usd, baseline_open, live_current, BUG-20260520-01
+
+- **What:** Naprawa sum stream-lineage gdy open z experiment/operator API: quote USD w lifecycle, baseline z `open_amount_*_raw`, cashflow bez open/close principal, persist snapshotów przed totals, self-seed live current, **reconcile totals z węzłów** gdy DB HODL/current są zdegradowane (jedna noga / stale baseline).
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/position_stream_pnl.rs`, `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md` (BUG-20260520-01)
+
+## 2026-05-20 — Session wallet metrics: open baseline + USD (GET session-balances)
+
+keywords: session-balances, SessionBalancesPanel, open_start, cycle baseline, wallet_session, PSLR, metrics
+
+- **What:** `GET /wallets/session-balances` returns optional `metrics`: first **open** row in session (deployed mints, `value_usd`, pre-open inventory) + `current_value_usd` / `delta_vs_pre_open_usd` at open event prices. UI block „Punkt odniesienia” in `SessionBalancesPanel`.
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/api/src/services/wallet_gl_posting.rs`, `crates/api/src/handlers/wallets.rs`, `web/src/components/SessionBalancesPanel.tsx`
+
+## 2026-05-20 — Experiment launcher PR-3/PR-4: kapitał UI + launch orchestrator
+
+keywords: experiment-launcher, ExperimentCapitalStep, experimentBudgetPlan, experimentLaunchSpecs, PR-3, PR-4, launchExperiment, shared-swap, web
+
+- **What:** PR-3: krok 3 wizarda — budżet USD (equal/manual), równoległe `quote-open-budget`, agregacja §6.2, wspólny/per-arm swap, gate `capitalStepOk`. PR-4: krok 4 — `launchExperiment` (shared swap opcjonalny, `createStrategy` / reuse, sekwencyjne `openPosition`), tabela postępu, `batch_id` w localStorage, linki do pozycji.
+- **paths:** `web/src/components/ExperimentCapitalStep.tsx`, `web/src/lib/experimentBudgetPlan.ts`, `web/src/lib/experimentLaunchSpecs.ts`, `web/src/pages/ExperimentLaunch.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — P5: dokumentacja rollout SESSION GL + reopen 5a (spec, runbook)
+
+keywords: P5, FUNCTIONAL_SPECIFICATION, WALLET_GL, ORCA_RUNBOOK, DATA_CATALOG, rollout, CLMM_REOPEN_USE_SESSION_CAPITAL, operator
+
+- **What:** §2.1 + §5.2 w `FUNCTIONAL_SPECIFICATION.md` (stan wdrożenia, flaga 5a); `WALLET_GL.md` §6 runbook operatora (krok A podgląd, krok B flaga); skrót w `ORCA_RUNBOOK.md` + env/UI w `DATA_CATALOG.md`; plan GL P5 ✅.
+- **paths:** `doc/FUNCTIONAL_SPECIFICATION.md`, `doc/WALLET_GL.md`, `doc/ORCA_RUNBOOK.md`, `doc/DATA_CATALOG.md`, `doc/WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md`
+
+## 2026-05-20 — P4: PositionCreate preflight kapitału sesji (min portfel, sesja)
+
+keywords: PositionCreate, session-balances, preflight, session capital, P4, min-rpc-session
+
+- **What:** `PositionCreate`: opcjonalne `cost_session_id` / sync z krokiem swap; panel `SessionCapitalPreflight` (portfel RPC vs kapitał sesji, efektywne min, blokada submit). Wspólne helpery `web/src/lib/sessionCapital.ts`.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `web/src/components/SessionCapitalPreflight.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — SESSION GL: posting w `clmm-lp-data` + testy integracyjne Postgres
+
+keywords: wallet_session, session_gl_integration, DATABASE_URL, lifecycle posting, wallet_gl_posting, PSLR, idempotency
+
+- **What:** Logika zapisu SESSION GL (`apply_session_mint_postings`, `apply_session_postings_from_lifecycle_row`, idempotency) przeniesiona do `clmm-lp-data::wallet_session`; API `wallet_gl_posting` tylko env-gate + best-effort journal. Nowy `crates/data/tests/session_gl_integration.rs` — close + collect, GL=PSLR, caps, `SkippedAlready` (skip bez `DATABASE_URL`).
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/api/src/services/wallet_gl_posting.rs`, `crates/data/tests/session_gl_integration.rs`
+
+## 2026-05-20 — Experiment launcher PR-2: presety, edycja ram, auto-ticki
+
+keywords: experiment-launcher, ExperimentArmEditor, gridPresets, PR-2, strategyFormShared, experimentArmTicks
+
+- **What:** Rozszerzony model `ExperimentArm` (form, preset, reuse strategii, ticki). `ExperimentArmEditor` — GRID_PRESETS, inline parametry, auto-ticki (width/Bollinger). Zestaw porównawczy 3 ram. `gridPresets.ts` współdzielony z Backtests.
+- **paths:** `web/src/lib/experimentArm.ts`, `experimentArmTicks.ts`, `gridPresets.ts`, `web/src/components/ExperimentArmEditor.tsx`, `web/src/pages/ExperimentLaunch.tsx`, `web/src/pages/Backtests.tsx`
+
+## 2026-05-20 — Experiment launcher PR-1: `/experiments/new` wizard skeleton
+
+keywords: experiment-launcher, ExperimentLaunch, PR-1, web, curatedPools, experimentArm, wizard
+
+- **What:** Route `/experiments/new` — 4-step wizard (pool → arms → capital placeholder → launch placeholder). Curated pool picker, add/remove arms (1–8), links from Positions/Strategies. i18n PL/EN.
+- **paths:** `web/src/pages/ExperimentLaunch.tsx`, `web/src/lib/curatedPools.ts`, `web/src/lib/experimentArm.ts`, `web/src/App.tsx`, `web/src/pages/Positions.tsx`, `web/src/pages/Strategies.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — Experiment launcher libs (TDD): capital, funding plan, launch orchestrator
+
+keywords: experiment-launcher, experimentCapital, experimentFundingPlan, experimentLaunch, TDD, shared-swap, BUG-20260512-05, vitest, web
+
+- **What:** Pure TS libs for multi-strategy experiment (PR-3): `experimentCapital` (budget split/validate), `experimentFundingPlan` (aggregate needs + shared Orca swap plan §6.2), `experimentLaunch` (sequential open + BUG-20260512-05 guard after swap). Shared swap estimators in `openPositionSwapEstimates.ts`. Vitest: 27 new tests.
+- **paths:** `web/src/lib/experimentCapital.ts`, `experimentFundingPlan.ts`, `experimentLaunch.ts`, `openPositionSwapEstimates.ts`, `*.test.ts`, `doc/MULTI_STRATEGY_EXPERIMENT_LAUNCHER.md`
+
+## 2026-05-20 — SESSION capital: testy jednostkowe flow (JSONL, load, caps)
+
+keywords: wallet_session, session_capital, tests, lifecycle jsonl, strict_empty, cap_rpc_with_session
+
+- **What:** `clmm-lp-data::wallet_session` +5 tests (aggregate open/close, JSONL caps, gl_pslr_match, resolve bez DB). `session_capital` +4 tokio tests (flag off, strict empty, JSONL inventory). `rebalance` +2 (apply_session_caps_to_wallet_raw, session_capital_error_if_strict).
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-05-20 — SESSION capital w executorze (faza 5a): min(RPC, SESSION) + flaga rollout
+
+keywords: wallet_session, session_capital, CLMM_REOPEN_USE_SESSION_CAPITAL, rebalance, reopen, policy-5a, clmm-lp-data
+
+- **What:** `clmm-lp-data::wallet_session` — wspólna logika Δ lifecycle + `resolve_session_mint_caps` (GL/PSLR min / JSONL). Executor: `cap_rpc_with_session`, §2.2 na capped balances, `bot_reopen_session_below_target`; `RebalanceExecutor::set_session_database` + hook w `strategy_service`. Flaga **`CLMM_REOPEN_USE_SESSION_CAPITAL`** (default **off**). API `wallet_gl_posting` deleguje do data crate.
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/wallet_gl_posting.rs`, `doc/WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md`
+
+## 2026-05-20 — Plan: executor / reopen na wydzielonym portfelu SESSION (faza 5)
+
+keywords: WALLET_SESSION_CAPITAL_EXECUTOR_PLAN, SESSION capital, executor, reopen, policy-3A, CLMM_REOPEN_USE_SESSION_CAPITAL, min-rpc-session-cap
+
+- **What:** Doc-only implementation plan: shared `wallet_session` in `clmm-lp-data`, executor caps `min(RPC, SESSION)`, §2.2 on `W_session`, API bot wiring, optional UI preflight; rollout flag default off. Links from `WALLET_SESSION_GL_IMPLEMENTATION_PLAN` faza 5.
+- **paths:** `doc/WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md`, `doc/WALLET_GL.md`, `doc/README.md`
+
+## 2026-05-20 — Wallet SESSION GL PR-C/E: backfill + reconcile-session-gl
+
+keywords: session-balances backfill, reconcile-session-gl, wallet_gl_posting, PSLR
+
+- **What:** `POST /wallets/session-balances/backfill?session_id=&limit=` replays `position_stream_ledger_rows` into SESSION GL (idempotent). `POST /wallets/reconcile-session-gl?session_id=` compares GL vs PSLR aggregate vs last close returned (§6.1 informational). UI: Backfill + Reconcile on `SessionBalancesPanel`. Env: `CLMM_WALLET_GL_SESSION_RECONCILE` (default on).
+- **paths:** `crates/api/src/services/wallet_gl_posting.rs`, `crates/api/src/handlers/wallets.rs`, `web/src/components/SessionBalancesPanel.tsx`
+
+## 2026-05-20 — Wallet SESSION GL PR-D: UI SessionBalancesPanel
+
+keywords: SessionBalancesPanel, WalletLedger, PositionDetail, Positions, session-balances, web
+
+- **What:** `GET /wallets/session-balances` wired in `web/src/lib/api.ts`. Reusable `SessionBalancesPanel` (mint / raw / est. UI, `source`, link to logs). Shown on `/wallet/ledger` (session filter), position detail (latest lifecycle session), positions stranded-reopen card (session picker).
+- **paths:** `web/src/components/SessionBalancesPanel.tsx`, `web/src/pages/WalletLedger.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/pages/Positions.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-20 — Wallet SESSION GL PR-A: lifecycle posting on ingest + PSLR read fallback
+
+keywords: wallet_gl_posting, lifecycle_posting, ingest_lifecycle_rows, position_stream_ledger_rows, session-balances, CLMM_WALLET_GL_SESSION_LIFECYCLE_POSTING
+
+- **What:** `session_mint_deltas_from_lifecycle_json` maps `bot_close_position` / `bot_collect_fees` / open / swap rows to SESSION mint deltas (`close_amount_*`, `lp_collected_*`, `fee_payer_token_deltas`). Hook after each row in `ingest_lifecycle_rows_best_effort`; idempotent `event_id=lifecycle:{signature}`. Journal posting skips when lifecycle posting exists for same signature. `GET /wallets/session-balances` uses `read_session_balances_resolved` (GL then PSLR aggregate). Env: `CLMM_WALLET_GL_SESSION_LIFECYCLE_POSTING` (default on).
+- **paths:** `crates/api/src/services/wallet_gl_posting.rs`, `crates/api/src/services/position_stream_performance.rs`, `crates/api/src/handlers/wallets.rs`
+
+## 2026-05-20 — Wallet SESSION GL: analiza integracji + zaktualizowany plan (lifecycle-first)
+
+keywords: WALLET_SESSION_GL_INTEGRATION_ANALYSIS, lifecycle-first, position_stream_ledger_rows, ingest, SESSION retention
+
+- **What:** Doc-only: pełna analiza spięcia SESSION GL z istniejącym lifecycle (`orca_position_lifecycle.jsonl` → `position_stream_ledger_rows`), lineage, wallet journal; reguły posting, pipeline ingest hook, PR-A..E. Plan implementacji zaktualizowany (faza 1b lifecycle posting jako priorytet zamiast RPC diff w API close).
+- **paths:** `doc/WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md`, `doc/WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md`, `doc/WALLET_GL.md`, `doc/README.md`
+
+## 2026-05-20 — Wallet SESSION GL: schema 011 + shadow posting + session-balances API
+
+keywords: wallet_gl_posting, wallet_gl_session, SESSION account, migration 011, session-balances, analytics retention
+
+- **What:** Postgres `wallet_gl_account` / `wallet_gl_balance` / `wallet_gl_posting` (migracja `011_*`). On each `append_wallet_ledger_event` → PG insert, `apply_session_postings_from_journal` updates `SESSION:{cost_session_id}` per mint from `deltas[]` when `confirmed` and not `dry_run`. **`GET /wallets/session-balances`**. Policy: **never** auto-close or liquidate SESSION after manual close (historical balances for analytics). Env: `CLMM_WALLET_GL_SESSION_POSTING` / `CLMM_WALLET_GL_SESSION_READ` (default on; set `0`/`false` to disable). **Gap:** `close_position` confirmed journal still often has empty `deltas[]` — SESSION updates on swap/open/collect until close deltas are added.
+- **paths:** `crates/data/migrations/011_wallet_gl_session_accounts.sql`, `crates/api/src/services/wallet_gl_posting.rs`, `crates/api/src/services/wallet_ledger.rs`, `crates/api/src/handlers/wallets.rs`, `doc/DATA_CATALOG.md`, `doc/WALLET_GL.md`
+
+## 2026-05-20 — Wallet SESSION GL: plan implementacji (Hybrid A, fazy 0–5)
+
+keywords: WALLET_SESSION_GL_IMPLEMENTATION_PLAN, SESSION account, wallet_gl_balance, posting, shadow read, policy-3A
+
+- **What:** Decision record + phased plan: GL sub-accounts `SESSION:{session_id}` per mint (variant C1), posting rules open/close/swap/collect, shadow API `session-balances`, reconcile, PR sequence. Bot/UI stay on §5 + 3A until later phases.
+- **paths:** `doc/WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md`, `doc/WALLET_GL.md`, `doc/README.md`
+
 ## 2026-05-20 — Wallet GL §2.2 + Functional spec §5.2: norma konta logicznego per cykl pozycji
 
 keywords: WALLET_GL, rebalance_session_id, SESSION account, policy-3A, FUNCTIONAL_SPECIFICATION, cost_session_id, returned_raw

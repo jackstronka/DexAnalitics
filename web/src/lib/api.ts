@@ -72,6 +72,18 @@ export interface PositionDiagnosticsResponse {
   linked_strategies: PositionStrategyDiagnostics[]
 }
 
+export interface PositionListExtrasEntry {
+  address: string
+  in_monitor: boolean
+  monitor_in_range?: boolean | null
+  linked_strategies: PositionStrategyDiagnostics[]
+  agent_session?: AgentPositionSession | null
+}
+
+export interface PositionsListExtrasResponse {
+  items: PositionListExtrasEntry[]
+}
+
 export interface AgentPositionSession {
   position_address: string
   status: string
@@ -1147,6 +1159,84 @@ export interface StaleReconcileReport {
   rpc_errors: number
 }
 
+/** `POST /positions/close-all` — bulk close monitored positions (202 + batch job). */
+export type CloseAllItemStatus =
+  | 'queued'
+  | 'submitted'
+  | 'pending_on_chain'
+  | 'confirmed'
+  | 'failed'
+  | 'skipped_unmanaged_signer'
+  | 'already_closed'
+
+export interface CloseAllPositionsOptions {
+  skip_pre_collect?: boolean
+  send_mode?: string
+  /** Min-out slippage for Orca close (bps). API default 200 when omitted. */
+  slippage_bps?: number
+}
+
+export interface CloseAllPositionsRequest {
+  scope?: 'monitored' | 'explicit'
+  addresses?: string[]
+  exclude_addresses?: string[]
+  pause_linked_strategies?: boolean
+  options?: CloseAllPositionsOptions
+}
+
+export interface CloseAllWalletGroup {
+  wallet_id: string
+  owner_pubkey: string
+  count: number
+}
+
+export interface CloseAllSkippedPreview {
+  address: string
+  reason: string
+  owner_pubkey?: string | null
+}
+
+export interface CloseAllPositionsStartResponse {
+  batch_id: string
+  status: string
+  total: number
+  groups: CloseAllWalletGroup[]
+  skipped_preview?: CloseAllSkippedPreview[]
+}
+
+export interface CloseAllPositionsPreviewResponse {
+  total: number
+  closable: number
+  groups: CloseAllWalletGroup[]
+  skipped_preview?: CloseAllSkippedPreview[]
+}
+
+export interface CloseAllBatchSummary {
+  total: number
+  closed: number
+  failed: number
+  skipped: number
+  pending: number
+}
+
+export interface CloseAllBatchItem {
+  address: string
+  owner_pubkey?: string | null
+  close_signer_wallet_id?: string | null
+  status: CloseAllItemStatus
+  signature?: string | null
+  error?: string | null
+}
+
+export interface CloseAllBatchStatusResponse {
+  batch_id: string
+  status: string
+  started_ts_utc: string
+  finished_ts_utc?: string | null
+  summary: CloseAllBatchSummary
+  items: CloseAllBatchItem[]
+}
+
 export interface ListPositionsMeta {
   skipped_absent_cached?: number
   skipped_registry_closed?: number
@@ -1163,9 +1253,19 @@ export interface ListPositionsResponse {
   meta?: ListPositionsMeta
 }
 
-// Positions — API defaults to `light=1` (fast list). Use getPositionsFull() for heavy valuation.
+// Positions — staged load: `fast` tick/range only, then `light=1` valuation (default).
+/** Batch strategy link + agent session for visible Positions rows (PERF-PR7). */
+export const postPositionsListExtras = (addresses: string[]) =>
+  fetchJsonWithTimeout<PositionsListExtrasResponse>('/positions/list-extras', 45_000, {
+    method: 'POST',
+    body: JSON.stringify({ addresses }),
+  })
+
+export const getPositionsFast = () =>
+  fetchJsonWithTimeout<ListPositionsResponse>('/positions?light=fast', 30_000)
+
 export const getPositions = () =>
-  fetchJsonWithTimeout<ListPositionsResponse>('/positions', 60_000)
+  fetchJsonWithTimeout<ListPositionsResponse>('/positions?light=1', 60_000)
 
 export const getPositionsFull = () =>
   fetchJsonWithTimeout<ListPositionsResponse>('/positions?light=0', 60_000)
@@ -1174,6 +1274,32 @@ export const reconcileStalePositions = () =>
   fetchJsonWithTimeout<StaleReconcileReport>('/positions/reconcile-stale', 120_000, {
     method: 'POST',
   })
+
+export const postCloseAllPositions = (body: CloseAllPositionsRequest = {}) =>
+  fetchJsonWithTimeout<CloseAllPositionsStartResponse>('/positions/close-all', 30_000, {
+    method: 'POST',
+    body: JSON.stringify({
+      scope: 'monitored',
+      pause_linked_strategies: true,
+      ...body,
+    }),
+  })
+
+export const postCloseAllPositionsPreview = (body: CloseAllPositionsRequest = {}) =>
+  fetchJsonWithTimeout<CloseAllPositionsPreviewResponse>('/positions/close-all/preview', 30_000, {
+    method: 'POST',
+    body: JSON.stringify({
+      scope: 'monitored',
+      pause_linked_strategies: true,
+      ...body,
+    }),
+  })
+
+export const getCloseAllBatchStatus = (batchId: string) =>
+  fetchJsonWithTimeout<CloseAllBatchStatusResponse>(
+    `/positions/close-all/${encodeURIComponent(batchId.trim())}`,
+    30_000,
+  )
 
 export const pruneStaleStrategyPositions = (strategyId: string) =>
   fetchJsonWithTimeout<StaleReconcileReport>(
@@ -1937,6 +2063,99 @@ export interface WalletLedgerEventsResponse {
   /** `postgres`, `jsonl`, or `jsonl_fallback` */
   storage?: string
   events: WalletLedgerEvent[]
+}
+
+export interface WalletSessionBalanceRow {
+  mint: string
+  amount_raw: string
+  decimals?: number | null
+}
+
+export interface WalletSessionOpenStartSnapshot {
+  ts_utc?: string | null
+  signature: string
+  position_pubkey?: string | null
+  event: string
+  deployed_balances: WalletSessionBalanceRow[]
+  value_usd?: string | null
+  value_usd_source: string
+  pre_open_balances: WalletSessionBalanceRow[]
+  pre_open_value_usd?: string | null
+  /** details | pool_address | incomplete */
+  mint_resolution?: string
+}
+
+export interface WalletSessionMetrics {
+  open_start: WalletSessionOpenStartSnapshot
+  current_value_usd?: string | null
+  delta_vs_pre_open_usd?: string | null
+  /** False when lifecycle close/open rows lack pool mints — session USD may not match wallet. */
+  metrics_trusted?: boolean
+}
+
+export interface WalletSessionBalancesResponse {
+  session_id: string
+  owner?: string | null
+  /** e.g. gl_session_shadow, gl_session_shadow_pslr_fallback */
+  source: string
+  balances: WalletSessionBalanceRow[]
+  metrics?: WalletSessionMetrics | null
+}
+
+export const getWalletSessionBalances = (opts: { session_id: string; owner?: string }) => {
+  const params = new URLSearchParams()
+  params.set('session_id', opts.session_id.trim())
+  if (opts.owner?.trim()) params.set('owner', opts.owner.trim())
+  return fetchJson<WalletSessionBalancesResponse>(`/wallets/session-balances?${params}`)
+}
+
+export interface WalletSessionGlBackfillReport {
+  sessions_processed: number
+  rows_scanned: number
+  postings_applied: number
+  rows_skipped_already: number
+  rows_skipped_no_deltas: number
+}
+
+export const postWalletSessionBalancesBackfill = (opts?: {
+  session_id?: string
+  limit?: number
+}) => {
+  const params = new URLSearchParams()
+  if (opts?.session_id?.trim()) params.set('session_id', opts.session_id.trim())
+  if (opts?.limit != null) params.set('limit', String(opts.limit))
+  const q = params.toString()
+  return fetchJson<WalletSessionGlBackfillReport>(
+    `/wallets/session-balances/backfill${q ? `?${q}` : ''}`,
+    { method: 'POST' },
+  )
+}
+
+export interface WalletSessionGlReconcileGap {
+  mint: string
+  gl_amount_raw?: string | null
+  pslr_amount_raw?: string | null
+  last_close_returned_raw?: string | null
+}
+
+export interface WalletSessionGlReconcileResponse {
+  session_id: string
+  gl_balances: WalletSessionBalanceRow[]
+  pslr_balances: WalletSessionBalanceRow[]
+  last_close_returned: WalletSessionBalanceRow[]
+  gaps: WalletSessionGlReconcileGap[]
+  gl_matches_pslr: boolean
+  note: string
+}
+
+export const postWalletReconcileSessionGl = (opts: { session_id: string; owner?: string }) => {
+  const params = new URLSearchParams()
+  params.set('session_id', opts.session_id.trim())
+  if (opts?.owner?.trim()) params.set('owner', opts.owner.trim())
+  return fetchJson<WalletSessionGlReconcileResponse>(
+    `/wallets/reconcile-session-gl?${params}`,
+    { method: 'POST' },
+  )
 }
 
 export const getWalletLedgerEvents = (opts?: {

@@ -104,16 +104,54 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 $logPath = Join-Path $logDir ("clmm-lp-api_8081_{0}.log" -f $ts)
 
-# Run in a separate window and keep it open on errors, so failures are visible.
+# Build here (blocking) so Start-Dashboard-Safe health-wait is not racing a hidden `cargo run` compile.
+# After Rust changes, first rebuild of protocols/execution/api can exceed 180s; runtime startup stays ~30–40s.
+Write-Host "[Start-ClmmApi-8081] Building clmm-lp-api (target-dev-api)..." -ForegroundColor Cyan
+$buildSw = [System.Diagnostics.Stopwatch]::StartNew()
+& cargo build -p clmm-lp-api --bin clmm-lp-api --target-dir $env:CLMM_API_TARGET_DIR
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "[Start-ClmmApi-8081] cargo build failed (exit $LASTEXITCODE). Fix compile errors before starting dashboard."
+    exit $LASTEXITCODE
+}
+Write-Host ("[Start-ClmmApi-8081] Build OK in {0}s." -f [int]$buildSw.Elapsed.TotalSeconds) -ForegroundColor Green
+
+$apiExe = Join-Path $RepoRoot (Join-Path $env:CLMM_API_TARGET_DIR "debug\clmm-lp-api.exe")
+if (-not (Test-Path -LiteralPath $apiExe)) {
+    Write-Error "[Start-ClmmApi-8081] Missing binary after build: $apiExe"
+    exit 1
+}
+
+# Run binary in a separate window (no second compile); keep it open on errors.
+$runCmd = @"
+& {
+  `$ErrorActionPreference = 'Continue'
+  `$env:API_PORT = '8081'
+  `$env:CLMM_REPO_ROOT = '$RepoRoot'
+  `$env:RUST_LOG = 'info'
+  `$env:DRY_RUN = '$($env:DRY_RUN)'
+  `$env:CLMM_API_TARGET_DIR = '$($env:CLMM_API_TARGET_DIR)'
+  `$env:CLMM_LP_CLI_PATH = '$($env:CLMM_LP_CLI_PATH)'
+  `$env:NPM_CONFIG_CACHE = '$($env:NPM_CONFIG_CACHE)'
+  `$env:TEMP = '$($env:TEMP)'
+  `$env:TMP = '$($env:TMP)'
+  `$env:KEYPAIR_PATH = '$($env:KEYPAIR_PATH)'
+  `$env:SOLANA_KEYPAIR_PATH = '$($env:SOLANA_KEYPAIR_PATH)'
+  `$env:WALLET_KEYPAIR_PATH = '$($env:WALLET_KEYPAIR_PATH)'
+  `$env:SOLANA_KEYPAIR = '$($env:SOLANA_KEYPAIR)'
+  `$env:WALLET_KEYPAIR_BASE58 = '$($env:WALLET_KEYPAIR_BASE58)'
+  `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS = '$($env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS)'
+  `$env:CLMM_IL_LEDGER_PATH = '$($env:CLMM_IL_LEDGER_PATH)'
+  `$env:CLMM_PENDING_OPEN_RECOVERY_PATH = '$($env:CLMM_PENDING_OPEN_RECOVERY_PATH)'
+  `$env:DATABASE_URL = '$($env:DATABASE_URL)'
+  `$env:DATABASE_POOL_SIZE = '$($env:DATABASE_POOL_SIZE)'
+  Write-Host '[clmm-lp-api] logging to: $logPath' -ForegroundColor DarkGray
+  Write-Host '[clmm-lp-api] exe: $apiExe' -ForegroundColor DarkGray
+  & '$apiExe' 2>&1 | Tee-Object -FilePath '$logPath'
+}
+"@
+
 Start-Process -FilePath "pwsh" `
-  -ArgumentList @(
-    "-NoProfile",
-    "-NoExit",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    "& { `$ErrorActionPreference='Continue'; `$env:API_PORT='8081'; `$env:CLMM_REPO_ROOT='$RepoRoot'; `$env:RUST_LOG='info'; `$env:DRY_RUN='$($env:DRY_RUN)'; `$env:CLMM_API_TARGET_DIR='$($env:CLMM_API_TARGET_DIR)'; `$env:CLMM_LP_CLI_PATH='$($env:CLMM_LP_CLI_PATH)'; `$env:NPM_CONFIG_CACHE='$($env:NPM_CONFIG_CACHE)'; `$env:TEMP='$($env:TEMP)'; `$env:TMP='$($env:TMP)'; `$env:KEYPAIR_PATH='$($env:KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR_PATH='$($env:SOLANA_KEYPAIR_PATH)'; `$env:WALLET_KEYPAIR_PATH='$($env:WALLET_KEYPAIR_PATH)'; `$env:SOLANA_KEYPAIR='$($env:SOLANA_KEYPAIR)'; `$env:WALLET_KEYPAIR_BASE58='$($env:WALLET_KEYPAIR_BASE58)'; `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS='$($env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS)'; `$env:CLMM_IL_LEDGER_PATH='$($env:CLMM_IL_LEDGER_PATH)'; `$env:CLMM_PENDING_OPEN_RECOVERY_PATH='$($env:CLMM_PENDING_OPEN_RECOVERY_PATH)'; `$env:DATABASE_URL='$($env:DATABASE_URL)'; `$env:DATABASE_POOL_SIZE='$($env:DATABASE_POOL_SIZE)'; Write-Host ('[clmm-lp-api] logging to: $logPath') -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] cargo target dir: ' + `$env:CLMM_API_TARGET_DIR) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] CLMM_LP_CLI_PATH=' + `$env:CLMM_LP_CLI_PATH) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] DRY_RUN=' + `$env:DRY_RUN) -ForegroundColor DarkGray; Write-Host ('[clmm-lp-api] TEMP/TMP=' + `$env:TEMP) -ForegroundColor DarkGray; if (`$env:DATABASE_URL -and `$env:DATABASE_URL.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] DATABASE_URL=set (Postgres enabled for chain-history)') -ForegroundColor DarkGray } else { Write-Host ('[clmm-lp-api] DATABASE_URL=unset — chain-history / DB features return 503') -ForegroundColor Yellow }; if (`$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS -and `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_STRANDED_RECONCILE_INTERVAL_SECS=' + `$env:CLMM_STRANDED_RECONCILE_INTERVAL_SECS) -ForegroundColor DarkGray }; if (`$env:CLMM_IL_LEDGER_PATH -and `$env:CLMM_IL_LEDGER_PATH.Trim().Length -gt 0) { Write-Host ('[clmm-lp-api] CLMM_IL_LEDGER_PATH=set') -ForegroundColor DarkGray }; cargo run -q -p clmm-lp-api --bin clmm-lp-api --target-dir `$env:CLMM_API_TARGET_DIR 2>&1 | Tee-Object -FilePath '$logPath' }"
-  ) `
+  -ArgumentList @("-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $runCmd) `
   -WorkingDirectory $RepoRoot `
   -WindowStyle Normal
 

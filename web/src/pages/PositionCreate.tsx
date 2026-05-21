@@ -37,6 +37,10 @@ import {
 import { getDevWalletPubkey } from '@/lib/devWallet'
 import { formatUSD, shortenAddress } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
+import {
+  SessionCapitalPreflight,
+  useSessionCapitalCheck,
+} from '@/components/SessionCapitalPreflight'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -250,7 +254,7 @@ function formatBalanceLine(
 }
 
 export default function PositionCreate() {
-  const { locale } = useI18n()
+  const { locale, t } = useI18n()
   const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -296,6 +300,8 @@ export default function PositionCreate() {
 
   // 2-step SWAP then OPEN state
   const [swapCostSessionId, setSwapCostSessionId] = useState<string | null>(null)
+  /** Optional reuse of rebalance_session_id (reopen / incomplete rebalance). */
+  const [sessionIdInput, setSessionIdInput] = useState('')
   const [swapSignature, setSwapSignature] = useState<string | null>(null)
   const [swapStepInfo, setSwapStepInfo] = useState<string | null>(null)
   const [swapStepError, setSwapStepError] = useState<string | null>(null)
@@ -396,6 +402,14 @@ export default function PositionCreate() {
     }
     prevEffectiveOwnerPkRef.current = effectiveOwnerPk
   }, [effectiveOwnerPk, queryClient])
+
+  useEffect(() => {
+    if (swapCostSessionId?.trim()) {
+      setSessionIdInput(swapCostSessionId.trim())
+    }
+  }, [swapCostSessionId])
+
+  const effectiveSessionId = (swapCostSessionId?.trim() || sessionIdInput.trim()) || ''
 
   const strategyOptions = useMemo(
     () => strategiesQ.data?.strategies ?? [],
@@ -1088,6 +1102,26 @@ export default function PositionCreate() {
     return null
   }, [fundingCheck, tokenA, tokenB, pricesQ.data, effectiveBalancesQ.data, poolQ.data?.price, poolStateQ.data?.price])
 
+  const sessionPreflightProps = useMemo(() => {
+    if (!effectiveSessionId || !tokenA || !tokenB || !fundingCheck.ready) return null
+    return {
+      sessionId: effectiveSessionId,
+      owner: effectiveOwnerPk ?? undefined,
+      tokenAMint: tokenA.mint,
+      tokenASymbol: tokenA.symbol,
+      tokenADecimals: tokenA.decimals,
+      tokenBMint: tokenB.mint,
+      tokenBSymbol: tokenB.symbol,
+      tokenBDecimals: tokenB.decimals,
+      needA: fundingCheck.needA,
+      needB: fundingCheck.needB,
+      walletHaveA: fundingCheck.effectiveHaveA ?? 0,
+      walletHaveB: fundingCheck.effectiveHaveB ?? 0,
+    }
+  }, [effectiveSessionId, tokenA, tokenB, fundingCheck, effectiveOwnerPk])
+
+  const sessionCheck = useSessionCapitalCheck(sessionPreflightProps)
+
   const swapBeforeOpenInputMeta = useMemo(() => {
     if (!swapBeforeOpenPlan || !tokenA || !tokenB) return null
     if (swapBeforeOpenPlan.specified_mint === tokenA.mint) {
@@ -1334,6 +1368,16 @@ export default function PositionCreate() {
           'Wallet balances are stale — use “Force refresh” and wait for fresh data before submitting open.',
         ),
       )
+      return
+    }
+
+    if (sessionCheck.ready && sessionCheck.blocked) {
+      const parts = [
+        sessionCheck.shortA && tokenA ? tokenA.symbol : null,
+        sessionCheck.shortB && tokenB ? tokenB.symbol : null,
+      ].filter(Boolean)
+      const tokenList = parts.length > 0 ? parts.join(', ') : '—'
+      setOpenStepError(t('positionCreate.sessionCapitalBlocked').replace('{tokens}', tokenList))
       return
     }
 
@@ -2092,9 +2136,40 @@ export default function PositionCreate() {
                 </InlineError>
               ) : null}
 
+              <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-3 space-y-2">
+                <label className="block text-sm font-medium" htmlFor="cost-session-id">
+                  {t('positionCreate.sessionIdLabel')}
+                </label>
+                <p className="text-xs text-muted-foreground">{t('positionCreate.sessionIdHint')}</p>
+                <input
+                  id="cost-session-id"
+                  type="text"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                  value={sessionIdInput}
+                  onChange={(e) => setSessionIdInput(e.target.value)}
+                  placeholder={t('positionCreate.sessionIdPlaceholder')}
+                  readOnly={!!swapCostSessionId?.trim()}
+                />
+                {swapCostSessionId?.trim() ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    {L(
+                      'ID sesji ustawione przez krok swap (cost_session_id).',
+                      'Session ID set by swap step (cost_session_id).',
+                    )}
+                  </p>
+                ) : null}
+              </div>
+
+              {sessionPreflightProps ? <SessionCapitalPreflight {...sessionPreflightProps} /> : null}
+
               {fundingCheck.ready && fundingCheck.blocked && (
                 <ErrorBanner className="py-2.5 space-y-2">
-                  <p className="font-medium">Za mało środków na portfelu względem kwot powyżej</p>
+                  <p className="font-medium">
+                    {L(
+                      'Za mało środków na portfelu (RPC) względem kwot powyżej',
+                      'Insufficient wallet (RPC) balance for the amounts above',
+                    )}
+                  </p>
                   {effectiveBalancesQ.data?.is_stale ? (
                     <p className="text-xs text-muted-foreground">
                       {L(
@@ -2364,7 +2439,8 @@ export default function PositionCreate() {
                     (fundingCheck.ready &&
                       fundingCheck.blocked &&
                       swapBeforeOpen &&
-                      !swapSignature)
+                      !swapSignature) ||
+                    (sessionCheck.ready && sessionCheck.blocked)
                   }
                 >
                   {forceRefreshingWallet || swapMutation.isPending

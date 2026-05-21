@@ -92,6 +92,15 @@ Deliver secure multi-wallet management in API + Web with:
    - reconcile flow,
    - transfer validation matrix.
 
+### Priority 4 — bulk close all (positions UI)
+
+Cross-feature: [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md).
+
+1. **`resolve_close_signer_for_position`:** map `owner_pubkey` (on-chain + registry) → `wallet_id` from `/wallets` stores.
+2. **Batch worker:** per-wallet groups; load keypair from file **without** mutating global `active_signer` for the whole API process.
+3. **Skip policy:** positions whose owner is not in API wallet storage → `skipped_unmanaged_signer` (Phantom / external keypair).
+4. **Optional:** parallel worker tasks per wallet group (after P1 sequential MVP).
+
 ## Operational notes
 
 - Two directories improve availability but do not replace host hardening.

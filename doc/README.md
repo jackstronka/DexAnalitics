@@ -12,7 +12,11 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Plan implementacji (świadomość środowiska → gate → symulacje → raport → apply):** [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md).
 
-**Wallet GL — wizja księgowa vs journal, §2.2 konto sesji per cykl pozycji, plan faz B–E:** [`WALLET_GL.md`](WALLET_GL.md).
+**Master plan (analiza całego projektu, 5 fal, kolejność PR):** [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md).
+
+**Plan implementacji (wykonawczy — backlog PR, harmonogram 2 tyg.):** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
+
+**Wallet GL — wizja księgowa vs journal, §2.2 konto sesji, plan wdrożenia SESSION:** [`WALLET_GL.md`](WALLET_GL.md), [`WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md`](WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md), [`WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md`](WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md), [**executor / reopen na SESSION**](WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md).
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
 
@@ -28,10 +32,13 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | -------- | ------- |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
 | [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | **Canonical:** „agent / AI” w repo — `AgentDecision` + apply-optimize, Position Agent (LLM opcjonalny), `DecisionEngine` live, `agent_decisions.jsonl`, linki do roadmap |
+| [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md) | **Plan:** rolling memory (global + pozycja + później strategia), event log, LLM context pack; fazy O1/M1/M2/M3; restart-safe pamięć poza modelem |
 | [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | **Fazy 0–6+:** kontrakt logu, gate runner, multi-backtest, raport real vs symulacja, apply z review, poza zakresem; kryteria sukcesu; kolejność PR |
+| [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | **Plan wykonawczy:** backlog PR-01–PR-30, fale F1–F5, kryteria done, najbliższe 2 tygodnie |
+| [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) | **Master roadmap:** analiza dojrzałości całego repo, 5 fal, metryki sukcesu |
 | [`DECISION_LAYER.md`](DECISION_LAYER.md) | **Wizja + kontrakt + §1a mapowanie celów + §1b rejestr zdolności + §11 audyt:** orkiestrator LP, fazy, shadow/symulacje, tabela CLI/API vs NO-GO, tabela co w kodzie / czego brak |
 | [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | **Normative:** expected behavior per feature (open/close, rebalance, strategies, wallet, fees); refine here first |
-| [`WALLET_GL.md`](WALLET_GL.md) | **Wallet GL:** wizja księgowa (każda transakcia → delty na konta, stan z GL); faza A = journal obecny w kodzie; plan faz B–E (kompletność API, chart of accounts, read model, reconcile) |
+| [`WALLET_GL.md`](WALLET_GL.md) | **Wallet GL:** wizja księgowa (każda transakcia → delty na konta, stan z GL); faza A = journal; **§2.2** `SESSION:{rebalance_session_id}`; plan faz B–E |
 | [`PROJECT_END_TO_END.md`](PROJECT_END_TO_END.md) | End-to-end: ingest danych -> analytics -> decyzje bota -> wykonanie i UI |
 | [`ROADMAP.md`](ROADMAP.md) | Roadmap produktowy: shadow strategies per position, historia przypisań strategia ↔ pozycja |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | Async event bus v2: decision matrix, event contract, rollout |
@@ -56,12 +63,16 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | systemd / Task Scheduler / Docker restart, logi, alerty (haki), RPC i klucze |
 | [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | spis `tools/*.ps1`, snapshot P0, Slack, CLI powiązane, skrypty spoza git (`scripts/`) |
 | [`UI_REQUIREMENTS_PHASE1.md`](UI_REQUIREMENTS_PHASE1.md) | Zakres dashboardu fazy 1 (skrypty, portfel, pozycje, ledger, akcje); **status implementacji** + wymagania środowiska |
+| [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md) | **Zamknij wszystkie pozycje:** batch job API, multi-wallet signer per owner, plan UI + PR-y |
+| [`CLOSE_ALL_SEND_FIRST_IMPLEMENTATION_PLAN.md`](CLOSE_ALL_SEND_FIRST_IMPLEMENTATION_PLAN.md) | **Send-first (faza B):** szybkie wysyłanie tx, confirm w tle, PR SF-PR1…SF-PR5 |
+| [`POSITIONS_PAGE_PERFORMANCE_PLAN.md`](POSITIONS_PAGE_PERFORMANCE_PLAN.md) | **Wydajność `/positions`:** N+1, light list, preview close-all, PERF-PR1…PR10 |
 | [`DOCKER.md`](DOCKER.md) | `docker compose` (web + API), `API_UPSTREAM`; **Docker Desktop musi działać** (Windows — troubleshooting pipe) |
 
 ## Backtesting and strategies
 
 | Document | Purpose |
 | -------- | ------- |
+| [`MULTI_STRATEGY_EXPERIMENT_LAUNCHER.md`](MULTI_STRATEGY_EXPERIMENT_LAUNCHER.md) | **Live A/B/C:** multi-strategy experiment launcher — presety, alokacja kapitału, wspólny swap, batch open (plan fazy 1–4) |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | Strategy catalog semantics for `backtest` / `backtest-optimize` |
 | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | Plan: strategie Bollinger i ostatnia świeca (symulacja, API, web, execution) |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | Focused backtest-optimize notes (example pair / fees) |
@@ -113,12 +124,15 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | File | Keywords |
 | ---- | -------- |
 | [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | aerodrome, slipstream, base, live, alloy, rpc, gauges-v3, WETH, USDC, cbBTC, CL100, deployment phases |
+| [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md) | rolling-memory, agent-memory, global.json, events.jsonl, AgentLlmContext, orchestrator, restart-safe, M1 M2 M3 |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | stream, narrator, obs, studio, agent |
 | [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | AgentDecision, apply-optimize, position agent, DecisionEngine, agent_decisions.jsonl, orchestration, LLM optional |
 | [`ASYNC_COMMUNICATION_LAYER.md`](ASYNC_COMMUNICATION_LAYER.md) | async, event bus, kafka, nats, redis, rollout |
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |
 | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | bollinger, candle, StratConfig, StrategyMode, backtest, roadmap |
 | [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | decision-layer, orchestrator, implementation-plan, gate-runner, NO-GO, orchestrator-runs, phased-rollout, situational-awareness |
+| [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | implementation-plan, execution-backlog, PR-slices, F1-F5, sprint, acceptance-criteria |
+| [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) | master-plan, implementation-roadmap, priorities, maturity, five-waves, F1-F5, lineage, ingest, experiment-launcher, shadow |
 | [`IMPERMANENT_LOSS_USD_AND_FEES.md`](IMPERMANENT_LOSS_USD_AND_FEES.md) | IL, HODL, USD, fees LP, stream-pnl, lineage, calculate_il_concentrated, segment IL |
 | [`BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md`](BACKTEST_OPTIMIZE_WHETH_SOL_24_48_72_FEES.md) | whETH/SOL, fees, grid example |
 | [`BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md`](BOT_HYBRID_ARCHITECTURE_CONTRACT_2026-03-23.md) | hybrid bot, scoring, contract (snapshot) |
@@ -136,10 +150,12 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`FEES_DATA_PLAN.md`](FEES_DATA_PLAN.md) | fees data |
 | [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | normative feature behavior, operator spec, single source of truth for “should” |
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora, swap event, DLMM |
+| [`MULTI_STRATEGY_EXPERIMENT_LAUNCHER.md`](MULTI_STRATEGY_EXPERIMENT_LAUNCHER.md) | experiment-launcher, multi-strategy, live-comparison, shared-swap, batch-open, capital-allocation |
 | [`ONCHAIN_FEES_PROGRESS.md`](ONCHAIN_FEES_PROGRESS.md) | on-chain fees, progress |
 | [`ONCHAIN_FEES_TRUTH_PLAN.md`](ONCHAIN_FEES_TRUTH_PLAN.md) | on-chain fees, plan |
 | [`POSITION_CHAIN_HISTORY_PLAN.md`](POSITION_CHAIN_HISTORY_PLAN.md) | lineage, position_chain_history_nodes, postgres materialized read-model, writer, stream-lineage, chain-history API |
 | [`POSITION_REGISTRY.md`](POSITION_REGISTRY.md) | registry.jsonl, active positions, orca-positions-list, collectors, API registry |
+| [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md) | close-all, bulk-close, batch-job, multi-wallet, active-signer, positions-ui, send-first |
 | [`OPERATIONAL_CONTINUITY.md`](OPERATIONAL_CONTINUITY.md) | bot supervision, systemd, Docker, Windows script, logs, alerts hooks |
 | [`ORCA_FEES_DATA_PLAN.md`](ORCA_FEES_DATA_PLAN.md) | Orca, fees plan |
 | [`ORCA_API_SERVICE_CONTRACT.md`](ORCA_API_SERVICE_CONTRACT.md) | Orca, service contract, read/write split, endpoint map |

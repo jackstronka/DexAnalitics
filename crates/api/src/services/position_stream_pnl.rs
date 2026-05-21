@@ -10,7 +10,8 @@
 use crate::error::ApiError;
 use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
 use crate::services::position_stream_lineage::{
-    lp_fees_collected_usd_from_ledger_db, resolve_lineage_chain_for_stream_pnl,
+    is_lifecycle_close_event, is_lifecycle_open_event, lp_fees_collected_usd_from_ledger_db,
+    resolve_lineage_chain_for_stream_pnl,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_valuation::{
@@ -27,6 +28,155 @@ use std::str::FromStr;
 use tokio::time::{Duration, timeout};
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+fn snapshot_kind_from_row(row: &sqlx::postgres::PgRow) -> Option<String> {
+    row.try_get::<Option<Value>, _>("raw_json")
+        .ok()
+        .flatten()
+        .and_then(|v| {
+            v.get("kind")
+                .and_then(|k| k.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn current_snapshot_is_stale_open_baseline(
+    current: &sqlx::postgres::PgRow,
+    baseline: &sqlx::postgres::PgRow,
+) -> bool {
+    current_snapshot_is_stale_open_baseline_values(
+        snapshot_kind_from_row(current).as_deref(),
+        current.try_get("ts_utc").ok(),
+        baseline.try_get("ts_utc").ok(),
+    )
+}
+
+fn current_snapshot_is_stale_open_baseline_values(
+    current_kind: Option<&str>,
+    current_ts: Option<DateTime<Utc>>,
+    baseline_ts: Option<DateTime<Utc>>,
+) -> bool {
+    if current_kind == Some("end_close") {
+        return false;
+    }
+    if current_kind == Some("baseline_open") {
+        return true;
+    }
+    current_ts.is_some() && current_ts == baseline_ts
+}
+
+fn is_lifecycle_principal_event(ev: Option<&str>) -> bool {
+    is_lifecycle_open_event(ev) || is_lifecycle_close_event(ev)
+}
+
+async fn seed_live_current_snapshot(
+    state: &AppState,
+    db: &clmm_lp_data::repositories::Database,
+    seed_pk: &str,
+) -> Result<(), ApiError> {
+    let pk = solana_sdk::pubkey::Pubkey::from_str(seed_pk.trim())
+        .map_err(|e| ApiError::internal(format!("stream pnl: invalid seed pubkey: {e}")))?;
+    let Ok(Ok(pos)) = timeout(
+        Duration::from_secs(2),
+        monitored_position_from_chain(state.provider.clone(), &pk),
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let prices = fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
+    let Ok(v) = compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await else {
+        return Ok(());
+    };
+    let raw = serde_json::json!({
+        "position": pos.address.to_string(),
+        "pool": pos.pool.to_string(),
+        "kind": "live_current",
+        "value_usd": v.value_usd,
+        "fees_usd": v.fees_usd,
+        "amount_a_ui": v.amount_a_ui,
+        "amount_b_ui": v.amount_b_ui,
+        "token_mint_a": v.token_mint_a.to_string(),
+        "token_mint_b": v.token_mint_b.to_string(),
+        "price_a_usd": v.price_a_usd,
+        "price_b_usd": v.price_b_usd,
+        "source": "stream_pnl_self_seed_current"
+    });
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO position_stream_valuation_snapshots
+          (position_pubkey, ts_utc, pool_pubkey, value_usd, amount_a_ui, amount_b_ui, fees_usd, token_mint_a, token_mint_b, price_a_usd, price_b_usd, price_source, raw_json)
+        VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (position_pubkey, ts_utc) DO NOTHING
+        "#,
+    )
+    .bind(pos.address.to_string())
+    .bind(pos.pool.to_string())
+    .bind(v.value_usd)
+    .bind(v.amount_a_ui)
+    .bind(v.amount_b_ui)
+    .bind(v.fees_usd)
+    .bind(v.token_mint_a.to_string())
+    .bind(v.token_mint_b.to_string())
+    .bind(Decimal::from_f64_retain(v.price_a_usd).unwrap_or(Decimal::ZERO))
+    .bind(Decimal::from_f64_retain(v.price_b_usd).unwrap_or(Decimal::ZERO))
+    .bind("free_prices")
+    .bind(raw)
+    .execute(db.pool())
+    .await;
+    Ok(())
+}
+
+async fn refetch_current_snapshot_row(
+    db: &clmm_lp_data::repositories::Database,
+    end_pubkey: Option<&str>,
+    positions: &[String],
+) -> Result<Option<sqlx::postgres::PgRow>, ApiError> {
+    if let Some(pk) = end_pubkey {
+        sqlx::query(CURRENT_SNAPSHOT_LAST_PDA_SQL)
+            .bind(pk)
+            .fetch_optional(db.pool())
+            .await
+            .map_err(|e| ApiError::internal(format!("stream pnl: current query (after seed): {e}")))
+    } else {
+        sqlx::query(CURRENT_SNAPSHOT_SQL)
+            .bind(positions)
+            .fetch_optional(db.pool())
+            .await
+            .map_err(|e| ApiError::internal(format!("stream pnl: current query (after seed): {e}")))
+    }
+}
+
+fn accumulate_cashflow_mint_deltas(
+    mint_deltas: &mut BTreeMap<String, Decimal>,
+    rows: &[sqlx::postgres::PgRow],
+) {
+    for r in rows {
+        let ev: Option<String> = r.try_get("event").ok();
+        let v: Option<Value> = r.try_get("fee_payer_token_deltas").ok();
+        apply_cashflow_fee_payer_deltas(mint_deltas, ev.as_deref(), v.as_ref());
+    }
+}
+
+fn apply_cashflow_fee_payer_deltas(
+    mint_deltas: &mut BTreeMap<String, Decimal>,
+    event: Option<&str>,
+    fee_payer_token_deltas: Option<&Value>,
+) {
+    if is_lifecycle_principal_event(event) {
+        return;
+    }
+    let Some(Value::Object(map)) = fee_payer_token_deltas else {
+        return;
+    };
+    for (mint, dv) in map {
+        if let Some(d) = decimal_from_json(dv) {
+            *mint_deltas.entry(mint.clone()).or_insert(Decimal::ZERO) += d;
+        }
+    }
+}
 
 /// Earliest snapshot across stream members — must include mint columns or HODL/IL falls back incorrectly.
 const BASELINE_SNAPSHOT_SQL: &str = r#"
@@ -432,74 +582,20 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 
     let seed_pk_for_current = end_pubkey.unwrap_or_else(|| position_address.trim());
 
-    if current_row.is_none() && allow_self_seed && !settlement_strict {
-        if let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(seed_pk_for_current)
-            && let Ok(Ok(pos)) = timeout(
-                Duration::from_secs(2),
-                monitored_position_from_chain(state.provider.clone(), &pk),
-            )
-            .await
-        {
-            let prices =
-                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
-                    .await;
-            if let Ok(v) =
-                compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
-            {
-                let raw = serde_json::json!({
-                    "position": pos.address.to_string(),
-                    "pool": pos.pool.to_string(),
-                    "value_usd": v.value_usd,
-                    "fees_usd": v.fees_usd,
-                    "amount_a_ui": v.amount_a_ui,
-                    "amount_b_ui": v.amount_b_ui,
-                    "token_mint_a": v.token_mint_a.to_string(),
-                    "token_mint_b": v.token_mint_b.to_string(),
-                    "price_a_usd": v.price_a_usd,
-                    "price_b_usd": v.price_b_usd,
-                    "source": "stream_pnl_self_seed_current"
-                });
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO position_stream_valuation_snapshots
-                      (position_pubkey, ts_utc, pool_pubkey, value_usd, amount_a_ui, amount_b_ui, fees_usd, token_mint_a, token_mint_b, price_a_usd, price_b_usd, price_source, raw_json)
-                    VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                    ON CONFLICT (position_pubkey, ts_utc) DO NOTHING
-                    "#,
-                )
-                .bind(pos.address.to_string())
-                .bind(pos.pool.to_string())
-                .bind(v.value_usd)
-                .bind(v.amount_a_ui)
-                .bind(v.amount_b_ui)
-                .bind(v.fees_usd)
-                .bind(v.token_mint_a.to_string())
-                .bind(v.token_mint_b.to_string())
-                .bind(Decimal::from_f64_retain(v.price_a_usd).unwrap_or(Decimal::ZERO))
-                .bind(Decimal::from_f64_retain(v.price_b_usd).unwrap_or(Decimal::ZERO))
-                .bind("free_prices")
-                .bind(raw)
-                .execute(db.pool())
-                .await;
-            }
-        }
-        current_row = if let Some(pk) = end_pubkey {
-            sqlx::query(CURRENT_SNAPSHOT_LAST_PDA_SQL)
-                .bind(pk)
-                .fetch_optional(db.pool())
-                .await
-                .map_err(|e| {
-                    ApiError::internal(format!("stream pnl: current query (after seed): {e}"))
-                })?
-        } else {
-            sqlx::query(CURRENT_SNAPSHOT_SQL)
-                .bind(&positions)
-                .fetch_optional(db.pool())
-                .await
-                .map_err(|e| {
-                    ApiError::internal(format!("stream pnl: current query (after seed): {e}"))
-                })?
+    let needs_live_current = allow_self_seed
+        && !settlement_strict
+        && match (&current_row, &baseline_row) {
+            (None, Some(_)) => true,
+            (Some(c), Some(b)) => current_snapshot_is_stale_open_baseline(c, b),
+            _ => false,
         };
+
+    if needs_live_current {
+        seed_live_current_snapshot(state, db, seed_pk_for_current).await?;
+        current_row = refetch_current_snapshot_row(db, end_pubkey, &positions).await?;
+    } else if current_row.is_none() && allow_self_seed && !settlement_strict {
+        seed_live_current_snapshot(state, db, seed_pk_for_current).await?;
+        current_row = refetch_current_snapshot_row(db, end_pubkey, &positions).await?;
     }
 
     let Some(b) = baseline_row else {
@@ -627,10 +723,10 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     };
 
     // Realized cashflow from lifecycle rows: sum fee_payer_token_deltas for the stream.
-    // We don't yet have stable token symbols here; we treat it as USD using current mint prices.
+    // Exclude open/close principal legs (deposit/withdrawal), same as per-node lineage metrics.
     let rows = if use_chain_session_scope {
         sqlx::query(
-            r#"SELECT fee_payer_token_deltas
+            r#"SELECT event, fee_payer_token_deltas
                FROM position_stream_ledger_rows
                WHERE rebalance_session_id = ANY($1) AND fee_payer_token_deltas IS NOT NULL"#,
         )
@@ -640,7 +736,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows: {e}")))?
     } else if !chain_vec.is_empty() {
         sqlx::query(
-            r#"SELECT fee_payer_token_deltas
+            r#"SELECT event, fee_payer_token_deltas
                FROM position_stream_ledger_rows
                WHERE position_pubkey = ANY($1) AND fee_payer_token_deltas IS NOT NULL"#,
         )
@@ -650,7 +746,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         .map_err(|e| ApiError::internal(format!("stream pnl: token deltas rows: {e}")))?
     } else if !sessions.is_empty() {
         sqlx::query(
-            r#"SELECT fee_payer_token_deltas
+            r#"SELECT event, fee_payer_token_deltas
                FROM position_stream_ledger_rows
                WHERE rebalance_session_id = ANY($1) AND fee_payer_token_deltas IS NOT NULL"#,
         )
@@ -667,17 +763,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     };
 
     let mut mint_deltas: BTreeMap<String, Decimal> = BTreeMap::new();
-    for r in rows {
-        let v: Option<Value> = r.try_get("fee_payer_token_deltas").ok();
-        let Some(Value::Object(map)) = v else {
-            continue;
-        };
-        for (mint, dv) in map {
-            if let Some(d) = decimal_from_json(&dv) {
-                *mint_deltas.entry(mint).or_insert(Decimal::ZERO) += d;
-            }
-        }
-    }
+    accumulate_cashflow_mint_deltas(&mut mint_deltas, &rows);
 
     // Use mints from baseline snapshot (fallback: latest snapshot) for HODL/IL and cashflow conversion.
     let pool_mints = pool_mints_for_hodl(
@@ -879,10 +965,15 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        chain_session_ids_from_edges, compute_stream_il_components, is_end_close_snapshot,
-        pool_mints_for_hodl, positive_price_pair, snapshot_price_time_kind,
+        apply_cashflow_fee_payer_deltas, chain_session_ids_from_edges, compute_stream_il_components,
+        current_snapshot_is_stale_open_baseline_values, is_end_close_snapshot,
+        is_lifecycle_principal_event, pool_mints_for_hodl, positive_price_pair,
+        snapshot_price_time_kind,
     };
+    use chrono::{TimeZone, Utc};
     use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
 
     #[test]
     fn pool_mints_prefers_baseline_over_current() {
@@ -956,6 +1047,61 @@ mod tests {
         assert_eq!(c.lp_fees_total_usd, Decimal::from(9));
         assert_eq!(c.lp_vs_hodl_with_fees_usd, Decimal::from(-1));
         assert_eq!(c.lp_vs_hodl_with_fees_pct, Decimal::new(-1, 2));
+    }
+
+    #[test]
+    fn cashflow_skips_open_and_close_principal_events() {
+        assert!(is_lifecycle_principal_event(Some("bot_open_position")));
+        assert!(is_lifecycle_principal_event(Some("position_open")));
+        assert!(is_lifecycle_principal_event(Some("bot_close_position")));
+
+        let deltas = serde_json::json!({
+            "MINTA": "-5.0",
+            "MINTB": "-4.859"
+        });
+        let mut mint_deltas = BTreeMap::new();
+        apply_cashflow_fee_payer_deltas(
+            &mut mint_deltas,
+            Some("bot_open_position"),
+            Some(&deltas),
+        );
+        assert!(mint_deltas.is_empty());
+
+        apply_cashflow_fee_payer_deltas(
+            &mut mint_deltas,
+            Some("bot_rebalance_swap"),
+            Some(&deltas),
+        );
+        assert_eq!(mint_deltas.get("MINTA"), Some(&Decimal::from_str("-5").unwrap()));
+        assert_eq!(
+            mint_deltas.get("MINTB"),
+            Some(&Decimal::from_str("-4.859").unwrap())
+        );
+    }
+
+    #[test]
+    fn current_snapshot_stale_when_baseline_open_or_same_ts() {
+        let ts = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
+        assert!(current_snapshot_is_stale_open_baseline_values(
+            Some("baseline_open"),
+            Some(ts),
+            Some(ts),
+        ));
+        assert!(current_snapshot_is_stale_open_baseline_values(
+            Some("live_current"),
+            Some(ts),
+            Some(ts),
+        ));
+        assert!(!current_snapshot_is_stale_open_baseline_values(
+            Some("live_current"),
+            Some(ts + chrono::Duration::minutes(5)),
+            Some(ts),
+        ));
+        assert!(!current_snapshot_is_stale_open_baseline_values(
+            Some("end_close"),
+            Some(ts),
+            Some(ts),
+        ));
     }
 }
 

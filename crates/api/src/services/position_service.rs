@@ -432,6 +432,7 @@ Top up the API wallet and retry."
         &self,
         address: &str,
         cost_session_id: Option<String>,
+        skip_pre_collect: bool,
     ) -> Result<OperationResult, ApiError> {
         let position_pubkey = Pubkey::from_str(address)
             .map_err(|_| ApiError::bad_request("Invalid position address"))?;
@@ -473,16 +474,28 @@ Top up the API wallet and retry."
         let ledger_details = Some(serde_json::json!({
             "close_kind": "manual",
             "close_source": "api",
+            "skip_pre_collect": skip_pre_collect,
         }));
-        if let Err(e) = guard
-            .execute_full_close_only(
-                &position_pubkey,
-                &pool_pubkey,
-                cost_session_id,
-                ledger_details,
-            )
-            .await
-        {
+        let close_result = if skip_pre_collect {
+            guard
+                .execute_bulk_close_only(
+                    &position_pubkey,
+                    &pool_pubkey,
+                    cost_session_id,
+                    ledger_details,
+                )
+                .await
+        } else {
+            guard
+                .execute_full_close_only(
+                    &position_pubkey,
+                    &pool_pubkey,
+                    cost_session_id,
+                    ledger_details,
+                )
+                .await
+        };
+        if let Err(e) = close_result {
             let raw = format!("{e:#}");
             let s = raw.to_lowercase();
             if s.contains("fetch position account") && s.contains("accountnotfound") {
@@ -511,6 +524,171 @@ Top up the API wallet and retry."
         }
 
         Ok(OperationResult::success())
+    }
+
+    /// Bulk close send-first: broadcast tx and return signature (no confirm wait).
+    pub async fn close_position_submit_only(
+        &self,
+        address: &str,
+        skip_pre_collect: bool,
+        slippage_bps: Option<u16>,
+    ) -> Result<OperationResult, ApiError> {
+        let position_pubkey = Pubkey::from_str(address)
+            .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+
+        let positions = self.state.monitor.get_positions().await;
+        let pool_pubkey = if let Some(p) = positions.iter().find(|p| p.address == position_pubkey) {
+            p.pool
+        } else {
+            let reader = PositionReader::new(self.state.provider.clone());
+            let on_chain = reader
+                .get_position(address)
+                .await
+                .map_err(map_position_fetch_error)?;
+            on_chain.pool
+        };
+
+        if self.dry_run {
+            return Ok(OperationResult::dry_run(format!(
+                "Would submit close for position {address} (send-first)"
+            )));
+        }
+
+        let Some(executor) = &self.executor else {
+            return Ok(OperationResult::failure(format!(
+                "Position closing requires executor and wallet configuration. {}",
+                wallet_config_diagnostic()
+            )));
+        };
+
+        if !skip_pre_collect {
+            return Err(ApiError::bad_request(
+                "send_first bulk close requires skip_pre_collect=true",
+            ));
+        }
+
+        let guard = executor.read().await;
+        let ledger_details = Some(serde_json::json!({
+            "close_kind": "manual",
+            "close_source": "api",
+            "skip_pre_collect": true,
+            "send_mode": "send_first",
+            "slippage_bps": slippage_bps,
+        }));
+        let submitted = guard
+            .execute_bulk_close_submit_only(
+                &position_pubkey,
+                &pool_pubkey,
+                ledger_details.clone(),
+                slippage_bps,
+            )
+            .await;
+        drop(guard);
+
+        if let Err(e) = submitted {
+            let raw = format!("{e:#}");
+            let s = raw.to_lowercase();
+            if s.contains("fetch position account") && s.contains("accountnotfound") {
+                self.state.monitor.remove_position(&position_pubkey).await;
+                return Ok(OperationResult::success_with_data(serde_json::json!({
+                    "already_closed_on_chain": true,
+                    "position_pda": position_pubkey.to_string(),
+                })));
+            }
+            return Err(classify_close_position_error(e));
+        }
+
+        let submitted = submitted.expect("checked Err above");
+        if !submitted.success {
+            let msg = submitted
+                .error
+                .clone()
+                .unwrap_or_else(|| "close submit failed".to_string());
+            return Ok(OperationResult::failure(msg));
+        }
+
+        let sig = submitted.signature.to_string();
+        let mut data = serde_json::json!({
+            "submitted": true,
+            "position_pda": position_pubkey.to_string(),
+            "pool": pool_pubkey.to_string(),
+        });
+        if let Some(a) = submitted.collect_fee_owed_a_raw {
+            data["collect_fee_owed_a_raw"] = serde_json::json!(a);
+        }
+        if let Some(b) = submitted.collect_fee_owed_b_raw {
+            data["collect_fee_owed_b_raw"] = serde_json::json!(b);
+        }
+        Ok(OperationResult {
+            success: true,
+            signature: Some(sig),
+            error: None,
+            data: Some(data),
+        })
+    }
+
+    /// Finalize send-first close after on-chain confirmation.
+    pub async fn finalize_close_submit_only(
+        &self,
+        address: &str,
+        submitted_signature: &str,
+        collect_fee_owed_a_raw: Option<u64>,
+        collect_fee_owed_b_raw: Option<u64>,
+    ) -> Result<OperationResult, ApiError> {
+        let position_pubkey = Pubkey::from_str(address)
+            .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+        let signature = solana_sdk::signature::Signature::from_str(submitted_signature.trim())
+            .map_err(|_| ApiError::bad_request("Invalid transaction signature"))?;
+
+        let positions = self.state.monitor.get_positions().await;
+        let pool_pubkey = if let Some(p) = positions.iter().find(|p| p.address == position_pubkey) {
+            p.pool
+        } else {
+            let reader = PositionReader::new(self.state.provider.clone());
+            reader
+                .get_position(address)
+                .await
+                .map_err(map_position_fetch_error)?
+                .pool
+        };
+
+        let Some(executor) = &self.executor else {
+            return Ok(OperationResult::failure(
+                "Position finalize requires executor and wallet configuration",
+            ));
+        };
+
+        let submitted = clmm_lp_protocols::orca::executor::ExecutionResult {
+            signature,
+            success: true,
+            slot: None,
+            error: None,
+            created_position: None,
+            collect_fee_owed_a_raw,
+            collect_fee_owed_b_raw,
+        };
+        let ledger_details = Some(serde_json::json!({
+            "close_kind": "manual",
+            "close_source": "api",
+            "skip_pre_collect": true,
+            "send_mode": "send_first",
+        }));
+
+        let guard = executor.read().await;
+        if let Err(e) = guard
+            .finalize_bulk_close_after_confirm(
+                &submitted,
+                &position_pubkey,
+                &pool_pubkey,
+                None,
+                ledger_details,
+            )
+            .await
+        {
+            return Err(classify_close_position_error(e));
+        }
+
+        Ok(OperationResult::success_with_signature(submitted_signature.to_string()))
     }
 
     /// Collects fees from a position.
@@ -1244,7 +1422,7 @@ mod tests {
         let state = AppState::new(RpcConfig::default(), ApiConfig::default(), None);
         let svc = PositionService::new(state);
         let err = svc
-            .close_position("not-a-valid-pubkey", None)
+            .close_position("not-a-valid-pubkey", None, false)
             .await
             .expect_err("bad pubkey");
         assert!(matches!(err, ApiError::BadRequest(_)));

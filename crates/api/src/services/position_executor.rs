@@ -271,3 +271,30 @@ pub async fn resolve_executor_for_position_ops(
     );
     Some(executor)
 }
+
+/// Ephemeral executor for a single close operation (does not register in global `executors` map).
+#[must_use]
+pub fn build_ephemeral_position_executor(
+    state: &AppState,
+    wallet: Arc<Wallet>,
+) -> Arc<RwLock<StrategyExecutor>> {
+    let executor_config = ExecutorConfig {
+        eval_interval_secs: 3600,
+        auto_execute: false,
+        require_confirmation: true,
+        max_slippage_pct: Decimal::new(5, 3),
+        dry_run: false,
+        fee_mode: PositionTruthMode::Heuristic,
+    };
+    let executor = StrategyExecutor::new(
+        state.provider.clone(),
+        state.monitor.clone(),
+        state.tx_manager.clone(),
+        executor_config,
+    );
+    executor.set_position_fee_ledger_path(Some(std::path::PathBuf::from(
+        "data/position-fee-checkpoints.jsonl",
+    )));
+    executor.set_wallet(wallet);
+    Arc::new(RwLock::new(executor))
+}

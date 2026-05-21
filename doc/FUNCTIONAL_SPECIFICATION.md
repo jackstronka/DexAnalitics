@@ -58,9 +58,23 @@ Sections below are **placeholders**. Replace stubs with normative text as you re
 
 ### 1. Position lifecycle (open, close, manual vs strategy)
 
-**Goal:** *TODO*
+**Goal:** Operator can open, monitor, and close LP positions; registry and lifecycle ledger record open/close; manual API close unlinks strategies.
 
-**keywords:** positions, open, close, registry, lifecycle
+**Single close (today):** `DELETE /positions/{address}` — server wallet (active signer or env keypair) signs `execute_full_close_only` (collect + close, sync confirm). UI: `PositionDetail` with confirm dialog.
+
+**Bulk close all (planned):** [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md)
+
+- **Scope:** positions from `GET /positions` (monitor API), not the optional RPC scan-by-owner block.
+- **HTTP:** `POST /positions/close-all` returns **202 + batch_id** immediately; worker closes in background.
+- **Multi-wallet:** resolver signera (registry → lifecycle → strategy executor → RPC NFT owner) mapuje **`owner_effective`** na plik w API wallet storage; close używa **tego** keypair, nie globalnego active signera. **Nie** polegać na `PositionResponse.owner` (dziś często pusty). Unmanaged → **skipped**.
+- **Executor:** `close_position_with_wallet` (efemeryczny executor per portfel) — patrz plan §4.4.
+- **Ledger:** `owner` w wallet journal = pubkey signera zamykającego, per item.
+- **On-chain speed:** sequential closes per wallet group; later phases: send-first confirm, optional skip pre-collect, optional parallel groups.
+- **Safety:** optional pause of linked strategy executors before batch; destructive confirm in UI with per-wallet counts.
+
+**Edge cases:** position already closed on-chain (idempotent cleanup); dry-run API; insufficient SOL on a signer wallet mid-batch (item `failed`, batch may be `partial`).
+
+**keywords:** positions, open, close, close-all, bulk-close, registry, lifecycle, multi-wallet, owner_pubkey, batch-job
 
 ---
 
@@ -138,6 +152,14 @@ Sections below are **placeholders**. Replace stubs with normative text as you re
 - W wielu systemach finansowych i w kolejkach zasobów typowym wzorcem jest **lock / rezerwacja** środków na czas transakcji, żeby równoległa sesja nie zużyła salda — **3A tego nie robi**.
 - **Uzasadnienie (faza obecna):** prostszy runtime bez osobnego mechanizmu escrow on-chain ani „skrytek” rezerw SPL/SOL per `rebalance_session_id`; jeden wspólny portfel, **pending-open + ponawianie + alerty** oraz **§2.2** (odświeżenia `W`, brak cichego downsizingu) jako jawna mitigacja race i słabych odczytów.
 - **Koszt:** realna **konkurencja o wallet** — inna strategia, worker lub operator może chwilowo „zabrać” tokeny z perspektywy danej sesji; reopen bywa **opóźniony**, niekoniecznie błędny. Jeśli kiedyś będzie wymagana **twarda** izolacja kapitału między sesjami, to **osobna** funkcja (rezerwacja / kolejka priorytetowa / sub-konta) — poza zakresem normy **3A**.
+
+**Faza 5a — logiczny cap sesji (opcjonalny rollout, 2026-05-20):**
+
+- Gdy **`CLMM_REOPEN_USE_SESSION_CAPITAL=1`** (domyślnie **`0`**), executor przy swap-mix / open używa **`min(saldo RPC, kapitał SESSION)`** per mint zamiast wyłącznie globalnego portfela; **`T` (USD)** z §6.1 **bez zmian**.
+- **`CLMM_REOPEN_SESSION_STRICT_EMPTY=1`** (domyślnie on): pusta sesja → błąd / pending, **bez** fallbacku na cały portfel.
+- **`CLMM_REOPEN_SESSION_REQUIRE_RECONCILE=0`** (domyślnie off): opcjonalnie przerwij gdy GL ≠ suma lifecycle w PG.
+- **Nie** zastępuje to policy **3A** on-chain — to cap w kodzie executora; inna sesja nadal może zużyć te same tokeny fizycznie na portfelu, dopóki nie włączymy **5b** (escrow) lub twardej rezerwacji.
+- Plan i env: [`WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md`](WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md), runbook: [`WALLET_GL.md` §6](WALLET_GL.md#6-rollout-operatora--session-gl--reopen-5a).
 
 **Periodic retries (normative intent):**
 
@@ -373,16 +395,27 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 **Cel:** przy starcie cyklu życia pozycji (ręczny open / bot reopen) operator i bot mają **jawny inwentarz tokenów przypisany do sesji**, a nie wyłącznie saldo całego portfela — zgodnie z [`WALLET_GL.md` §2.2](WALLET_GL.md#22-konto-logiczne-per-cykl-życia-pozycji-rebalance_session_id--norma-docelowa).
 
-**Normatywnie (docelowo, po fazach C–D GL):**
+**Normatywnie:**
 
 - **Identyfikator:** `rebalance_session_id` (rotacja bot) lub `cost_session_id` (ręczny swap+open) — spina lifecycle i wpisy wallet journal.
-- **Źródło prawdy inwentarza sesji (tokeny):** lifecycle `bot_close_position` → `returned_*_raw` (**§6.1**); swapy i collect dopisują ruchy; read model GL `SESSION:{id}` per mint (shadow → produkt).
-- **Decyzja reopen:** `T` z §6.1; porównanie z **sesją** (preferowane) lub z `W` (**§2.2**) dopóki read model sesji nie jest produkcyjny.
-- **Fee w cyklu:** zebrane fee zwiększają inwentarz tej samej sesji (nie „giną” w globalnym portfelu bez śladu).
+- **Źródło prawdy inwentarza sesji (tokeny):** lifecycle `bot_close_position` → `returned_*_raw` (**§6.1**); swapy i collect dopisują ruchy; read model GL `SESSION:{id}` per mint w Postgres (`wallet_gl_*`, migracja 011).
+- **Decyzja reopen (USD):** **`T` zawsze z §6.1** (lifecycle po close) — nie z sumy GL.
+- **Decyzja reopen (tokeny / caps):** przy **`CLMM_REOPEN_USE_SESSION_CAPITAL=1`** — **`min(RPC, SESSION)`** per mint + §2.2 na capped notional; przy fladze **off** — wyłącznie **`W`** globalne (**§2.2**) i policy **3A** (**§2.1**).
+- **Fee w cyklu:** zebrane fee zwiększają inwentarz tej samej sesji w lifecycle i (po ingest/backfill) w GL.
 
-**Stan dziś:** sesja i `T` są w **lifecycle**; salda UI i executor przy open nadal używają **`§5` (`effective-balances`)** i **policy 3A** (**§2.1** — brak twardej rezerwacji SPL). Konto logiczne SESSION w GL — **do wdrożenia** (patrz checklista w `WALLET_GL.md` §2.2).
+**Stan wdrożenia (2026-05-20):**
 
-**keywords:** rebalance_session_id, cost_session_id, session-account, WALLET_GL, policy-3A, returned_raw, session-notional
+| Warstwa | Stan |
+| ------- | ---- |
+| GL `SESSION:{id}` + posting z lifecycle | ✅ shadow (Postgres) |
+| `GET /wallets/session-balances`, backfill, reconcile | ✅ API |
+| UI: diagnostyka rebalance, dziennik, **Otwórz pozycję** (preflight sesji) | ✅ |
+| Executor 5a (`CLMM_REOPEN_USE_SESSION_CAPITAL`) | ✅ kod; **domyślnie off** |
+| Twarda rezerwacja on-chain (**5b**) | ❌ poza v1 |
+
+**Operator:** saldo **portfela** w UI nadal z **`§5` (`effective-balances`)**; kapitał **sesji** — osobno (`session-balances`, panel diagnostyki). Nie mylić źródeł.
+
+**keywords:** rebalance_session_id, cost_session_id, session-account, WALLET_GL, policy-3A, returned_raw, session-notional, CLMM_REOPEN_USE_SESSION_CAPITAL, session-balances
 
 ### 6. Fees and PnL presentation (collect vs close, principal vs fees in UI)
 

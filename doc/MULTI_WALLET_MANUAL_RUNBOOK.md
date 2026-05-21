@@ -47,6 +47,15 @@ When status is `conflict`:
 
 Do not transfer from conflicted wallet ids until resolved.
 
+## 6) Bulk close all positions (planned)
+
+When using **Close all** on the Positions screen (see [`POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md`](POSITIONS_CLOSE_ALL_IMPLEMENTATION_PLAN.md)):
+
+1. Positions opened under **different wallet keypairs** are closed using **each position's on-chain owner**, not necessarily the current active signer.
+2. Only wallets present in `CLMM_WALLETS_DIR_*` can be used for server-side close; others appear as **skipped** in the batch summary.
+3. Before a large batch, verify replication is **healthy** and you have enough **native SOL per signer** for tx fees.
+4. Prefer pausing linked strategies for the batch (default in spec) to avoid rebalance during mass close.
+
 ## 5) Security hygiene
 
 - Never commit wallet JSON files to git.

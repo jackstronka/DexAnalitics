@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, Play, Square, RefreshCw, Pencil } from 'lucide-react'
+import { Plus, Play, Square, RefreshCw, Pencil, FlaskConical } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,7 +13,7 @@ import {
 import { useI18n } from '@/lib/i18n'
 
 export default function Strategies() {
-  const { locale } = useI18n()
+  const { locale, t } = useI18n()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { data, isLoading, refetch } = useQuery({
@@ -56,6 +56,10 @@ export default function Strategies() {
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             <RefreshCw className="h-4 w-4 mr-2" />
             {locale === 'pl' ? 'Odśwież' : 'Refresh'}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => navigate('/experiments/new')}>
+            <FlaskConical className="h-4 w-4 mr-2" />
+            {t('positions.newExperiment')}
           </Button>
           <Button size="sm" onClick={() => navigate('/strategies/new')}>
             <Plus className="h-4 w-4 mr-2" />

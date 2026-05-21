@@ -2,7 +2,7 @@
 
 **keywords:** decision-layer, orchestrator, implementation-plan, capability-registry, NO-GO, data-health-check, backtest-optimize, agent_decisions, observability, phased-rollout
 
-**Powiązane:** [`DECISION_LAYER.md`](DECISION_LAYER.md) (wizja, §1a mapowanie celów, §1b rejestr zdolności, §11 audyt), [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §8, [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md), [`ROADMAP.md`](ROADMAP.md).
+**Powiązane:** [`DECISION_LAYER.md`](DECISION_LAYER.md), [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §8, [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md), [`ROADMAP.md`](ROADMAP.md), [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md), [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) (analiza), [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (**backlog PR — start tutaj**).
 
 **Cel planu:** przejść od **„wiem, co mnie otacza i jakie mam narzędzia”** do **„potrafię w sposób powtarzalny ocenić sytuację, zasymulować warianty i zalogować decyzję”** — **najpierw bez autonomicznych transakcji** (zgodnie z fazą 1 w `DECISION_LAYER.md`).
 

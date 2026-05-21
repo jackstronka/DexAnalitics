@@ -4,6 +4,7 @@
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::env;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -73,11 +74,75 @@ pub async fn running_strategy_position_pubkeys(state: &AppState) -> Vec<Pubkey> 
     out.into_iter().collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct CachedSupplementBatch {
+    pub until: Instant,
+    pub fingerprint: u64,
+    pub by_pubkey: HashMap<Pubkey, clmm_lp_execution::monitor::MonitoredPosition>,
+}
+
+/// TTL for shared supplement RPC cache (list + close-all).
+pub fn supplement_batch_cache_ttl() -> Duration {
+    let secs = env::var("CLMM_SUPPLEMENT_BATCH_CACHE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(25);
+    Duration::from_secs(secs)
+}
+
+/// Fingerprint of supplement candidate PDAs (order-independent).
+#[must_use]
+pub fn supplement_candidates_fingerprint(candidates: &[Pubkey]) -> u64 {
+    let mut sorted: Vec<[u8; 32]> = candidates.iter().map(|p| p.to_bytes()).collect();
+    sorted.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for bytes in sorted {
+        bytes.hash(&mut h);
+    }
+    h.finish()
+}
+
+async fn read_supplement_batch_cache(
+    state: &AppState,
+    fingerprint: u64,
+) -> Option<HashMap<Pubkey, clmm_lp_execution::monitor::MonitoredPosition>> {
+    let guard = state.supplement_batch_cache.read().await;
+    let cached = guard.as_ref()?;
+    if cached.fingerprint != fingerprint || Instant::now() >= cached.until {
+        return None;
+    }
+    Some(cached.by_pubkey.clone())
+}
+
+async fn write_supplement_batch_cache(
+    state: &AppState,
+    fingerprint: u64,
+    mut by_pubkey: HashMap<Pubkey, clmm_lp_execution::monitor::MonitoredPosition>,
+) {
+    let until = Instant::now() + supplement_batch_cache_ttl();
+    let mut guard = state.supplement_batch_cache.write().await;
+    if let Some(existing) = guard.as_mut()
+        && existing.fingerprint == fingerprint
+        && Instant::now() < existing.until
+    {
+        existing.by_pubkey.extend(by_pubkey.drain());
+        existing.until = until;
+        return;
+    }
+    *guard = Some(CachedSupplementBatch {
+        until,
+        fingerprint,
+        by_pubkey,
+    });
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SupplementFetchStats {
     pub skipped_absent_cached: u32,
     pub skipped_registry_closed: u32,
     pub skipped_already_listed: u32,
+    pub skipped_supplement_cache: u32,
     pub chain_error: u32,
     pub merged_ok: u32,
 }
@@ -96,7 +161,11 @@ pub async fn fetch_supplement_positions_parallel(
 
     prune_expired_position_absent_cache(state).await;
 
+    let fingerprint = supplement_candidates_fingerprint(&candidates);
+    let batch_cache = read_supplement_batch_cache(state, fingerprint).await;
+
     let mut stats = SupplementFetchStats::default();
+    let mut merged = Vec::new();
     let mut to_fetch = Vec::new();
 
     for pk in candidates {
@@ -112,11 +181,19 @@ pub async fn fetch_supplement_positions_parallel(
             stats.skipped_absent_cached += 1;
             continue;
         }
+        if let Some(cache) = &batch_cache
+            && let Some(p) = cache.get(&pk)
+        {
+            stats.skipped_supplement_cache += 1;
+            stats.merged_ok += 1;
+            merged.push(p.clone());
+            continue;
+        }
         to_fetch.push(pk);
     }
 
     if to_fetch.is_empty() {
-        return (Vec::new(), stats);
+        return (merged, stats);
     }
 
     let provider = state.provider.clone();
@@ -156,11 +233,13 @@ pub async fn fetch_supplement_positions_parallel(
         .collect::<Vec<_>>()
         .await;
 
-    let mut merged = Vec::new();
+    let mut fresh_by_pubkey: HashMap<Pubkey, clmm_lp_execution::monitor::MonitoredPosition> =
+        HashMap::new();
     for outcome in outcomes {
         match outcome {
             Ok(p) => {
                 stats.merged_ok += 1;
+                fresh_by_pubkey.insert(p.address, p.clone());
                 merged.push(p);
             }
             Err((pk, e)) => {
@@ -179,6 +258,16 @@ pub async fn fetch_supplement_positions_parallel(
                     "list_positions: supplement fetch failed; skipping"
                 );
             }
+        }
+    }
+
+    if !fresh_by_pubkey.is_empty() {
+        if let Some(cache) = batch_cache {
+            let mut combined = cache;
+            combined.extend(fresh_by_pubkey);
+            write_supplement_batch_cache(state, fingerprint, combined).await;
+        } else {
+            write_supplement_batch_cache(state, fingerprint, fresh_by_pubkey).await;
         }
     }
 
@@ -237,5 +326,52 @@ mod tests {
     fn api_error_is_account_absent_matches_not_found() {
         assert!(api_error_is_account_absent(&ApiError::not_found("gone")));
         assert!(!api_error_is_account_absent(&ApiError::bad_gateway("rpc")));
+    }
+
+    #[test]
+    fn supplement_fingerprint_is_order_independent() {
+        let a = Pubkey::new_unique();
+        let b = Pubkey::new_unique();
+        let f1 = supplement_candidates_fingerprint(&[a, b]);
+        let f2 = supplement_candidates_fingerprint(&[b, a]);
+        assert_eq!(f1, f2);
+        assert_ne!(f1, supplement_candidates_fingerprint(&[a]));
+    }
+
+    #[tokio::test]
+    async fn supplement_batch_cache_reuses_fingerprint_within_ttl() {
+        let state = test_state();
+        let pk = Pubkey::new_unique();
+        let candidates = vec![pk];
+        let fp = supplement_candidates_fingerprint(&candidates);
+        let mut by = HashMap::new();
+        let pool = Pubkey::new_unique();
+        by.insert(
+            pk,
+            clmm_lp_execution::monitor::MonitoredPosition {
+                address: pk,
+                pool,
+                on_chain: clmm_lp_protocols::prelude::OnChainPosition {
+                    address: pk,
+                    pool,
+                    owner: Pubkey::new_unique(),
+                    tick_lower: 0,
+                    tick_upper: 0,
+                    liquidity: 0,
+                    fee_growth_inside_a: 0,
+                    fee_growth_inside_b: 0,
+                    fees_owed_a: 0,
+                    fees_owed_b: 0,
+                },
+                pnl: clmm_lp_execution::monitor::PositionPnL::default(),
+                in_range: true,
+                last_updated: chrono::Utc::now(),
+            },
+        );
+        write_supplement_batch_cache(&state, fp, by).await;
+        let got = read_supplement_batch_cache(&state, fp).await;
+        assert!(got.as_ref().is_some_and(|m| m.contains_key(&pk)));
+        let wrong = read_supplement_batch_cache(&state, fp.wrapping_add(1)).await;
+        assert!(wrong.is_none());
     }
 }
