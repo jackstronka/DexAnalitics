@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260521-06 — Chain net PnL −100% when current $0 on closed position
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-21  
+fixed_in: local  
+keywords: net_pnl_usd, current_value_usd, closed position, -1.000%, chain_headline_end_nav, lineage_node_end_nav, live snapshots
+
+- **Symptom:** Wynik ekonomiczny łańcucha: baseline ~$9.90, **current $0.000**, net PnL **−$9.905 (−1.000%)** mimo zebranych LP fees (~$0.03) i opłat tx ~$0.0035.
+- **Root cause:** Po zamknięciu PDA `current_value_usd` w totals zostawało 0 (brak on-chain NAV); wzór dawał net PnL ≈ −baseline. `reconcile_stream_pnl_totals_with_nodes` nie traktowało „current=0 przy znanym baseline” jako do naprawy.
+- **Fix:** `lineage_node_end_nav_usd` / `chain_headline_end_nav_usd` — end z `chain_history_end_value_usd` lub estymata zamknięcia (baseline + LP fees + cashflow − tx); `refresh_lineage_totals_from_nodes` podnosi current i przelicza net PnL.
+- **Guards/tests:** `chain_headline_end_nav_uses_close_estimate_when_current_zero`, `refresh_lineage_totals_repairs_zero_current_closed_chain_net_pnl`.
+- **Paths:** `position_stream_lineage.rs`
+
+---
+
 ### BUG-20260521-05 — Chain-history Postgres: baseline/HODL $0, net PnL = current (stale totals_json)
 
 status: fixed  

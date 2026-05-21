@@ -1,3 +1,10 @@
+## 2026-05-21 — Chain net PnL: nie −100% gdy zamknięta pozycja ma current $0
+
+keywords: net_pnl_usd, current_value_usd, closed, chain_headline_end_nav, lineage_node_end_nav, refresh_lineage_totals_from_nodes
+
+- **What:** Nagłówek „Wynik ekonomiczny łańcucha” używa end NAV (materialized end lub baseline+fees−tx dla closed bez snapshotu), zamiast `current=0` → net PnL ≈ −baseline.
+- **paths:** `position_stream_lineage.rs`
+
 ## 2026-05-21 — GET /positions/{address}: Wyniki Net PnL / IL z baseline snapshot
 
 keywords: get_position, position_detail, net_pnl_usd, il_pct, performance, baseline_open, monitor

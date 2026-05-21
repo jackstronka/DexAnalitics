@@ -941,7 +941,7 @@ pub async fn load_chain_history_from_db(
     refresh_chain_history_node_fees_from_ledger(state, &chain, &mut nodes).await?;
 
     let mut totals = totals;
-    refresh_lineage_totals_from_nodes(&entry, &mut totals, &nodes);
+    refresh_lineage_totals_from_nodes(&entry, &mut totals, &mut nodes);
 
     let mut chain_cost_summary =
         rollup_lineage_chain_costs(&nodes).or_else(|| chain_cost_summary_from_meta.clone());
@@ -957,7 +957,7 @@ pub async fn load_chain_history_from_db(
             apply_tx_fees_usd_from_lamports_on_nodes(&mut nodes, sol_px);
             chain_cost_summary =
                 rollup_lineage_chain_costs(&nodes).or_else(|| chain_cost_summary_from_meta);
-            refresh_lineage_totals_from_nodes(&entry, &mut totals, &nodes);
+            refresh_lineage_totals_from_nodes(&entry, &mut totals, &mut nodes);
         }
     }
 
