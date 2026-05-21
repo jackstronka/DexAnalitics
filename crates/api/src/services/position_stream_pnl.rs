@@ -16,10 +16,14 @@ use crate::services::position_stream_lineage::{
 use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
+    PositionUsdValuation,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
+use clmm_lp_domain::metrics::impermanent_loss::calculate_il_concentrated;
+use clmm_lp_execution::monitor::MonitoredPosition;
+use clmm_lp_protocols::prelude::tick_to_price;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::Row;
@@ -961,12 +965,250 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
     })
 }
 
+/// Performance-card PnL for `GET /positions/{address}` (single PDA, not full rotation chain).
+#[derive(Debug, Clone, Copy)]
+pub struct SinglePositionDetailPnL {
+    pub net_pnl_usd: Decimal,
+    pub net_pnl_pct: Decimal,
+    pub il_pct: Decimal,
+}
+
+fn pool_price_b_per_a(price_a_usd: f64, price_b_usd: f64) -> Option<Decimal> {
+    if price_a_usd.is_finite() && price_a_usd > 0.0 && price_b_usd.is_finite() && price_b_usd > 0.0 {
+        Decimal::from_f64_retain(price_b_usd / price_a_usd)
+    } else {
+        None
+    }
+}
+
+async fn baseline_usd_from_snapshot_row(row: &sqlx::postgres::PgRow) -> Option<Decimal> {
+    let value_usd: Decimal = row.try_get("value_usd").ok().unwrap_or(Decimal::ZERO);
+    if value_usd > Decimal::ZERO {
+        return Some(value_usd);
+    }
+
+    let raw_json: Value = row
+        .try_get::<Value, _>("raw_json")
+        .unwrap_or_else(|_| Value::Object(Default::default()));
+    let mut aa = row
+        .try_get::<Option<Decimal>, _>("amount_a_ui")
+        .ok()
+        .flatten();
+    let mut bb = row
+        .try_get::<Option<Decimal>, _>("amount_b_ui")
+        .ok()
+        .flatten();
+    let mut pa = row
+        .try_get::<Option<Decimal>, _>("price_a_usd")
+        .ok()
+        .flatten();
+    let mut pb = row
+        .try_get::<Option<Decimal>, _>("price_b_usd")
+        .ok()
+        .flatten();
+    if let Some(o) = raw_json.as_object() {
+        if aa.is_none() {
+            aa = o.get("amount_a_ui").and_then(decimal_from_json);
+        }
+        if bb.is_none() {
+            bb = o.get("amount_b_ui").and_then(decimal_from_json);
+        }
+        if pa.is_none() {
+            pa = o.get("price_a_usd").and_then(decimal_from_json);
+        }
+        if pb.is_none() {
+            pb = o.get("price_b_usd").and_then(decimal_from_json);
+        }
+    }
+    let aa = aa.unwrap_or(Decimal::ZERO);
+    let bb = bb.unwrap_or(Decimal::ZERO);
+    if aa.is_zero() && bb.is_zero() {
+        return None;
+    }
+
+    let mut mints: BTreeSet<String> = BTreeSet::new();
+    for key in ["token_mint_a", "token_mint_b"] {
+        if let Some(m) = row.try_get::<Option<String>, _>(key).ok().flatten() {
+            let t = m.trim();
+            if !t.is_empty() {
+                mints.insert(t.to_string());
+            }
+        }
+    }
+    if let Some(o) = raw_json.as_object() {
+        for key in ["token_mint_a", "token_mint_b"] {
+            if let Some(m) = o.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty())
+            {
+                mints.insert(m.to_string());
+            }
+        }
+    }
+    if !mints.is_empty() {
+        let (px, _) = match timeout(Duration::from_secs(3), fetch_mint_prices_usd(&mints)).await {
+            Ok(v) => v,
+            Err(_) => (BTreeMap::new(), "timeout".to_string()),
+        };
+        if pa.is_none_or(|p| p <= Decimal::ZERO) {
+            if let Some(m) = row.try_get::<Option<String>, _>("token_mint_a").ok().flatten() {
+                if let Some(f) = px.get(m.trim()) {
+                    pa = Decimal::from_f64_retain(*f);
+                }
+            }
+        }
+        if pb.is_none_or(|p| p <= Decimal::ZERO) {
+            if let Some(m) = row.try_get::<Option<String>, _>("token_mint_b").ok().flatten() {
+                if let Some(f) = px.get(m.trim()) {
+                    pb = Decimal::from_f64_retain(*f);
+                }
+            }
+        }
+    }
+    let pa = pa.unwrap_or(Decimal::ZERO);
+    let pb = pb.unwrap_or(Decimal::ZERO);
+    let nav = aa * pa + bb * pb;
+    (nav > Decimal::ZERO).then_some(nav)
+}
+
+fn baseline_entry_pool_price_from_snapshot_row(row: &sqlx::postgres::PgRow) -> Option<Decimal> {
+    let pa = row
+        .try_get::<Option<Decimal>, _>("price_a_usd")
+        .ok()
+        .flatten()
+        .filter(|p| *p > Decimal::ZERO);
+    let pb = row
+        .try_get::<Option<Decimal>, _>("price_b_usd")
+        .ok()
+        .flatten()
+        .filter(|p| *p > Decimal::ZERO);
+    if let (Some(a), Some(b)) = (pa, pb) {
+        let r = ratio_or_zero(b, a);
+        return (r > Decimal::ZERO).then_some(r);
+    }
+    let raw_json: Value = row.try_get("raw_json").unwrap_or(Value::Null);
+    let pa = raw_json
+        .get("price_a_usd")
+        .and_then(decimal_from_json)
+        .filter(|p| *p > Decimal::ZERO);
+    let pb = raw_json
+        .get("price_b_usd")
+        .and_then(decimal_from_json)
+        .filter(|p| *p > Decimal::ZERO);
+    match (pa, pb) {
+        (Some(a), Some(b)) => {
+            let r = ratio_or_zero(b, a);
+            (r > Decimal::ZERO).then_some(r)
+        }
+        _ => None,
+    }
+}
+
+/// Baseline USD for one PDA: valuation snapshot → ledger open quote → monitor entry.
+pub async fn baseline_value_usd_for_single_position(
+    state: &AppState,
+    position_pubkey: &str,
+    monitor_entry_value_usd: Decimal,
+) -> Option<Decimal> {
+    if monitor_entry_value_usd > Decimal::ZERO {
+        return Some(monitor_entry_value_usd);
+    }
+    let pk = position_pubkey.trim();
+    if pk.is_empty() {
+        return None;
+    }
+    if let Some(db) = state.db.as_ref() {
+        if let Ok(Some(row)) = sqlx::query(BASELINE_SNAPSHOT_FIRST_PDA_SQL)
+            .bind(pk)
+            .fetch_optional(db.pool())
+            .await
+            && let Some(usd) = baseline_usd_from_snapshot_row(&row).await
+        {
+            return Some(usd);
+        }
+        if let Ok(Some(row)) = sqlx::query(
+            r#"
+            SELECT COALESCE(
+              NULLIF(raw_json #>> '{details,open_quote_estimated_value_usd}', '')::DOUBLE PRECISION,
+              NULLIF(raw_json #>> '{details,open_target_usd}', '')::DOUBLE PRECISION,
+              NULLIF(raw_json #>> '{details,open_prev_end_value_usd}', '')::DOUBLE PRECISION
+            ) AS open_usd
+            FROM position_stream_ledger_rows
+            WHERE position_pubkey = $1
+              AND event IN ('bot_open_position', 'bot_open_position_full_range', 'position_open')
+            ORDER BY ts_utc DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(pk)
+        .fetch_optional(db.pool())
+        .await
+        {
+            let open_usd: Option<f64> = row.try_get("open_usd").ok().flatten();
+            if let Some(f) = open_usd.and_then(Decimal::from_f64_retain).filter(|d| *d > Decimal::ZERO)
+            {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// Net PnL + IL for the position detail performance card (uses live valuation + DB open baseline).
+pub async fn compute_single_position_detail_pnl(
+    state: &AppState,
+    position: &MonitoredPosition,
+    current_value_usd: Decimal,
+    valuation: &PositionUsdValuation,
+) -> Option<SinglePositionDetailPnL> {
+    if current_value_usd <= Decimal::ZERO {
+        return None;
+    }
+    let baseline = baseline_value_usd_for_single_position(
+        state,
+        &position.address.to_string(),
+        position.pnl.entry_value_usd,
+    )
+    .await?;
+    if baseline <= Decimal::ZERO {
+        return None;
+    }
+    let net_pnl_usd = current_value_usd - baseline;
+    let net_pnl_pct = ratio_or_zero(net_pnl_usd, baseline);
+
+    let current_price = pool_price_b_per_a(valuation.price_a_usd, valuation.price_b_usd)?;
+    let entry_price = if let Some(ep) = position.pnl.entry_price.filter(|p| *p > Decimal::ZERO) {
+        Some(ep)
+    } else if let Some(db) = state.db.as_ref() {
+        sqlx::query(BASELINE_SNAPSHOT_FIRST_PDA_SQL)
+            .bind(position.address.to_string())
+            .fetch_optional(db.pool())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| baseline_entry_pool_price_from_snapshot_row(&row))
+    } else {
+        None
+    };
+    let il_pct = entry_price
+        .and_then(|ep| {
+            let lower = tick_to_price(position.on_chain.tick_lower);
+            let upper = tick_to_price(position.on_chain.tick_upper);
+            calculate_il_concentrated(ep, current_price, lower, upper).ok()
+        })
+        .unwrap_or(Decimal::ZERO);
+
+    Some(SinglePositionDetailPnL {
+        net_pnl_usd,
+        net_pnl_pct,
+        il_pct,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         apply_cashflow_fee_payer_deltas, chain_session_ids_from_edges, compute_stream_il_components,
-        current_snapshot_is_stale_open_baseline_values, is_end_close_snapshot,
+        current_snapshot_is_stale_open_baseline_values, is_end_close_snapshot, ratio_or_zero,
         is_lifecycle_principal_event, pool_mints_for_hodl, positive_price_pair,
         snapshot_price_time_kind,
     };
@@ -1032,6 +1274,17 @@ mod tests {
             Some((Decimal::from(95), Decimal::ONE))
         );
         assert!(positive_price_pair(Decimal::ZERO, Decimal::ONE).is_none());
+    }
+
+    #[test]
+    fn single_position_net_pnl_from_baseline_matches_stream_ratio_scale() {
+        let baseline = Decimal::from_str("9.973").unwrap();
+        let current = Decimal::from_str("9.938").unwrap();
+        let net = current - baseline;
+        let pct = ratio_or_zero(net, baseline);
+        assert!(net < Decimal::ZERO);
+        assert!(pct < Decimal::ZERO);
+        assert!(pct > Decimal::new(-1, 2));
     }
 
     #[test]

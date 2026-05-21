@@ -1039,6 +1039,24 @@ pub async fn compute_session_balances_from_pslr(
         .collect())
 }
 
+/// Balances for session USD metrics: GL when it matches PSLR aggregate, else PSLR (lifecycle truth).
+pub async fn session_balances_for_metrics(
+    db: &Database,
+    session_id: &str,
+    gl_balances: &[SessionBalanceMint],
+    owner: Option<&str>,
+) -> Result<Vec<SessionBalanceMint>, sqlx::Error> {
+    let pslr = compute_session_balances_from_pslr(db, session_id).await?;
+    if gl_balances.is_empty() {
+        return Ok(pslr);
+    }
+    if gl_pslr_match(gl_balances, &pslr) {
+        return Ok(gl_balances.to_vec());
+    }
+    let _ = owner;
+    Ok(pslr)
+}
+
 pub fn gl_pslr_match(gl: &[SessionBalanceMint], pslr: &[SessionBalanceMint]) -> bool {
     let mut gl_map: BTreeMap<String, String> = BTreeMap::new();
     for b in gl {
@@ -1560,6 +1578,50 @@ mod tests {
             "pre_open USD must not inflate to ~97: got {:?}",
             pre_open_usd
         );
+    }
+
+    #[test]
+    fn session_balances_for_metrics_prefers_pslr_when_gl_doubles_open() {
+        let open = serde_json::json!({
+            "event": "bot_open_position",
+            "signature": "sig-o",
+            "rebalance_session_id": "sess-metrics-1",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC_MINT,
+                "open_amount_a_raw": 60_435_307u64,
+                "open_amount_b_raw": 4_720_942u64,
+                "event_price_a_usd": 85.0,
+                "event_price_b_usd": 1.0
+            }
+        });
+        let (_, _, _, posts) =
+            session_mint_deltas_from_lifecycle_json(&open, None, None).expect("posts");
+        let pslr: Vec<SessionBalanceMint> = posts
+            .into_iter()
+            .map(|(mint, amount_raw)| SessionBalanceMint {
+                mint,
+                amount_raw: format_raw_i128(amount_raw),
+            })
+            .collect();
+        let gl = vec![
+            SessionBalanceMint {
+                mint: WSOL_MINT.to_string(),
+                amount_raw: "-120870615".to_string(),
+            },
+            SessionBalanceMint {
+                mint: USDC_MINT.to_string(),
+                amount_raw: "-9586801".to_string(),
+            },
+        ];
+        assert!(!gl_pslr_match(&gl, &pslr));
+        let snap = build_open_start_from_row(&open, &BTreeMap::new()).expect("open_start");
+        let metrics_gl = resolve_session_metrics_from_open_start(&snap, &gl, true);
+        let metrics_pslr = resolve_session_metrics_from_open_start(&snap, &pslr, true);
+        let gl_usd = metrics_gl.current_value_usd.unwrap_or(0.0);
+        let pslr_usd = metrics_pslr.current_value_usd.unwrap_or(0.0);
+        assert!(gl_usd < -15.0, "doubled GL should be ~-20 USD: {gl_usd}");
+        assert!(pslr_usd > -12.0 && pslr_usd < -8.0, "PSLR single open ~-10 USD: {pslr_usd}");
     }
 
     #[test]

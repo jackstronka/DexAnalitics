@@ -28,6 +28,7 @@ use crate::services::position_stream_lineage::{
 use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_stream_pnl::{
     compute_position_stream_pnl, compute_position_stream_pnl_settlement_v1,
+    compute_single_position_detail_pnl,
 };
 use crate::services::position_agent_service;
 use crate::services::strategy_service::{
@@ -1756,6 +1757,18 @@ pub async fn get_position(
         None => (None, None, None),
     };
 
+    let mut net_pnl_usd = position.pnl.net_pnl_usd;
+    let mut net_pnl_pct = position.pnl.net_pnl_pct;
+    let mut il_pct = position.pnl.il_pct;
+    if let Some(v) = valuation.as_ref()
+        && let Some(detail) =
+            compute_single_position_detail_pnl(&state, &position, value_usd, v).await
+    {
+        net_pnl_usd = detail.net_pnl_usd;
+        net_pnl_pct = detail.net_pnl_pct;
+        il_pct = detail.il_pct;
+    }
+
     let response = PositionResponse {
         address: position.address.to_string(),
         pool_address: position.pool.to_string(),
@@ -1780,14 +1793,14 @@ pub async fn get_position(
         value_usd,
         valuation_source,
         pnl: PnLResponse {
-            unrealized_pnl_usd: position.pnl.net_pnl_usd,
-            unrealized_pnl_pct: position.pnl.net_pnl_pct,
+            unrealized_pnl_usd: net_pnl_usd,
+            unrealized_pnl_pct: net_pnl_pct,
             fees_earned_a: position.pnl.fees_earned_a,
             fees_earned_b: position.pnl.fees_earned_b,
             fees_earned_usd: fees_usd,
-            il_pct: position.pnl.il_pct,
-            net_pnl_usd: position.pnl.net_pnl_usd,
-            net_pnl_pct: position.pnl.net_pnl_pct,
+            il_pct,
+            net_pnl_usd,
+            net_pnl_pct,
         },
         status: if in_range_fresh {
             PositionStatus::Active

@@ -360,9 +360,19 @@ pub async fn reconcile_session_gl(
     })
 }
 
+/// Principal open/close is posted from lifecycle (`open_amount_*` / `close_amount_*` on-chain).
+/// Journal rows use request caps and a different `event_id` — skip to avoid double SESSION GL.
+pub fn journal_principal_deferred_to_lifecycle(kind: &str) -> bool {
+    lifecycle_posting_enabled()
+        && matches!(kind.trim(), "open_position" | "close_position")
+}
+
 /// Apply SESSION balance updates from a confirmed wallet journal event (best-effort).
 pub async fn apply_session_postings_from_journal(db: &Database, ev: &WalletLedgerEvent) {
     if !session_posting_enabled() {
+        return;
+    }
+    if journal_principal_deferred_to_lifecycle(&ev.kind) {
         return;
     }
     let Some(session_id) = session_id_from_ledger_event(ev) else {
@@ -440,15 +450,18 @@ fn to_open_start_snapshot(
 pub async fn resolve_session_metrics(
     db: &Database,
     session_id: &str,
+    owner: Option<&str>,
     current_balances: &[WalletSessionBalanceRow],
 ) -> Result<Option<WalletSessionMetrics>, sqlx::Error> {
-    let current: Vec<wallet_session::SessionBalanceMint> = current_balances
+    let gl: Vec<wallet_session::SessionBalanceMint> = current_balances
         .iter()
         .map(|b| wallet_session::SessionBalanceMint {
             mint: b.mint.clone(),
             amount_raw: b.amount_raw.clone(),
         })
         .collect();
+    let current =
+        wallet_session::session_balances_for_metrics(db, session_id, &gl, owner).await?;
     let resolved =
         wallet_session::compute_session_metrics_from_pslr(db, session_id, &current).await?;
     let Some(open) = resolved.open_start else {
@@ -462,23 +475,43 @@ pub async fn resolve_session_metrics(
     }))
 }
 
-/// Read SESSION balances: materialized GL first, then PSLR aggregate fallback.
+/// Read SESSION balances: GL when it matches PSLR; empty GL → PSLR; GL mismatch → PSLR (corrected).
 pub async fn read_session_balances_resolved(
     db: &Database,
     session_id: &str,
     owner: Option<&str>,
 ) -> Result<(Vec<WalletSessionBalanceRow>, String), sqlx::Error> {
-    let gl = read_session_balances(db, session_id, owner).await?;
-    if !gl.is_empty() {
-        return Ok((gl, "gl_session_shadow".to_string()));
+    let gl_rows = read_session_balances(db, session_id, owner).await?;
+    let gl_mint: Vec<wallet_session::SessionBalanceMint> = gl_rows
+        .iter()
+        .map(|b| wallet_session::SessionBalanceMint {
+            mint: b.mint.clone(),
+            amount_raw: b.amount_raw.clone(),
+        })
+        .collect();
+    let pslr_mint =
+        wallet_session::compute_session_balances_from_pslr(db, session_id).await?;
+    let pslr: Vec<WalletSessionBalanceRow> = pslr_mint
+        .iter()
+        .map(|b| WalletSessionBalanceRow {
+            mint: b.mint.clone(),
+            amount_raw: b.amount_raw.clone(),
+            decimals: None,
+        })
+        .collect();
+
+    if gl_rows.is_empty() {
+        let source = if pslr.is_empty() {
+            "gl_session_shadow_empty".to_string()
+        } else {
+            "gl_session_shadow_pslr_fallback".to_string()
+        };
+        return Ok((pslr, source));
     }
-    let pslr = compute_session_balances_from_pslr(db, session_id).await?;
-    let source = if pslr.is_empty() {
-        "gl_session_shadow_empty".to_string()
-    } else {
-        "gl_session_shadow_pslr_fallback".to_string()
-    };
-    Ok((pslr, source))
+    if wallet_session::gl_pslr_match(&gl_mint, &pslr_mint) {
+        return Ok((gl_rows, "gl_session_shadow".to_string()));
+    }
+    Ok((pslr, "gl_session_shadow_pslr_corrected".to_string()))
 }
 
 /// Read current SESSION balances for analytics (shadow read model).
@@ -618,5 +651,65 @@ mod tests {
             lifecycle_posting_event_id("abc123"),
             "lifecycle:abc123"
         );
+    }
+
+    #[test]
+    fn journal_open_close_deferred_when_lifecycle_posting_on() {
+        assert!(journal_principal_deferred_to_lifecycle("open_position"));
+        assert!(journal_principal_deferred_to_lifecycle("close_position"));
+        assert!(!journal_principal_deferred_to_lifecycle("swap_before_open"));
+        assert!(!journal_principal_deferred_to_lifecycle("collect_fees"));
+    }
+
+    #[test]
+    fn open_lifecycle_single_post_matches_cap_plus_onchain_double() {
+        let v = serde_json::json!({
+            "event": "bot_open_position",
+            "signature": "sig-open-1",
+            "rebalance_session_id": "sess-dup",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC_MINT,
+                "open_amount_a_raw": 60_435_307u64,
+                "open_amount_b_raw": 4_720_942u64,
+                "amount_a_cap": 60_435_308u64,
+                "amount_b_cap": 4_865_859u64
+            }
+        });
+        let posts =
+            session_mint_deltas_from_lifecycle_json(&v, None, None).expect("posts").3;
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts.iter().find(|(m, _)| m == WSOL_MINT).map(|(_, d)| *d), Some(-60_435_307));
+        assert_eq!(
+            posts.iter().find(|(m, _)| m == USDC_MINT).map(|(_, d)| *d),
+            Some(-4_720_942)
+        );
+        let journal_caps = vec![
+            (WSOL_MINT.to_string(), -60_435_308i128),
+            (USDC_MINT.to_string(), -4_865_859i128),
+        ];
+        let mut combined = posts.clone();
+        for (m, d) in journal_caps {
+            if let Some((_, e)) = combined.iter_mut().find(|(mint, _)| mint == &m) {
+                *e = e.saturating_add(d);
+            } else {
+                combined.push((m, d));
+            }
+        }
+        let pslr: Vec<wallet_session::SessionBalanceMint> = posts
+            .into_iter()
+            .map(|(mint, amount_raw)| wallet_session::SessionBalanceMint {
+                mint,
+                amount_raw: wallet_session::format_raw_i128(amount_raw),
+            })
+            .collect();
+        let gl: Vec<wallet_session::SessionBalanceMint> = combined
+            .into_iter()
+            .map(|(mint, amount_raw)| wallet_session::SessionBalanceMint {
+                mint,
+                amount_raw: wallet_session::format_raw_i128(amount_raw),
+            })
+            .collect();
+        assert!(!wallet_session::gl_pslr_match(&gl, &pslr));
     }
 }

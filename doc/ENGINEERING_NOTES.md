@@ -1,3 +1,38 @@
+## 2026-05-21 — GET /positions/{address}: Wyniki Net PnL / IL z baseline snapshot
+
+keywords: get_position, position_detail, net_pnl_usd, il_pct, performance, baseline_open, monitor
+
+- **What:** Karta „Wyniki” brała `pnl.*` z monitora (domyślnie 0 — brak `entry_value_usd`). Teraz `compute_single_position_detail_pnl` liczy Net PnL i IL z live `value_usd` vs baseline (`baseline_open` snapshot / ledger open quote).
+- **paths:** `position_stream_pnl.rs`, `handlers/positions.rs`
+
+## 2026-05-21 — Tx fees USD: per-node backfill + stream-lineage fee refresh
+
+keywords: chain-history, stream-lineage, tx_fees_usd, sol_usd_for_tx_fees, apply_tx_fees_usd_from_lamports_on_nodes, lamports, HySRBC91
+
+- **What:** Gdy λ>0 a `tx_fees_usd`=0, drugi pass uzupełnia **każdy węzeł** (nie tylko nagłówek `chain_cost_summary`). `sol_usd_for_tx_fees`: najpierw `event_price_a_usd` z materializacji, potem 15m cache, CoinGecko. `compute_position_stream_lineage` woła `refresh_chain_history_node_fees_from_ledger` + `refresh_lineage_totals_from_nodes` (net PnL odejmuje opłaty w totals).
+- **paths:** `position_stream_lineage.rs`, `position_chain_history.rs`
+
+## 2026-05-21 — Tx fees USD: reuse `fetch_mint_prices_usd_stable` + event spot fallback
+
+keywords: chain-history, tx_fees_usd, MINT_PRICE_CACHE, fetch_mint_prices_usd_stable, sol_usd_for_tx_fees, lamports
+
+- **What:** Przeliczanie λ→USD dla opłat tx używa tego samego **15m cache** co reszta lineage (`fetch_mint_prices_usd_stable`), potem `event_price_a_usd` z węzłów, na końcu CoinGecko — bez osobnego fetcha przy każdym GET chain-history.
+- **paths:** `position_stream_lineage.rs` (`sol_usd_for_tx_fees`), `position_chain_history.rs`, `price_fetch.rs`
+
+## 2026-05-21 — Chain-history read: odświeżanie totals z węzłów (stale totals_json)
+
+keywords: chain-history, position_chain_history, totals_json, baseline_value_usd, refresh_lineage_totals_from_nodes, HySRBC91, BUG-20260521-05
+
+- **What:** `load_chain_history_from_db` wywołuje `refresh_lineage_totals_from_nodes` po enrich węzłów — naprawa nagłówka gdy materializacja zapisała `baseline=0` / `hodl=0`, a wiersze tabeli mają poprawne start/current (net PnL ≠ sam current).
+- **paths:** `crates/api/src/services/position_chain_history.rs`, `position_stream_lineage.rs`
+
+## 2026-05-21 — Session metrics: brak podwójnego GL open + PSLR gdy GL ≠ lifecycle
+
+keywords: session-balances, wallet_gl_posting, wallet_session, current_value_usd, gl_pslr_match, open_position, BUG-20260521-04
+
+- **What:** Journal `open_position`/`close_position` nie postuje już principal do SESSION (lifecycle ma `open_amount_*_raw`). Przy rozjazie GL vs PSLR API zwraca sumę lifecycle (`gl_session_shadow_pslr_corrected`) i metryki „Sesja teraz” z PSLR — naprawa wyświetlania ~−$20 przy open ~$10.
+- **paths:** `crates/api/src/services/wallet_gl_posting.rs`, `crates/data/src/wallet_session.rs`, `web/src/components/SessionBalancesPanel.tsx`
+
 ## 2026-05-21 — Fix: experiment launch funding używa SOL-first (native SOL na nodze WSOL)
 
 keywords: experiment-launch, web, sol-first, wsol, native-sol, PositionCreate, funding

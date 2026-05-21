@@ -1323,7 +1323,7 @@ pub async fn get_wallet_session_balances(
         wallet_gl_posting::read_session_balances_resolved(db, session_id, owner)
             .await
             .map_err(|e| ApiError::internal(format!("session balances read failed: {e}")))?;
-    let metrics = wallet_gl_posting::resolve_session_metrics(db, session_id, &balances)
+    let metrics = wallet_gl_posting::resolve_session_metrics(db, session_id, owner, &balances)
         .await
         .map_err(|e| ApiError::internal(format!("session metrics read failed: {e}")))?;
     Ok(Json(WalletSessionBalancesResponse {

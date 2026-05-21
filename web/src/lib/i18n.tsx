@@ -90,6 +90,8 @@ const pl: Dictionary = {
   'sessionBalances.sourceGl': 'Saldo z księgi GL (Postgres) — zapisane.',
   'sessionBalances.sourcePslrFallback':
     'Księga GL jest pusta — poniżej suma z lifecycle (podgląd). Użyj „Zapisz do księgi”, potem „Sprawdź zgodność”.',
+  'sessionBalances.sourcePslrCorrected':
+    'Księga GL nie zgadza się z lifecycle (np. podwójny zapis open) — saldo i „Sesja teraz” z sumy lifecycle. „Sprawdź zgodność” pokaże lukę; naprawa GL w toku operatora.',
   'sessionBalances.sourceEmpty': 'Brak danych w GL i w lifecycle dla tej sesji.',
   'sessionBalances.sourceDisabled': 'Odczyt SESSION wyłączony (CLMM_WALLET_GL_SESSION_READ).',
   'sessionBalances.sourceNoDb': 'Brak połączenia z Postgres — saldo sesji niedostępne.',
@@ -636,6 +638,8 @@ const en: Dictionary = {
   'sessionBalances.sourceGl': 'Balance from GL ledger (Postgres) — posted.',
   'sessionBalances.sourcePslrFallback':
     'GL ledger is empty — table shows lifecycle sum (preview). Use “Save to ledger”, then “Check match”.',
+  'sessionBalances.sourcePslrCorrected':
+    'GL ledger does not match lifecycle (e.g. duplicate open posting) — balances and “Session now” use lifecycle sum. “Check match” shows the gap; GL repair is operator-driven.',
   'sessionBalances.sourceEmpty': 'No data in GL or lifecycle for this session.',
   'sessionBalances.sourceDisabled': 'SESSION read disabled (CLMM_WALLET_GL_SESSION_READ).',
   'sessionBalances.sourceNoDb': 'Postgres not connected — session balance unavailable.',

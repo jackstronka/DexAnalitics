@@ -298,6 +298,19 @@ async fn fetch_dexscreener_mint_usd(mint: &str) -> Option<f64> {
     }
 }
 
+/// SOL/USD for tx-fee and lamports→USD conversion (CoinGecko first; avoids empty USD when batch fetch times out).
+pub async fn fetch_sol_usd_best_effort() -> (f64, String) {
+    if let Some(p) = fetch_coingecko_solana_usd().await {
+        return (p, "coingecko_solana".to_string());
+    }
+    let mut mints = BTreeSet::new();
+    mints.insert(WSOL_MINT.to_string());
+    match tokio::time::timeout(Duration::from_secs(4), fetch_mint_prices_usd(&mints)).await {
+        Ok((px, src)) => (px.get(WSOL_MINT).copied().unwrap_or(0.0), src),
+        Err(_) => (0.0, "timeout".to_string()),
+    }
+}
+
 /// Best-effort USD price map for the given mint set (see module docs for ordering).
 ///
 /// Returns a short `source` label for API responses (not a strict provenance per mint).

@@ -13,7 +13,7 @@ use crate::services::position_stream_performance::compute_position_stream_perfor
 use crate::services::position_valuation::{
     compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
 };
-use crate::services::price_fetch::fetch_mint_prices_usd;
+use crate::services::price_fetch::{fetch_mint_prices_usd, fetch_sol_usd_best_effort};
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use clmm_lp_data::repositories::Database;
@@ -2740,14 +2740,73 @@ fn build_lineage_chain_from_db_edges(
     chain
 }
 
-async fn sol_usd() -> (f64, String) {
-    let mut mints: BTreeSet<String> = BTreeSet::new();
+fn sol_usd_from_nodes_event_spot(nodes: &[PositionStreamLineageNode]) -> Option<(f64, String)> {
+    for n in nodes {
+        if n.token_mint_a.as_deref() != Some(WSOL_MINT) {
+            continue;
+        }
+        for spot in [
+            n.chain_history_event_spot_token_a_usd_open.as_deref(),
+            n.chain_history_event_spot_token_a_usd_close.as_deref(),
+        ] {
+            let Some(s) = spot else { continue };
+            let Ok(px) = s.trim().parse::<f64>() else {
+                continue;
+            };
+            if px.is_finite() && px > 0.0 {
+                return Some((px, "event_price_a_usd".to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// SOL/USD for tx-fee conversion: lifecycle/Postgres event spots (no network), shared 15m mint cache, then CoinGecko.
+pub async fn sol_usd_for_tx_fees(nodes: &[PositionStreamLineageNode]) -> (f64, String) {
+    if let Some((fb, fb_src)) = sol_usd_from_nodes_event_spot(nodes) {
+        return (fb, fb_src);
+    }
+    let mut mints = BTreeSet::new();
     mints.insert(WSOL_MINT.to_string());
-    let (px, src) = match timeout(Duration::from_secs(2), fetch_mint_prices_usd(&mints)).await {
-        Ok(r) => r,
-        Err(_) => (BTreeMap::new(), "timeout".to_string()),
-    };
-    (px.get(WSOL_MINT).copied().unwrap_or(0.0), src)
+    let (px, src) = fetch_mint_prices_usd_stable(&mints).await;
+    let p = px.get(WSOL_MINT).copied().unwrap_or(0.0);
+    if p > 0.0 {
+        return (p, src);
+    }
+    fetch_sol_usd_best_effort().await
+}
+
+async fn sol_usd() -> (f64, String) {
+    sol_usd_for_tx_fees(&[]).await
+}
+
+fn tx_fees_usd_from_lamports(lamports: u64, sol_usd_px: f64) -> Decimal {
+    if lamports == 0 || !(sol_usd_px.is_finite() && sol_usd_px > 0.0) {
+        return Decimal::ZERO;
+    }
+    Decimal::from_f64_retain((lamports as f64 / 1e9) * sol_usd_px).unwrap_or(Decimal::ZERO)
+}
+
+/// Fill `tx_fees_usd` / per-node `net_pnl_*` when lamports are known but USD was left at 0 (price fetch miss).
+pub(crate) fn apply_tx_fees_usd_from_lamports_on_nodes(
+    nodes: &mut [PositionStreamLineageNode],
+    sol_usd_px: f64,
+) {
+    if !(sol_usd_px.is_finite() && sol_usd_px > 0.0) {
+        return;
+    }
+    for node in nodes {
+        if node.tx_fee_lamports == 0 || !node.tx_fees_usd.is_zero() {
+            continue;
+        }
+        node.tx_fees_usd = tx_fees_usd_from_lamports(node.tx_fee_lamports, sol_usd_px);
+        node.net_pnl_usd = node.current_value_usd + node.realized_cashflow_usd
+            - node.baseline_value_usd
+            - node.tx_fees_usd;
+        if !node.baseline_value_usd.is_zero() {
+            node.net_pnl_pct = node.net_pnl_usd / node.baseline_value_usd;
+        }
+    }
 }
 
 fn ui_amount(raw: u64, decimals: u8) -> f64 {
@@ -4103,7 +4162,7 @@ pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
     .await
     .map_err(|e| ApiError::internal(format!("chain-history: tx fee batch: {e}")))?;
 
-    let fee_lamports_by_pos: HashMap<String, u64> = fee_rows
+    let mut fee_lamports_by_pos: HashMap<String, u64> = fee_rows
         .into_iter()
         .filter_map(|r| {
             let position: String = r.try_get("position_pubkey").ok()?;
@@ -4111,6 +4170,28 @@ pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
             Some((position, fee.max(0) as u64))
         })
         .collect();
+
+    let mut tx_fees_from_lifecycle: HashMap<String, u64> = HashMap::new();
+    let needs_tx_fee_lifecycle = chain.iter().any(|p| {
+        fee_lamports_by_pos.get(p).copied().unwrap_or(0) == 0
+    });
+    if needs_tx_fee_lifecycle {
+        let lifecycle_rows = lifecycle_rows_cached_best_effort().await;
+        for p in chain {
+            if fee_lamports_by_pos.get(p).copied().unwrap_or(0) > 0 {
+                continue;
+            }
+            let lifecycle_tx: u64 = lifecycle_rows
+                .iter()
+                .filter(|r| r.position_pubkey.as_deref() == Some(p.as_str()))
+                .filter_map(|r| r.tx_fee_lamports)
+                .sum();
+            if lifecycle_tx > 0 {
+                fee_lamports_by_pos.insert(p.clone(), lifecycle_tx);
+                tx_fees_from_lifecycle.insert(p.clone(), lifecycle_tx);
+            }
+        }
+    }
 
     let mut fee_metrics = lp_fees_collected_usd_from_ledger_db_batch(state, db, chain).await?;
     let needs_lifecycle_fee_fallback = chain.iter().any(|p| {
@@ -4148,15 +4229,11 @@ pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
         }
     }
 
-    let (sol_usd, _) = sol_usd().await;
-    for node in nodes {
+    let (sol_usd_px, _) = sol_usd_for_tx_fees(nodes).await;
+    for node in &mut *nodes {
         let p = node.position_address.trim().to_string();
         let fee_lamports = fee_lamports_by_pos.get(&p).copied().unwrap_or(0);
-        let tx_fees_usd = if sol_usd > 0.0 {
-            Decimal::from_f64_retain((fee_lamports as f64 / 1e9) * sol_usd).unwrap_or(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
+        let tx_fees_usd = tx_fees_usd_from_lamports(fee_lamports, sol_usd_px);
         let fee_metric = fee_metrics.get(&p).cloned().unwrap_or_default();
         let mut mint_a = node.token_mint_a.clone();
         let mut mint_b = node.token_mint_b.clone();
@@ -4183,7 +4260,16 @@ pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
         } else {
             node.net_pnl_pct = Decimal::ZERO;
         }
+        if tx_fees_from_lifecycle.contains_key(&p) {
+            let tag = "tx_fees_from_lifecycle_fallback.";
+            match &mut node.note {
+                Some(n) if !n.contains(tag) => n.push_str(&format!(" {tag}")),
+                None => node.note = Some(tag.to_string()),
+                _ => {}
+            }
+        }
     }
+    apply_tx_fees_usd_from_lamports_on_nodes(nodes, sol_usd_px);
 
     Ok(())
 }
@@ -5148,6 +5234,10 @@ pub async fn compute_position_stream_lineage_opts(
     let cps = fee_checkpoint_rows_cached_best_effort().await;
     attach_collect_zero_diagnostics(&rows, &cps, &mut nodes);
 
+    if state.db.is_some() {
+        refresh_chain_history_node_fees_from_ledger(state, &chain, &mut nodes).await?;
+    }
+
     // Refresh totals after nodes + snapshot persist (live current mark, repaired baseline basket).
     if state.db.is_some() {
         totals = compute_position_stream_pnl_for_stream_members(
@@ -5173,6 +5263,8 @@ pub async fn compute_position_stream_lineage_opts(
         Some("No valuation snapshots yet; totals computed best-effort from lineage nodes (IL/HODL unavailable)."),
     )
     .or(totals);
+
+    refresh_lineage_totals_from_nodes(entry, &mut totals, &nodes);
 
     let chain_cost_summary = rollup_lineage_chain_costs(&nodes);
     let mut note = "Lineage chain is best-effort and assumes a mostly linear old→new rotation path (common for strategies). If edges are missing, the chain may be incomplete.".to_string();
@@ -5334,7 +5426,7 @@ fn apply_baseline_fallback_from_prev_end(nodes: &mut [PositionStreamLineageNode]
 
 /// When DB stream PnL totals disagree with per-node lineage marks (e.g. one-leg baseline snapshot
 /// before `open_amount_*_raw` enrichment), align headline totals with node rows best-effort.
-fn reconcile_stream_pnl_totals_with_nodes(
+pub fn reconcile_stream_pnl_totals_with_nodes(
     totals: &mut crate::models::PositionStreamPnLResponse,
     nodes: &[PositionStreamLineageNode],
 ) {
@@ -5401,16 +5493,22 @@ fn maybe_compute_totals_from_nodes(
         return None;
     }
     let totals_is_placeholder = existing.as_ref().is_some_and(|t| {
-        t.baseline_value_usd.is_zero()
+        let note_lc = t
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let stale_meta = note_lc.contains("no valuation snapshots")
+            || t.valuation_price_time_kind == "node_fallback_unavailable";
+        (t.baseline_value_usd.is_zero()
             && t.current_value_usd.is_zero()
             && t.tx_fees_usd.is_zero()
             && t.realized_cashflow_usd.is_zero()
             && t.net_pnl_usd.is_zero()
-            && t.note
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .contains("no valuation snapshots")
+            && stale_meta)
+            || (t.baseline_value_usd.is_zero()
+                && !t.current_value_usd.is_zero()
+                && stale_meta)
     });
     if existing.is_some() && !totals_is_placeholder {
         return None;
@@ -5471,6 +5569,81 @@ fn maybe_compute_totals_from_nodes(
         },
         note: note.map(|s| s.to_string()),
     })
+}
+
+/// Refresh persisted/stream totals from per-node marks (e.g. stale `totals_json` on chain-history read).
+pub fn refresh_lineage_totals_from_nodes(
+    entry: &str,
+    totals: &mut Option<crate::models::PositionStreamPnLResponse>,
+    nodes: &[PositionStreamLineageNode],
+) {
+    if nodes.is_empty() {
+        return;
+    }
+    let first_baseline = nodes
+        .first()
+        .map(|n| n.baseline_value_usd)
+        .unwrap_or(Decimal::ZERO);
+    let stale_baseline = totals
+        .as_ref()
+        .is_some_and(|t| t.baseline_value_usd.is_zero() && first_baseline > Decimal::ZERO);
+    if totals.is_none() || stale_baseline {
+        if let Some(fresh) = maybe_compute_totals_from_nodes(
+            entry,
+            if stale_baseline { &None } else { totals },
+            nodes,
+            Some(
+                "Totals refreshed from lineage nodes on read (materialized totals_json was stale).",
+            ),
+        ) {
+            *totals = Some(fresh);
+        }
+    }
+    if let Some(t) = totals.as_mut() {
+        reconcile_stream_pnl_totals_with_nodes(t, nodes);
+        let tx_sum: Decimal = nodes.iter().map(|n| n.tx_fees_usd).sum();
+        let fee_sum: Decimal = nodes.iter().map(|n| n.fees_collected_usd).sum();
+        let cashflow_sum: Decimal = nodes.iter().map(|n| n.realized_cashflow_usd).sum();
+        if t.tx_fees_usd.is_zero() && tx_sum > Decimal::ZERO {
+            t.tx_fees_usd = tx_sum;
+        }
+        if t.realized_lp_fees_usd.is_zero() && fee_sum > Decimal::ZERO {
+            t.realized_lp_fees_usd = fee_sum;
+            t.lp_fees_total_usd = fee_sum + t.uncollected_lp_fees_usd;
+        }
+        if t.realized_cashflow_usd.is_zero() && cashflow_sum != Decimal::ZERO {
+            t.realized_cashflow_usd = cashflow_sum;
+        }
+        if !t.hodl_value_usd.is_zero() {
+            t.lp_vs_hodl_with_fees_usd = t.il_usd + t.lp_fees_total_usd;
+            t.lp_vs_hodl_with_fees_pct = if t.hodl_value_usd.is_zero() {
+                Decimal::ZERO
+            } else {
+                t.lp_vs_hodl_with_fees_usd / t.hodl_value_usd
+            };
+        }
+        t.net_pnl_usd = t.current_value_usd + t.realized_cashflow_usd
+            - t.baseline_value_usd
+            - t.tx_fees_usd;
+        t.net_pnl_pct = if t.baseline_value_usd.is_zero() {
+            Decimal::ZERO
+        } else {
+            t.net_pnl_usd / t.baseline_value_usd
+        };
+        if !t.hodl_value_usd.is_zero()
+            && (!t.il_usd.is_zero() || !t.clean_il_usd.is_zero())
+            && t.valuation_price_time_kind == "node_fallback_unavailable"
+        {
+            t.valuation_price_time_kind = "lineage_nodes_reconciled".to_string();
+            t.price_basis_note = Some(
+                "HODL/IL from first→last node USD marks on read. Full token-basket HODL needs DB valuation snapshots (refresh chain-history after rotations)."
+                    .to_string(),
+            );
+            t.interpretation.il_vs_initial_hodl_caption_pl =
+                "Benchmark IL vs HODL: wartość LP na końcu łańcucha minus HODL przybliżony z baseline pierwszego węzła (bez pełnego koszyka tokenów ze snapshotów DB)."
+                    .to_string();
+        }
+    }
 }
 
 /// Backfill synthetic DB valuation snapshots for positions present in lifecycle JSONL.
@@ -6831,6 +7004,80 @@ mod tests {
     }
 
     // NOTE: legacy open-caps heuristics tests removed intentionally.
+
+    #[test]
+    fn tx_fees_usd_from_lamports_converts_at_sol_price() {
+        let usd = tx_fees_usd_from_lamports(65_000, 87.0);
+        assert!(usd > Decimal::from_str("0.005").unwrap());
+        assert!(usd < Decimal::from_str("0.01").unwrap());
+    }
+
+    #[test]
+    fn apply_tx_fees_usd_from_lamports_fills_nodes_and_net_pnl() {
+        let mut nodes = vec![mk_node(
+            "PDA",
+            Decimal::from_str("10").unwrap(),
+            Decimal::from_str("9.99").unwrap(),
+        )];
+        nodes[0].tx_fee_lamports = 25_000;
+        nodes[0].tx_fees_usd = Decimal::ZERO;
+        nodes[0].net_pnl_usd = Decimal::from_str("9.99").unwrap() - Decimal::from_str("10").unwrap();
+        apply_tx_fees_usd_from_lamports_on_nodes(&mut nodes, 100.0);
+        assert!(nodes[0].tx_fees_usd > Decimal::ZERO);
+        assert!(nodes[0].net_pnl_usd < Decimal::from_str("-0.01").unwrap());
+    }
+
+    #[test]
+    fn refresh_lineage_totals_repairs_stale_chain_history_meta_baseline_zero() {
+        use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
+
+        let mut totals = Some(PositionStreamPnLResponse {
+            position_address: "HySR".to_string(),
+            baseline_ts_utc: None,
+            current_ts_utc: None,
+            baseline_value_usd: Decimal::ZERO,
+            current_value_usd: Decimal::from_str("9.95054476807043").unwrap(),
+            hodl_value_usd: Decimal::ZERO,
+            il_usd: Decimal::ZERO,
+            il_pct: Decimal::ZERO,
+            clean_il_usd: Decimal::ZERO,
+            clean_il_pct: Decimal::ZERO,
+            realized_lp_fees_usd: Decimal::ZERO,
+            uncollected_lp_fees_usd: Decimal::ZERO,
+            lp_fees_total_usd: Decimal::ZERO,
+            lp_vs_hodl_with_fees_usd: Decimal::ZERO,
+            lp_vs_hodl_with_fees_pct: Decimal::ZERO,
+            valuation_price_time_kind: "node_fallback_unavailable".to_string(),
+            price_basis_note: None,
+            tx_fees_usd: Decimal::ZERO,
+            realized_cashflow_usd: Decimal::ZERO,
+            net_pnl_usd: Decimal::from_str("9.95054476807043").unwrap(),
+            net_pnl_pct: Decimal::ZERO,
+            interpretation: StreamPnLInterpretation {
+                economic_net_pnl_caption_pl: String::new(),
+                il_vs_initial_hodl_caption_pl: String::new(),
+            },
+            note: Some("No valuation snapshots yet; totals computed best-effort from lineage nodes (IL/HODL unavailable).".to_string()),
+        });
+        let nodes = vec![
+            mk_node(
+                "At6",
+                Decimal::from_str("9.973205210329806").unwrap(),
+                Decimal::from_str("10.003062304519507").unwrap(),
+            ),
+            mk_node(
+                "HySR",
+                Decimal::from_str("9.948260832969006").unwrap(),
+                Decimal::from_str("9.94637160185368").unwrap(),
+            ),
+        ];
+        refresh_lineage_totals_from_nodes("HySR", &mut totals, &nodes);
+        let t = totals.as_ref().expect("totals");
+        assert!(t.baseline_value_usd > Decimal::from_str("9.9").unwrap());
+        assert!(t.hodl_value_usd > Decimal::from_str("9.9").unwrap());
+        assert!(t.net_pnl_usd.abs() < Decimal::from_str("0.5").unwrap());
+        assert!(!t.il_usd.is_zero() || !t.clean_il_usd.is_zero());
+    }
 
     #[test]
     fn reconcile_stream_pnl_totals_with_nodes_repairs_degraded_hodl_and_stale_current() {

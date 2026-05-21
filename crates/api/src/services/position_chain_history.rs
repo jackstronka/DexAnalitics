@@ -13,8 +13,9 @@ use crate::services::position_stream_lineage::{
     apply_open_start_usd_from_lifecycle_snapshots_for_chain_history,
     compute_position_stream_lineage_opts, enrich_chain_history_nodes_open_quote_baseline_lift,
     node_metrics, prefer_lifecycle_lineage_if_extends_db_prefix,
-    refresh_chain_history_node_fees_from_ledger, resolve_lineage_chain_for_stream_pnl,
-    rollup_lineage_chain_costs,
+    refresh_chain_history_node_fees_from_ledger, refresh_lineage_totals_from_nodes,
+    apply_tx_fees_usd_from_lamports_on_nodes, resolve_lineage_chain_for_stream_pnl,
+    rollup_lineage_chain_costs, sol_usd_for_tx_fees,
 };
 use futures::future::join_all;
 use std::collections::HashMap;
@@ -939,7 +940,26 @@ pub async fn load_chain_history_from_db(
 
     refresh_chain_history_node_fees_from_ledger(state, &chain, &mut nodes).await?;
 
-    let chain_cost_summary = rollup_lineage_chain_costs(&nodes).or(chain_cost_summary_from_meta);
+    let mut totals = totals;
+    refresh_lineage_totals_from_nodes(&entry, &mut totals, &nodes);
+
+    let mut chain_cost_summary =
+        rollup_lineage_chain_costs(&nodes).or_else(|| chain_cost_summary_from_meta.clone());
+    let needs_tx_usd = nodes
+        .iter()
+        .any(|n| n.tx_fee_lamports > 0 && n.tx_fees_usd.is_zero())
+        || chain_cost_summary.as_ref().is_some_and(|cs| {
+            cs.tx_fee_lamports_total > 0 && cs.tx_fees_usd_total.is_zero()
+        });
+    if needs_tx_usd {
+        let (sol_px, _) = sol_usd_for_tx_fees(&nodes).await;
+        if sol_px > 0.0 {
+            apply_tx_fees_usd_from_lamports_on_nodes(&mut nodes, sol_px);
+            chain_cost_summary =
+                rollup_lineage_chain_costs(&nodes).or_else(|| chain_cost_summary_from_meta);
+            refresh_lineage_totals_from_nodes(&entry, &mut totals, &nodes);
+        }
+    }
 
     let mut note_out = note.unwrap_or_default();
     if !note_out.is_empty() {

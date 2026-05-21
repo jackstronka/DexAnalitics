@@ -19,10 +19,11 @@ import { shortenAddress } from '@/lib/utils'
 const WSOL = 'So11111111111111111111111111111111111111112'
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 
-type SourceKind = 'gl' | 'pslr_fallback' | 'empty' | 'disabled' | 'no_db' | 'unknown'
+type SourceKind = 'gl' | 'pslr_fallback' | 'pslr_corrected' | 'empty' | 'disabled' | 'no_db' | 'unknown'
 
 function parseSource(source: string): SourceKind {
   if (source === 'gl_session_shadow') return 'gl'
+  if (source === 'gl_session_shadow_pslr_corrected') return 'pslr_corrected'
   if (source === 'gl_session_shadow_pslr_fallback') return 'pslr_fallback'
   if (source === 'gl_session_shadow_empty') return 'empty'
   if (source === 'gl_session_shadow_disabled') return 'disabled'
@@ -186,6 +187,8 @@ function SourceBanner({ kind }: { kind: SourceKind }) {
         return t('sessionBalances.sourceGl')
       case 'pslr_fallback':
         return t('sessionBalances.sourcePslrFallback')
+      case 'pslr_corrected':
+        return t('sessionBalances.sourcePslrCorrected')
       case 'empty':
         return t('sessionBalances.sourceEmpty')
       case 'disabled':
@@ -200,10 +203,11 @@ function SourceBanner({ kind }: { kind: SourceKind }) {
   const tone =
     kind === 'gl'
       ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
-      : kind === 'pslr_fallback'
+      : kind === 'pslr_fallback' || kind === 'pslr_corrected'
         ? 'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-100'
         : 'border-border bg-muted/30 text-muted-foreground'
-  const Icon = kind === 'gl' ? CheckCircle2 : kind === 'pslr_fallback' ? AlertTriangle : HelpCircle
+  const Icon =
+    kind === 'gl' ? CheckCircle2 : kind === 'pslr_fallback' || kind === 'pslr_corrected' ? AlertTriangle : HelpCircle
   return (
     <div className={`rounded-md border px-3 py-2 text-sm flex gap-2 ${tone}`}>
       <Icon className="h-4 w-4 shrink-0 mt-0.5" aria-hidden />

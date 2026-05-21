@@ -28,6 +28,40 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260521-05 — Chain-history Postgres: baseline/HODL $0, net PnL = current (stale totals_json)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-21  
+fixed_in: local  
+keywords: chain-history, totals_json, baseline_value_usd, hodl_value_usd, net_pnl_usd, live snapshots, HySRBC91, refresh_lineage_totals_from_nodes, materialize
+
+- **Symptom:** Zakładka Historia (Postgres), `source: live snapshots` — baseline $0, HODL $0, net PnL ≈ current (~$9.95, +0%); IL vs HODL wszystko $0 mimo 3 PDA w łańcuchu i zebranych fee (~$0.05). `GET stream-lineage` dla tego samego anchor pokazywał poprawne sumy (~$9.97 baseline).
+- **Root cause:** `GET …/chain-history` zwracał zamrożone `totals_json` z wczesnej materializacji (przed snapshotami / pełnym łańcuchem). Węzły w tabeli miały poprawne `start_value_usd`, ale nagłówek totals nie był przeliczany przy odczycie.
+- **Fix:** `refresh_lineage_totals_from_nodes` na odczycie chain-history: odbudowa z węzłów + `reconcile_stream_pnl_totals_with_nodes`; rozszerzony warunek placeholder (`baseline=0`, `current>0`, `node_fallback_unavailable`). **Follow-up:** `refresh_chain_history_node_fees_from_ledger` — fallback `tx_fee_lamports` z lifecycle JSONL gdy PSLR ma 0. **Follow-up 2 (tx fees USD $0):** drugi pass `apply_tx_fees_usd_from_lamports_on_nodes` gdy λ>0 a USD=0 (nagłówek był uzupełniany bez węzłów); `sol_usd_for_tx_fees` najpierw event spot z Postgres; stream-lineage też woła refresh opłat + `refresh_lineage_totals_from_nodes`.
+- **Guards/tests:** `refresh_lineage_totals_repairs_stale_chain_history_meta_baseline_zero` (`cargo test -p clmm-lp-api refresh_lineage_totals`).
+- **Paths:** `position_chain_history.rs`, `position_stream_lineage.rs`
+
+---
+
+### BUG-20260521-04 — Sesja teraz ~−$20 przy open ~$10 (podwójny SESSION GL)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-21  
+fixed_in: local  
+keywords: session-balances, SessionBalancesPanel, current_value_usd, Sesja teraz, gl_pslr_match, open_position, journal, lifecycle, amount_a_cap, open_amount_raw, 4FQfsB9a, 9dc9a854, operator_api
+
+- **Symptom:** Po open ~$9.90 panel „Punkt odniesienia” pokazywał **Sesja teraz (USD, ceny z open)** ≈ **−$19.95** (~2× wdrożonego kapitału).
+- **Root cause:** `POST /positions` (open) zapisywał do SESSION GL **capy** z requestu (`amount_a/b`), a ingest lifecycle — **`open_amount_*_raw`** on-chain; różne `event_id` → oba wpisy. Metryki liczyły zmaterializowane GL.
+- **Fix:** Journal nie duplikuje principal dla `open_position`/`close_position` gdy włączone lifecycle posting; `GET session-balances` i metryki używają **PSLR**, gdy `!gl_pslr_match` (`gl_session_shadow_pslr_corrected`).
+- **Guards/tests:** `journal_open_close_deferred_when_lifecycle_posting_on`, `open_lifecycle_single_post_matches_cap_plus_onchain_double`, `session_balances_for_metrics_prefers_pslr_when_gl_doubles_open` (`cargo test -p clmm-lp-data wallet_session`, `cargo test -p clmm-lp-api wallet_gl_posting`).
+- **Paths:** `wallet_gl_posting.rs`, `wallet_session.rs`, `handlers/wallets.rs`, `SessionBalancesPanel.tsx`
+
+---
+
 ### BUG-20260521-03 — Bulk send-first close: 6018 po confirm mimo „wysłane”
 
 status: fixed  
