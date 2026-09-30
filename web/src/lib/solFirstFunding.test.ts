@@ -7,9 +7,19 @@ const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 function mockBalances(overrides: Partial<WalletEffectiveBalancesResponse> = {}): WalletEffectiveBalancesResponse {
   return {
     owner: 'owner',
+    rpc_url: 'http://localhost',
+    lamports: 0,
     sol: '0',
     tokens: [],
+    as_of_utc: '',
     is_stale: false,
+    stale_age_ms: 0,
+    confidence: 'verified',
+    pending_ops_count: 0,
+    native_onchain_lamports: 0,
+    native_effective_lamports: 0,
+    wsol_onchain_raw: 0,
+    wsol_effective_raw: 0,
     ...overrides,
   }
 }
@@ -18,7 +28,7 @@ describe('solFirstFunding', () => {
   it('uses native SOL for WSOL leg when SPL WSOL is zero', () => {
     const balances = mockBalances({
       sol: '1.5',
-      tokens: [{ mint: WSOL_MINT, ui_amount: '0', amount_raw: '0', decimals: 9 }],
+      tokens: [{ mint: WSOL_MINT, ui_amount: '0' }],
     })
     const r = computeSolFirstFundingBalances({
       balances,
@@ -35,7 +45,7 @@ describe('solFirstFunding', () => {
   it('uses SPL balance for non-WSOL leg', () => {
     const balances = mockBalances({
       sol: '0.1',
-      tokens: [{ mint: USDC, ui_amount: '25.5', amount_raw: '25500000', decimals: 6 }],
+      tokens: [{ mint: USDC, ui_amount: '25.5' }],
     })
     const r = computeSolFirstFundingBalances({
       balances,

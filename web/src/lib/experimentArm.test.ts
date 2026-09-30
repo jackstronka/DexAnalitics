@@ -72,7 +72,7 @@ describe('experimentArm', () => {
       auto_execute: false,
       created_at: '',
       updated_at: '',
-    } as Strategy
+    } as unknown as Strategy
 
     const form = formStateFromStrategy(strategy)
     expect(form.rangeWidthPct).toBe(2)

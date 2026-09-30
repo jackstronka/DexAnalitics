@@ -213,8 +213,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_state(wallets_dir: &std::path::Path, registry_path: &std::path::Path) -> AppState {
-        let mut cfg = ApiConfig::default();
-        cfg.wallets_dir_primary = Some(wallets_dir.to_string_lossy().to_string());
+        let cfg = ApiConfig {
+            wallets_dir_primary: Some(wallets_dir.to_string_lossy().to_string()),
+            ..ApiConfig::default()
+        };
         unsafe {
             std::env::set_var(
                 "CLMM_POSITION_REGISTRY_PATH",
