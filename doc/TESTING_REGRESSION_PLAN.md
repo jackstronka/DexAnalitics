@@ -143,4 +143,4 @@ Odkryte przy okazji (nie naprawione w T-PR1):
 | `critical_area_requires_tests` (brak skryptu) | `.gitignore` `/scripts/*` + `!/scripts/ci/`; skrypt w repo | — |
 | `semver-*` (`main^{tree}`) | `baseline-rev: origin/main` | — |
 
-Wynik CI: patrz PR #2 (uzupełnić po runie).
+Wynik CI PR #2 (`b5d73ba`): zielone `run_tests` (2 runy), `lint`, `build`, `semver-*` ×7, `critical_area_requires_tests`, `lineage_shadow_diff`, `format_check` (nadal nie sprawdza — BUG-20260930-03, A1), **`code_coverage_report` też zielony** (był czerwony od maja; tarpaulin uruchamia te same testy, więc najpewniej padał na nich — przyczyny historycznej nie weryfikowano).

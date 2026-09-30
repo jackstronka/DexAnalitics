@@ -82,11 +82,11 @@ keywords: decimals, mint_decimals_ledger, wallet_opening_postings_from_effective
 
 ### BUG-20260930-01 — Pełny `cargo test --workspace` nie kompilował się; niestabilne testy env w `session_capital`
 
-status: partially fixed (lokalnie Windows zielone; CI Linux PR #2 — 3 dalsze problemy, patrz niżej)  
+status: fixed (CI PR #2 zielone 2026-09-30: run_tests, lint, semver ×7, critical gate, lineage golden, coverage)  
 severity: high  
 reported_by: ai  
 first_seen: 2026-09-30  
-fixed_in: local  
+fixed_in: feat/chain-portfolio-wallet-gl b5d73ba (PR #2)  
 keywords: cargo test, E0063, chain_session_id, OpenPositionRequest, TEST_ENV_LOCK, env var race, flaky, CLMM_REOPEN_USE_CHAIN_PORTFOLIO, tsc, WalletTokenBalance, clippy, TESTING_REGRESSION_PLAN
 
 - **Symptom:** `cargo test --workspace` → `E0063: missing field chain_session_id in OpenPositionRequest` (`position_service.rs` test helper) — **żaden** test workspace się nie uruchamiał. Po naprawie: losowo 1–2 FAIL w `session_capital::tests` (`load_reopen_portfolio_auto_chain_when_id_present_without_env`, `load_reopen_portfolio_prefers_chain_when_both_flags`); przy `--test-threads=1` zielone. Web: `tsc --noEmit` 4 błędy w testach. `make lint` czerwony (clippy 1.94).
