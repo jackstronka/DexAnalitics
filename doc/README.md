@@ -16,6 +16,8 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Plan implementacji (wykonawczy — backlog PR, harmonogram 2 tyg.):** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
+**Szybkie budowanie + odporność na regresje** (verify/CI, goldeny, niezmienniki, self-heal pipeline — **nie** auto-update asercji): [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) (jedyny plan wykonawczy testów); audyt + log: [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md).
+
 **Wallet GL — wizja księgowa vs journal, §2.2 konto sesji, plan wdrożenia SESSION:** [`WALLET_GL.md`](WALLET_GL.md), [`WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md`](WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md), [`WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md`](WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md), [**executor / reopen na SESSION**](WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md). **Portfel łańcucha (jeden cykl od startu do close):** [`CHAIN_SESSION_PORTFOLIO.md`](CHAIN_SESSION_PORTFOLIO.md), [`IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md`](IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md).
 
 **Plan produktowy (osobno od fees):** [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) — **osobny profil/tryb** (`agent_layer_profile`), screenshot + agenci, konsensus, rulebook; backlog P1–P13.
@@ -35,6 +37,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md) | **Plan:** rolling memory (global + pozycja + później strategia), event log, LLM context pack; fazy O1/M1/M2/M3; restart-safe pamięć poza modelem |
 | [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | **Fazy 0–6+:** kontrakt logu, gate runner, multi-backtest, raport real vs symulacja, apply z review, poza zakresem; kryteria sukcesu; kolejność PR |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | **Plan wykonawczy:** backlog PR-01–PR-30, fale F1–F5, kryteria done, najbliższe 2 tygodnie |
+| [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) | **Jedyny plan wykonawczy testów:** cele G1–G9, fazy 0/A–E + R (hermetyczność, verify/CI/Postgres, goldeny `insta`, proptest, OpenAPI→TS, self-heal pipeline, raport per obszar), mapa fal master planu → testy (§7) |
 | [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) | **Master roadmap:** analiza dojrzałości całego repo, 5 fal, metryki sukcesu |
 | [`DECISION_LAYER.md`](DECISION_LAYER.md) | **Wizja + kontrakt + §1a mapowanie celów + §1b rejestr zdolności + §11 audyt:** orkiestrator LP, fazy, shadow/symulacje, tabela CLI/API vs NO-GO, tabela co w kodzie / czego brak |
 | [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) | **Normative:** expected behavior per feature (open/close, rebalance, strategies, wallet, fees); refine here first |
@@ -45,7 +48,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | Solana indexing concepts (RPC vs WebSocket vs Geyser), “token” misconception, relation to swap sync |
 | [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | **Base + Aerodrome Slipstream (CLMM) live:** oficjalne źródła, fazy 0–5, wielość deployów, bezpieczeństwo, Go-live checklist; fee-only unstaked; endpoint `GET /api/v1/evm/base/aerodrome-slipstream/pools/{pool}/slot0` + `BASE_RPC_URL` |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | **Append-only log of non-trivial code changes** — each entry has `keywords:` for grep / AI search |
-| [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | **Plan siatki testów:** audyt stanu (2026-09-30), 4 warstwy (zielony baseline, `make verify` + CI, golden testy finansowe, kontrakty/niezmienniki), kolejność T-PR1…T-PR9 |
+| [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | **Audyt testów 2026-09-30 + log wykonania** (backlog T-PR zastąpiony); plan: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | Local-first MVP for an AI narrator / stream agent (YouTube) |
 
 ## Runbooks and operations
@@ -132,6 +135,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) | strategies, `backtest`, `backtest-optimize`, semantics |
 | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) | bollinger, candle, StratConfig, StrategyMode, backtest, roadmap |
 | [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | decision-layer, orchestrator, implementation-plan, gate-runner, NO-GO, orchestrator-runs, phased-rollout, situational-awareness |
+| [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) | regression-resilience, testing-plan, hermetic-tests, fast-build, golden, insta, proptest, invariants, openapi, make-verify, postgres-ci, self-heal-pipeline, agent-workflow, test-report, test-areas, roadmap-test-gates |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | implementation-plan, execution-backlog, PR-slices, F1-F5, sprint, acceptance-criteria |
 | [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) | master-plan, implementation-roadmap, priorities, maturity, five-waves, F1-F5, lineage, ingest, experiment-launcher, shadow |
 | [`IMPERMANENT_LOSS_USD_AND_FEES.md`](IMPERMANENT_LOSS_USD_AND_FEES.md) | IL, HODL, USD, fees LP, stream-pnl, lineage, calculate_il_concentrated, segment IL |

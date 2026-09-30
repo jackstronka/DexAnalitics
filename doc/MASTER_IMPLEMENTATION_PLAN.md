@@ -19,6 +19,7 @@
 | Bollinger / last-candle | [`IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md`](IMPLEMENTATION_PLAN_BOLLINGER_CANDLE_STRATEGIES.md) |
 | Architektura crate’ów | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) |
 | Rejestr bugów | [`BUGS.md`](BUGS.md) |
+| Testy: kryteria zamknięcia fal F1–F5, raport jakości per obszar | [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §7, faza R |
 
 ---
 
@@ -302,7 +303,7 @@ Sugerowana kolejność merge (można równoleglić F1 ops z F2 kod):
 
 ## 9. Utrzymanie dokumentu
 
-- Przy zamknięciu fazy — zaktualizuj tabelę w §2.2 i checkbox w §4.
+- Przy zamknięciu fazy — zaktualizuj tabelę w §2.2 i checkbox w §4. Fala jest zamknięta dopiero po spełnieniu jej testowego exit gate z [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §7.
 - Przy nowym bugu P0 — dopisz do F2 backlog; nie przesuwaj F3 przed domknięciem F2.1–F2.3.
 - Szczegóły implementacji — w dokumentach z § powiązane; ten plik = **tylko kolejność i priorytety**.
 
