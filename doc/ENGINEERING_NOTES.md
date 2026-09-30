@@ -1,3 +1,10 @@
+## 2026-09-30 — Faza 0 planu testów: hermetyczny test registry, gate script w repo, semver baseline
+
+keywords: testing, hermetic-tests, EnvGuard, test_env, registry_stale_reconcile, position_close_signer, CLMM_POSITION_REGISTRY_PATH, CLMM_POSITION_LIFECYCLE_LEDGER_PATH, critical-area-test-gate, semver, ci, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-01, BUG-20260930-04
+
+- **What:** `clmm-lp-api` ma `#[cfg(test)] test_env::EnvGuard` — każdy test mutujący env w tym crate trzyma guard (wspólny `tokio::sync::Mutex`; `lock().await` / `blocking_lock()`), wartości przywracane w `Drop`. Test `backfill_9vhky_*` (mainnet RPC + lokalny ledger + `set_current_dir`) zastąpiony 3 hermetycznymi testami orphan-close / snapshot / early-exit bez RPC; wersja mainnet zostaje jako `#[ignore]` manual repair. `.gitignore`: `/scripts/*` + `!/scripts/ci/` → `scripts/ci/critical-area-test-gate.sh` w repo (job `critical_area_requires_tests` wcześniej nie miał skryptu). `semver.yml`: baseline `origin/main` na PR. Plan i mapa fal → testy: `doc/IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`.
+- **paths:** `crates/api/src/test_env.rs`, `crates/api/src/lib.rs`, `crates/api/src/services/registry_stale_reconcile.rs`, `crates/api/src/services/position_close_signer.rs`, `.gitignore`, `scripts/ci/critical-area-test-gate.sh`, `.github/workflows/semver.yml`
+
 ## 2026-09-30 — T-PR1: zielony baseline testów (cargo test, clippy, tsc)
 
 keywords: testing, regression, cargo-test, clippy, TEST_ENV_LOCK, session_capital, env-var-race, tsc, vitest, TESTING_REGRESSION_PLAN, BUG-20260930-01, BUG-20260930-02, BUG-20260930-03

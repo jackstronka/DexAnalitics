@@ -28,6 +28,24 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260930-04 — Testy niehermetyczne: sieć, repo `data/`, `set_current_dir`, env bez blokady, puste passy
+
+status: partially fixed (punkt 1 i `position_close_signer` z punktu 3 — faza 0.1; reszta A5/A6/A7)  
+severity: high  
+reported_by: ai  
+first_seen: 2026-09-30  
+fixed_in: feat/chain-portfolio-wallet-gl (PR #2)  
+keywords: hermetic, flaky, non_hermetic, mainnet rpc in test, set_current_dir, env var race, vacuous pass, DATABASE_URL skip, registry_stale_reconcile, backfill_9vhky, local_swap_fees, EnvGuard, unshare, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **Symptom:** `run_tests` czerwony w CI PR #2 (Linux), lokalnie zielony. Wynik testów zależy od maszyny, sieci i kolejności wątków.
+- **Root cause:** (audyt kodu 2026-09-30) (1) `registry_stale_reconcile::backfill_9vhky_orphan_close_when_lifecycle_missing` woła mainnet RPC, czyta/zapisuje gitignorowany ledger, zmienia `set_current_dir`; lokalnie bez danych robi `return` (pusty pass). (2) `cli/src/local_swap_fees.rs` test zapisuje do repo `data/swaps/orca/<pool>/decoded_swaps.jsonl`. (3) Env bez wspólnej blokady: `CLMM_POSITION_REGISTRY_PATH` (`api/position_close_signer.rs`, bez sprzątania), `ORCA_PUBLIC_API_BASE_URL` (`api/handlers/pools_tests.rs`), `CLMM_SWAP_MIX_DEFICIT_USD_EPS` (`execution/rebalance.rs` poza `TEST_ENV_LOCK`), `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` / `CLMM_REOPEN_SESSION_REQUIRE_RECONCILE` (`data/wallet_session.rs`), `KEYPAIR_PATH` (`cli/orca_wallet.rs`). (4) 4× `session_gl_integration` cicho przechodzą bez `DATABASE_URL`. (5) `wallets.rs` `wallet_effective_hydrate_timestamp_preserves_stale_age` — okno zegara 5000–7500 ms.
+- **Uzupełnienie (weryfikacja 2026-09-30, luki L1–L3 w `IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md` §2):** (6) CI `run_tests` zatrzymał się na pierwszym padzie (`clmm-lp-api --lib`), bo `make test` nie ma `--no-fail-fast` — testy pozostałych crate'ów nie wykonały się w CI, lista przyczyn może być niepełna (plan 0.5). (7) Niejawne odczyty gitignorowanego `data/ledger/orca_position_lifecycle.jsonl` przez domyślne ścieżki (`data/wallet_session.rs:1217`, `protocols/ledger/tx_lifecycle.rs` `DEFAULT_REL_PATH`) — nie wiadomo jeszcze, czy trafia w nie aktywny test (plan A6). (8) `CLMM_AGENT_DATA_DIR` w `api/position_agent_service.rs` pod lokalnym lockiem zamiast `EnvGuard`, bez przywrócenia przy panice (plan A6).
+- **Fix:** (faza 0.1, 2026-09-30) `crates/api/src/test_env.rs::EnvGuard` — wspólna blokada env dla testów crate'u `clmm-lp-api` + przywracanie wartości w `Drop`. `registry_stale_reconcile`: 3 hermetyczne testy (tempdir registry + lifecycle przez `CLMM_POSITION_REGISTRY_PATH` / `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`, RPC na nieroutowalny `127.0.0.1:9` — wczesne wyjścia nie mogą dotknąć sieci); stary test mainnet → `#[ignore]` „manual repair”, bez `set_current_dir`, bez pustego `return` (assert zamiast). `position_close_signer` testy pod `EnvGuard`. Pozostałe (2)–(5): plan A5, A6, A7.
+- **Guards/tests:** `orphan_close_detected_only_for_registry_close_without_lifecycle_close`, `last_open_snapshot_takes_latest_open_row`, `backfill_skips_without_rpc_when_already_closed_or_no_open_snapshot`; `cargo test --workspace` 0 fail. Planowane: `EnvGuard` w pozostałych crate'ach; `CLMM_REQUIRE_DB_TESTS=1` w CI; testy Rust w CI pod `unshare -n` (brak sieci poza loopback).
+- **Paths:** `crates/api/src/services/registry_stale_reconcile.rs`, `crates/cli/src/local_swap_fees.rs`, `crates/api/src/services/position_close_signer.rs`, `crates/api/src/handlers/pools_tests.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/data/src/wallet_session.rs`, `crates/cli/src/orca_wallet.rs`, `crates/data/tests/session_gl_integration.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/services/position_agent_service.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `Makefile`
+
+---
+
 ### BUG-20260930-03 — CI „Format Check” formatuje zamiast sprawdzać (zawsze zielony)
 
 status: open  
@@ -39,7 +57,7 @@ keywords: ci, format_check.yml, make fmt, fmt-check, rustfmt, quality gate, TEST
 
 - **Symptom:** Job „Format Check” w GitHub Actions jest zielony, a `cargo fmt --all --check` lokalnie zgłasza 38 niesformatowanych plików (także zacommitowanych, np. `handlers/strategies.rs`, `server.rs`).
 - **Root cause:** `.github/workflows/format_check.yml` uruchamia `make fmt` (`cargo fmt --all` — zapisuje zmiany w runnerze) zamiast `make fmt-check`.
-- **Fix:** (planowane, T-PR2/T-PR3 w `TESTING_REGRESSION_PLAN.md`) jednorazowy commit `cargo fmt --all`, potem workflow na `cargo fmt --all --check`.
+- **Fix:** (planowane, A1 w `IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`) jednorazowy commit `cargo fmt --all`, potem workflow na `cargo fmt --all --check`.
 - **Guards/tests:** job CI z `--check`.
 - **Paths:** `.github/workflows/format_check.yml`, `Makefile`
 
@@ -64,7 +82,7 @@ keywords: decimals, mint_decimals_ledger, wallet_opening_postings_from_effective
 
 ### BUG-20260930-01 — Pełny `cargo test --workspace` nie kompilował się; niestabilne testy env w `session_capital`
 
-status: fixed  
+status: partially fixed (lokalnie Windows zielone; CI Linux PR #2 — 3 dalsze problemy, patrz niżej)  
 severity: high  
 reported_by: ai  
 first_seen: 2026-09-30  
@@ -75,7 +93,12 @@ keywords: cargo test, E0063, chain_session_id, OpenPositionRequest, TEST_ENV_LOC
 - **Root cause:** (1) nowe pole w modelu bez aktualizacji inicjalizatora testowego; (2) testy równolegle mutują globalne env `CLMM_REOPEN_*` / `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`; (3) fixture TS z polami `amount_raw`/`decimals`, których nie ma w `WalletTokenBalance` (backend też ich nie zwraca); (4) nowe lintery clippy (`collapsible_if` z let-chains itd.).
 - **Fix:** `chain_session_id: None` w helperze; `session_capital::TEST_ENV_LOCK` (`tokio::sync::Mutex`) we wszystkich testach env w `session_capital.rs` i `rebalance.rs`; poprawione fixture'y TS; clippy do zera (`--fix` + ręcznie, bez zmiany zachowania).
 - **Guards/tests:** `cargo test --workspace` 634 pass / 0 fail; `clmm-lp-execution` 5× z rzędu zielone równolegle; `cargo clippy --all-targets --all-features -- -D warnings` = 0; `tsc --noEmit` = 0. Dalsze gate'y (verify/CI) — `doc/TESTING_REGRESSION_PLAN.md`.
-- **Paths:** `crates/api/src/services/position_service.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/lib/solFirstFunding.test.ts`, `web/src/lib/experimentArm.test.ts`
+- **CI PR #2 (2026-09-30, Linux) — nowe objawy:**
+  - `run_tests`: FAIL `registry_stale_reconcile::tests::backfill_9vhky_orphan_close_when_lifecycle_missing` (`registry_stale_reconcile.rs:470`, „expected on-chain close backfill”). Test **nie jest hermetyczny**: czyta lokalny (gitignorowany) lifecycle ledger — lokalnie close już jest → `return` (pusty pass); w CI brak pliku → woła publiczny mainnet RPC, zapisuje do ledgera, robi `set_current_dir` dla całego procesu testów.
+  - `critical_area_requires_tests`: `scripts/ci/critical-area-test-gate.sh: No such file or directory` — `.gitignore` ma `/scripts/`, więc skrypt gate'u **nigdy nie był w repo** (gate nie działał od początku).
+  - `semver-*`: `couldn't parse revision: "main^{tree}"` — problem checkoutu w workflow semver (brak ref `main`), niezwiązany z kodem.
+  - **Fix (faza 0, 2026-09-30):** test registry → BUG-20260930-04 (hermetyczne testy + `#[ignore]` manual); `.gitignore` `/scripts/*` + `!/scripts/ci/` i skrypt gate'u zacommitowany; `semver.yml` `baseline-rev: origin/main` dla PR. Status → `fixed` po zielonym CI PR #2.
+- **Paths:** `crates/api/src/services/position_service.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/lib/solFirstFunding.test.ts`, `web/src/lib/experimentArm.test.ts`, `crates/api/src/services/registry_stale_reconcile.rs`, `.gitignore`, `.github/workflows/quality_gates.yml`
 
 ---
 

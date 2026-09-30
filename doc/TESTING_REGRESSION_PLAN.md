@@ -1,6 +1,6 @@
 # Plan: siatka testów chroniąca przed regresjami
 
-**Status:** T-PR1 **zrobione lokalnie** (2026-09-30, niezacommitowane) — patrz §6; T-PR2…T-PR9 plan (wymaga **GO**)  
+**Status:** audyt 2026-09-30 + log wykonania (§6). T-PR1 zrobione (PR #2). **§3–§4 zastąpione** — jedyny plan wykonawczy: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) (fazy 0/A–E; mapowanie T-PR → nowe ID w kolumnie „stare ID”).  
 **Data:** 2026-09-30  
 **keywords:** testing, regression, golden-fixture, make-verify, pre-push, ci, postgres-integration, vitest, tsc, api-contract, openapi, invariants, wallet-gl, lineage, stream-pnl, chain-portfolio, backtest
 
@@ -32,6 +32,8 @@ Nowe prace (feature, refactor, fix) **nie mogą po cichu zmieniać** zachowania,
 ---
 
 ## 3. Warstwy (kolejność = priorytet)
+
+> **Zastąpione** przez [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §5. Poniżej wersja historyczna — nie realizować z tej listy.
 
 ### Warstwa 1 — Zielony baseline (warunek wszystkiego)
 
@@ -132,3 +134,13 @@ Odkryte przy okazji (nie naprawione w T-PR1):
 - **BUG-20260930-02** — zgadywane decimals mintów w GL opening import / ledger CHAIN (latentny błąd kwot dla tokenów ≠ SOL/USDC).
 - **BUG-20260930-03** — `format_check.yml` uruchamia `make fmt` (formatuje) zamiast `--check` → zawsze zielony; `cargo fmt --all --check` zgłasza 38 plików. Do T-PR2: jeden osobny commit `cargo fmt --all` (po zacommitowaniu bieżącej pracy) + zmiana workflow na `make fmt-check`.
 - **`npm run lint` w `web/`** nie działa — brak pliku konfiguracyjnego ESLint (`.eslintrc*`). Do T-PR2: dodać config albo usunąć skrypt z `make verify`, zanim hook go wymusi.
+
+### Faza 0 (2026-09-30) — PR #2 w CI (plan: `IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md` 0.1–0.4)
+
+| Pad CI | Zmiana | Lokalnie |
+| ------ | ------ | -------- |
+| `run_tests` (`backfill_9vhky_*`, mainnet RPC) | 3 hermetyczne testy + `#[ignore]` manual repair; `EnvGuard` w `clmm-lp-api` (też `position_close_signer`) | workspace 0 fail; api 240 pass / 24 ignored |
+| `critical_area_requires_tests` (brak skryptu) | `.gitignore` `/scripts/*` + `!/scripts/ci/`; skrypt w repo | — |
+| `semver-*` (`main^{tree}`) | `baseline-rev: origin/main` | — |
+
+Wynik CI: patrz PR #2 (uzupełnić po runie).

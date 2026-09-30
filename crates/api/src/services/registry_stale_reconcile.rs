@@ -454,17 +454,139 @@ pub async fn prune_stale_addresses_in_strategy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
     use clmm_lp_protocols::rpc::RpcConfig;
+    use std::io::Write;
+    use std::path::Path;
+    use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn backfill_9vhky_orphan_close_when_lifecycle_missing() {
-        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        std::env::set_current_dir(&repo_root).expect("repo root");
-
-        let pos = "9vhKYHAinJ8bpofhy8zwNMdgPDjoqSSXN43W9Rv2pKUH";
-        if lifecycle_has_bot_close_for_position(pos) {
-            return;
+    fn write_jsonl(path: &Path, rows: &[serde_json::Value]) {
+        let mut f = File::create(path).expect("create jsonl");
+        for row in rows {
+            writeln!(f, "{row}").expect("write jsonl");
         }
+    }
+
+    fn registry_row(event: &str, pos: &Pubkey, pool: &Pubkey, owner: &Pubkey) -> serde_json::Value {
+        serde_json::json!({
+            "event": event,
+            "position_pubkey": pos.to_string(),
+            "pool_address": pool.to_string(),
+            "owner_pubkey": owner.to_string(),
+        })
+    }
+
+    /// Temp registry + lifecycle ledger, both pointed to via env for the guard's lifetime.
+    fn ledger_env(
+        env: &mut EnvGuard,
+        registry: &[serde_json::Value],
+        lifecycle: &[serde_json::Value],
+    ) -> TempDir {
+        let tmp = TempDir::new().expect("tempdir");
+        let reg = tmp.path().join("registry.jsonl");
+        let lc = tmp.path().join("lifecycle.jsonl");
+        write_jsonl(&reg, registry);
+        write_jsonl(&lc, lifecycle);
+        env.set("CLMM_POSITION_REGISTRY_PATH", &reg);
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &lc);
+        tmp
+    }
+
+    #[test]
+    fn orphan_close_detected_only_for_registry_close_without_lifecycle_close() {
+        let mut env = EnvGuard::blocking_lock();
+        let (pool, owner) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let orphan = Pubkey::new_unique();
+        let closed_ok = Pubkey::new_unique();
+        let still_open = Pubkey::new_unique();
+        let reopened = Pubkey::new_unique();
+        let _tmp = ledger_env(
+            &mut env,
+            &[
+                registry_row("registry_open", &orphan, &pool, &owner),
+                registry_row("registry_close", &orphan, &pool, &owner),
+                registry_row("registry_open", &closed_ok, &pool, &owner),
+                registry_row("registry_close", &closed_ok, &pool, &owner),
+                registry_row("registry_open", &still_open, &pool, &owner),
+                registry_row("registry_close", &reopened, &pool, &owner),
+                registry_row("registry_open", &reopened, &pool, &owner),
+            ],
+            &[serde_json::json!({
+                "event": "bot_close_position",
+                "position_pubkey": closed_ok.to_string(),
+                "signature": "closed-ok-sig",
+            })],
+        );
+
+        assert_eq!(registry_closed_missing_lifecycle_close(), vec![orphan]);
+    }
+
+    #[test]
+    fn last_open_snapshot_takes_latest_open_row() {
+        let mut env = EnvGuard::blocking_lock();
+        let pos = Pubkey::new_unique();
+        let (pool_old, pool_new, owner) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        let mut latest = registry_row("registry_open", &pos, &pool_new, &owner);
+        latest["rebalance_session_id"] = serde_json::json!(" sess-2 ");
+        latest["signature"] = serde_json::json!("open-sig-2");
+        let _tmp = ledger_env(
+            &mut env,
+            &[
+                registry_row("registry_open", &pos, &pool_old, &owner),
+                registry_row("registry_close", &pos, &pool_old, &owner),
+                latest,
+            ],
+            &[],
+        );
+
+        let snap = registry_last_open_snapshot(&pos).expect("snapshot");
+        assert_eq!(snap.pool, pool_new);
+        assert_eq!(snap.owner, owner);
+        assert_eq!(snap.rebalance_session_id.as_deref(), Some("sess-2"));
+        assert_eq!(snap.open_signature.as_deref(), Some("open-sig-2"));
+        assert!(registry_last_open_snapshot(&Pubkey::new_unique()).is_none());
+    }
+
+    /// Both early exits must return before any RPC call (provider points at an unroutable URL).
+    #[tokio::test]
+    async fn backfill_skips_without_rpc_when_already_closed_or_no_open_snapshot() {
+        let mut env = EnvGuard::lock().await;
+        let (pool, owner) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let closed = Pubkey::new_unique();
+        let unknown = Pubkey::new_unique();
+        let _tmp = ledger_env(
+            &mut env,
+            &[registry_row("registry_open", &closed, &pool, &owner)],
+            &[serde_json::json!({
+                "event": "bot_close_position",
+                "position_pubkey": closed.to_string(),
+                "signature": "closed-sig",
+            })],
+        );
+        let provider = Arc::new(RpcProvider::new(RpcConfig {
+            primary_url: "http://127.0.0.1:9".to_string(),
+            fallback_urls: Vec::new(),
+            ..RpcConfig::default()
+        }));
+
+        assert!(!try_backfill_missing_lifecycle_close(&provider, &closed).await);
+        assert!(!try_backfill_missing_lifecycle_close(&provider, &unknown).await);
+    }
+
+    /// Manual repair against mainnet + the local (gitignored) ledger; run from repo root:
+    /// `cargo test -p clmm-lp-api backfill_9vhky -- --ignored`
+    #[tokio::test]
+    #[ignore = "manual repair: mainnet RPC + local data/ ledger"]
+    async fn backfill_9vhky_orphan_close_when_lifecycle_missing() {
+        let pos = "9vhKYHAinJ8bpofhy8zwNMdgPDjoqSSXN43W9Rv2pKUH";
+        assert!(
+            !lifecycle_has_bot_close_for_position(pos),
+            "{pos} already has bot_close_position in the local ledger; nothing to repair"
+        );
         let provider = Arc::new(RpcProvider::new(RpcConfig::default()));
         let pk = Pubkey::from_str(pos).expect("valid pubkey");
         assert!(

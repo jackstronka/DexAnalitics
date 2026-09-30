@@ -40,6 +40,9 @@ pub mod strategy_store;
 /// WebSocket handlers.
 pub mod websocket;
 
+#[cfg(test)]
+mod test_env;
+
 pub use auth::{AuthConfig, AuthError, AuthState, Claims, Role};
 pub use error::ApiError;
 pub use openapi::ApiDoc;

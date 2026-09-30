@@ -47,7 +47,8 @@ src/.DS_Store
 /cobertura.xml
 /tarpaulin-report.html
 .secrets
-/scripts/
+/scripts/*
+!/scripts/ci/
 /web/package-lock.json
 /web/node_modules/
 /web/dist/
