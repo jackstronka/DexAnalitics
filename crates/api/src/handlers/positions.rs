@@ -3023,7 +3023,7 @@ pub async fn decrease_liquidity(
         }
         if ledger_owner.is_some() {
             let sig = op.signature.clone();
-            let conf = wallet_ledger::new_ledger_event(
+            let mut conf = wallet_ledger::new_ledger_event(
                 &correlation_id,
                 WalletLedgerStatus::Confirmed,
                 "decrease_liquidity",
@@ -3038,6 +3038,8 @@ pub async fn decrease_liquidity(
                 None,
                 "api:positions",
             );
+            conf.decode_status =
+                Some(wallet_ledger::decode_status::DEFERRED_LIFECYCLE.to_string());
             wallet_ledger::append_wallet_ledger_event(&state, conf).await;
         }
         spawn_chain_history_materialize_background(&state, address.clone(), "decrease_liquidity");
@@ -3168,7 +3170,7 @@ pub async fn rebalance_position(
         }
         if ledger_owner.is_some() {
             let sig = op.signature.clone();
-            let conf = wallet_ledger::new_ledger_event(
+            let mut conf = wallet_ledger::new_ledger_event(
                 &correlation_id,
                 WalletLedgerStatus::Confirmed,
                 "rebalance_position",
@@ -3183,6 +3185,7 @@ pub async fn rebalance_position(
                 None,
                 "api:positions",
             );
+            conf.decode_status = Some(wallet_ledger::decode_status::DEFERRED_LIFECYCLE.to_string());
             wallet_ledger::append_wallet_ledger_event(&state, conf).await;
         }
         spawn_chain_history_materialize_background(&state, address.clone(), "rebalance_position");
@@ -3444,7 +3447,7 @@ mod list_positions_display_tests {
             amount_a_raw: 1,
             amount_b_raw: 1,
             amount_a_ui: Decimal::new(52_410_078, 9),
-            amount_b_ui: Decimal::new(502_418_7, 6),
+            amount_b_ui: Decimal::new(5_024_187, 6),
             token_mint_a: sol,
             token_mint_b: usdc,
             price_a_usd: 86.37,
@@ -3457,7 +3460,7 @@ mod list_positions_display_tests {
             },
             in_range: true,
             fees_owed_a_ui: Decimal::new(414_388, 6),
-            fees_owed_b_ui: Decimal::new(352_65, 5),
+            fees_owed_b_ui: Decimal::new(35_265, 5),
             token_a_label: "SOL".to_string(),
             token_b_label: "USDC".to_string(),
         }
@@ -3542,7 +3545,7 @@ mod list_positions_display_tests {
                 token_a_label: "SOL".to_string(),
                 token_b_label: "USDC".to_string(),
                 amount_a: Decimal::new(414_388, 6),
-                amount_b: Decimal::new(352_65, 5),
+                amount_b: Decimal::new(35_265, 5),
             }),
             liquidity: "1".to_string(),
             in_range: true,

@@ -9,9 +9,12 @@
 
 use crate::error::ApiError;
 use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
+use crate::services::chain_economic_totals::{
+    maybe_compute_totals_from_nodes, sync_chain_economic_totals_from_nodes,
+};
 use crate::services::position_stream_lineage::{
-    is_lifecycle_close_event, is_lifecycle_open_event, lp_fees_collected_usd_from_ledger_db,
-    resolve_lineage_chain_for_stream_pnl,
+    is_lifecycle_close_event, is_lifecycle_open_event, lineage_nodes_for_chain_economic_rollup,
+    lp_fees_collected_usd_from_ledger_db, resolve_lineage_chain_for_stream_pnl,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_valuation::{
@@ -419,6 +422,8 @@ fn stream_pnl_db_disabled_response(position_address: &str) -> PositionStreamPnLR
         realized_cashflow_usd: Decimal::ZERO,
         net_pnl_usd: Decimal::ZERO,
         net_pnl_pct: Decimal::ZERO,
+        economic_quality: Some("degraded".to_string()),
+        end_nav_source: Some("missing".to_string()),
         interpretation: StreamPnLInterpretation::default(),
         note: Some(
             "DB is disabled (DATABASE_URL missing/failed); stream PnL/IL unavailable.".to_string(),
@@ -594,10 +599,7 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             _ => false,
         };
 
-    if needs_live_current {
-        seed_live_current_snapshot(state, db, seed_pk_for_current).await?;
-        current_row = refetch_current_snapshot_row(db, end_pubkey, &positions).await?;
-    } else if current_row.is_none() && allow_self_seed && !settlement_strict {
+    if needs_live_current || (current_row.is_none() && allow_self_seed && !settlement_strict) {
         seed_live_current_snapshot(state, db, seed_pk_for_current).await?;
         current_row = refetch_current_snapshot_row(db, end_pubkey, &positions).await?;
     }
@@ -625,6 +627,8 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
             realized_cashflow_usd: Decimal::ZERO,
             net_pnl_usd: Decimal::ZERO,
             net_pnl_pct: Decimal::ZERO,
+            economic_quality: Some("degraded".to_string()),
+            end_nav_source: Some("missing".to_string()),
             interpretation: stream_pnl_interpretation_pl(use_lineage_anchor, false),
             note: Some(if settlement_strict {
                 "Settlement v1 requires persisted valuation snapshots (self-seed disabled). Baseline snapshot unavailable.".to_string()
@@ -948,6 +952,8 @@ pub(crate) async fn compute_position_stream_pnl_for_stream_members(
         realized_cashflow_usd,
         net_pnl_usd,
         net_pnl_pct,
+        economic_quality: None,
+        end_nav_source: None,
         interpretation: stream_pnl_interpretation_pl(use_lineage_anchor, hodl_basket_ok),
         note: Some(format!(
             "Best-effort.{anchor} IL/HODL: baseline basket (open amounts at chain start) × valuation USD prices ({price_src}, price_time_kind={valuation_price_time_kind}). clean_il excludes LP fees; lp_vs_hodl_with_fees adds realized LP fees + active uncollected fees. tx fees in USD use SOL/USD ({sol_src}). realized_cashflow uses lifecycle fee_payer_token_deltas × valuation mint USD prices ({price_src}) and is broader than LP fees. cost/cashflow scope={scope}.",
@@ -1048,20 +1054,16 @@ async fn baseline_usd_from_snapshot_row(row: &sqlx::postgres::PgRow) -> Option<D
             Ok(v) => v,
             Err(_) => (BTreeMap::new(), "timeout".to_string()),
         };
-        if pa.is_none_or(|p| p <= Decimal::ZERO) {
-            if let Some(m) = row.try_get::<Option<String>, _>("token_mint_a").ok().flatten() {
-                if let Some(f) = px.get(m.trim()) {
+        if pa.is_none_or(|p| p <= Decimal::ZERO)
+            && let Some(m) = row.try_get::<Option<String>, _>("token_mint_a").ok().flatten()
+                && let Some(f) = px.get(m.trim()) {
                     pa = Decimal::from_f64_retain(*f);
                 }
-            }
-        }
-        if pb.is_none_or(|p| p <= Decimal::ZERO) {
-            if let Some(m) = row.try_get::<Option<String>, _>("token_mint_b").ok().flatten() {
-                if let Some(f) = px.get(m.trim()) {
+        if pb.is_none_or(|p| p <= Decimal::ZERO)
+            && let Some(m) = row.try_get::<Option<String>, _>("token_mint_b").ok().flatten()
+                && let Some(f) = px.get(m.trim()) {
                     pb = Decimal::from_f64_retain(*f);
                 }
-            }
-        }
     }
     let pa = pa.unwrap_or(Decimal::ZERO);
     let pb = pb.unwrap_or(Decimal::ZERO);
@@ -1152,28 +1154,11 @@ pub async fn baseline_value_usd_for_single_position(
     None
 }
 
-/// Net PnL + IL for the position detail performance card (uses live valuation + DB open baseline).
-pub async fn compute_single_position_detail_pnl(
+async fn detail_il_pct_concentrated(
     state: &AppState,
     position: &MonitoredPosition,
-    current_value_usd: Decimal,
     valuation: &PositionUsdValuation,
-) -> Option<SinglePositionDetailPnL> {
-    if current_value_usd <= Decimal::ZERO {
-        return None;
-    }
-    let baseline = baseline_value_usd_for_single_position(
-        state,
-        &position.address.to_string(),
-        position.pnl.entry_value_usd,
-    )
-    .await?;
-    if baseline <= Decimal::ZERO {
-        return None;
-    }
-    let net_pnl_usd = current_value_usd - baseline;
-    let net_pnl_pct = ratio_or_zero(net_pnl_usd, baseline);
-
+) -> Option<Decimal> {
     let current_price = pool_price_b_per_a(valuation.price_a_usd, valuation.price_b_usd)?;
     let entry_price = if let Some(ep) = position.pnl.entry_price.filter(|p| *p > Decimal::ZERO) {
         Some(ep)
@@ -1188,12 +1173,70 @@ pub async fn compute_single_position_detail_pnl(
     } else {
         None
     };
-    let il_pct = entry_price
-        .and_then(|ep| {
-            let lower = tick_to_price(position.on_chain.tick_lower);
-            let upper = tick_to_price(position.on_chain.tick_upper);
-            calculate_il_concentrated(ep, current_price, lower, upper).ok()
-        })
+    entry_price.and_then(|ep| {
+        let lower = tick_to_price(position.on_chain.tick_lower);
+        let upper = tick_to_price(position.on_chain.tick_upper);
+        calculate_il_concentrated(ep, current_price, lower, upper).ok()
+    })
+}
+
+/// Net PnL + IL for the position detail performance card (uses live valuation + DB open baseline).
+pub async fn compute_single_position_detail_pnl(
+    state: &AppState,
+    position: &MonitoredPosition,
+    current_value_usd: Decimal,
+    valuation: &PositionUsdValuation,
+) -> Option<SinglePositionDetailPnL> {
+    if current_value_usd <= Decimal::ZERO {
+        return None;
+    }
+
+    // Rotation chain: same economic net PnL as lineage headline (node rollup; avoids full stream-pnl RPC).
+    if state.db.is_some() {
+        let addr = position.address.to_string();
+        if let Ok(perf) = compute_position_stream_performance(state, &addr, false).await {
+            let chain = resolve_lineage_chain_for_stream_pnl(state, &perf, addr.trim()).await;
+            if chain.len() > 1
+                && let Ok(mut nodes) =
+                    lineage_nodes_for_chain_economic_rollup(state, &chain).await
+                && let Some(mut totals) = maybe_compute_totals_from_nodes(
+                    addr.trim(),
+                    &None,
+                    &nodes,
+                    Some("Position detail: chain economic net from lineage nodes."),
+                )
+            {
+                sync_chain_economic_totals_from_nodes(&mut totals, &mut nodes);
+                let il_pct = if totals.il_pct != Decimal::ZERO {
+                    totals.il_pct
+                } else {
+                    detail_il_pct_concentrated(state, position, valuation)
+                        .await
+                        .unwrap_or(Decimal::ZERO)
+                };
+                return Some(SinglePositionDetailPnL {
+                    net_pnl_usd: totals.net_pnl_usd,
+                    net_pnl_pct: totals.net_pnl_pct,
+                    il_pct,
+                });
+            }
+        }
+    }
+
+    let baseline = baseline_value_usd_for_single_position(
+        state,
+        &position.address.to_string(),
+        position.pnl.entry_value_usd,
+    )
+    .await?;
+    if baseline <= Decimal::ZERO {
+        return None;
+    }
+    let net_pnl_usd = current_value_usd - baseline;
+    let net_pnl_pct = ratio_or_zero(net_pnl_usd, baseline);
+
+    let il_pct = detail_il_pct_concentrated(state, position, valuation)
+        .await
         .unwrap_or(Decimal::ZERO);
 
     Some(SinglePositionDetailPnL {
@@ -1358,6 +1401,20 @@ mod tests {
     }
 }
 
+async fn apply_chain_economic_rollup_when_rotated(
+    state: &AppState,
+    _position_address: &str,
+    mut pnl: PositionStreamPnLResponse,
+    lineage_chain: &[String],
+) -> Result<PositionStreamPnLResponse, ApiError> {
+    if lineage_chain.len() <= 1 {
+        return Ok(pnl);
+    }
+    let mut nodes = lineage_nodes_for_chain_economic_rollup(state, lineage_chain).await?;
+    sync_chain_economic_totals_from_nodes(&mut pnl, &mut nodes);
+    Ok(pnl)
+}
+
 pub async fn compute_position_stream_pnl(
     state: &AppState,
     position_address: &str,
@@ -1370,7 +1427,7 @@ pub async fn compute_position_stream_pnl(
     let perf = compute_position_stream_performance(state, position_address, false).await?;
     let lineage_chain =
         resolve_lineage_chain_for_stream_pnl(state, &perf, position_address.trim()).await;
-    compute_position_stream_pnl_for_stream_members(
+    let pnl = compute_position_stream_pnl_for_stream_members(
         state,
         position_address,
         perf.positions,
@@ -1379,7 +1436,8 @@ pub async fn compute_position_stream_pnl(
         true,
         false,
     )
-    .await
+    .await?;
+    apply_chain_economic_rollup_when_rotated(state, position_address, pnl, &lineage_chain).await
 }
 
 pub async fn compute_position_stream_pnl_settlement_v1(
@@ -1392,7 +1450,7 @@ pub async fn compute_position_stream_pnl_settlement_v1(
     let perf = compute_position_stream_performance(state, position_address, false).await?;
     let lineage_chain =
         resolve_lineage_chain_for_stream_pnl(state, &perf, position_address.trim()).await;
-    compute_position_stream_pnl_for_stream_members(
+    let pnl = compute_position_stream_pnl_for_stream_members(
         state,
         position_address,
         perf.positions,
@@ -1401,5 +1459,6 @@ pub async fn compute_position_stream_pnl_settlement_v1(
         false,
         true,
     )
-    .await
+    .await?;
+    apply_chain_economic_rollup_when_rotated(state, position_address, pnl, &lineage_chain).await
 }

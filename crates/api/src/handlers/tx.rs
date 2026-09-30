@@ -5,6 +5,10 @@ use crate::models::{
     BuildUnsignedTxRequest, BuildUnsignedTxResponse, SubmitSignedTxRequest, SubmitSignedTxResponse,
 };
 use crate::services::position_chain_history::spawn_chain_history_materialize_background;
+use crate::services::wallet_ledger_tx::{
+    self, TxSubmitLedgerAudit, KIND_CLOSE_POSITION, KIND_COLLECT_FEES, KIND_DECREASE_LIQUIDITY,
+    KIND_INCREASE_LIQUIDITY, KIND_OPEN_POSITION,
+};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -51,6 +55,16 @@ enum TxOp {
 
 fn parse_pubkey(label: &str, v: &str) -> Result<Pubkey, ApiError> {
     Pubkey::from_str(v).map_err(|_| ApiError::bad_request(format!("Invalid {label} pubkey")))
+}
+
+fn ledger_kind_for_op(op: TxOp) -> &'static str {
+    match op {
+        TxOp::Open => KIND_OPEN_POSITION,
+        TxOp::Increase => KIND_INCREASE_LIQUIDITY,
+        TxOp::Decrease => KIND_DECREASE_LIQUIDITY,
+        TxOp::Collect => KIND_COLLECT_FEES,
+        TxOp::Close => KIND_CLOSE_POSITION,
+    }
 }
 
 async fn build_unsigned(
@@ -305,6 +319,7 @@ async fn build_unsigned(
     Ok(BuildUnsignedTxResponse {
         unsigned_tx_base64: BASE64.encode(bytes),
         correlation_id: uuid::Uuid::new_v4().to_string(),
+        ledger_kind: ledger_kind_for_op(op).to_string(),
         expected_program_ids: ALLOWED_PROGRAMS.iter().map(|p| p.to_string()).collect(),
         position_mint: position_mint_out.map(|p| p.to_string()),
         position_address: position_address_out.map(|p| p.to_string()),
@@ -492,31 +507,131 @@ pub async fn tx_submit_signed(
     State(state): State<AppState>,
     Json(req): Json<SubmitSignedTxRequest>,
 ) -> ApiResult<Json<SubmitSignedTxResponse>> {
-    let bytes = BASE64
-        .decode(req.signed_tx_base64.as_bytes())
-        .map_err(|_| ApiError::bad_request("Invalid signed_tx_base64"))?;
-    let tx: Transaction = bincode::deserialize(&bytes)
-        .map_err(|_| ApiError::bad_request("Invalid serialized transaction"))?;
+    let audit = TxSubmitLedgerAudit::from_submit_request(&req);
+    if let Some(ref a) = audit {
+        wallet_ledger_tx::append_tx_submit_pending(&state, a).await;
+    }
+
+    let bytes = match BASE64.decode(req.signed_tx_base64.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => {
+            if let Some(ref a) = audit {
+                wallet_ledger_tx::append_tx_submit_outcome(
+                    &state,
+                    a,
+                    crate::models::WalletLedgerStatus::Failed,
+                    None,
+                    Some("Invalid signed_tx_base64".to_string()),
+                )
+                .await;
+            }
+            return Err(ApiError::bad_request("Invalid signed_tx_base64"));
+        }
+    };
+    let tx: Transaction = match bincode::deserialize(&bytes) {
+        Ok(t) => t,
+        Err(_) => {
+            if let Some(ref a) = audit {
+                wallet_ledger_tx::append_tx_submit_outcome(
+                    &state,
+                    a,
+                    crate::models::WalletLedgerStatus::Failed,
+                    None,
+                    Some("Invalid serialized transaction".to_string()),
+                )
+                .await;
+            }
+            return Err(ApiError::bad_request("Invalid serialized transaction"));
+        }
+    };
 
     if tx.signatures.is_empty() || tx.signatures.iter().all(|s| *s == Signature::default()) {
+        if let Some(ref a) = audit {
+            wallet_ledger_tx::append_tx_submit_outcome(
+                &state,
+                a,
+                crate::models::WalletLedgerStatus::Failed,
+                None,
+                Some("Transaction is not signed".to_string()),
+            )
+            .await;
+        }
         return Err(ApiError::bad_request("Transaction is not signed"));
     }
-    policy_gate(&tx)?;
-
-    let sim = state
-        .provider
-        .simulate_transaction(&tx)
-        .await
-        .map_err(|e| ApiError::internal(format!("simulate failed: {e}")))?;
-    if let Some(err) = sim.err {
-        return Err(ApiError::Validation(format!("simulate error: {err:?}")));
+    if let Err(e) = policy_gate(&tx) {
+        if let Some(ref a) = audit {
+            wallet_ledger_tx::append_tx_submit_outcome(
+                &state,
+                a,
+                crate::models::WalletLedgerStatus::Failed,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+        }
+        return Err(e);
     }
 
-    let sig = state
-        .provider
-        .send_transaction(&tx)
-        .await
-        .map_err(|e| ApiError::internal(format!("send failed: {e}")))?;
+    let sim = match state.provider.simulate_transaction(&tx).await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("simulate failed: {e}");
+            if let Some(ref a) = audit {
+                wallet_ledger_tx::append_tx_submit_outcome(
+                    &state,
+                    a,
+                    crate::models::WalletLedgerStatus::Failed,
+                    None,
+                    Some(msg.clone()),
+                )
+                .await;
+            }
+            return Err(ApiError::internal(msg));
+        }
+    };
+    if let Some(err) = sim.err {
+        let msg = format!("simulate error: {err:?}");
+        if let Some(ref a) = audit {
+            wallet_ledger_tx::append_tx_submit_outcome(
+                &state,
+                a,
+                crate::models::WalletLedgerStatus::Failed,
+                None,
+                Some(msg.clone()),
+            )
+            .await;
+        }
+        return Err(ApiError::Validation(msg));
+    }
+
+    let sig = match state.provider.send_transaction(&tx).await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("send failed: {e}");
+            if let Some(ref a) = audit {
+                wallet_ledger_tx::append_tx_submit_outcome(
+                    &state,
+                    a,
+                    crate::models::WalletLedgerStatus::Failed,
+                    None,
+                    Some(msg.clone()),
+                )
+                .await;
+            }
+            return Err(ApiError::internal(msg));
+        }
+    };
+
+    if let Some(ref a) = audit {
+        wallet_ledger_tx::append_tx_submit_outcome(
+            &state,
+            a,
+            crate::models::WalletLedgerStatus::Confirmed,
+            Some(sig.to_string()),
+            None,
+        )
+        .await;
+    }
 
     for anchor in normalized_submit_chain_history_anchors(req.chain_history_anchors.as_ref()) {
         spawn_chain_history_materialize_background(&state, anchor, "tx_submit_signed");

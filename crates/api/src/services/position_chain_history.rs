@@ -8,14 +8,14 @@ use crate::models::{
     PositionStreamLineageResponse, PositionStreamPnLResponse,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
+use crate::services::chain_economic_totals::refresh_lineage_totals_from_nodes;
 use crate::services::position_stream_lineage::{
     ComputePositionStreamLineageOpts,
     apply_open_start_usd_from_lifecycle_snapshots_for_chain_history,
-    compute_position_stream_lineage_opts, enrich_chain_history_nodes_open_quote_baseline_lift,
-    node_metrics, prefer_lifecycle_lineage_if_extends_db_prefix,
-    refresh_chain_history_node_fees_from_ledger, refresh_lineage_totals_from_nodes,
-    apply_tx_fees_usd_from_lamports_on_nodes, resolve_lineage_chain_for_stream_pnl,
-    rollup_lineage_chain_costs, sol_usd_for_tx_fees,
+    apply_tx_fees_usd_from_lamports_on_nodes, compute_position_stream_lineage_opts,
+    enrich_chain_history_nodes_open_quote_baseline_lift, node_metrics,
+    prefer_lifecycle_lineage_if_extends_db_prefix, refresh_chain_history_node_fees_from_ledger,
+    resolve_lineage_chain_for_stream_pnl, rollup_lineage_chain_costs, sol_usd_for_tx_fees,
 };
 use futures::future::join_all;
 use std::collections::HashMap;
@@ -79,6 +79,26 @@ struct ChainHistoryLedgerAux {
     event_price_a_usd: Option<Decimal>,
     /// Close lifecycle row: `details.event_price_a_usd` (same field as open; stored in SQL `event_price_b_usd`).
     event_price_close_a_usd: Option<Decimal>,
+    /// Close lifecycle row: `details.event_price_b_usd`.
+    event_price_close_b_usd: Option<Decimal>,
+    close_amount_a_raw: Option<u64>,
+    close_amount_b_raw: Option<u64>,
+}
+
+fn ch_decimal_event_price_b_from_details(details: &JsonValue) -> Option<Decimal> {
+    let obj = details.as_object()?;
+    ch_json_f64_positive_price(obj.get("event_price_b_usd"))
+        .and_then(Decimal::from_f64_retain)
+        .filter(|d| *d > Decimal::ZERO)
+}
+
+fn ch_u64_from_details(details: &JsonValue, key: &str) -> Option<u64> {
+    let obj = details.as_object()?;
+    obj.get(key).and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    })
 }
 
 fn ch_json_f64_positive_price(v: Option<&JsonValue>) -> Option<f64> {
@@ -202,12 +222,32 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
     .bind(pos)
     .fetch_optional(pool)
     .await
-        && let Some(d) = ch_details_from_ledger_raw(&raw)
-            && let Some(px) = ch_decimal_event_price_a_from_details(d) {
+        && let Some(d) = ch_details_from_ledger_raw(&raw) {
+            if let Some(px) = ch_decimal_event_price_a_from_details(d) {
                 out.event_price_close_a_usd = Some(px);
             }
+            if let Some(px) = ch_decimal_event_price_b_from_details(d) {
+                out.event_price_close_b_usd = Some(px);
+            }
+            out.close_amount_a_raw = ch_u64_from_details(d, "close_amount_a_raw");
+            out.close_amount_b_raw = ch_u64_from_details(d, "close_amount_b_raw");
+        }
 
     out
+}
+
+/// When Postgres meta is stored under an older `chain_anchor_pubkey`, live merge must start from
+/// the **requested** URL PDA so rotation tails (e.g. reopen head) appear in read results.
+fn chain_history_lineage_entry_for_read(
+    remapped: bool,
+    requested: &str,
+    effective_anchor: &str,
+) -> String {
+    if remapped {
+        requested.trim().to_string()
+    } else {
+        effective_anchor.trim().to_string()
+    }
 }
 
 /// Meta `chain_json` can be **too short** (e.g. materialize right after reopen stored only `[newest]`).
@@ -463,6 +503,20 @@ pub async fn materialize_chain_history_for_anchor(
     }
 
     apply_open_start_usd_from_lifecycle_snapshots_for_chain_history(state, &mut resp.nodes).await?;
+
+    crate::services::chain_economic_totals::enrich_nodes_lifecycle_close_nav_from_ledger(
+        state,
+        pool,
+        &mut resp.nodes,
+    )
+    .await;
+
+    // Re-roll totals after lifecycle open-start enrich so materialized `totals_json` matches nodes.
+    refresh_lineage_totals_from_nodes(
+        anchor.trim(),
+        &mut resp.totals,
+        &mut resp.nodes,
+    );
 
     let mut tx = pool
         .begin()
@@ -878,13 +932,11 @@ pub async fn load_chain_history_from_db(
     }
 
     let mut chain = meta_chain.clone();
-    if let Ok(perf) = compute_position_stream_performance(state, effective_anchor.as_str(), true).await {
-        let resolved = resolve_lineage_chain_for_stream_pnl(
-            state,
-            &perf,
-            effective_anchor.as_str(),
-        )
-        .await;
+    let lineage_entry =
+        chain_history_lineage_entry_for_read(remapped, requested.as_str(), effective_anchor.as_str());
+    if let Ok(perf) = compute_position_stream_performance(state, lineage_entry.as_str(), true).await {
+        let resolved =
+            resolve_lineage_chain_for_stream_pnl(state, &perf, lineage_entry.as_str()).await;
         chain = merge_meta_chain_with_resolved_for_read(meta_chain.clone(), resolved);
     }
 
@@ -921,6 +973,11 @@ pub async fn load_chain_history_from_db(
 
     enrich_chain_history_nodes_open_quote_baseline_lift(state, &chain, &mut nodes).await?;
 
+    crate::services::chain_economic_totals::enrich_nodes_lifecycle_close_nav_from_ledger(
+        state, pool, &mut nodes,
+    )
+    .await;
+
     // Do **not** overwrite `chain_history_start_value_usd` whenever `baseline_value_usd` is positive:
     // after enrich, baseline can still reflect open-quote (~9.66x) while SQL `start_value_usd` already
     // holds the snapshot writer mark (~9.67x). Only backfill the JSON mirror when the SQL column was empty.
@@ -956,7 +1013,7 @@ pub async fn load_chain_history_from_db(
         if sol_px > 0.0 {
             apply_tx_fees_usd_from_lamports_on_nodes(&mut nodes, sol_px);
             chain_cost_summary =
-                rollup_lineage_chain_costs(&nodes).or_else(|| chain_cost_summary_from_meta);
+                rollup_lineage_chain_costs(&nodes).or(chain_cost_summary_from_meta);
             refresh_lineage_totals_from_nodes(&entry, &mut totals, &mut nodes);
         }
     }
@@ -1008,6 +1065,28 @@ mod tests {
         assert_eq!(
             merge_meta_chain_with_resolved_for_read(meta, resolved),
             vec!["OLD", "NEW"]
+        );
+    }
+
+    #[test]
+    fn merge_meta_chain_prefix_extends_when_resolved_longer() {
+        let meta = vec!["3dUG".to_string()];
+        let resolved = vec!["3dUG".to_string(), "HTybm".to_string()];
+        assert_eq!(
+            merge_meta_chain_with_resolved_for_read(meta, resolved),
+            vec!["3dUG", "HTybm"]
+        );
+    }
+
+    #[test]
+    fn chain_history_lineage_entry_uses_requested_when_remapped() {
+        assert_eq!(
+            chain_history_lineage_entry_for_read(true, "HTybmHEAD", "3dUGanchor"),
+            "HTybmHEAD"
+        );
+        assert_eq!(
+            chain_history_lineage_entry_for_read(false, "HTybmHEAD", "3dUGanchor"),
+            "3dUGanchor"
         );
     }
 

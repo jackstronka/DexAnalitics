@@ -400,7 +400,7 @@ async fn devnet_unsigned_tx_sign_submit_smoke() {
         State(state),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: signed,
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await;
@@ -471,7 +471,7 @@ async fn devnet_open_and_read_position_smoke() {
         State(state.clone()),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: signed,
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -577,7 +577,7 @@ async fn devnet_open_and_read_position_proxy_pairs_smoke() {
             State(state.clone()),
             Json(crate::models::SubmitSignedTxRequest {
                 signed_tx_base64: signed,
-                chain_history_anchors: None,
+                ..Default::default()
             }),
         )
         .await
@@ -667,7 +667,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
         State(state.clone()),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&open_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -719,7 +719,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
         State(state.clone()),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&decrease_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -752,7 +752,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
         State(state.clone()),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&collect_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -785,7 +785,7 @@ async fn devnet_unsigned_lifecycle_open_decrease_collect_close_smoke() {
         State(state),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&close_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -852,7 +852,7 @@ async fn devnet_unsigned_increase_liquidity_smoke() {
         State(state.clone()),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&open_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -882,7 +882,7 @@ async fn devnet_unsigned_increase_liquidity_smoke() {
         State(state.clone()),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&increase_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -911,7 +911,7 @@ async fn devnet_unsigned_increase_liquidity_smoke() {
         State(state),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: sign_built_tx(&close_build.unsigned_tx_base64, &kp),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -1055,7 +1055,7 @@ async fn devnet_submit_unsigned_tx_is_rejected() {
         State(state),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64,
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await
@@ -1072,7 +1072,7 @@ async fn devnet_submit_invalid_base64_is_rejected() {
         State(state),
         Json(crate::models::SubmitSignedTxRequest {
             signed_tx_base64: "%%%not-base64%%%".to_string(),
-            chain_history_anchors: None,
+            ..Default::default()
         }),
     )
     .await

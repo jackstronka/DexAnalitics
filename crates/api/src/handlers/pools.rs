@@ -6,6 +6,7 @@ use crate::models::{
     OrcaVolumeHistoryResponse, OrcaVolumeSnapshotRow, PoolResponse, PoolStateResponse,
     QuoteOpenBudgetRequest, QuoteOpenBudgetResponse, SwapCostEstimateResponse,
 };
+use crate::services::position_executor::resolve_executor_for_position_ops;
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use axum::{
@@ -15,6 +16,10 @@ use axum::{
 use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaRestClient};
 use clmm_lp_protocols::ledger::swap_cost_estimate::{
     DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS, median_historical_swap_network_fee_lamports,
+};
+use clmm_lp_execution::strategy::{
+    clamp_deposit_quote_to_portfolio, clamp_target_usd_to_chain_wallet_notional,
+    chain_wallet_notional_usd_sol_first, load_chain_scoped_pool_wallet, portfolio_scope_label,
 };
 use clmm_lp_protocols::orca::deposit_quote::quote_deposit_budget_in_range;
 use clmm_lp_protocols::prelude::WhirlpoolReader;
@@ -485,7 +490,81 @@ pub async fn quote_open_budget(
     }
 
     let in_range = pool.tick_current >= body.tick_lower && pool.tick_current < body.tick_upper;
-    let q = quote_deposit_budget_in_range(
+
+    let chain_session_id = body
+        .chain_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            body.cost_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+
+    let mut target_usd = body.target_usd;
+    let mut chain_wallet_notional_usd: Option<f64> = None;
+    let mut target_usd_clamped: Option<f64> = None;
+    let mut portfolio_scope: Option<String> = None;
+    let mut chain_caps: Option<clmm_lp_execution::strategy::SessionMintCaps> = None;
+
+    if let Some(ref cid) = chain_session_id {
+        let owner = if let Some(exec) = resolve_executor_for_position_ops(&state).await {
+            let g = exec.read().await;
+            g.wallet_pubkey()
+        } else {
+            None
+        };
+        let Some(owner_pk) = owner else {
+            return Err(ApiError::bad_request(
+                "quote-open-budget with chain_session_id requires configured executor wallet",
+            ));
+        };
+        let db = state.db.as_ref();
+        let scoped = load_chain_scoped_pool_wallet(
+            state.provider.as_ref(),
+            db,
+            &owner_pk,
+            &pool.token_mint_a,
+            &pool.token_mint_b,
+            None,
+            Some(cid.as_str()),
+        )
+        .await
+        .map_err(ApiError::bad_request)?;
+        if let Some(ref loaded) = scoped.loaded {
+            portfolio_scope = Some(portfolio_scope_label(loaded.scope).to_string());
+            chain_caps = Some(loaded.caps.clone());
+        }
+        let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .map_err(|_| ApiError::internal("WSOL mint parse".to_string()))?;
+        let notional = chain_wallet_notional_usd_sol_first(
+            scoped.balance_a_raw,
+            scoped.balance_b_raw,
+            scoped.spendable_lamports,
+            &pool.token_mint_a,
+            &pool.token_mint_b,
+            &wsol_mint_pk,
+            dec_a,
+            dec_b,
+            pa,
+            pb,
+        );
+        chain_wallet_notional_usd = Some(notional);
+        target_usd = clamp_target_usd_to_chain_wallet_notional(body.target_usd, notional);
+        target_usd_clamped = Some(target_usd);
+        if !(target_usd.is_finite() && target_usd > 0.0) {
+            return Err(ApiError::bad_request(format!(
+                "CHAIN portfolio {cid} has insufficient inventory for open quote (notional={notional:.6} USD)"
+            )));
+        }
+    }
+
+    let mut q = quote_deposit_budget_in_range(
         body.tick_lower,
         body.tick_upper,
         pool.tick_current,
@@ -494,12 +573,32 @@ pub async fn quote_open_budget(
         dec_b,
         pa,
         pb,
-        body.target_usd,
+        target_usd,
     )
     .map_err(|m| ApiError::bad_request(m.to_string()))?;
 
+    if let Some(ref caps) = chain_caps {
+        q = clamp_deposit_quote_to_portfolio(
+            &q,
+            caps,
+            &pool.token_mint_a,
+            &pool.token_mint_b,
+        );
+    }
+
     let a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));
     let b_ui = q.amount_b as f64 / 10f64.powi(i32::from(dec_b));
+    let note = if chain_session_id.is_some() {
+        Some(
+            "Sized against CHAIN portfolio inventory (not global operator wallet). Use token_max_a/b as POST /positions amount_a/b."
+                .to_string(),
+        )
+    } else {
+        Some(
+            "Use token_max_a/b as POST /positions amount_a/b. Pass chain_session_id to size from CHAIN:{id} inventory."
+                .to_string(),
+        )
+    };
     Ok(Json(QuoteOpenBudgetResponse {
         token_max_a: q.token_max_a,
         token_max_b: q.token_max_b,
@@ -510,10 +609,11 @@ pub async fn quote_open_budget(
         estimated_value_usd: q.estimated_value_usd,
         liquidity: q.liquidity.to_string(),
         in_range,
-        note: Some(
-            "Use token_max_a/b as POST /positions amount_a/b. Estimated USD uses the same mint prices as this quote; on-chain fill may differ slightly."
-                .to_string(),
-        ),
+        note,
+        chain_session_id,
+        chain_wallet_notional_usd,
+        target_usd_clamped,
+        portfolio_scope,
     }))
 }
 

@@ -117,7 +117,7 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
         if t.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(t) else {
+        let Ok(mut v) = serde_json::from_str::<Value>(t) else {
             continue;
         };
         let signature = v
@@ -145,6 +145,15 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToString::to_string);
+        let mut chain_sid = clmm_lp_data::wallet_session::chain_session_id_from_lifecycle_json(&v);
+        if chain_sid.is_none() {
+            chain_sid = sid.clone();
+        }
+        if let Some(ref cid) = chain_sid
+            && let Some(obj) = v.as_object_mut() {
+                obj.entry("chain_session_id".to_string())
+                    .or_insert_with(|| Value::String(cid.clone()));
+            }
         let position = v
             .get("position_pda")
             .and_then(|x| x.as_str())
@@ -179,6 +188,7 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
                 .or_else(|| x.as_u64().map(|n| n as i64))
                 .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
         });
+        let sig_for_chain_update = signature.clone();
 
         // Signature is the idempotency key when present. When absent, we still store best-effort rows.
         if schema_caps.has_fee_payer_token_deltas && schema_caps.has_lp_collected_raw {
@@ -224,6 +234,21 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .await?;
             wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, lp_a, lp_b)
                 .await;
+            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, lp_a, lp_b)
+                .await;
+            if let (Some(ref sig), Some(ref cid)) = (sig_for_chain_update.as_ref(), chain_sid.as_ref()) {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE position_stream_ledger_rows
+                    SET chain_session_id = COALESCE(chain_session_id, $1)
+                    WHERE signature = $2
+                    "#,
+                )
+                .bind(cid)
+                .bind(sig)
+                .execute(db.pool())
+                .await;
+            }
         } else if schema_caps.has_fee_payer_token_deltas {
             sqlx::query(
                 r#"
@@ -262,6 +287,21 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .await?;
             wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None)
                 .await;
+            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, None, None)
+                .await;
+            if let (Some(ref sig), Some(ref cid)) = (sig_for_chain_update.as_ref(), chain_sid.as_ref()) {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE position_stream_ledger_rows
+                    SET chain_session_id = COALESCE(chain_session_id, $1)
+                    WHERE signature = $2
+                    "#,
+                )
+                .bind(cid)
+                .bind(sig)
+                .execute(db.pool())
+                .await;
+            }
         } else {
             sqlx::query(
                 r#"
@@ -298,6 +338,21 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .await?;
             wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None)
                 .await;
+            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, None, None)
+                .await;
+            if let (Some(ref sig), Some(ref cid)) = (sig_for_chain_update.as_ref(), chain_sid.as_ref()) {
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE position_stream_ledger_rows
+                    SET chain_session_id = COALESCE(chain_session_id, $1)
+                    WHERE signature = $2
+                    "#,
+                )
+                .bind(cid)
+                .bind(sig)
+                .execute(db.pool())
+                .await;
+            }
         }
     }
     Ok(())

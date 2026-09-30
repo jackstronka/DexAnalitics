@@ -2,13 +2,17 @@
 
 use crate::error::ApiError;
 use crate::models::{
-    MessageResponse, WalletLedgerStatus, CLOSE_ALL_DEFAULT_SLIPPAGE_BPS, CLOSE_ALL_MAX_SLIPPAGE_BPS,
+    MessageResponse, WalletLedgerEvent, WalletLedgerStatus, CLOSE_ALL_DEFAULT_SLIPPAGE_BPS,
+    CLOSE_ALL_MAX_SLIPPAGE_BPS,
 };
+use crate::services::chain_portfolio;
 use crate::services::position_chain_history::spawn_chain_history_materialize_background;
 use crate::services::position_executor::build_ephemeral_position_executor;
 use crate::services::position_valuation::monitored_position_from_chain;
 use crate::services::strategy_service::remove_position_address_from_all_strategies;
 use crate::services::wallet_ledger;
+use crate::services::wallet_ledger::decode_status;
+use crate::services::wallet_ledger_lifecycle::journal_mirror_from_lifecycle_signature;
 use crate::services::PositionService;
 use crate::state::{AppState, PositionUpdate};
 use clmm_lp_execution::prelude::Wallet;
@@ -33,6 +37,8 @@ pub struct ManualCloseLedgerContext {
     pub slippage_bps: u16,
     /// One automatic 6018 retry with raised slippage (bulk send-first).
     pub slippage_6018_retry_done: bool,
+    /// Wallet journal `source` field (bulk vs single close).
+    pub ledger_source: &'static str,
 }
 
 /// Resolve bulk close slippage from request (default 200 bps, cap 2000).
@@ -47,8 +53,7 @@ pub fn resolve_bulk_close_slippage_bps(opt: Option<u16>) -> u16 {
 pub fn bump_close_slippage_bps_for_6018_retry(base: u16) -> u16 {
     const MIN_RETRY_BPS: u16 = 500;
     base.saturating_mul(2)
-        .max(MIN_RETRY_BPS)
-        .min(CLOSE_ALL_MAX_SLIPPAGE_BPS)
+        .clamp(MIN_RETRY_BPS, CLOSE_ALL_MAX_SLIPPAGE_BPS)
 }
 
 /// True when error text indicates Whirlpool close min-out failure (6018).
@@ -71,6 +76,7 @@ impl ManualCloseLedgerContext {
             skip_pre_collect: false,
             slippage_bps: resolve_bulk_close_slippage_bps(None),
             slippage_6018_retry_done: false,
+            ledger_source: "api:positions",
         }
     }
 
@@ -88,12 +94,14 @@ impl ManualCloseLedgerContext {
             skip_pre_collect,
             slippage_bps,
             slippage_6018_retry_done: false,
+            ledger_source: "api:positions:close-all",
         }
     }
 }
 
 /// Outcome of send-first submit (before background confirm).
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ManualCloseSubmitOutcome {
     Submitted(ManualCloseInFlight),
     AlreadyClosed,
@@ -137,6 +145,14 @@ async fn complete_manual_close_success(
     if !already_closed {
         spawn_chain_history_materialize_background(state, pos_pda.to_string(), "close_position");
     }
+    if let Err(e) = chain_portfolio::mark_chain_session_closed_after_manual_close(state, pos_pda).await
+    {
+        warn!(
+            position = %pos_pda,
+            error = %e,
+            "close_position: chain_session_registry close mark failed (continuing)"
+        );
+    }
 }
 
 async fn position_snapshot(state: &AppState, pubkey: &Pubkey) -> Result<clmm_lp_execution::monitor::MonitoredPosition, ApiError> {
@@ -145,6 +161,20 @@ async fn position_snapshot(state: &AppState, pubkey: &Pubkey) -> Result<clmm_lp_
         return Ok(p.clone());
     }
     monitored_position_from_chain(state.provider.clone(), pubkey).await
+}
+
+fn apply_close_confirmed_ledger_meta(
+    mut ev: WalletLedgerEvent,
+    signature: Option<&str>,
+) -> WalletLedgerEvent {
+    if let Some(sig) = signature.map(str::trim).filter(|s| !s.is_empty())
+        && let Some((deltas, status)) = journal_mirror_from_lifecycle_signature(sig) {
+            ev.deltas = deltas;
+            ev.decode_status = Some(status.to_string());
+            return ev;
+        }
+    ev.decode_status = Some(decode_status::DEFERRED_LIFECYCLE.to_string());
+    ev
 }
 
 /// Execute one manual close with an explicit API wallet (does not touch global active signer).
@@ -197,7 +227,7 @@ pub async fn execute_manual_close_with_wallet(
         None,
         vec![],
         None,
-        "api:positions",
+        ledger_ctx.ledger_source,
     );
     wallet_ledger::append_wallet_ledger_event(state, pending).await;
 
@@ -225,7 +255,7 @@ pub async fn execute_manual_close_with_wallet(
                 None,
                 vec![],
                 Some(e.to_string()),
-                "api:positions",
+                ledger_ctx.ledger_source,
             );
             wallet_ledger::append_wallet_ledger_event(state, fail).await;
             return Err(e);
@@ -234,20 +264,23 @@ pub async fn execute_manual_close_with_wallet(
 
     if op.success {
         let sig = op.signature.clone();
-        let conf = wallet_ledger::new_ledger_event(
-            &ledger_ctx.correlation_id,
-            WalletLedgerStatus::Confirmed,
-            "close_position",
-            Some(ledger_ctx.ledger_owner.clone()),
-            sig,
-            Some(pool_str.clone()),
-            Some(pos_pda.clone()),
-            cost_session_id.clone(),
-            false,
-            None,
-            vec![],
-            None,
-            "api:positions",
+        let conf = apply_close_confirmed_ledger_meta(
+            wallet_ledger::new_ledger_event(
+                &ledger_ctx.correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "close_position",
+                Some(ledger_ctx.ledger_owner.clone()),
+                sig.clone(),
+                Some(pool_str.clone()),
+                Some(pos_pda.clone()),
+                cost_session_id.clone(),
+                false,
+                None,
+                vec![],
+                None,
+                ledger_ctx.ledger_source,
+            ),
+            sig.as_deref(),
         );
         wallet_ledger::append_wallet_ledger_event(state, conf).await;
 
@@ -287,7 +320,7 @@ pub async fn execute_manual_close_with_wallet(
             op.error
                 .clone()
                 .or_else(|| Some("Position closing failed".to_string())),
-            "api:positions",
+            ledger_ctx.ledger_source,
         );
         wallet_ledger::append_wallet_ledger_event(state, fail).await;
         Err(ApiError::ServiceUnavailable(
@@ -347,7 +380,7 @@ pub async fn submit_manual_close_send_first(
         None,
         vec![],
         None,
-        "api:positions",
+        ledger_ctx.ledger_source,
     );
     wallet_ledger::append_wallet_ledger_event(state, pending).await;
 
@@ -379,7 +412,7 @@ pub async fn submit_manual_close_send_first(
                 None,
                 vec![],
                 Some(e.to_string()),
-                "api:positions",
+                ledger_ctx.ledger_source,
             );
             wallet_ledger::append_wallet_ledger_event(state, fail).await;
             return Err(e);
@@ -402,7 +435,7 @@ pub async fn submit_manual_close_send_first(
             op.error
                 .clone()
                 .or_else(|| Some("Position close submit failed".to_string())),
-            "api:positions",
+            ledger_ctx.ledger_source,
         );
         wallet_ledger::append_wallet_ledger_event(state, fail).await;
         return Err(ApiError::ServiceUnavailable(
@@ -418,20 +451,23 @@ pub async fn submit_manual_close_send_first(
         .and_then(|v| v.as_bool())
         == Some(true)
     {
-        let conf = wallet_ledger::new_ledger_event(
-            &ledger_ctx.correlation_id,
-            WalletLedgerStatus::Confirmed,
-            "close_position",
-            Some(ledger_ctx.ledger_owner.clone()),
-            op.signature.clone(),
-            Some(pool_str.clone()),
-            Some(pos_pda.clone()),
-            cost_session_id.clone(),
-            false,
-            None,
-            vec![],
-            None,
-            "api:positions",
+        let conf = apply_close_confirmed_ledger_meta(
+            wallet_ledger::new_ledger_event(
+                &ledger_ctx.correlation_id,
+                WalletLedgerStatus::Confirmed,
+                "close_position",
+                Some(ledger_ctx.ledger_owner.clone()),
+                op.signature.clone(),
+                Some(pool_str.clone()),
+                Some(pos_pda.clone()),
+                cost_session_id.clone(),
+                false,
+                None,
+                vec![],
+                None,
+                ledger_ctx.ledger_source,
+            ),
+            op.signature.as_deref(),
         );
         wallet_ledger::append_wallet_ledger_event(state, conf).await;
         complete_manual_close_success(state, &pubkey, &pos_pda, true).await;
@@ -456,7 +492,7 @@ pub async fn submit_manual_close_send_first(
         None,
         vec![],
         None,
-        "api:positions",
+        ledger_ctx.ledger_source,
     );
     wallet_ledger::append_wallet_ledger_event(state, submitted_ledger).await;
 
@@ -537,20 +573,23 @@ async fn finalize_manual_close_attempt(
 
     match op {
         Ok(o) if o.success => {
-            let conf = wallet_ledger::new_ledger_event(
-                &flight.ledger_ctx.correlation_id,
-                WalletLedgerStatus::Confirmed,
-                "close_position",
-                Some(flight.ledger_ctx.ledger_owner.clone()),
-                Some(flight.signature.clone()),
-                Some(flight.pool_str.clone()),
-                Some(flight.pos_pda.clone()),
-                flight.cost_session_id.clone(),
-                false,
-                None,
-                vec![],
-                None,
-                "api:positions",
+            let conf = apply_close_confirmed_ledger_meta(
+                wallet_ledger::new_ledger_event(
+                    &flight.ledger_ctx.correlation_id,
+                    WalletLedgerStatus::Confirmed,
+                    "close_position",
+                    Some(flight.ledger_ctx.ledger_owner.clone()),
+                    Some(flight.signature.clone()),
+                    Some(flight.pool_str.clone()),
+                    Some(flight.pos_pda.clone()),
+                    flight.cost_session_id.clone(),
+                    false,
+                    None,
+                    vec![],
+                    None,
+                    flight.ledger_ctx.ledger_source,
+                ),
+                Some(flight.signature.as_str()),
             );
             wallet_ledger::append_wallet_ledger_event(state, conf).await;
             complete_manual_close_success(state, &flight.pubkey, &flight.pos_pda, false).await;
@@ -574,7 +613,7 @@ async fn finalize_manual_close_attempt(
                 None,
                 vec![],
                 Some(msg.clone()),
-                "api:positions",
+                flight.ledger_ctx.ledger_source,
             );
             wallet_ledger::append_wallet_ledger_event(state, fail).await;
             Err(ApiError::ServiceUnavailable(msg))
@@ -593,7 +632,7 @@ async fn finalize_manual_close_attempt(
                 None,
                 vec![],
                 Some(e.to_string()),
-                "api:positions",
+                flight.ledger_ctx.ledger_source,
             );
             wallet_ledger::append_wallet_ledger_event(state, fail).await;
             Err(e)

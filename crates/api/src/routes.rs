@@ -288,6 +288,23 @@ fn create_base_http_router(state: AppState) -> Router {
             "/wallets/reconcile-session-gl",
             post(handlers::post_wallet_reconcile_session_gl),
         )
+        .route(
+            "/wallets/reconcile-chain-gl",
+            post(handlers::post_wallet_reconcile_chain_gl),
+        )
+        .route(
+            "/wallets/wallet-balances",
+            get(handlers::get_wallet_gl_balances),
+        )
+        .route(
+            "/wallets/wallet-balances/opening-import",
+            post(handlers::post_wallet_gl_opening_import),
+        )
+        .route(
+            "/wallets/reconcile-wallet-gl",
+            get(handlers::get_wallet_reconcile_wallet_gl),
+        )
+        // chain-portfolio routes live in [`create_chain_portfolio_router`] (longer HTTP timeout)
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
@@ -297,6 +314,36 @@ fn create_base_http_router(state: AppState) -> Router {
         )
         // Add state
         .with_state(state)
+}
+
+/// Chain portfolio reads can exceed the default 30s API timeout (PSLR aggregate + GL).
+fn create_chain_portfolio_router(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/wallets/chain-portfolio",
+            get(handlers::get_wallet_chain_portfolio),
+        )
+        .route(
+            "/wallets/chain-portfolio/history",
+            get(handlers::get_wallet_chain_portfolio_history),
+        )
+        .route(
+            "/wallets/chain-portfolio/backfill",
+            post(handlers::post_wallet_chain_portfolio_backfill),
+        )
+        .route(
+            "/wallets/chain-portfolio/backfill-chain-ids",
+            post(handlers::post_wallet_chain_portfolio_backfill_chain_ids),
+        )
+        .with_state(state)
+}
+
+pub fn chain_portfolio_request_timeout_secs() -> u64 {
+    std::env::var("CLMM_CHAIN_PORTFOLIO_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&n| (30..=120).contains(&n))
+        .unwrap_or(45)
 }
 
 fn create_ws_router(state: AppState) -> Router {
@@ -370,6 +417,10 @@ pub fn create_versioned_router(
     #[allow(deprecated)]
     let base_http = create_base_http_router(state.clone())
         .layer(TimeoutLayer::new(Duration::from_secs(request_timeout_secs)));
+    #[allow(deprecated)]
+    let chain_portfolio = create_chain_portfolio_router(state.clone()).layer(TimeoutLayer::new(
+        Duration::from_secs(chain_portfolio_request_timeout_secs()),
+    ));
     let ws = create_ws_router(state.clone());
     #[allow(deprecated)]
     let onchain = create_onchain_router(state).layer(TimeoutLayer::new(Duration::from_secs(
@@ -382,7 +433,7 @@ pub fn create_versioned_router(
     // layer wrapping more routes than intended (depending on composition order). To make the
     // boundary unambiguous, we apply versioning with separate `nest("/api/v1", ...)` routers and
     // merge them at the top level.
-    let http_versioned = Router::new().nest("/api/v1", base_http.merge(onchain));
+    let http_versioned = Router::new().nest("/api/v1", base_http.merge(chain_portfolio).merge(onchain));
     let ws_versioned = Router::new().nest("/api/v1", ws);
     Router::new().merge(http_versioned).merge(ws_versioned)
 }
