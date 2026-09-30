@@ -16,4 +16,5 @@ pub use decision::*;
 pub use executor::*;
 pub use pending_open::{PendingOpenItem, PendingOpenStore};
 pub use rebalance::*;
+pub use session_capital::*;
 pub use types::Decision;

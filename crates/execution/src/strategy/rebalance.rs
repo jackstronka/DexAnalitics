@@ -182,27 +182,25 @@ fn swap_mix_wallet_ui_sol_first(inputs: &SwapMixWalletInputs<'_>) -> (f64, f64) 
 
 /// When opening on a WSOL pool leg, treat spendable native SOL as available on that leg.
 ///
-/// This matches upstream Whirlpool bot behavior (native SOL vs WSOL ATA) and our swap-mix sizing.
-fn apply_session_caps_to_wallet_raw(
+/// Delegates to [`session_capital::apply_portfolio_caps_to_wallet_raw`].
+fn apply_portfolio_caps_to_wallet_raw(
     balance_a_raw: u64,
     balance_b_raw: u64,
     spendable_lamports: u64,
     token_mint_a: &Pubkey,
     token_mint_b: &Pubkey,
     wsol_mint_pk: &Pubkey,
-    session: Option<&super::session_capital::SessionMintCaps>,
+    portfolio: Option<&super::session_capital::SessionMintCaps>,
 ) -> (u64, u64, u64) {
-    use super::session_capital::cap_rpc_with_session;
-    let wa = cap_rpc_with_session(balance_a_raw, token_mint_a, session);
-    let wb = cap_rpc_with_session(balance_b_raw, token_mint_b, session);
-    let spend = if token_mint_a == wsol_mint_pk {
-        cap_rpc_with_session(spendable_lamports, token_mint_a, session)
-    } else if token_mint_b == wsol_mint_pk {
-        cap_rpc_with_session(spendable_lamports, token_mint_b, session)
-    } else {
-        spendable_lamports
-    };
-    (wa, wb, spend)
+    super::session_capital::apply_portfolio_caps_to_wallet_raw(
+        balance_a_raw,
+        balance_b_raw,
+        spendable_lamports,
+        token_mint_a,
+        token_mint_b,
+        wsol_mint_pk,
+        portfolio,
+    )
 }
 
 fn open_wallet_notional_and_caps_sol_first(
@@ -859,6 +857,8 @@ pub struct RebalanceExecutor {
     chain_history_hook: Mutex<Option<ChainHistoryMaterializeHook>>,
     /// Optional Postgres for SESSION cap resolution (API bot path).
     session_db: std::sync::Mutex<Option<std::sync::Arc<clmm_lp_data::repositories::Database>>>,
+    /// Active portfel łańcucha id for the current rebalance attempt (cleared after `execute`).
+    active_chain_session_id: std::sync::Mutex<Option<String>>,
 }
 
 impl RebalanceExecutor {
@@ -878,7 +878,21 @@ impl RebalanceExecutor {
             dry_run: AtomicBool::new(false),
             chain_history_hook: Mutex::new(None),
             session_db: std::sync::Mutex::new(None),
+            active_chain_session_id: std::sync::Mutex::new(None),
         }
+    }
+
+    pub fn set_active_chain_session_id(&self, id: Option<String>) {
+        if let Ok(mut g) = self.active_chain_session_id.lock() {
+            *g = id;
+        }
+    }
+
+    fn active_chain_session_id(&self) -> Option<String> {
+        self.active_chain_session_id
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     /// Attach Postgres for `SESSION:{id}` cap reads (`CLMM_REOPEN_USE_SESSION_CAPITAL=1`).
@@ -956,36 +970,137 @@ impl RebalanceExecutor {
             .ok_or_else(|| anyhow::anyhow!("Wallet not set on RebalanceExecutor"))
     }
 
-    async fn session_caps_for_reopen(
+    async fn portfolio_caps_for_reopen(
         &self,
         ledger_session_id: Option<&str>,
-    ) -> Option<super::session_capital::SessionMintCaps> {
-        let sid = ledger_session_id.map(str::trim).filter(|s| !s.is_empty())?;
+        position_hint: Option<&Pubkey>,
+    ) -> Option<super::session_capital::LoadedReopenCaps> {
+        let chain_id = self.active_chain_session_id().or_else(|| {
+            position_hint.and_then(|p| {
+                clmm_lp_protocols::ledger::tx_lifecycle::resolve_chain_session_id_for_position(
+                    &p.to_string(),
+                )
+            })
+        });
         let owner = self.wallet_pubkey().map(|p| p.to_string());
         let db = self
             .session_db
             .lock()
             .ok()
             .and_then(|g| g.clone());
-        super::session_capital::load_session_mint_caps(db.as_deref(), sid, owner.as_deref()).await
+        super::session_capital::load_reopen_portfolio_caps(
+            db.as_deref(),
+            ledger_session_id,
+            chain_id.as_deref(),
+            owner.as_deref(),
+        )
+        .await
     }
 
-    fn session_capital_error_if_strict(session: &super::session_capital::SessionMintCaps) -> Option<String> {
-        if !super::session_capital::reopen_use_session_capital() {
-            return None;
+    /// Cap operator/rebalance open amounts to CHAIN/SESSION inventory; fail when request exceeds caps.
+    async fn cap_open_amounts_with_portfolio(
+        &self,
+        pool: &Pubkey,
+        amount_a: u64,
+        amount_b: u64,
+        ledger_session_id: Option<&str>,
+        position_hint: Option<&Pubkey>,
+    ) -> anyhow::Result<(u64, u64)> {
+        let portfolio_loaded = self
+            .portfolio_caps_for_reopen(ledger_session_id, position_hint)
+            .await;
+        if let Some(ref loaded) = portfolio_loaded
+            && let Some(err) = super::session_capital::portfolio_capital_error_if_strict(loaded)
+        {
+            anyhow::bail!(err);
         }
-        if !super::session_capital::reopen_session_strict_empty() {
-            return None;
+        let Some(loaded) = portfolio_loaded else {
+            return Ok((amount_a, amount_b));
+        };
+        let portfolio = &loaded.caps;
+        let reader = WhirlpoolReader::new(self.provider.clone());
+        let pool_state = reader
+            .get_pool_state(&pool.to_string())
+            .await
+            .context("fetch pool for portfolio open caps")?;
+        let cap_a = super::session_capital::cap_rpc_with_portfolio(
+            amount_a,
+            &pool_state.token_mint_a,
+            Some(portfolio),
+        );
+        let cap_b = super::session_capital::cap_rpc_with_portfolio(
+            amount_b,
+            &pool_state.token_mint_b,
+            Some(portfolio),
+        );
+        if cap_a == 0 && cap_b == 0 {
+            anyhow::bail!(
+                "portfolio_capital_insufficient: open blocked — no spendable inventory in {} portfolio {} (requested_a={amount_a}, requested_b={amount_b})",
+                match loaded.scope {
+                    super::session_capital::ReopenPortfolioScope::Chain => "CHAIN",
+                    super::session_capital::ReopenPortfolioScope::Session => "SESSION",
+                },
+                portfolio.session_id
+            );
         }
-        if session.is_empty() {
-            Some(format!(
-                "session_capital_unknown: no SESSION inventory for {} (source={})",
-                session.session_id,
-                super::session_capital::session_caps_source_label(session.source)
-            ))
-        } else {
-            None
+        if cap_a < amount_a || cap_b < amount_b {
+            anyhow::bail!(
+                "portfolio_capital_insufficient: open exceeds {} portfolio {} (requested_a={amount_a}, capped_a={cap_a}, requested_b={amount_b}, capped_b={cap_b})",
+                match loaded.scope {
+                    super::session_capital::ReopenPortfolioScope::Chain => "CHAIN",
+                    super::session_capital::ReopenPortfolioScope::Session => "SESSION",
+                },
+                portfolio.session_id
+            );
         }
+        Ok((cap_a, cap_b))
+    }
+
+    /// Cap swap `amount_in` to CHAIN/SESSION inventory when portfolio caps are active.
+    async fn cap_swap_amount_with_portfolio(
+        &self,
+        specified_mint: &Pubkey,
+        amount_in: u64,
+        ledger_session_id: Option<&str>,
+        position_hint: Option<&Pubkey>,
+    ) -> anyhow::Result<u64> {
+        let portfolio_loaded = self
+            .portfolio_caps_for_reopen(ledger_session_id, position_hint)
+            .await;
+        if let Some(ref loaded) = portfolio_loaded
+            && let Some(err) = super::session_capital::portfolio_capital_error_if_strict(loaded)
+        {
+            anyhow::bail!(err);
+        }
+        let Some(loaded) = portfolio_loaded else {
+            return Ok(amount_in);
+        };
+        let capped = super::session_capital::cap_rpc_with_portfolio(
+            amount_in,
+            specified_mint,
+            Some(&loaded.caps),
+        );
+        if capped == 0 {
+            anyhow::bail!(
+                "portfolio_capital_insufficient: swap blocked — zero {} cap for mint {} (requested={amount_in})",
+                match loaded.scope {
+                    super::session_capital::ReopenPortfolioScope::Chain => "CHAIN",
+                    super::session_capital::ReopenPortfolioScope::Session => "SESSION",
+                },
+                specified_mint
+            );
+        }
+        if capped < amount_in {
+            anyhow::bail!(
+                "portfolio_capital_insufficient: swap amount exceeds {} cap for mint {} (requested={amount_in}, capped={capped})",
+                match loaded.scope {
+                    super::session_capital::ReopenPortfolioScope::Chain => "CHAIN",
+                    super::session_capital::ReopenPortfolioScope::Session => "SESSION",
+                },
+                specified_mint
+            );
+        }
+        Ok(capped)
     }
 
     /// Checks if a rebalance is profitable.
@@ -1075,14 +1190,15 @@ impl RebalanceExecutor {
         log_position: &Pubkey,
         ledger_session_id: Option<String>,
     ) -> Result<(), String> {
-        let session_caps = self
-            .session_caps_for_reopen(ledger_session_id.as_deref())
+        let portfolio_loaded = self
+            .portfolio_caps_for_reopen(ledger_session_id.as_deref(), Some(log_position))
             .await;
-        if let Some(ref sc) = session_caps
-            && let Some(err) = Self::session_capital_error_if_strict(sc)
+        if let Some(ref loaded) = portfolio_loaded
+            && let Some(err) = super::session_capital::portfolio_capital_error_if_strict(loaded)
         {
             return Err(err);
         }
+        let portfolio_caps = portfolio_loaded.as_ref().map(|l| &l.caps);
 
         let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
             .parse()
@@ -1095,7 +1211,7 @@ impl RebalanceExecutor {
         let mut last_prev_end = 0.0_f64;
         let mut last_wallet = 0.0_f64;
         let mut last_threshold = 0.0_f64;
-        let session_mode = session_caps.is_some();
+        let portfolio_mode = portfolio_caps.is_some();
 
         for attempt in 0..attempts {
             let pool_live = pool_reader
@@ -1114,14 +1230,14 @@ impl RebalanceExecutor {
                 spl_token_balance_raw(self.provider.as_ref(), owner, &pool_live.token_mint_b).await;
             let native_lamports = self.provider.get_balance(owner).await.unwrap_or(0);
             let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
-            let (wa, wb, native_spendable) = apply_session_caps_to_wallet_raw(
+            let (wa, wb, native_spendable) = apply_portfolio_caps_to_wallet_raw(
                 wa,
                 wb,
                 native_spendable,
                 &pool_live.token_mint_a,
                 &pool_live.token_mint_b,
                 &wsol_mint_pk,
-                session_caps.as_ref(),
+                portfolio_caps,
             );
             let (pa, pb, _) = synthetic_prices_for_deposit_quote(
                 pool_live.price,
@@ -1167,14 +1283,14 @@ impl RebalanceExecutor {
                         wallet_notional,
                         prev_end_usd,
                         threshold,
-                        session_mode,
+                        portfolio_mode,
                         position = %log_position,
                         "Wallet notional met reopen target after refresh"
                     );
                 }
                 return Ok(());
             }
-            let diag_event = if session_mode {
+            let diag_event = if portfolio_mode {
                 "bot_reopen_session_below_target"
             } else {
                 "bot_reopen_wallet_below_target"
@@ -1187,9 +1303,9 @@ impl RebalanceExecutor {
                 wallet_notional,
                 prev_end_usd,
                 threshold,
-                session_mode,
+                portfolio_mode,
                 position = %log_position,
-                "Wallet/session notional below reopen target (may be stale read or contention)"
+                "Wallet/portfolio notional below reopen target (may be stale read or contention)"
             );
             clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
                 self.provider.as_ref(),
@@ -1213,8 +1329,8 @@ impl RebalanceExecutor {
             }
         }
 
-        let err_prefix = if session_mode {
-            "session_below_target_after_refresh"
+        let err_prefix = if portfolio_mode {
+            "portfolio_below_target_after_refresh"
         } else {
             "wallet_below_target_after_refresh"
         };
@@ -1239,7 +1355,7 @@ impl RebalanceExecutor {
         amount_b_before_raw: u64,
         log_position: &Pubkey,
         ledger_session_id: Option<String>,
-        session_caps: Option<super::session_capital::SessionMintCaps>,
+        portfolio_caps: Option<super::session_capital::SessionMintCaps>,
     ) -> anyhow::Result<u32> {
         if self.is_dry_run() {
             return Ok(0);
@@ -1317,14 +1433,14 @@ impl RebalanceExecutor {
                 .parse()
                 .expect("WSOL mint");
             let native_spendable = swap_mix_native_spendable_lamports(native_lamports);
-            let (wa, wb, native_spendable) = apply_session_caps_to_wallet_raw(
+            let (wa, wb, native_spendable) = apply_portfolio_caps_to_wallet_raw(
                 wa,
                 wb,
                 native_spendable,
                 &pool_state.token_mint_a,
                 &pool_state.token_mint_b,
                 &wsol_mint_pk,
-                session_caps.as_ref(),
+                portfolio_caps.as_ref(),
             );
             let pool_has_wsol =
                 pool_state.token_mint_a == wsol_mint_pk || pool_state.token_mint_b == wsol_mint_pk;
@@ -2058,14 +2174,15 @@ impl RebalanceExecutor {
             );
         };
 
-        let session_caps = self
-            .session_caps_for_reopen(ledger_session_id.as_deref())
+        let portfolio_loaded = self
+            .portfolio_caps_for_reopen(ledger_session_id.as_deref(), Some(log_position))
             .await;
-        if let Some(ref sc) = session_caps
-            && let Some(err) = Self::session_capital_error_if_strict(sc)
+        if let Some(ref loaded) = portfolio_loaded
+            && let Some(err) = super::session_capital::portfolio_capital_error_if_strict(loaded)
         {
             return Err(err);
         }
+        let portfolio_caps = portfolio_loaded.as_ref().map(|l| &l.caps);
 
         if let Some(sid) = ledger_session_id
             .as_deref()
@@ -2139,7 +2256,7 @@ impl RebalanceExecutor {
                 amount_b_before_calc,
                 log_position,
                 ledger_session_id.clone(),
-                session_caps.clone(),
+                portfolio_loaded.as_ref().map(|l| l.caps.clone()),
             )
             .await;
         let swap_rounds = match swap_rounds {
@@ -2195,14 +2312,14 @@ impl RebalanceExecutor {
             let wsol_mint_pk: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
                 .parse()
                 .expect("WSOL mint");
-            let (wa, wb, native_spendable) = apply_session_caps_to_wallet_raw(
+            let (wa, wb, native_spendable) = apply_portfolio_caps_to_wallet_raw(
                 wa,
                 wb,
                 native_spendable,
                 &pool_live.token_mint_a,
                 &pool_live.token_mint_b,
                 &wsol_mint_pk,
-                session_caps.as_ref(),
+                portfolio_caps,
             );
 
             let dec_a = spl_mint_decimals(self.provider.as_ref(), &pool_live.token_mint_a)
@@ -2261,15 +2378,15 @@ impl RebalanceExecutor {
             if cap_a == 0 && cap_b == 0 {
                 cap_a = amount_a_before_calc.max(1);
                 cap_b = amount_b_before_calc.max(1);
-                cap_a = super::session_capital::cap_rpc_with_session(
+                cap_a = super::session_capital::cap_rpc_with_portfolio(
                     cap_a,
                     &pool_live.token_mint_a,
-                    session_caps.as_ref(),
+                    portfolio_caps,
                 );
-                cap_b = super::session_capital::cap_rpc_with_session(
+                cap_b = super::session_capital::cap_rpc_with_portfolio(
                     cap_b,
                     &pool_live.token_mint_b,
-                    session_caps.as_ref(),
+                    portfolio_caps,
                 );
                 if attempt == 1 {
                     warn!(
@@ -2481,6 +2598,7 @@ impl RebalanceExecutor {
                                     native_balance,
                                     log_position,
                                     ledger_session_id.clone(),
+                                    portfolio_caps,
                                 )
                                 .await
                             {
@@ -2627,6 +2745,7 @@ impl RebalanceExecutor {
     /// transient. If open preflight says native is short, we:
     /// - unwrap WSOL -> native SOL (if any)
     /// - else swap a small amount of USDC -> WSOL in-pool, then unwrap to native SOL
+    #[allow(clippy::too_many_arguments)]
     async fn ensure_operational_native_sol_for_open(
         &self,
         pool: &Pubkey,
@@ -2635,6 +2754,7 @@ impl RebalanceExecutor {
         native_balance: u64,
         log_position: &Pubkey,
         ledger_session_id: Option<String>,
+        portfolio_caps: Option<&super::session_capital::SessionMintCaps>,
     ) -> anyhow::Result<()> {
         if native_balance >= required_with_margin {
             return Ok(());
@@ -2655,7 +2775,13 @@ impl RebalanceExecutor {
         }
 
         // 1) Prefer WSOL -> native SOL (partial unwrap) when WSOL exists.
+        let wsol = Self::wsol_mint_pk();
         let mut wsol_raw = orca.read_wsol_balance_raw(&owner).await.unwrap_or(0);
+        wsol_raw = super::session_capital::cap_rpc_with_portfolio(
+            wsol_raw,
+            &wsol,
+            portfolio_caps,
+        );
         if wsol_raw > 0 {
             let want_unwrap = deficit.min(wsol_raw).max(1);
             let sig = orca
@@ -2689,7 +2815,6 @@ impl RebalanceExecutor {
 
         // 2) If still short, swap stable (non-WSOL pool leg) -> WSOL in-pool, then unwrap.
         // Covers mainnet USDC as well as devnet devUSDC (or any SPL leg paired with WSOL).
-        let wsol = Self::wsol_mint_pk();
         let stable_mint = Self::stable_mint_for_operational_sol_topup(pool_live).ok_or_else(|| {
             anyhow::anyhow!(
                 "operational SOL topup: pool has no WSOL leg or could not resolve stable mint (mint_a={}, mint_b={}); set CLMM_STABLE_MINT_FOR_SOL_TOPUP",
@@ -2705,8 +2830,18 @@ impl RebalanceExecutor {
             .unwrap_or(6);
         let remaining = required_with_margin.saturating_sub(native_now);
         let sol_needed = (remaining as f64) / 1e9;
-        let stable_in_raw =
+        let mut stable_in_raw =
             Self::estimate_stable_raw_for_sol_deficit(pool_live, stable_dec, sol_needed).max(1);
+        stable_in_raw = super::session_capital::cap_rpc_with_portfolio(
+            stable_in_raw,
+            &stable_mint,
+            portfolio_caps,
+        );
+        if stable_in_raw == 0 {
+            anyhow::bail!(
+                "operational SOL topup: CHAIN/SESSION cap blocks stable swap for mint {stable_mint}"
+            );
+        }
 
         // Swap exact-in: spend stable, receive WSOL SPL.
         let _ = self
@@ -2723,6 +2858,11 @@ impl RebalanceExecutor {
 
         // Unwrap as much WSOL as we now have, but only if it moves the needle.
         wsol_raw = orca.read_wsol_balance_raw(&owner).await.unwrap_or(0);
+        wsol_raw = super::session_capital::cap_rpc_with_portfolio(
+            wsol_raw,
+            &wsol,
+            portfolio_caps,
+        );
         if wsol_raw == 0 {
             anyhow::bail!("operational SOL topup: swap produced 0 WSOL; cannot proceed");
         }
@@ -2779,6 +2919,19 @@ impl RebalanceExecutor {
         };
         let rebalance_session_id = Uuid::new_v4().to_string();
         result.rebalance_session_id = Some(rebalance_session_id.clone());
+
+        let chain_session_id = clmm_lp_protocols::ledger::tx_lifecycle::resolve_chain_session_id_for_position(
+            &params.position.to_string(),
+        )
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.set_active_chain_session_id(Some(chain_session_id));
+        struct ClearChainSessionId<'a>(&'a RebalanceExecutor);
+        impl Drop for ClearChainSessionId<'_> {
+            fn drop(&mut self) {
+                self.0.set_active_chain_session_id(None);
+            }
+        }
+        let _clear_chain_session = ClearChainSessionId(self);
 
         if self.is_dry_run() {
             info!("Dry run mode - simulating rebalance");
@@ -2855,6 +3008,13 @@ impl RebalanceExecutor {
                 );
                 return result;
             };
+            let portfolio_loaded = self
+                .portfolio_caps_for_reopen(
+                    Some(rebalance_session_id.as_str()),
+                    Some(&params.position),
+                )
+                .await;
+            let portfolio_caps = portfolio_loaded.as_ref().map(|l| &l.caps);
             let pool_reader = WhirlpoolReader::new(self.provider.clone());
             let pool_state = match pool_reader.get_pool_state(&params.pool.to_string()).await {
                 Ok(s) => s,
@@ -2876,6 +3036,19 @@ impl RebalanceExecutor {
             let wb =
                 spl_token_balance_raw(self.provider.as_ref(), &owner, &pool_state.token_mint_b)
                     .await;
+            let wsol_mint_pk = Self::wsol_mint_pk();
+            let native_lamports = self.provider.get_balance(&owner).await.unwrap_or(0);
+            let native_spendable =
+                super::session_capital::chain_native_spendable_lamports(native_lamports);
+            let (wa, wb, _) = apply_portfolio_caps_to_wallet_raw(
+                wa,
+                wb,
+                native_spendable,
+                &pool_state.token_mint_a,
+                &pool_state.token_mint_b,
+                &wsol_mint_pk,
+                portfolio_caps,
+            );
             let (pa, pb, price_mode) = synthetic_prices_for_deposit_quote(
                 pool_state.price,
                 &pool_state.token_mint_a,
@@ -3837,6 +4010,14 @@ impl RebalanceExecutor {
             );
             return Ok(None);
         }
+        let amount_in = self
+            .cap_swap_amount_with_portfolio(
+                specified_mint,
+                amount_in,
+                ledger_session_id.as_deref(),
+                position_for_ledger.as_ref(),
+            )
+            .await?;
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
         let payer = wallet.keypair();
@@ -3962,6 +4143,15 @@ impl RebalanceExecutor {
         ledger_session_id: Option<String>,
         ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
+        let (amount_a, amount_b) = self
+            .cap_open_amounts_with_portfolio(
+                pool,
+                amount_a,
+                amount_b,
+                ledger_session_id.as_deref(),
+                None,
+            )
+            .await?;
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
         let payer = wallet.keypair();
@@ -4024,6 +4214,15 @@ impl RebalanceExecutor {
         ledger_session_id: Option<String>,
         ledger_open_details: Option<serde_json::Value>,
     ) -> anyhow::Result<(Pubkey, i32, i32)> {
+        let (amount_a, amount_b) = self
+            .cap_open_amounts_with_portfolio(
+                pool,
+                amount_a,
+                amount_b,
+                ledger_session_id.as_deref(),
+                None,
+            )
+            .await?;
         let wallet = self.require_wallet()?;
         let orca = WhirlpoolExecutor::new(self.provider.clone());
 
@@ -4111,22 +4310,9 @@ impl RebalanceExecutor {
                 .ok()
                 .and_then(|g| g.as_ref().map(|w| w.pubkey()));
             if let Some(fee_payer) = fee_payer {
-                let ledger_for_append = if matches!(
-                    op_name,
-                    "open_position" | "open_full_range_position" | "close_position"
-                ) {
-                    Some(
-                        enrich_open_close_ledger_details(
-                            self.provider.clone(),
-                            pool,
-                            result,
-                            ledger_details.clone(),
-                        )
-                        .await,
-                    )
-                } else {
-                    ledger_details.clone()
-                };
+                // Persist lifecycle before optional RPC enrichment so a crash/restart after
+                // on-chain confirm cannot leave a confirmed close/open without a ledger row.
+                let ledger_for_append = merge_event_slot_into_ledger_details(result, ledger_details.clone());
 
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_rebalance_executor_tx_cost(
                     self.provider.as_ref(),
@@ -4137,6 +4323,7 @@ impl RebalanceExecutor {
                     position,
                     result.created_position,
                     ledger_session_id.clone(),
+                    self.active_chain_session_id(),
                     ledger_for_append.clone(),
                     lp_collected_token_a_raw,
                     lp_collected_token_b_raw,
@@ -4240,13 +4427,12 @@ impl RebalanceExecutor {
     }
 }
 
-/// Merge `event_slot` + best-effort pool mint USD spot into lifecycle `details` (open/close only).
-async fn enrich_open_close_ledger_details(
-    provider: Arc<RpcProvider>,
-    pool: Option<Pubkey>,
+/// Sync merge of `event_slot` into lifecycle `details` (no RPC).
+#[must_use]
+fn merge_event_slot_into_ledger_details(
     result: &clmm_lp_protocols::orca::executor::ExecutionResult,
     ledger_details: Option<serde_json::Value>,
-) -> serde_json::Value {
+) -> Option<serde_json::Value> {
     let mut base = match ledger_details {
         Some(serde_json::Value::Object(m)) => serde_json::Value::Object(m),
         Some(other) => {
@@ -4261,14 +4447,25 @@ async fn enrich_open_close_ledger_details(
     {
         obj.insert("event_slot".to_string(), slot.into());
     }
+    Some(base)
+}
+
+/// Merge `event_slot` + best-effort pool mint USD spot into lifecycle `details` (open/close only).
+#[allow(dead_code)]
+async fn enrich_open_close_ledger_details(
+    provider: Arc<RpcProvider>,
+    pool: Option<Pubkey>,
+    result: &clmm_lp_protocols::orca::executor::ExecutionResult,
+    ledger_details: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut base = merge_event_slot_into_ledger_details(result, ledger_details).unwrap_or_default();
     if let Some(pool_pk) = pool {
         if let Ok(Ok(pool_state)) = tokio::time::timeout(
             std::time::Duration::from_secs(8),
             WhirlpoolReader::new(provider.clone()).get_pool_state(&pool_pk.to_string()),
         )
         .await
-        {
-            if let Some(obj) = base.as_object_mut() {
+            && let Some(obj) = base.as_object_mut() {
                 obj.insert(
                     "token_mint_a".to_string(),
                     serde_json::json!(pool_state.token_mint_a.to_string()),
@@ -4278,7 +4475,6 @@ async fn enrich_open_close_ledger_details(
                     serde_json::json!(pool_state.token_mint_b.to_string()),
                 );
             }
-        }
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
             clmm_lp_protocols::orca::event_pool_mint_usd::fetch_event_pool_mint_usd_prices(
@@ -4596,6 +4792,29 @@ mod tests {
     use solana_sdk::signature::Signature;
 
     #[test]
+    fn merge_event_slot_into_ledger_details_adds_slot() {
+        let result = ExecutionResult {
+            signature: Signature::default(),
+            success: true,
+            slot: Some(42),
+            error: None,
+            created_position: None,
+            collect_fee_owed_a_raw: None,
+            collect_fee_owed_b_raw: None,
+        };
+        let merged = merge_event_slot_into_ledger_details(
+            &result,
+            Some(serde_json::json!({"close_kind":"rotation"})),
+        )
+        .expect("details");
+        assert_eq!(merged.get("event_slot").and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(
+            merged.get("close_kind").and_then(|v| v.as_str()),
+            Some("rotation")
+        );
+    }
+
+    #[test]
     fn insert_open_quote_usd_fields_from_onchain_amounts() {
         let mut obj = serde_json::Map::new();
         obj.insert("open_amount_a_raw".to_string(), serde_json::json!(50_000_000u64));
@@ -4784,18 +5003,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_session_caps_to_wallet_raw_limits_per_mint() {
+    fn apply_portfolio_caps_to_wallet_raw_limits_per_mint() {
         let wsol: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
             .parse()
             .expect("WSOL");
         let usdc = Pubkey::new_unique();
-        let mut caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-cap");
+        let mut caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("chain-cap");
         caps.caps_by_mint.insert(wsol.to_string(), 50);
         caps.caps_by_mint.insert(usdc.to_string(), 200);
-        unsafe {
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
-        }
-        let (wa, wb, spend) = apply_session_caps_to_wallet_raw(
+        let (wa, wb, spend) = apply_portfolio_caps_to_wallet_raw(
             1_000,
             500,
             2_000_000_000,
@@ -4806,25 +5022,27 @@ mod tests {
         );
         assert_eq!(wa, 50);
         assert_eq!(wb, 200);
-        assert_eq!(spend, 50); // native capped to WSOL session leg
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-        }
+        assert_eq!(spend, 50); // native capped to WSOL portfolio leg
     }
 
     #[test]
-    fn session_capital_error_if_strict_on_empty_session() {
-        let empty = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-empty");
+    fn portfolio_capital_error_if_strict_on_empty_chain() {
+        let empty = clmm_lp_data::wallet_session::SessionMintCaps::empty("chain-empty");
+        let loaded = crate::strategy::session_capital::LoadedReopenCaps {
+            caps: empty,
+            scope: crate::strategy::session_capital::ReopenPortfolioScope::Chain,
+        };
+        let _env = crate::strategy::session_capital::TEST_ENV_LOCK.blocking_lock();
         unsafe {
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
-            std::env::set_var("CLMM_REOPEN_SESSION_STRICT_EMPTY", "1");
+            std::env::set_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "1");
+            std::env::set_var("CLMM_REOPEN_CHAIN_STRICT_EMPTY", "1");
         }
-        let err = RebalanceExecutor::session_capital_error_if_strict(&empty).expect("err");
-        assert!(err.contains("session_capital_unknown"));
-        assert!(err.contains("sess-empty"));
+        let err = crate::strategy::session_capital::portfolio_capital_error_if_strict(&loaded).expect("err");
+        assert!(err.contains("portfolio_capital_unknown"));
+        assert!(err.contains("chain-empty"));
         unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-            std::env::remove_var("CLMM_REOPEN_SESSION_STRICT_EMPTY");
+            std::env::remove_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
+            std::env::remove_var("CLMM_REOPEN_CHAIN_STRICT_EMPTY");
         }
     }
 
@@ -4833,6 +5051,7 @@ mod tests {
         let mint = Pubkey::new_unique();
         let mut caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-1");
         caps.caps_by_mint.insert(mint.to_string(), 40);
+        let _env = crate::strategy::session_capital::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
         }

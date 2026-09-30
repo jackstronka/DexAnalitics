@@ -32,6 +32,69 @@ pub fn rebalance_session_id_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Optional stable id for the **whole rotation chain** (portfel łańcucha). Propagated across rebalances.
+#[must_use]
+pub fn chain_session_id_from_env() -> Option<String> {
+    std::env::var("CLMM_CHAIN_SESSION_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read `chain_session_id` from a lifecycle JSON value (top-level or `details`).
+#[must_use]
+pub fn chain_session_id_from_value(v: &serde_json::Value) -> Option<String> {
+    v.get("chain_session_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            v.get("details")
+                .and_then(|d| d.get("chain_session_id"))
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+/// Scan lifecycle ledger for an existing `chain_session_id` tied to `position_pubkey`.
+#[must_use]
+pub fn resolve_chain_session_id_for_position(position_pubkey: &str) -> Option<String> {
+    let pos = position_pubkey.trim();
+    if pos.is_empty() {
+        return None;
+    }
+    let p = ledger_read_path();
+    let Ok(f) = std::fs::File::open(&p) else {
+        return None;
+    };
+    let r = BufReader::new(f);
+    for line in r.lines().map_while(Result::ok) {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+            continue;
+        };
+        let row_pos = v
+            .get("position_pubkey")
+            .or_else(|| v.get("position_pda"))
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if row_pos != pos {
+            continue;
+        }
+        if let Some(cid) = chain_session_id_from_value(&v) {
+            return Some(cid);
+        }
+    }
+    None
+}
+
 /// Optional IL / rebalance JSONL path (`orca-bot-run --il-ledger-path` / **`CLMM_IL_LEDGER_PATH`**).
 /// Unlike [`ledger_path`], there is **no** default file — unset means IL rows are not persisted to disk unless the flag is passed.
 #[must_use]
@@ -339,6 +402,55 @@ pub async fn enrich_tx_costs(
     }
 }
 
+/// Whether `orca_position_lifecycle.jsonl` already contains a row with this signature.
+#[must_use]
+pub fn lifecycle_has_row_with_signature(signature: &str) -> bool {
+    let sig = signature.trim();
+    if sig.is_empty() {
+        return false;
+    }
+    let path = ledger_path();
+    let Ok(file) = std::fs::File::open(&path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("signature").and_then(|x| x.as_str()) == Some(sig) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether lifecycle already records `bot_close_position` for this PDA.
+#[must_use]
+pub fn lifecycle_has_bot_close_for_position(position: &str) -> bool {
+    let pos = position.trim();
+    if pos.is_empty() {
+        return false;
+    }
+    let path = ledger_path();
+    let Ok(file) = std::fs::File::open(&path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("event").and_then(|x| x.as_str()) != Some("bot_close_position") {
+            continue;
+        }
+        if v.get("position_pubkey").and_then(|x| x.as_str()) == Some(pos) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Append one JSON line to the lifecycle ledger file.
 pub fn append_jsonl_line<T: Serialize>(rec: &T) -> Result<()> {
     let path = ledger_path();
@@ -391,6 +503,7 @@ pub async fn try_append_rebalance_executor_tx_cost(
     position: Option<Pubkey>,
     created_position: Option<Pubkey>,
     rebalance_session_id_override: Option<String>,
+    chain_session_id_override: Option<String>,
     // Extra structured fields for operators (e.g. swap mints + amount_in for swap_exact_in).
     details: Option<serde_json::Value>,
     lp_collected_token_a_raw: Option<u64>,
@@ -405,6 +518,7 @@ pub async fn try_append_rebalance_executor_tx_cost(
         position,
         created_position,
         rebalance_session_id_override,
+        chain_session_id_override,
         details,
         lp_collected_token_a_raw,
         lp_collected_token_b_raw,
@@ -425,6 +539,7 @@ async fn append_rebalance_inner(
     position: Option<Pubkey>,
     created_position: Option<Pubkey>,
     rebalance_session_id_override: Option<String>,
+    chain_session_id_override: Option<String>,
     details: Option<serde_json::Value>,
     lp_collected_token_a_raw: Option<u64>,
     lp_collected_token_b_raw: Option<u64>,
@@ -450,6 +565,8 @@ async fn append_rebalance_inner(
         position_pubkey: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         rebalance_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chain_session_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         details: Option<serde_json::Value>,
         tx_fee_lamports: u64,
@@ -486,6 +603,7 @@ async fn append_rebalance_inner(
         pool_address: pool.map(|p| p.to_string()),
         position_pubkey: effective_position.map(|p| p.to_string()),
         rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
+        chain_session_id: chain_session_id_override.or_else(chain_session_id_from_env),
         details,
         tx_fee_lamports: tx_fee,
         fee_payer_pubkey: fee_payer.to_string(),
@@ -552,6 +670,8 @@ async fn append_cli_swap_inner(
         position_pubkey: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         rebalance_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chain_session_id: Option<String>,
         tx_fee_lamports: u64,
         fee_payer_pubkey: String,
         fee_payer_pre_lamports: Option<u64>,
@@ -574,6 +694,7 @@ async fn append_cli_swap_inner(
         pool_address: pool.to_string(),
         position_pubkey: None,
         rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
+        chain_session_id: chain_session_id_from_env(),
         tx_fee_lamports: tx_fee,
         fee_payer_pubkey: fee_payer.to_string(),
         fee_payer_pre_lamports: pre,
@@ -615,6 +736,8 @@ pub async fn try_append_bot_diagnostic_row(
         position_pubkey: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         rebalance_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chain_session_id: Option<String>,
         rpc_url: String,
         /// Structured free-form fields; stable keys are preferred but not enforced.
         details: serde_json::Value,
@@ -631,6 +754,7 @@ pub async fn try_append_bot_diagnostic_row(
         pool_address: pool.map(|p| p.to_string()),
         position_pubkey: position.map(|p| p.to_string()),
         rebalance_session_id: rebalance_session_id_override.or_else(rebalance_session_id_from_env),
+        chain_session_id: chain_session_id_from_env(),
         rpc_url,
         details,
         accounting_note: "Diagnostic row (no tx); helps debug swap-mix / rebalance incomplete sequences.",
