@@ -28,6 +28,160 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20260930-03 — CI „Format Check” formatuje zamiast sprawdzać (zawsze zielony)
+
+status: open  
+severity: low  
+reported_by: ai  
+first_seen: 2026-09-30  
+fixed_in:  
+keywords: ci, format_check.yml, make fmt, fmt-check, rustfmt, quality gate, TESTING_REGRESSION_PLAN
+
+- **Symptom:** Job „Format Check” w GitHub Actions jest zielony, a `cargo fmt --all --check` lokalnie zgłasza 38 niesformatowanych plików (także zacommitowanych, np. `handlers/strategies.rs`, `server.rs`).
+- **Root cause:** `.github/workflows/format_check.yml` uruchamia `make fmt` (`cargo fmt --all` — zapisuje zmiany w runnerze) zamiast `make fmt-check`.
+- **Fix:** (planowane, T-PR2/T-PR3 w `TESTING_REGRESSION_PLAN.md`) jednorazowy commit `cargo fmt --all`, potem workflow na `cargo fmt --all --check`.
+- **Guards/tests:** job CI z `--check`.
+- **Paths:** `.github/workflows/format_check.yml`, `Makefile`
+
+---
+
+### BUG-20260930-02 — Decimals mintów zgadywane (USDC=6, reszta 9 lub 6) w GL opening import i ledger CHAIN
+
+status: open  
+severity: medium  
+reported_by: ai  
+first_seen: 2026-09-30  
+fixed_in:  
+keywords: decimals, mint_decimals_ledger, wallet_opening_postings_from_effective, ui_amount_to_positive_raw_i128, WALLET GL opening import, CHAIN ledger, whETH, if_same_then_else
+
+- **Symptom:** (latentny, wykryty przez clippy `if_same_then_else`, bez zgłoszenia z UI) dla tokenów innych niż SOL/WSOL i USDC kwoty raw w GL mogą być przeskalowane ×10^k.
+- **Root cause:** `handlers/wallets.rs::wallet_opening_postings_from_effective` — `ui_amount` → raw z decimals `USDC ? 6 : 9` (każdy inny mint = 9). `services/chain_portfolio.rs::mint_decimals_ledger` — `SOL/WSOL ? 9 : 6` (każdy inny mint = 6). Dwie różne, niespójne wartości domyślne; np. whETH ma 8 decimals.
+- **Fix:** brak (2026-09-30 tylko uproszczenie gałęzi bez zmiany zachowania przy porządkach clippy). Kierunek: decimals z konta mint on-chain / z danych lifecycle (`token_mint_*` + decimals z RPC lub cache), wspólny helper zamiast dwóch heurystyk.
+- **Guards/tests:** do dodania: test opening import + ledger CHAIN dla mintu o decimals ≠ 6/9.
+- **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/services/chain_portfolio.rs`
+
+---
+
+### BUG-20260930-01 — Pełny `cargo test --workspace` nie kompilował się; niestabilne testy env w `session_capital`
+
+status: fixed  
+severity: high  
+reported_by: ai  
+first_seen: 2026-09-30  
+fixed_in: local  
+keywords: cargo test, E0063, chain_session_id, OpenPositionRequest, TEST_ENV_LOCK, env var race, flaky, CLMM_REOPEN_USE_CHAIN_PORTFOLIO, tsc, WalletTokenBalance, clippy, TESTING_REGRESSION_PLAN
+
+- **Symptom:** `cargo test --workspace` → `E0063: missing field chain_session_id in OpenPositionRequest` (`position_service.rs` test helper) — **żaden** test workspace się nie uruchamiał. Po naprawie: losowo 1–2 FAIL w `session_capital::tests` (`load_reopen_portfolio_auto_chain_when_id_present_without_env`, `load_reopen_portfolio_prefers_chain_when_both_flags`); przy `--test-threads=1` zielone. Web: `tsc --noEmit` 4 błędy w testach. `make lint` czerwony (clippy 1.94).
+- **Root cause:** (1) nowe pole w modelu bez aktualizacji inicjalizatora testowego; (2) testy równolegle mutują globalne env `CLMM_REOPEN_*` / `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`; (3) fixture TS z polami `amount_raw`/`decimals`, których nie ma w `WalletTokenBalance` (backend też ich nie zwraca); (4) nowe lintery clippy (`collapsible_if` z let-chains itd.).
+- **Fix:** `chain_session_id: None` w helperze; `session_capital::TEST_ENV_LOCK` (`tokio::sync::Mutex`) we wszystkich testach env w `session_capital.rs` i `rebalance.rs`; poprawione fixture'y TS; clippy do zera (`--fix` + ręcznie, bez zmiany zachowania).
+- **Guards/tests:** `cargo test --workspace` 634 pass / 0 fail; `clmm-lp-execution` 5× z rzędu zielone równolegle; `cargo clippy --all-targets --all-features -- -D warnings` = 0; `tsc --noEmit` = 0. Dalsze gate'y (verify/CI) — `doc/TESTING_REGRESSION_PLAN.md`.
+- **Paths:** `crates/api/src/services/position_service.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `web/src/lib/solFirstFunding.test.ts`, `web/src/lib/experimentArm.test.ts`
+
+---
+
+### BUG-20260527-02 — Portfel CHAIN tokeny: phantom minty i błędne USD
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-27  
+fixed_in: local  
+keywords: chain_balance_usd_legs, phantom mint, chain_strategy_wallet_mints, CHAIN GL, pslr_corrected, Portfel CHAIN tokeny
+
+- **Symptom:** Sekcja „Portfel CHAIN — tokeny (poza pulą)” pokazuje minty z ilością „1” bez USD i zawyżoną sumę — niezgodne z opisem portfela strategii.
+- **Root cause:** `chain_balance_usd_legs` brało **wszystkie** minty z GL/PSLR (w tym phantom `1000000000` raw); USD z feed spot zamiast par puli; GL≠PSLR (`pslr_corrected`).
+- **Fix:** `chain_strategy_wallet_mints_from_agg` — tylko minty pul/swap/WSOL z lifecycle; filtrowane `chain_balance_usd_legs` + `chain_wallet_excluded_mint_count`; ceny display z open-start gdy `metrics_trusted`; UI ostrzeżenie.
+- **Guards/tests:** `chain_strategy_wallet_mints_from_open_row`, `filter_strategy_wallet_balances_drops_phantom_mints`.
+- **Paths:** `wallet_session.rs`, `chain_portfolio.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`
+
+---
+
+### BUG-20260527-01 — Portfel łańcucha: miga „Ładowanie…” / treść znika po chwili
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-27  
+fixed_in: local  
+keywords: ChainPortfolioPanel, chain-portfolio, react-query, lpNavUsd, loading flicker, Strategia vs start, keepPreviousData
+
+- **Symptom:** Sekcja „Strategia vs start — portfel łańcucha” pokazuje dane, potem znika i wraca „Ładowanie portfela łańcucha…”.
+- **Root cause:** `useQuery` miał w `queryKey` `lpNavUsd` (dopiero po załadowaniu stream-lineage). Zmiana klucza = nowe zapytanie (~20–50s) z `isLoading` bez danych → UI chowa tabelę/stopkę. Dodatkowo `refetchInterval: 30s` na wolnym endpoincie.
+- **Fix:** Stabilny `queryKey` (anchor + owner); NAV tylko z props w UI; `placeholderData: keepPreviousData`; pierwsze ładowanie `isPending && !data`; wyłączony auto-refetch co 30s.
+- **Guards/tests:** manual: otwórz Przegląd — po pojawieniu się lineage NAV stopka nie znika.
+- **Paths:** `web/src/components/ChainPortfolioPanel.tsx`, `web/src/lib/i18n.tsx`
+
+---
+
+### BUG-20260526-04 — Historia Postgres 1 wiersz vs Logi/rebalances 2; hero strategia vs start pusty (HTybm)
+
+status: fixed  
+severity: medium  
+reported_by: user  
+first_seen: 2026-05-26  
+fixed_in: local  
+keywords: HTybm, chain-history, stream-lineage, remapped anchor, merge_meta_chain, chain-portfolio, 408 timeout, strategy vs start, Logi rebalances
+
+- **Symptom:** Dla głowy rotacji `HTybm…` zakładka **Logi/rebalances** (stream-lineage) ma **2** wiersze (`3dUG…` → `HTybm…`), **Historia (Postgres)** tylko **1**; sekcja **Strategia vs start** — same `—`, tylko NAV głowy z lineage.
+- **Root cause:** (1) `load_chain_history_from_db` po remapie PDA→anchor merge live lineage od **`effective_anchor`** zamiast **`requested`**, więc meta `[3dUG]` nie dostawało ogona `HTybm`. (2) `GET /wallets/chain-portfolio` przekraczał domyślny limit **30s** Tower → HTTP 408 → brak `metrics` w UI.
+- **Fix:** `chain_history_lineage_entry_for_read` — merge od requested gdy remapped; testy prefix merge. Osobny router chain-portfolio z timeout **45s** (`CLMM_CHAIN_PORTFOLIO_REQUEST_TIMEOUT_SECS`); UI fetch 50s; fallback start z lineage gdy CP error **lub** brak `open_start.value_usd`; równoległy read GL+meta.
+- **Guards/tests:** `merge_meta_chain_prefix_extends_when_resolved_longer`, `chain_history_lineage_entry_uses_requested_when_remapped`.
+- **Paths:** `position_chain_history.rs`, `routes.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`, `api.ts`
+
+---
+
+### BUG-20260526-03 — Postgres chain-history 503 po migracjach 015/016 (regresja semicolon-split)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-26  
+fixed_in: local  
+keywords: migrate, Database::migrate, semicolon split, 015_wallet_gl_tx_fee_account, 016_wallet_gl_wallet_account, DATABASE_URL, connect_db_best_effort, chain-history, wallet_gl, Postgres is not connected
+
+- **Symptom:** UI **Historia pozycji (Postgres)** — *Service unavailable: Postgres is not connected*; `/health` OK ale `components.database: false`.
+- **Root cause:** Migracje **015** i **016** miały **`;`** w literałach `notes` (np. `network fees; balance…`, `WALLET:{pubkey}; opening…`). Naiwny runner `Database::migrate` tnie po `;` → błąd SQL (`niezakończona stała łańcuchowa`) → `connect_db_best_effort` zwraca `db: None` (regresja wzorca BUG-20260514-03).
+- **Fix:** Zamiana `;` na `,` w `notes` + komentarze ostrzegawcze w obu plikach (jak 009–013).
+- **Guards/tests:** `cargo run -p clmm-lp-cli -- db init` z `DATABASE_URL`; `cargo test -p clmm-lp-data --test session_gl_integration` (4/4); unikać `;` w stringach migracji dopóki runner jest statement-based.
+- **Follow-up (2026-05-26):** `GET /wallets/chain-portfolio` timeout >30s po naprawie PG — meta bez `compute_position_stream_performance`, reconcile z `timeout` 8s (`CLMM_CHAIN_PORTFOLIO_RECONCILE_TIMEOUT_SECS`).
+- **Paths:** `crates/data/migrations/015_wallet_gl_tx_fee_account.sql`, `crates/data/migrations/016_wallet_gl_wallet_account.sql`, `crates/data/src/repositories/database.rs`, `crates/api/src/server.rs`, `crates/api/src/services/chain_portfolio.rs`
+
+---
+
+### BUG-20260526-02 — Rebalance close bez lifecycle po restarcie API (9vhKY)
+
+status: fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-26  
+fixed_in: local  
+keywords: 9vhKYHA, rebalance, RangeExit, lifecycle, bot_close_position, stale_reconcile, record_execution_success, enrich_open_close, API restart, orphan close, backfill
+
+- **Symptom:** Pozycja `9vhKY…` zniknęła bez ręcznego close; registry ma `close_kind: stale_reconcile`, brak `bot_close_position` w lifecycle; on-chain close tx `4JXtYq29…` istnieje.
+- **Root cause:** O 10:32 UTC bot wykonał **automatyczny rebalance** (OOR RangeExit, strategia `OOR Recenter 2% 60min`). Close tx potwierdzony, ale proces API urwał log tuż po confirm (ostatnie linie: pool fetch w `enrich_open_close_ledger_details`) **zanim** `try_append_rebalance_executor_tx_cost` dopisał lifecycle/registry. Reopen nie wystartował. Po restarcie `stale_reconcile` zsynchronizował tylko registry.
+- **Fix:** (1) `record_execution_success` — lifecycle append **przed** blokującym RPC enrich (tylko merge `event_slot`). (2) `repair_orphan_lifecycle_closes` / `try_backfill_missing_lifecycle_close` — skan registry-closed bez lifecycle, backfill z `getSignaturesForAddress` + append `bot_close_position` + registry close `orca_bot`. Wywoływane z `POST /positions/reconcile-stale`.
+- **Guards/tests:** `merge_event_slot_into_ledger_details_adds_slot`; `lifecycle_has_bot_close_for_position` w `tx_lifecycle.rs`.
+- **Paths:** `rebalance.rs`, `registry_stale_reconcile.rs`, `tx_lifecycle.rs`
+
+---
+
+### BUG-20260526-01 — Phantom ujemne USDC w SESSION GL przy open z globalnego portfela
+
+status: partially fixed  
+severity: high  
+reported_by: user  
+first_seen: 2026-05-26  
+fixed_in: local (F1+F2 CHAIN GL; F4 executor caps; CHAIN-first auto 2026-05-27)  
+keywords: phantom USDC, chain_session_id, CHAIN GL, SESSION GL, open debit, swap-mix, 1f33b923, 9vhKYHA, portfel łańcucha, portfolio_capital_insufficient
+
+- **Symptom:** Panel „Portfel sesji teraz” dla ostatniego `rebalance_session_id` pokazuje USDC **−2.08** i ~$0.09 łącznie, podczas gdy operator oczekuje jednego portfela cyklu od ~$10 start.
+- **Root cause:** `session_mint_deltas_from_lifecycle_json` debetuje pełny `open_amount_*` na `SESSION:{rebalance}` mimo że USDC na open pochodzi z globalnego portfela (brak swap credit w GL); `rebalance_session_id` zmienia się co rotację (~17 UUID na jeden łańcuch).
+- **Fix (partial):** Wdrożono **`chain_session_id`** + konto **`CHAIN:{id}`** (F1+F2), **F4** executor caps, **Faza C2** cap open debit w GL. **2026-05-27:** CHAIN-first domyślnie gdy jest `chain_session_id` — open/swap capowane do inventory CHAIN; `portfolio_capital_insufficient` zamiast cichego global wallet; pierwszy open cyklu bez close nadal bez caps. Pełne domknięcie wymaga **backfill CHAIN GL** + weryfikacji E2E na rebalance (`8ekFnc8…`).
+- **Guards/tests:** `chain_mint_deltas_use_chain_session_id_scope`; `open_debit_capped_when_wallet_has_no_prior_credit`; `load_reopen_portfolio_auto_chain_when_id_present_without_env`; `chain_portfolio_enabled_respects_explicit_off`; `chain_has_funding_lifecycle_rows` (pierwszy open wyjątek).
+- **Paths:** `crates/data/src/wallet_session.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `doc/CHAIN_SESSION_PORTFOLIO.md`
+
+---
+
 ### BUG-20260521-06 — Chain net PnL −100% when current $0 on closed position
 
 status: fixed  
@@ -39,9 +193,9 @@ keywords: net_pnl_usd, current_value_usd, closed position, -1.000%, chain_headli
 
 - **Symptom:** Wynik ekonomiczny łańcucha: baseline ~$9.90, **current $0.000**, net PnL **−$9.905 (−1.000%)** mimo zebranych LP fees (~$0.03) i opłat tx ~$0.0035.
 - **Root cause:** Po zamknięciu PDA `current_value_usd` w totals zostawało 0 (brak on-chain NAV); wzór dawał net PnL ≈ −baseline. `reconcile_stream_pnl_totals_with_nodes` nie traktowało „current=0 przy znanym baseline” jako do naprawy.
-- **Fix:** `lineage_node_end_nav_usd` / `chain_headline_end_nav_usd` — end z `chain_history_end_value_usd` lub estymata zamknięcia (baseline + LP fees + cashflow − tx); `refresh_lineage_totals_from_nodes` podnosi current i przelicza net PnL.
-- **Guards/tests:** `chain_headline_end_nav_uses_close_estimate_when_current_zero`, `refresh_lineage_totals_repairs_zero_current_closed_chain_net_pnl`.
-- **Paths:** `position_stream_lineage.rs`
+- **Fix:** `lineage_node_end_nav_usd` / `chain_headline_end_nav_usd` — end z `chain_history_end_value_usd`, potem **`lifecycle_close_nav_usd`** z `close_amount_*_raw` × event spot (Faza C), na końcu estymata (baseline + LP fees + cashflow − tx); `refresh_lineage_totals_from_nodes` podnosi current i przelicza net PnL.
+- **Guards/tests:** `chain_headline_end_nav_uses_close_estimate_when_current_zero`, `lineage_node_end_nav_prefers_lifecycle_close_nav_over_estimate`, `close_nav_usd_from_raw_amounts_usdc_close_leg`, `refresh_lineage_totals_repairs_zero_current_closed_chain_net_pnl`.
+- **Paths:** `chain_economic_totals.rs`, `position_stream_lineage.rs`, `position_stream_pnl.rs`, `position_chain_history.rs`
 
 ---
 

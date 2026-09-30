@@ -370,7 +370,7 @@ Preflight happens **before close**, so SPL balances may be zero while all value 
 
 **Normatywnie — źródło prawdy sald w UI (faza bieżąca):**
 
-- Salda w dashboardzie (**w tym ekran otwierania pozycji / swap-before-open**) są wyprowadzane z **`GET /wallets/effective-balances`** (i powiązanych ścieżek odświeżania), **nie** z sumy wierszy **Wallet GL journal** (`§5.1`).
+- Salda w dashboardzie (**w tym ekran otwierania pozycji / swap-before-open**) są wyprowadzane z **`GET /wallets/effective-balances`** (i powiązanych ścieżek odświeżania), **nie** z sumy wierszy **Wallet GL journal** (`§5.1`), **chyba że** operator włączy **`CLMM_WALLET_GL_EFFECTIVE_READ=1`** (Faza D4) — wtedy kwoty pochodzą z konta **`WALLET:{owner}`** w Postgres gdy GL jest zaufane (`opening_import_applied`, `needs_reconcile=false`, brak pending convert ops); w przeciwnym razie endpoint zwraca RPC z `effective_balance_source=rpc_fallback`.
 - On-chain przez RPC pozostaje **„bankiem”** do uzgodnienia; **jawne odświeżenie** operatora (`force=true` tam, gdzie przewidziano w API) może **nadpisać** read-model zgodnie z zasadami monotoniczności opisanymi w kodzie i `BUGS.md`.
 
 **keywords:** wallets, effective-balances, wsol, native_sol, operational_sol, wallet_effective_cache
