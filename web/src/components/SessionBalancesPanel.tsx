@@ -10,6 +10,7 @@ import {
   postWalletReconcileSessionGl,
   postWalletSessionBalancesBackfill,
   type WalletSessionBalanceRow,
+  type WalletSessionBalanceUsdLeg,
   type WalletSessionGlReconcileResponse,
   type WalletSessionMetrics,
 } from '@/lib/api'
@@ -85,16 +86,62 @@ function formatSignedUsd(v: string | null | undefined): string {
 
 function humanUsdSource(source: string, locale: 'pl' | 'en'): string {
   if (source === 'open_quote_estimated_value_usd') {
-    return locale === 'pl' ? 'szacunek quote open' : 'open quote estimate'
+    return locale === 'pl' ? 'szacunek bota (open_quote)' : 'bot estimate (open_quote)'
   }
-  if (source === 'open_target_usd') return locale === 'pl' ? 'target open' : 'open target'
+  if (source === 'open_target_usd') {
+    return locale === 'pl' ? 'target kapitału open' : 'open capital target'
+  }
   if (source === 'open_prev_end_value_usd') {
-    return locale === 'pl' ? 'prev end (reopen)' : 'prev end (reopen)'
+    return locale === 'pl' ? 'wartość końca poprzedniej pozycji' : 'previous position end value'
   }
   if (source === 'computed_event_prices') {
-    return locale === 'pl' ? 'event_price × kwoty' : 'event_price × amounts'
+    return locale === 'pl' ? 'event_price × ilości on-chain' : 'event_price × on-chain amounts'
   }
   return source
+}
+
+function formatSignedUsdSmall(v: string | null | undefined): string {
+  if (v == null || v.trim() === '') return '—'
+  const n = parseFloat(v)
+  if (!Number.isFinite(n)) return '—'
+  const abs = `$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+  if (n > 0) return `+${abs}`
+  if (n < 0) return `−${abs}`
+  return abs
+}
+
+function BalanceUsdLegList({
+  legs,
+  label,
+  footnote,
+}: {
+  legs: WalletSessionBalanceUsdLeg[]
+  label: string
+  footnote?: string
+}) {
+  if (!legs.length) return null
+  return (
+    <div>
+      <div className="text-[11px] text-muted-foreground mb-1">{label}</div>
+      <ul className="space-y-1 text-xs tabular-nums">
+        {legs.map((leg) => (
+          <li key={`${label}-${leg.mint}`} className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+            <span>
+              <span className="font-medium">{mintSymbol(leg.mint)}</span>{' '}
+              {formatRawAmount(leg.amount_raw, defaultDecimals(leg.mint))}
+              {leg.price_usd ? (
+                <span className="text-[10px] text-muted-foreground ml-1">
+                  @ ${parseFloat(leg.price_usd).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </span>
+              ) : null}
+            </span>
+            <span className="text-muted-foreground shrink-0">{formatSignedUsdSmall(leg.value_usd)}</span>
+          </li>
+        ))}
+      </ul>
+      {footnote ? <p className="text-[10px] text-muted-foreground leading-snug mt-1.5">{footnote}</p> : null}
+    </div>
+  )
 }
 
 function CompactBalanceList({ rows, label }: { rows: WalletSessionBalanceRow[]; label: string }) {
@@ -114,64 +161,100 @@ function CompactBalanceList({ rows, label }: { rows: WalletSessionBalanceRow[]; 
   )
 }
 
-function SessionMetricsPanel({ metrics }: { metrics: WalletSessionMetrics }) {
+export function SessionMetricsPanel({
+  metrics,
+  mode = 'session',
+}: {
+  metrics: WalletSessionMetrics
+  /** `chain` uses chainPortfolio.* labels (portfel łańcucha, not rebalance SESSION). */
+  mode?: 'session' | 'chain'
+}) {
   const { t, locale } = useI18n()
+  const p = mode === 'chain' ? 'chainPortfolio' : 'sessionBalances'
+  const tk = (suffix: string) => t(`${p}.${suffix}` as Parameters<typeof t>[0])
   const open = metrics.open_start
   const hasPreOpen = open.pre_open_balances.length > 0
   const showUntrusted =
     metrics.metrics_trusted === false || open.mint_resolution === 'incomplete'
+  const currentLegs = metrics.current_balance_usd_legs ?? []
 
   return (
     <div className="rounded-md border border-primary/25 bg-primary/5 px-3 py-3 space-y-3 text-sm">
       <div>
-        <p className="font-medium">{t('sessionBalances.metricsTitle')}</p>
-        <p className="text-xs text-muted-foreground mt-1">{t('sessionBalances.metricsExplain')}</p>
+        <p className="font-medium">{tk('metricsTitle')}</p>
+        <p className="text-xs text-muted-foreground mt-1">{tk('metricsExplain')}</p>
       </div>
       {showUntrusted ? (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-100 flex gap-2">
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden />
-          <span>{t('sessionBalances.metricsUntrusted')}</span>
+          <span>{tk('metricsUntrusted')}</span>
         </div>
       ) : null}
       <div className="grid gap-3 sm:grid-cols-2 text-xs">
         <div className="space-y-2">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {t('sessionBalances.metricsTokensColumn')}
+          </div>
           <div className="text-muted-foreground">
             {t('sessionBalances.metricsOpenAt')}
             {open.ts_utc ? `: ${open.ts_utc}` : ''}
           </div>
           {open.position_pubkey ? (
-            <div className="font-mono text-[10px] text-muted-foreground break-all" title={open.position_pubkey}>
-              {shortenAddress(open.position_pubkey, 6)}
+            <div>
+              <div className="text-[11px] text-muted-foreground">{t('sessionBalances.metricsOpenPda')}</div>
+              <div className="font-mono text-[10px] text-muted-foreground break-all" title={open.position_pubkey}>
+                {shortenAddress(open.position_pubkey, 6)}
+              </div>
             </div>
           ) : null}
-          <CompactBalanceList rows={open.deployed_balances} label={t('sessionBalances.metricsDeployed')} />
+          <CompactBalanceList rows={open.deployed_balances} label={t('sessionBalances.metricsDeployedList')} />
           {hasPreOpen ? (
-            <CompactBalanceList rows={open.pre_open_balances} label={t('sessionBalances.metricsPreOpen')} />
+            <CompactBalanceList rows={open.pre_open_balances} label={tk('metricsPreOpenList')} />
+          ) : null}
+          {currentLegs.length > 0 ? (
+            <div className="border-t border-border/50 pt-2">
+              <BalanceUsdLegList
+                legs={currentLegs}
+                label={tk('metricsCurrentList')}
+                footnote={tk('metricsCurrentUsdLegsFootnote')}
+              />
+            </div>
           ) : null}
         </div>
         <div className="space-y-1.5 tabular-nums">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground mb-1">
+            {t('sessionBalances.metricsUsdColumn')}
+          </div>
           <div className="flex justify-between gap-2">
-            <span className="text-muted-foreground">{t('sessionBalances.metricsDeployed')}</span>
+            <span className="text-muted-foreground" title={t('sessionBalances.metricsDeployedUsdHint')}>
+              {t('sessionBalances.metricsDeployedUsd')}
+            </span>
             <span className="font-medium">{formatUsdMetric(open.value_usd)}</span>
           </div>
           {hasPreOpen ? (
             <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">{t('sessionBalances.metricsPreOpen')}</span>
+              <span className="text-muted-foreground" title={tk('metricsPreOpenUsdHint')}>
+                {tk('metricsPreOpenUsd')}
+              </span>
               <span>{formatUsdMetric(open.pre_open_value_usd)}</span>
             </div>
           ) : null}
           <div className="flex justify-between gap-2 border-t border-border/50 pt-1.5">
-            <span className="text-muted-foreground">{t('sessionBalances.metricsCurrentUsd')}</span>
+            <span className="text-muted-foreground" title={tk('metricsCurrentUsdHint')}>
+              {tk('metricsCurrentUsd')}
+            </span>
             <span className="font-medium">{formatUsdMetric(metrics.current_value_usd)}</span>
           </div>
           {metrics.delta_vs_pre_open_usd != null && metrics.delta_vs_pre_open_usd !== '' ? (
             <div className="flex justify-between gap-2">
-              <span className="text-muted-foreground">{t('sessionBalances.metricsDeltaPreOpen')}</span>
+              <span className="text-muted-foreground" title={tk('metricsDeltaPreOpenHint')}>
+                {tk('metricsDeltaPreOpen')}
+              </span>
               <span>{formatSignedUsd(metrics.delta_vs_pre_open_usd)}</span>
             </div>
           ) : null}
           <div className="text-[10px] text-muted-foreground pt-1">
-            {t('sessionBalances.metricsUsdSource')}: {humanUsdSource(open.value_usd_source, locale)}
+            {t('sessionBalances.metricsDeployedUsdSource')}: {humanUsdSource(open.value_usd_source, locale)}
           </div>
         </div>
       </div>
@@ -179,7 +262,34 @@ function SessionMetricsPanel({ metrics }: { metrics: WalletSessionMetrics }) {
   )
 }
 
-function SourceBanner({ kind }: { kind: SourceKind }) {
+function qualityLabel(t: (k: string) => string, quality: string | undefined): string | null {
+  switch (quality) {
+    case 'exact':
+      return t('sessionBalances.qualityExact')
+    case 'pslr_fallback':
+      return t('sessionBalances.qualityPslrFallback')
+    case 'pslr_corrected':
+      return t('sessionBalances.qualityPslrCorrected')
+    case 'empty':
+      return t('sessionBalances.qualityEmpty')
+    case 'disabled':
+      return t('sessionBalances.qualityDisabled')
+    case 'no_db':
+      return t('sessionBalances.qualityNoDb')
+    default:
+      return quality ? `${t('sessionBalances.qualityUnknown')}: ${quality}` : null
+  }
+}
+
+export function SourceBanner({
+  kind,
+  quality,
+  needsReconcile,
+}: {
+  kind: SourceKind
+  quality?: string
+  needsReconcile?: boolean
+}) {
   const { t } = useI18n()
   const msg = (() => {
     switch (kind) {
@@ -199,24 +309,35 @@ function SourceBanner({ kind }: { kind: SourceKind }) {
         return null
     }
   })()
-  if (!msg) return null
+  const qLabel = qualityLabel(t, quality)
+  if (!msg && !needsReconcile && !qLabel) return null
   const tone =
-    kind === 'gl'
+    kind === 'gl' && !needsReconcile
       ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
-      : kind === 'pslr_fallback' || kind === 'pslr_corrected'
+      : kind === 'pslr_fallback' || kind === 'pslr_corrected' || needsReconcile
         ? 'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-100'
         : 'border-border bg-muted/30 text-muted-foreground'
   const Icon =
-    kind === 'gl' ? CheckCircle2 : kind === 'pslr_fallback' || kind === 'pslr_corrected' ? AlertTriangle : HelpCircle
+    kind === 'gl' && !needsReconcile
+      ? CheckCircle2
+      : kind === 'pslr_fallback' || kind === 'pslr_corrected' || needsReconcile
+        ? AlertTriangle
+        : HelpCircle
   return (
     <div className={`rounded-md border px-3 py-2 text-sm flex gap-2 ${tone}`}>
       <Icon className="h-4 w-4 shrink-0 mt-0.5" aria-hidden />
-      <span>{msg}</span>
+      <div className="space-y-1">
+        {msg ? <span>{msg}</span> : null}
+        {qLabel ? <p className="text-xs opacity-90">{qLabel}</p> : null}
+        {needsReconcile ? (
+          <p className="text-xs font-medium">{t('sessionBalances.needsReconcileBanner')}</p>
+        ) : null}
+      </div>
     </div>
   )
 }
 
-function BalancesTable({
+export function BalancesTable({
   balances,
   showRaw,
 }: {
@@ -282,7 +403,7 @@ function buildCompareRows(data: WalletSessionGlReconcileResponse): CompareRow[] 
   })
 }
 
-function ReconcilePanel({ data }: { data: WalletSessionGlReconcileResponse }) {
+export function ReconcilePanel({ data }: { data: WalletSessionGlReconcileResponse }) {
   const { t } = useI18n()
   const rows = useMemo(() => buildCompareRows(data), [data])
   const hasLastClose = rows.some((r) => r.lastClose != null && r.lastClose !== '')
@@ -442,7 +563,7 @@ export function SessionBalancesPanel({ sessionId, owner, embedded, className }: 
   const inner = (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground leading-relaxed">{t('sessionBalances.whatIsThis')}</p>
-      {q.data ? <SourceBanner kind={sourceKind} /> : null}
+      {q.data ? <SourceBanner kind={sourceKind} quality={q.data.quality} needsReconcile={q.data.needs_reconcile} /> : null}
       {actionRow}
       {backfillM.error ? <ErrorBanner>{(backfillM.error as Error).message}</ErrorBanner> : null}
       {reconcileM.error ? <ErrorBanner>{(reconcileM.error as Error).message}</ErrorBanner> : null}
@@ -459,6 +580,7 @@ export function SessionBalancesPanel({ sessionId, owner, embedded, className }: 
         <p className="text-sm text-muted-foreground">{t('sessionBalances.empty')}</p>
       ) : (
         <>
+          <p className="text-[11px] font-medium text-muted-foreground">{t('sessionBalances.metricsBalancesTableTitle')}</p>
           <div className="flex justify-end">
             <Button type="button" variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowRaw((v) => !v)}>
               {showRaw ? t('sessionBalances.hideRaw') : t('sessionBalances.showRaw')}
