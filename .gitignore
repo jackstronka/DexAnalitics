@@ -16,6 +16,10 @@ target-dev-api/
 /data/
 /data-backup/
 /data-backup-runner/
+# Runtime caches written when a binary runs with a crate dir as cwd (e.g. dexscreener-cache)
+/crates/*/data/
+# Ad-hoc API response dumps in repo root
+/tmp_*.json
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html

@@ -63,7 +63,7 @@ Wzorzec do powielenia: `lineage_shadow_diff_matches_golden_fixture` — zamrożo
 
 | Kandydat | Wejście (fixture) | Oczekiwane wyjście |
 | -------- | ----------------- | ------------------ |
-| stream-pnl / lineage łańcucha | zanonimizowane `tmp_stream_lineage_9vhKY.json`, `tmp_chain_history_9vhKY.json` | headline net PnL, IL, fees, baseline/end NAV |
+| stream-pnl / lineage łańcucha | `crates/api/tests/fixtures/stream_lineage_9vhKY.json`, `chain_history_9vhKY.json` (zrzuty API z 2026-05-26; tylko publiczne dane on-chain) | headline net PnL, IL, fees, baseline/end NAV |
 | `chain_economic_totals` | ten sam łańcuch rotacji | sumy netto łańcucha |
 | Wallet GL posting | zestaw wierszy lifecycle (open / close / collect / rebalance / tx fee) | posty per konto (`SESSION:`, `CHAIN:`, wallet, tx fee) i salda |
 | `session_capital` / rebalance sizing | stan sesji + ceny | wyliczone kwoty open |
