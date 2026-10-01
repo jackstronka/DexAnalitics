@@ -1226,8 +1226,7 @@ pub struct BuildUnsignedTxResponse {
 }
 
 /// Submit signed tx request.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct SubmitSignedTxRequest {
     /// Base64 serialized signed transaction.
     pub signed_tx_base64: String,
@@ -1251,7 +1250,6 @@ pub struct SubmitSignedTxRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_session_id: Option<String>,
 }
-
 
 /// Submit signed tx response.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

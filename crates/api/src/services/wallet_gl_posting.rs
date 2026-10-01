@@ -7,27 +7,27 @@
 //! **Secondary:** wallet journal `deltas[]` when present.
 
 use crate::models::{
-    WalletLedgerEvent, WalletLedgerStatus, WalletSessionBalanceRow, WalletSessionBalanceUsdLeg,
-    WalletSessionGlBackfillReport, WalletSessionGlReconcileGap, WalletSessionGlReconcileResponse,
-    WalletSessionMetrics, WalletSessionOpenStartSnapshot, WalletChainGlBackfillReport,
+    WalletBalanceConfidence, WalletChainGlBackfillReport, WalletEffectiveBalancesResponse,
     WalletGlBalancesResponse, WalletGlOpeningImportReport, WalletGlRpcReconcileGap,
-    WalletGlRpcReconcileResponse, WalletBalanceConfidence, WalletEffectiveBalancesResponse,
+    WalletGlRpcReconcileResponse, WalletLedgerEvent, WalletLedgerStatus, WalletSessionBalanceRow,
+    WalletSessionBalanceUsdLeg, WalletSessionGlBackfillReport, WalletSessionGlReconcileGap,
+    WalletSessionGlReconcileResponse, WalletSessionMetrics, WalletSessionOpenStartSnapshot,
     WalletTokenBalance,
 };
 use clmm_lp_data::repositories::Database;
 use clmm_lp_data::wallet_session::{
-    self, apply_session_mint_postings, apply_session_postings_from_lifecycle_row,
-    format_raw_i128, parse_raw_i128, session_lifecycle_posting_already_applied,
-    SessionBalanceMint, SessionLifecyclePostingOutcome,
+    self, SessionBalanceMint, SessionLifecyclePostingOutcome, apply_session_mint_postings,
+    apply_session_postings_from_lifecycle_row, format_raw_i128, parse_raw_i128,
+    session_lifecycle_posting_already_applied,
 };
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
 pub use clmm_lp_data::wallet_session::{
-    lifecycle_posting_event_id, session_account_code, session_mint_deltas_from_lifecycle_json,
-    wallet_account_code, wallet_journal_posting_event_id, wallet_opening_import_event_id,
-    TX_FEE_ACCOUNT_CODE,
+    TX_FEE_ACCOUNT_CODE, lifecycle_posting_event_id, session_account_code,
+    session_mint_deltas_from_lifecycle_json, wallet_account_code, wallet_journal_posting_event_id,
+    wallet_opening_import_event_id,
 };
 
 pub type LifecyclePostingOutcome = SessionLifecyclePostingOutcome;
@@ -61,10 +61,7 @@ pub fn gl_needs_reconcile_from_read(
     gl_matches_pslr: bool,
     metrics_trusted: Option<bool>,
 ) -> bool {
-    if matches!(
-        gl_read_quality_from_source(source),
-        "disabled" | "no_db"
-    ) {
+    if matches!(gl_read_quality_from_source(source), "disabled" | "no_db") {
         return false;
     }
     if metrics_trusted == Some(false) {
@@ -152,11 +149,7 @@ pub fn session_postings_from_event(ev: &WalletLedgerEvent) -> Option<Vec<(String
         }
         out.push((mint.to_string(), delta));
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 async fn apply_postings_to_session_best_effort(
@@ -170,10 +163,8 @@ async fn apply_postings_to_session_best_effort(
     if postings.is_empty() {
         return;
     }
-    if let Err(e) = apply_session_mint_postings(
-        db, session_id, owner, event_id, kind, postings,
-    )
-    .await
+    if let Err(e) =
+        apply_session_mint_postings(db, session_id, owner, event_id, kind, postings).await
     {
         tracing::warn!(
             error = %e,
@@ -194,7 +185,8 @@ pub async fn apply_session_postings_from_lifecycle_json(
     if !lifecycle_posting_enabled() {
         return;
     }
-    match apply_session_postings_from_lifecycle_row(db, v, lp_collected_a_raw, lp_collected_b_raw).await
+    match apply_session_postings_from_lifecycle_row(db, v, lp_collected_a_raw, lp_collected_b_raw)
+        .await
     {
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "wallet_gl_posting: lifecycle row posting failed"),
@@ -238,34 +230,34 @@ pub async fn backfill_session_postings_from_pslr(
         rows_skipped_no_deltas: 0,
     };
 
-    let session_ids: Vec<String> = if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty())
-    {
-        vec![sid.to_string()]
-    } else {
-        let rows = sqlx::query(
-            r#"
+    let session_ids: Vec<String> =
+        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            vec![sid.to_string()]
+        } else {
+            let rows = sqlx::query(
+                r#"
             SELECT DISTINCT rebalance_session_id AS sid
             FROM position_stream_ledger_rows
             WHERE rebalance_session_id IS NOT NULL AND TRIM(rebalance_session_id) <> ''
             ORDER BY sid
             LIMIT $1
             "#,
-        )
-        .bind(max_sessions as i64)
-        .fetch_all(db.pool())
-        .await?;
-        rows.iter()
-            .filter_map(|r| {
-                let s: String = r.get("sid");
-                let t = s.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            })
-            .collect()
-    };
+            )
+            .bind(max_sessions as i64)
+            .fetch_all(db.pool())
+            .await?;
+            rows.iter()
+                .filter_map(|r| {
+                    let s: String = r.get("sid");
+                    let t = s.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                })
+                .collect()
+        };
 
     for sid in session_ids {
         report.sessions_processed += 1;
@@ -438,8 +430,7 @@ pub async fn reconcile_session_gl(
 /// Principal open/close is posted from lifecycle (`open_amount_*` / `close_amount_*` on-chain).
 /// Journal rows use request caps and a different `event_id` — skip to avoid double SESSION GL.
 pub fn journal_principal_deferred_to_lifecycle(kind: &str) -> bool {
-    lifecycle_posting_enabled()
-        && matches!(kind.trim(), "open_position" | "close_position")
+    lifecycle_posting_enabled() && matches!(kind.trim(), "open_position" | "close_position")
 }
 
 /// Apply SESSION balance updates from a confirmed wallet journal event (best-effort).
@@ -456,7 +447,12 @@ pub async fn apply_session_postings_from_journal(db: &Database, ev: &WalletLedge
     let Some(postings) = session_postings_from_event(ev) else {
         return;
     };
-    if let Some(sig) = ev.signature.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(sig) = ev
+        .signature
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let lifecycle_id = lifecycle_posting_event_id(sig);
         if session_lifecycle_posting_already_applied(db, &lifecycle_id)
             .await
@@ -467,7 +463,12 @@ pub async fn apply_session_postings_from_journal(db: &Database, ev: &WalletLedge
     }
     let owner = ev.owner.as_deref();
     apply_postings_to_session_best_effort(
-        db, &session_id, owner, &ev.event_id, &ev.kind, &postings,
+        db,
+        &session_id,
+        owner,
+        &ev.event_id,
+        &ev.kind,
+        &postings,
     )
     .await;
 }
@@ -489,8 +490,7 @@ pub async fn compute_session_balances_from_pslr(
 }
 
 fn fmt_usd_opt(v: Option<f64>) -> Option<String> {
-    v.filter(|x| x.is_finite())
-        .map(|x| format!("{x:.8}"))
+    v.filter(|x| x.is_finite()).map(|x| format!("{x:.8}"))
 }
 
 fn to_balance_rows(mints: &[wallet_session::SessionBalanceMint]) -> Vec<WalletSessionBalanceRow> {
@@ -558,8 +558,7 @@ pub async fn resolve_session_metrics(
             amount_raw: b.amount_raw.clone(),
         })
         .collect();
-    let current =
-        wallet_session::session_balances_for_metrics(db, session_id, &gl, owner).await?;
+    let current = wallet_session::session_balances_for_metrics(db, session_id, &gl, owner).await?;
     let resolved =
         wallet_session::compute_session_metrics_from_pslr(db, session_id, &current).await?;
     let Some(open) = resolved.open_start else {
@@ -589,8 +588,7 @@ pub async fn read_session_balances_resolved(
             amount_raw: b.amount_raw.clone(),
         })
         .collect();
-    let pslr_mint =
-        wallet_session::compute_session_balances_from_pslr(db, session_id).await?;
+    let pslr_mint = wallet_session::compute_session_balances_from_pslr(db, session_id).await?;
     let pslr: Vec<WalletSessionBalanceRow> = pslr_mint
         .iter()
         .map(|b| WalletSessionBalanceRow {
@@ -679,7 +677,9 @@ pub async fn apply_chain_postings_from_lifecycle_json(
     .await
     {
         Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "wallet_gl_posting: chain lifecycle row posting failed"),
+        Err(e) => {
+            tracing::warn!(error = %e, "wallet_gl_posting: chain lifecycle row posting failed")
+        }
     }
 }
 
@@ -745,7 +745,8 @@ pub async fn backfill_chain_postings_from_pslr(
             let raw: Value = r.get("raw_json");
             let lp_a: Option<i64> = r.try_get("lp_collected_token_a_raw").ok().flatten();
             let lp_b: Option<i64> = r.try_get("lp_collected_token_b_raw").ok().flatten();
-            match wallet_session::apply_chain_postings_from_lifecycle_row(db, &raw, lp_a, lp_b).await
+            match wallet_session::apply_chain_postings_from_lifecycle_row(db, &raw, lp_a, lp_b)
+                .await
             {
                 Ok(wallet_session::ChainLifecyclePostingOutcome::Applied) => {
                     report.postings_applied += 1;
@@ -820,11 +821,8 @@ fn chain_metrics_from_agg(
         wallet_session::compute_chain_open_start_from_lifecycle_rows(agg, chain_session_id);
     match open_start {
         Some(ref snap) => {
-            let resolved = wallet_session::resolve_session_metrics_from_open_start(
-                snap,
-                &current,
-                trusted,
-            );
+            let resolved =
+                wallet_session::resolve_session_metrics_from_open_start(snap, &current, trusted);
             let current_legs =
                 wallet_session::session_balance_usd_legs(&current, &snap.price_by_mint);
             Some(WalletSessionMetrics {
@@ -906,8 +904,7 @@ pub async fn read_chain_balances_resolved(
             amount_raw: b.amount_raw.clone(),
         })
         .collect();
-    let pslr_mint =
-        wallet_session::compute_chain_balances_from_pslr(db, chain_session_id).await?;
+    let pslr_mint = wallet_session::compute_chain_balances_from_pslr(db, chain_session_id).await?;
     let pslr: Vec<WalletSessionBalanceRow> = pslr_mint
         .iter()
         .map(|b| WalletSessionBalanceRow {
@@ -996,11 +993,8 @@ pub async fn resolve_chain_metrics(
         wallet_session::compute_chain_open_start_from_lifecycle_rows(agg, chain_session_id);
     Ok(match open_start {
         Some(ref snap) => {
-            let resolved = wallet_session::resolve_session_metrics_from_open_start(
-                snap,
-                &current,
-                trusted,
-            );
+            let resolved =
+                wallet_session::resolve_session_metrics_from_open_start(snap, &current, trusted);
             let current_legs =
                 wallet_session::session_balance_usd_legs(&current, &snap.price_by_mint);
             Some(WalletSessionMetrics {
@@ -1022,8 +1016,7 @@ pub async fn reconcile_chain_gl(
     owner: Option<&str>,
 ) -> Result<WalletSessionGlReconcileResponse, sqlx::Error> {
     let gl = read_chain_balances(db, chain_session_id, owner).await?;
-    let pslr_mint =
-        wallet_session::compute_chain_balances_from_pslr(db, chain_session_id).await?;
+    let pslr_mint = wallet_session::compute_chain_balances_from_pslr(db, chain_session_id).await?;
     let pslr: Vec<WalletSessionBalanceRow> = pslr_mint
         .iter()
         .map(|b| WalletSessionBalanceRow {
@@ -1143,10 +1136,13 @@ pub fn wallet_postings_from_ledger_event(ev: &WalletLedgerEvent) -> Option<Vec<(
         *sums.entry(mint.to_string()).or_insert(0) = sums.get(mint).copied().unwrap_or(0) + delta;
     }
     if let Some(n) = ev.native_lamports_delta.as_deref().and_then(parse_raw_i128)
-        && n != 0 {
-            let e = sums.entry(wallet_session::WSOL_MINT.to_string()).or_insert(0);
-            *e += n;
-        }
+        && n != 0
+    {
+        let e = sums
+            .entry(wallet_session::WSOL_MINT.to_string())
+            .or_insert(0);
+        *e += n;
+    }
     if sums.is_empty() {
         None
     } else {
@@ -1159,12 +1155,7 @@ pub async fn apply_wallet_postings_from_journal(db: &Database, ev: &WalletLedger
     if !wallet_posting_enabled() {
         return;
     }
-    let Some(owner) = ev
-        .owner
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(owner) = ev.owner.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return;
     };
     let Some(postings) = wallet_postings_from_ledger_event(ev) else {
@@ -1177,14 +1168,8 @@ pub async fn apply_wallet_postings_from_journal(db: &Database, ev: &WalletLedger
     {
         return;
     }
-    if let Err(e) = wallet_session::apply_wallet_mint_postings(
-        db,
-        owner,
-        &event_id,
-        &ev.kind,
-        &postings,
-    )
-    .await
+    if let Err(e) =
+        wallet_session::apply_wallet_mint_postings(db, owner, &event_id, &ev.kind, &postings).await
     {
         tracing::warn!(
             error = %e,
@@ -1422,11 +1407,7 @@ fn raw_i128_to_ui_amount(raw: i128, decimals: u8) -> String {
     } else {
         format!("{whole}.{trimmed}")
     };
-    if neg {
-        format!("-{ui}")
-    } else {
-        ui
-    }
+    if neg { format!("-{ui}") } else { ui }
 }
 
 /// True when WALLET GL is safe to use as effective-balance source (flag must already be on).
@@ -1450,11 +1431,7 @@ pub fn apply_wallet_gl_effective_read_overlay(
     rpc: WalletEffectiveBalancesResponse,
     gl: Option<&WalletGlBalancesResponse>,
 ) -> WalletEffectiveBalancesResponse {
-    apply_wallet_gl_effective_read_overlay_with_enabled(
-        rpc,
-        gl,
-        wallet_effective_read_enabled(),
-    )
+    apply_wallet_gl_effective_read_overlay_with_enabled(rpc, gl, wallet_effective_read_enabled())
 }
 
 #[must_use]
@@ -1551,7 +1528,10 @@ mod tests {
     use crate::models::WalletLedgerDelta;
     use clmm_lp_data::wallet_session::{USDC_MINT, WSOL_MINT};
 
-    fn sample_event(deltas: Vec<WalletLedgerDelta>, status: WalletLedgerStatus) -> WalletLedgerEvent {
+    fn sample_event(
+        deltas: Vec<WalletLedgerDelta>,
+        status: WalletLedgerStatus,
+    ) -> WalletLedgerEvent {
         WalletLedgerEvent {
             schema_version: 1,
             ts_utc: "2026-01-01T00:00:00Z".to_string(),
@@ -1585,7 +1565,11 @@ mod tests {
             false,
             None
         ));
-        assert!(!gl_needs_reconcile_from_read("gl_session_shadow", true, Some(true)));
+        assert!(!gl_needs_reconcile_from_read(
+            "gl_session_shadow",
+            true,
+            Some(true)
+        ));
     }
 
     #[test]
@@ -1719,7 +1703,10 @@ mod tests {
         gl.opening_import_applied = false;
         let rpc = sample_rpc_effective(owner);
         let out = apply_wallet_gl_effective_read_overlay_with_enabled(rpc.clone(), Some(&gl), true);
-        assert_eq!(out.effective_balance_source.as_deref(), Some("rpc_fallback"));
+        assert_eq!(
+            out.effective_balance_source.as_deref(),
+            Some("rpc_fallback")
+        );
         assert_eq!(out.lamports, rpc.lamports);
     }
 
@@ -1787,7 +1774,11 @@ mod tests {
         assert_eq!(sig, "sig-close-1");
         assert_eq!(ev, "bot_close_position");
         assert_eq!(posts.len(), 3);
-        assert!(posts.iter().any(|(m, d)| m == WSOL_MINT && *d == 1_000_000_000));
+        assert!(
+            posts
+                .iter()
+                .any(|(m, d)| m == WSOL_MINT && *d == 1_000_000_000)
+        );
         assert!(posts.iter().any(|(m, d)| m == USDC_MINT && *d == 2_000_000));
         assert!(posts.iter().any(|(m, d)| m == WSOL_MINT && *d == 50_000));
     }
@@ -1803,8 +1794,9 @@ mod tests {
                 "token_mint_b": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             }
         });
-        let posts =
-            session_mint_deltas_from_lifecycle_json(&v, Some(10), Some(20)).expect("posts").3;
+        let posts = session_mint_deltas_from_lifecycle_json(&v, Some(10), Some(20))
+            .expect("posts")
+            .3;
         assert_eq!(posts.len(), 2);
         assert_eq!(posts[0].1, 10);
         assert_eq!(posts[1].1, 20);
@@ -1812,10 +1804,7 @@ mod tests {
 
     #[test]
     fn lifecycle_posting_event_id_prefix() {
-        assert_eq!(
-            lifecycle_posting_event_id("abc123"),
-            "lifecycle:abc123"
-        );
+        assert_eq!(lifecycle_posting_event_id("abc123"), "lifecycle:abc123");
     }
 
     #[test]
@@ -1841,10 +1830,14 @@ mod tests {
                 "amount_b_cap": 4_865_859u64
             }
         });
-        let posts =
-            session_mint_deltas_from_lifecycle_json(&v, None, None).expect("posts").3;
+        let posts = session_mint_deltas_from_lifecycle_json(&v, None, None)
+            .expect("posts")
+            .3;
         assert_eq!(posts.len(), 2);
-        assert_eq!(posts.iter().find(|(m, _)| m == WSOL_MINT).map(|(_, d)| *d), Some(-60_435_307));
+        assert_eq!(
+            posts.iter().find(|(m, _)| m == WSOL_MINT).map(|(_, d)| *d),
+            Some(-60_435_307)
+        );
         assert_eq!(
             posts.iter().find(|(m, _)| m == USDC_MINT).map(|(_, d)| *d),
             Some(-4_720_942)

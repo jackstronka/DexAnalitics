@@ -2,9 +2,10 @@
 
 use crate::error::ApiError;
 use crate::models::{
-    MessageResponse, WalletLedgerEvent, WalletLedgerStatus, CLOSE_ALL_DEFAULT_SLIPPAGE_BPS,
-    CLOSE_ALL_MAX_SLIPPAGE_BPS,
+    CLOSE_ALL_DEFAULT_SLIPPAGE_BPS, CLOSE_ALL_MAX_SLIPPAGE_BPS, MessageResponse, WalletLedgerEvent,
+    WalletLedgerStatus,
 };
+use crate::services::PositionService;
 use crate::services::chain_portfolio;
 use crate::services::position_chain_history::spawn_chain_history_materialize_background;
 use crate::services::position_executor::build_ephemeral_position_executor;
@@ -13,7 +14,6 @@ use crate::services::strategy_service::remove_position_address_from_all_strategi
 use crate::services::wallet_ledger;
 use crate::services::wallet_ledger::decode_status;
 use crate::services::wallet_ledger_lifecycle::journal_mirror_from_lifecycle_signature;
-use crate::services::PositionService;
 use crate::state::{AppState, PositionUpdate};
 use clmm_lp_execution::prelude::Wallet;
 use solana_sdk::pubkey::Pubkey;
@@ -145,7 +145,8 @@ async fn complete_manual_close_success(
     if !already_closed {
         spawn_chain_history_materialize_background(state, pos_pda.to_string(), "close_position");
     }
-    if let Err(e) = chain_portfolio::mark_chain_session_closed_after_manual_close(state, pos_pda).await
+    if let Err(e) =
+        chain_portfolio::mark_chain_session_closed_after_manual_close(state, pos_pda).await
     {
         warn!(
             position = %pos_pda,
@@ -155,7 +156,10 @@ async fn complete_manual_close_success(
     }
 }
 
-async fn position_snapshot(state: &AppState, pubkey: &Pubkey) -> Result<clmm_lp_execution::monitor::MonitoredPosition, ApiError> {
+async fn position_snapshot(
+    state: &AppState,
+    pubkey: &Pubkey,
+) -> Result<clmm_lp_execution::monitor::MonitoredPosition, ApiError> {
     let positions = state.monitor.get_positions().await;
     if let Some(p) = positions.iter().find(|p| p.address == *pubkey) {
         return Ok(p.clone());
@@ -168,11 +172,12 @@ fn apply_close_confirmed_ledger_meta(
     signature: Option<&str>,
 ) -> WalletLedgerEvent {
     if let Some(sig) = signature.map(str::trim).filter(|s| !s.is_empty())
-        && let Some((deltas, status)) = journal_mirror_from_lifecycle_signature(sig) {
-            ev.deltas = deltas;
-            ev.decode_status = Some(status.to_string());
-            return ev;
-        }
+        && let Some((deltas, status)) = journal_mirror_from_lifecycle_signature(sig)
+    {
+        ev.deltas = deltas;
+        ev.decode_status = Some(status.to_string());
+        return ev;
+    }
     ev.decode_status = Some(decode_status::DEFERRED_LIFECYCLE.to_string());
     ev
 }
@@ -237,7 +242,11 @@ pub async fn execute_manual_close_with_wallet(
     svc.set_executor(executor);
 
     let op = match svc
-        .close_position(&pos_pda, cost_session_id.clone(), ledger_ctx.skip_pre_collect)
+        .close_position(
+            &pos_pda,
+            cost_session_id.clone(),
+            ledger_ctx.skip_pre_collect,
+        )
         .await
     {
         Ok(o) => o,
@@ -655,8 +664,7 @@ pub async fn finalize_manual_close_send_first(
                 if flight.ledger_ctx.slippage_6018_retry_done || !is_close_slippage_6018(&msg) {
                     return Err(e);
                 }
-                let bumped =
-                    bump_close_slippage_bps_for_6018_retry(flight.ledger_ctx.slippage_bps);
+                let bumped = bump_close_slippage_bps_for_6018_retry(flight.ledger_ctx.slippage_bps);
                 if bumped <= flight.ledger_ctx.slippage_bps {
                     return Err(e);
                 }
@@ -743,4 +751,3 @@ mod tests {
         assert!(!is_close_slippage_6018("insufficient funds"));
     }
 }
-

@@ -32,11 +32,11 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 use tokio::time::{Duration, sleep, timeout};
 
+use crate::services::chain_economic_totals::maybe_compute_totals_from_nodes;
 pub use crate::services::chain_economic_totals::{
     chain_headline_end_nav_usd, lineage_node_end_nav_usd, reconcile_stream_pnl_totals_with_nodes,
     refresh_lineage_totals_from_nodes,
 };
-use crate::services::chain_economic_totals::maybe_compute_totals_from_nodes;
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const WHETH_MINT: &str = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs";
@@ -467,10 +467,10 @@ pub async fn apply_open_start_usd_from_lifecycle_snapshots_for_chain_history(
         if chosen.is_none()
             && let Some(usd) =
                 open_start_usd_from_event_spot_open_row(state, rows.as_ref(), node).await
-                && usd > Decimal::ZERO
-            {
-                chosen = Some((usd, "open_event_spot_amounts"));
-            }
+            && usd > Decimal::ZERO
+        {
+            chosen = Some((usd, "open_event_spot_amounts"));
+        }
 
         let Some((usd, quality)) = chosen else {
             continue;
@@ -2807,7 +2807,8 @@ pub(crate) fn apply_tx_fees_usd_from_lamports_on_nodes(
         }
         node.tx_fees_usd = tx_fees_usd_from_lamports(node.tx_fee_lamports, sol_usd_px);
         let end_nav = crate::services::chain_economic_totals::lineage_node_end_nav_usd(node);
-        node.net_pnl_usd = end_nav + node.realized_cashflow_usd - node.baseline_value_usd - node.tx_fees_usd;
+        node.net_pnl_usd =
+            end_nav + node.realized_cashflow_usd - node.baseline_value_usd - node.tx_fees_usd;
         if !node.baseline_value_usd.is_zero() {
             node.net_pnl_pct = node.net_pnl_usd / node.baseline_value_usd;
         }
@@ -3132,12 +3133,12 @@ pub(crate) async fn node_metrics(
     // (or only in `raw_json`), recompute open NAV so lineage baseline matches materialized `start_value_usd`.
     if baseline_value <= Decimal::ZERO
         && let Some(ref br) = baseline
-            && let Some(nav) = open_nav_usd_from_valuation_snapshot_row(state, br).await
-                && nav > Decimal::ZERO
-            {
-                baseline_value = nav;
-                baseline_note = Some("baseline_nav_from_snapshot_amounts_prices".to_string());
-            }
+        && let Some(nav) = open_nav_usd_from_valuation_snapshot_row(state, br).await
+        && nav > Decimal::ZERO
+    {
+        baseline_value = nav;
+        baseline_note = Some("baseline_nav_from_snapshot_amounts_prices".to_string());
+    }
 
     // DB path guardrail: baseline snapshots derived from open deltas may miss one leg (WSOL),
     // which can massively understate "start value". Correct from open `amount_*_cap` when available.
@@ -3240,20 +3241,21 @@ pub(crate) async fn node_metrics(
     let open_usd_solo =
         fetch_ledger_open_quote_usd_by_positions(db, &[position_pubkey.trim().to_string()]).await?;
     if let Some(open_usd) = open_usd_solo.get(position_pubkey.trim()).copied()
-        && open_usd > baseline_value {
-            let vs_mark = current_value > Decimal::ZERO
-                && baseline_value < current_value * Decimal::new(60, 2);
-            let zero_current_open = current_value.is_zero() && open_usd > baseline_value;
-            let open_notional_mismatch = baseline_value < open_usd * Decimal::new(85, 2);
-            if baseline_value.is_zero() || vs_mark || zero_current_open || open_notional_mismatch {
-                baseline_value = open_usd;
-                baseline_note = Some(
-                    baseline_note
-                        .map(|n| format!("{n} baseline_from_ledger_open_quote_usd."))
-                        .unwrap_or_else(|| "baseline_from_ledger_open_quote_usd.".to_string()),
-                );
-            }
+        && open_usd > baseline_value
+    {
+        let vs_mark =
+            current_value > Decimal::ZERO && baseline_value < current_value * Decimal::new(60, 2);
+        let zero_current_open = current_value.is_zero() && open_usd > baseline_value;
+        let open_notional_mismatch = baseline_value < open_usd * Decimal::new(85, 2);
+        if baseline_value.is_zero() || vs_mark || zero_current_open || open_notional_mismatch {
+            baseline_value = open_usd;
+            baseline_note = Some(
+                baseline_note
+                    .map(|n| format!("{n} baseline_from_ledger_open_quote_usd."))
+                    .unwrap_or_else(|| "baseline_from_ledger_open_quote_usd.".to_string()),
+            );
         }
+    }
 
     let realized_cashflow_usd = if let (Some(a), Some(b)) = (mint_a.clone(), mint_b.clone()) {
         let mut mints: BTreeSet<String> = BTreeSet::new();
@@ -3368,25 +3370,23 @@ pub(crate) async fn node_metrics(
     let mut current_value_usd_live_note = String::new();
     if closed_ts.is_none()
         && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(position_pubkey)
-            && let Ok(Ok(pos)) = timeout(
-                Duration::from_secs(2),
-                monitored_position_from_chain(state.provider.clone(), &pk),
-            )
-            .await
-            {
-                let prices =
-                    fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
-                        .await;
-                if let Ok(v) =
-                    compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
-                    && v.value_usd > Decimal::ZERO
-                {
-                    if (v.value_usd - current_value).abs() > Decimal::new(5, 2) {
-                        current_value_usd_live_note.push_str(" current_value_usd_from_live_rpc.");
-                    }
-                    current_value = v.value_usd;
-                }
+        && let Ok(Ok(pos)) = timeout(
+            Duration::from_secs(2),
+            monitored_position_from_chain(state.provider.clone(), &pk),
+        )
+        .await
+    {
+        let prices =
+            fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
+        if let Ok(v) = compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
+            && v.value_usd > Decimal::ZERO
+        {
+            if (v.value_usd - current_value).abs() > Decimal::new(5, 2) {
+                current_value_usd_live_note.push_str(" current_value_usd_from_live_rpc.");
             }
+            current_value = v.value_usd;
+        }
+    }
 
     let net_pnl_usd = current_value + realized_cashflow_usd - baseline_value - tx_fees_usd;
     let net_pnl_pct = if baseline_value.is_zero() {
@@ -4044,13 +4044,15 @@ fn hydrate_lineage_open_close_ts_and_mints_from_lifecycle(
     for n in nodes.iter_mut() {
         let addr = n.position_address.clone();
         if n.opened_ts_utc.is_none()
-            && let Some(ts) = first_open.get(&addr) {
-                n.opened_ts_utc = Some(ts.to_rfc3339());
-            }
+            && let Some(ts) = first_open.get(&addr)
+        {
+            n.opened_ts_utc = Some(ts.to_rfc3339());
+        }
         if n.closed_ts_utc.is_none()
-            && let Some(ts) = last_close.get(&addr) {
-                n.closed_ts_utc = Some(ts.to_rfc3339());
-            }
+            && let Some(ts) = last_close.get(&addr)
+        {
+            n.closed_ts_utc = Some(ts.to_rfc3339());
+        }
         if let Some((ma, mb)) = mints.get(&addr) {
             if n.token_mint_a.is_none() {
                 n.token_mint_a = ma.clone();
@@ -4178,9 +4180,9 @@ pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
         .collect();
 
     let mut tx_fees_from_lifecycle: HashMap<String, u64> = HashMap::new();
-    let needs_tx_fee_lifecycle = chain.iter().any(|p| {
-        fee_lamports_by_pos.get(p).copied().unwrap_or(0) == 0
-    });
+    let needs_tx_fee_lifecycle = chain
+        .iter()
+        .any(|p| fee_lamports_by_pos.get(p).copied().unwrap_or(0) == 0);
     if needs_tx_fee_lifecycle {
         let lifecycle_rows = lifecycle_rows_cached_best_effort().await;
         for p in chain {
@@ -4457,24 +4459,22 @@ pub(crate) async fn node_metrics_fast_for_chain(
             current.and_then(|m| closed_ts_for_snapshot_kind(m.kind.as_deref(), m.ts_utc));
         if closed_ts_pre.is_none()
             && let Ok(pk) = solana_sdk::pubkey::Pubkey::from_str(p.trim())
-                && let Ok(Ok(pos)) = timeout(
-                    Duration::from_secs(2),
-                    monitored_position_from_chain(state.provider.clone(), &pk),
-                )
-                .await
-                {
-                    let prices = fetch_prices_for_positions(
-                        state.provider.clone(),
-                        std::slice::from_ref(&pos),
-                    )
+            && let Ok(Ok(pos)) = timeout(
+                Duration::from_secs(2),
+                monitored_position_from_chain(state.provider.clone(), &pk),
+            )
+            .await
+        {
+            let prices =
+                fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos))
                     .await;
-                    if let Ok(v) =
-                        compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
-                        && v.value_usd > Decimal::ZERO
-                    {
-                        current_value = v.value_usd;
-                    }
-                }
+            if let Ok(v) =
+                compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await
+                && v.value_usd > Decimal::ZERO
+            {
+                current_value = v.value_usd;
+            }
+        }
         let net_pnl_usd = current_value - baseline_value - tx_fees_usd;
         let net_pnl_pct = if baseline_value.is_zero() {
             Decimal::ZERO
@@ -5015,7 +5015,11 @@ pub(crate) fn prefer_lifecycle_lineage_if_extends_db_prefix(
     lifecycle: Vec<String>,
 ) -> Vec<String> {
     if from_db.is_empty() {
-        return if lifecycle.is_empty() { from_db } else { lifecycle };
+        return if lifecycle.is_empty() {
+            from_db
+        } else {
+            lifecycle
+        };
     }
     if lifecycle.len() > from_db.len()
         && from_db
@@ -5544,21 +5548,23 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
                 (d.get("open_amount_a_raw")
                     .and_then(parse_u64_from_json)
                     .is_some()
-                    && d
-                        .get("open_amount_b_raw")
+                    && d.get("open_amount_b_raw")
                         .and_then(parse_u64_from_json)
                         .is_some())
-                    || (d.get("open_quote_token_max_a")
+                    || (d
+                        .get("open_quote_token_max_a")
                         .and_then(parse_u64_from_json)
                         .is_some()
-                        && d
-                            .get("open_quote_token_max_b")
+                        && d.get("open_quote_token_max_b")
                             .and_then(parse_u64_from_json)
                             .is_some())
-                    || (d.get("amount_a_cap")
+                    || (d
+                        .get("amount_a_cap")
                         .and_then(parse_u64_from_json)
                         .is_some()
-                        && d.get("amount_b_cap").and_then(parse_u64_from_json).is_some())
+                        && d.get("amount_b_cap")
+                            .and_then(parse_u64_from_json)
+                            .is_some())
             }) {
                 let a_pk = solana_sdk::pubkey::Pubkey::from_str(mint_a.trim()).ok();
                 let b_pk = solana_sdk::pubkey::Pubkey::from_str(mint_b.trim()).ok();
@@ -5864,10 +5870,8 @@ mod tests {
             pool_mint_b: Some(usdc.clone()),
             ..Default::default()
         };
-        fee.by_mint_ui
-            .insert(wsol.clone(), Decimal::new(11434, 9));
-        fee.by_mint_ui
-            .insert(usdc.clone(), Decimal::new(145, 6));
+        fee.by_mint_ui.insert(wsol.clone(), Decimal::new(11434, 9));
+        fee.by_mint_ui.insert(usdc.clone(), Decimal::new(145, 6));
         fill_missing_lineage_mints_from_fee_metric(&mut mint_a, &mut mint_b, &fee);
         assert_eq!(mint_a.as_ref(), Some(&wsol));
         assert_eq!(mint_b.as_ref(), Some(&usdc));
@@ -6058,7 +6062,7 @@ mod tests {
             chain_history_tick_upper_open: None,
             chain_history_event_spot_token_a_usd_open: None,
             chain_history_event_spot_token_a_usd_close: None,
-        lifecycle_close_nav_usd: None,
+            lifecycle_close_nav_usd: None,
         }
     }
 
@@ -6850,10 +6854,10 @@ mod tests {
         )];
         nodes[0].tx_fee_lamports = 25_000;
         nodes[0].tx_fees_usd = Decimal::ZERO;
-        nodes[0].net_pnl_usd = Decimal::from_str("9.99").unwrap() - Decimal::from_str("10").unwrap();
+        nodes[0].net_pnl_usd =
+            Decimal::from_str("9.99").unwrap() - Decimal::from_str("10").unwrap();
         apply_tx_fees_usd_from_lamports_on_nodes(&mut nodes, 100.0);
         assert!(nodes[0].tx_fees_usd > Decimal::ZERO);
         assert!(nodes[0].net_pnl_usd < Decimal::from_str("-0.01").unwrap());
     }
-
 }

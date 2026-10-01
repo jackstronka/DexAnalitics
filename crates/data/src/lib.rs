@@ -11,13 +11,13 @@ pub mod pool_state;
 pub mod providers;
 /// Database repositories.
 pub mod repositories;
-/// Logical SESSION portfolio (lifecycle deltas, GL read, executor caps).
-pub mod wallet_session;
 /// In-memory data repository for simulation.
 pub mod repository;
 pub mod swaps;
 /// Time series data structures.
 pub mod timeseries;
+/// Logical SESSION portfolio (lifecycle deltas, GL read, executor caps).
+pub mod wallet_session;
 
 use anyhow::Result;
 use async_trait::async_trait;

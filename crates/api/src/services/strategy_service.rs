@@ -1046,7 +1046,9 @@ pub async fn disable_automation_for_positions(
                     .entry("executor_disabled_position_addresses".to_string())
                     .or_insert_with(|| serde_json::json!([]));
                 let list = arr_val.as_array_mut().ok_or_else(|| {
-                    ApiError::bad_request("executor_disabled_position_addresses must be a JSON array")
+                    ApiError::bad_request(
+                        "executor_disabled_position_addresses must be a JSON array",
+                    )
                 })?;
                 if !list.iter().any(|v| v.as_str() == Some(pda)) {
                     list.push(serde_json::Value::String(pda.to_string()));

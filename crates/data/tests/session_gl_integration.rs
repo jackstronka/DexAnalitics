@@ -5,13 +5,12 @@
 
 use clmm_lp_data::repositories::Database;
 use clmm_lp_data::wallet_session::{
+    SessionCapsSource, SessionLifecyclePostingOutcome, USDC_MINT, WSOL_MINT,
     apply_chain_postings_from_lifecycle_row, apply_session_postings_from_lifecycle_row,
     apply_wallet_mint_postings, apply_wallet_opening_import, compute_chain_balances_from_pslr,
-    compute_session_balances_from_pslr, gl_pslr_match, lifecycle_posting_event_id,
-    parse_raw_i128, read_chain_balances, read_session_balances, read_wallet_balances,
-    resolve_session_mint_caps, session_lifecycle_posting_already_applied,
-    wallet_opening_import_already_applied, SessionCapsSource, SessionLifecyclePostingOutcome,
-    USDC_MINT, WSOL_MINT,
+    compute_session_balances_from_pslr, gl_pslr_match, lifecycle_posting_event_id, parse_raw_i128,
+    read_chain_balances, read_session_balances, read_wallet_balances, resolve_session_mint_caps,
+    session_lifecycle_posting_already_applied, wallet_opening_import_already_applied,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -136,11 +135,11 @@ fn close_lifecycle_json_chain(
     })
 }
 
-fn balance_map(rows: &[clmm_lp_data::wallet_session::SessionBalanceMint]) -> std::collections::BTreeMap<String, i128> {
+fn balance_map(
+    rows: &[clmm_lp_data::wallet_session::SessionBalanceMint],
+) -> std::collections::BTreeMap<String, i128> {
     rows.iter()
-        .filter_map(|b| {
-            parse_raw_i128(&b.amount_raw).map(|v| (b.mint.clone(), v))
-        })
+        .filter_map(|b| parse_raw_i128(&b.amount_raw).map(|v| (b.mint.clone(), v)))
         .collect()
 }
 
@@ -160,10 +159,9 @@ async fn session_gl_lifecycle_posting_matches_pslr_and_caps() {
         .await
         .expect("insert pslr");
 
-    let outcome =
-        apply_session_postings_from_lifecycle_row(&db, &v, Some(50_000), Some(0))
-            .await
-            .expect("post lifecycle");
+    let outcome = apply_session_postings_from_lifecycle_row(&db, &v, Some(50_000), Some(0))
+        .await
+        .expect("post lifecycle");
     assert_eq!(outcome, SessionLifecyclePostingOutcome::Applied);
 
     let event_id = lifecycle_posting_event_id(&signature);
@@ -173,10 +171,9 @@ async fn session_gl_lifecycle_posting_matches_pslr_and_caps() {
             .expect("idempotency check")
     );
 
-    let again =
-        apply_session_postings_from_lifecycle_row(&db, &v, Some(50_000), Some(0))
-            .await
-            .expect("post again");
+    let again = apply_session_postings_from_lifecycle_row(&db, &v, Some(50_000), Some(0))
+        .await
+        .expect("post again");
     assert_eq!(again, SessionLifecyclePostingOutcome::SkippedAlready);
 
     let gl = read_session_balances(&db, &session_id, Some(owner))
@@ -234,10 +231,7 @@ async fn session_gl_collect_row_accumulates() {
         }
     });
 
-    for (sig, v, lp_a, lp_b) in [
-        (&sig1, &v1, 10_i64, 20_i64),
-        (&sig2, &v2, 5_i64, 7_i64),
-    ] {
+    for (sig, v, lp_a, lp_b) in [(&sig1, &v1, 10_i64, 20_i64), (&sig2, &v2, 5_i64, 7_i64)] {
         insert_pslr_row(&db, &session_id, sig, v, lp_a, lp_b)
             .await
             .expect("insert pslr");

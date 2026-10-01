@@ -7,10 +7,10 @@
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::prelude::RpcProvider;
 use solana_sdk::pubkey::Pubkey;
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]

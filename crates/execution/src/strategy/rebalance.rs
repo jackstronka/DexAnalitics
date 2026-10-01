@@ -983,11 +983,7 @@ impl RebalanceExecutor {
             })
         });
         let owner = self.wallet_pubkey().map(|p| p.to_string());
-        let db = self
-            .session_db
-            .lock()
-            .ok()
-            .and_then(|g| g.clone());
+        let db = self.session_db.lock().ok().and_then(|g| g.clone());
         super::session_capital::load_reopen_portfolio_caps(
             db.as_deref(),
             ledger_session_id,
@@ -2777,11 +2773,7 @@ impl RebalanceExecutor {
         // 1) Prefer WSOL -> native SOL (partial unwrap) when WSOL exists.
         let wsol = Self::wsol_mint_pk();
         let mut wsol_raw = orca.read_wsol_balance_raw(&owner).await.unwrap_or(0);
-        wsol_raw = super::session_capital::cap_rpc_with_portfolio(
-            wsol_raw,
-            &wsol,
-            portfolio_caps,
-        );
+        wsol_raw = super::session_capital::cap_rpc_with_portfolio(wsol_raw, &wsol, portfolio_caps);
         if wsol_raw > 0 {
             let want_unwrap = deficit.min(wsol_raw).max(1);
             let sig = orca
@@ -2858,11 +2850,7 @@ impl RebalanceExecutor {
 
         // Unwrap as much WSOL as we now have, but only if it moves the needle.
         wsol_raw = orca.read_wsol_balance_raw(&owner).await.unwrap_or(0);
-        wsol_raw = super::session_capital::cap_rpc_with_portfolio(
-            wsol_raw,
-            &wsol,
-            portfolio_caps,
-        );
+        wsol_raw = super::session_capital::cap_rpc_with_portfolio(wsol_raw, &wsol, portfolio_caps);
         if wsol_raw == 0 {
             anyhow::bail!("operational SOL topup: swap produced 0 WSOL; cannot proceed");
         }
@@ -2920,10 +2908,11 @@ impl RebalanceExecutor {
         let rebalance_session_id = Uuid::new_v4().to_string();
         result.rebalance_session_id = Some(rebalance_session_id.clone());
 
-        let chain_session_id = clmm_lp_protocols::ledger::tx_lifecycle::resolve_chain_session_id_for_position(
-            &params.position.to_string(),
-        )
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let chain_session_id =
+            clmm_lp_protocols::ledger::tx_lifecycle::resolve_chain_session_id_for_position(
+                &params.position.to_string(),
+            )
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         self.set_active_chain_session_id(Some(chain_session_id));
         struct ClearChainSessionId<'a>(&'a RebalanceExecutor);
         impl Drop for ClearChainSessionId<'_> {
@@ -3714,9 +3703,11 @@ impl RebalanceExecutor {
     ) -> anyhow::Result<clmm_lp_protocols::orca::executor::ExecutionResult> {
         if self.is_dry_run() {
             info!("Dry run: would bulk-close position (submit only)");
-            return Ok(clmm_lp_protocols::orca::executor::ExecutionResult::submitted(
-                solana_sdk::signature::Signature::default(),
-            ));
+            return Ok(
+                clmm_lp_protocols::orca::executor::ExecutionResult::submitted(
+                    solana_sdk::signature::Signature::default(),
+                ),
+            );
         }
         let (close_amount_a_raw, close_amount_b_raw) = self
             .read_close_amounts_best_effort(position, pool)
@@ -4312,7 +4303,8 @@ impl RebalanceExecutor {
             if let Some(fee_payer) = fee_payer {
                 // Persist lifecycle before optional RPC enrichment so a crash/restart after
                 // on-chain confirm cannot leave a confirmed close/open without a ledger row.
-                let ledger_for_append = merge_event_slot_into_ledger_details(result, ledger_details.clone());
+                let ledger_for_append =
+                    merge_event_slot_into_ledger_details(result, ledger_details.clone());
 
                 clmm_lp_protocols::ledger::tx_lifecycle::try_append_rebalance_executor_tx_cost(
                     self.provider.as_ref(),
@@ -4465,16 +4457,17 @@ async fn enrich_open_close_ledger_details(
             WhirlpoolReader::new(provider.clone()).get_pool_state(&pool_pk.to_string()),
         )
         .await
-            && let Some(obj) = base.as_object_mut() {
-                obj.insert(
-                    "token_mint_a".to_string(),
-                    serde_json::json!(pool_state.token_mint_a.to_string()),
-                );
-                obj.insert(
-                    "token_mint_b".to_string(),
-                    serde_json::json!(pool_state.token_mint_b.to_string()),
-                );
-            }
+            && let Some(obj) = base.as_object_mut()
+        {
+            obj.insert(
+                "token_mint_a".to_string(),
+                serde_json::json!(pool_state.token_mint_a.to_string()),
+            );
+            obj.insert(
+                "token_mint_b".to_string(),
+                serde_json::json!(pool_state.token_mint_b.to_string()),
+            );
+        }
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
             clmm_lp_protocols::orca::event_pool_mint_usd::fetch_event_pool_mint_usd_prices(
@@ -4562,10 +4555,8 @@ async fn enrich_open_close_ledger_details(
         .await
         {
             Ok(Ok((a_raw, b_raw, mint_a, mint_b))) => {
-                let dec_a =
-                    fetch_mint_decimals_best_effort(provider.as_ref(), &mint_a).await;
-                let dec_b =
-                    fetch_mint_decimals_best_effort(provider.as_ref(), &mint_b).await;
+                let dec_a = fetch_mint_decimals_best_effort(provider.as_ref(), &mint_a).await;
+                let dec_b = fetch_mint_decimals_best_effort(provider.as_ref(), &mint_b).await;
                 if let Some(obj) = base.as_object_mut() {
                     obj.insert("open_amount_a_raw".to_string(), serde_json::json!(a_raw));
                     obj.insert("open_amount_b_raw".to_string(), serde_json::json!(b_raw));
@@ -4817,8 +4808,14 @@ mod tests {
     #[test]
     fn insert_open_quote_usd_fields_from_onchain_amounts() {
         let mut obj = serde_json::Map::new();
-        obj.insert("open_amount_a_raw".to_string(), serde_json::json!(50_000_000u64));
-        obj.insert("open_amount_b_raw".to_string(), serde_json::json!(5_000_000u64));
+        obj.insert(
+            "open_amount_a_raw".to_string(),
+            serde_json::json!(50_000_000u64),
+        );
+        obj.insert(
+            "open_amount_b_raw".to_string(),
+            serde_json::json!(5_000_000u64),
+        );
         obj.insert("event_price_a_usd".to_string(), serde_json::json!(100.0));
         obj.insert("event_price_b_usd".to_string(), serde_json::json!(1.0));
         insert_open_quote_usd_fields(&mut obj, 9, 6);
@@ -5037,7 +5034,8 @@ mod tests {
             std::env::set_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "1");
             std::env::set_var("CLMM_REOPEN_CHAIN_STRICT_EMPTY", "1");
         }
-        let err = crate::strategy::session_capital::portfolio_capital_error_if_strict(&loaded).expect("err");
+        let err = crate::strategy::session_capital::portfolio_capital_error_if_strict(&loaded)
+            .expect("err");
         assert!(err.contains("portfolio_capital_unknown"));
         assert!(err.contains("chain-empty"));
         unsafe {

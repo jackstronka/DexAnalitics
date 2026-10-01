@@ -7,7 +7,6 @@ use crate::models::{
     LineageChainCostSummary, MaterializeChainHistoryResponse, PositionStreamLineageNode,
     PositionStreamLineageResponse, PositionStreamPnLResponse,
 };
-use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::chain_economic_totals::refresh_lineage_totals_from_nodes;
 use crate::services::position_stream_lineage::{
     ComputePositionStreamLineageOpts,
@@ -17,17 +16,18 @@ use crate::services::position_stream_lineage::{
     prefer_lifecycle_lineage_if_extends_db_prefix, refresh_chain_history_node_fees_from_ledger,
     resolve_lineage_chain_for_stream_pnl, rollup_lineage_chain_costs, sol_usd_for_tx_fees,
 };
-use futures::future::join_all;
-use std::collections::HashMap;
+use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_stream_pnl::compute_position_stream_pnl_settlement_v1;
 use crate::state::{ApiConfig, AppState};
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use chrono::{DateTime, Utc};
 use clmm_lp_data::repositories::Database;
+use futures::future::join_all;
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use solana_sdk::pubkey::Pubkey;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::{info, warn};
 
@@ -129,12 +129,8 @@ fn ch_ticks_open_from_details(details: &JsonValue) -> Option<(i32, i32)> {
         let Some(hi_v) = obj.get(uk) else {
             continue;
         };
-        let lo = lo_v
-            .as_i64()
-            .or_else(|| lo_v.as_f64().map(|f| f as i64))?;
-        let hi = hi_v
-            .as_i64()
-            .or_else(|| hi_v.as_f64().map(|f| f as i64))?;
+        let lo = lo_v.as_i64().or_else(|| lo_v.as_f64().map(|f| f as i64))?;
+        let hi = hi_v.as_i64().or_else(|| hi_v.as_f64().map(|f| f as i64))?;
         let lo_i = i32::try_from(lo).ok()?;
         let hi_i = i32::try_from(hi).ok()?;
         if lo_i < hi_i {
@@ -149,7 +145,10 @@ fn ch_details_from_ledger_raw(raw: &JsonValue) -> Option<&JsonValue> {
 }
 
 /// Best-effort: pool from valuation snapshots / ledger; ticks + event spots from earliest open / latest close rows.
-async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubkey: &str) -> ChainHistoryLedgerAux {
+async fn fetch_chain_history_ledger_aux_best_effort(
+    pool: &PgPool,
+    position_pubkey: &str,
+) -> ChainHistoryLedgerAux {
     let mut out = ChainHistoryLedgerAux::default();
     let pos = position_pubkey.trim();
     if pos.is_empty() {
@@ -165,12 +164,13 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
     .bind(pos)
     .fetch_optional(pool)
     .await
-        && let Some(Some(s)) = r {
-            let t = s.trim();
-            if !t.is_empty() {
-                out.pool_address = Some(t.to_string());
-            }
+        && let Some(Some(s)) = r
+    {
+        let t = s.trim();
+        if !t.is_empty() {
+            out.pool_address = Some(t.to_string());
         }
+    }
 
     if out.pool_address.is_none()
         && let Ok(r) = sqlx::query_scalar::<_, Option<String>>(
@@ -182,12 +182,13 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
         .bind(pos)
         .fetch_optional(pool)
         .await
-            && let Some(Some(s)) = r {
-                let t = s.trim();
-                if !t.is_empty() {
-                    out.pool_address = Some(t.to_string());
-                }
-            }
+        && let Some(Some(s)) = r
+    {
+        let t = s.trim();
+        if !t.is_empty() {
+            out.pool_address = Some(t.to_string());
+        }
+    }
 
     if let Ok(Some(raw)) = sqlx::query_scalar::<_, JsonValue>(
         r#"SELECT raw_json FROM position_stream_ledger_rows
@@ -207,9 +208,10 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
             out.range_label_at_open = Some(format!("{lo}→{hi} ticks"));
         }
         if let Some(d) = ch_details_from_ledger_raw(&raw)
-            && let Some(px) = ch_decimal_event_price_a_from_details(d) {
-                out.event_price_a_usd = Some(px);
-            }
+            && let Some(px) = ch_decimal_event_price_a_from_details(d)
+        {
+            out.event_price_a_usd = Some(px);
+        }
     }
 
     if let Ok(Some(raw)) = sqlx::query_scalar::<_, JsonValue>(
@@ -222,16 +224,17 @@ async fn fetch_chain_history_ledger_aux_best_effort(pool: &PgPool, position_pubk
     .bind(pos)
     .fetch_optional(pool)
     .await
-        && let Some(d) = ch_details_from_ledger_raw(&raw) {
-            if let Some(px) = ch_decimal_event_price_a_from_details(d) {
-                out.event_price_close_a_usd = Some(px);
-            }
-            if let Some(px) = ch_decimal_event_price_b_from_details(d) {
-                out.event_price_close_b_usd = Some(px);
-            }
-            out.close_amount_a_raw = ch_u64_from_details(d, "close_amount_a_raw");
-            out.close_amount_b_raw = ch_u64_from_details(d, "close_amount_b_raw");
+        && let Some(d) = ch_details_from_ledger_raw(&raw)
+    {
+        if let Some(px) = ch_decimal_event_price_a_from_details(d) {
+            out.event_price_close_a_usd = Some(px);
         }
+        if let Some(px) = ch_decimal_event_price_b_from_details(d) {
+            out.event_price_close_b_usd = Some(px);
+        }
+        out.close_amount_a_raw = ch_u64_from_details(d, "close_amount_a_raw");
+        out.close_amount_b_raw = ch_u64_from_details(d, "close_amount_b_raw");
+    }
 
     out
 }
@@ -253,7 +256,10 @@ fn chain_history_lineage_entry_for_read(
 /// Meta `chain_json` can be **too short** (e.g. materialize right after reopen stored only `[newest]`).
 /// Live `resolve_lineage_chain_for_stream_pnl` returns the full rotation chain. Prefer resolved when
 /// it is a strict **prefix extension** of meta, or when meta is a **single tail** of resolved.
-fn merge_meta_chain_with_resolved_for_read(meta_chain: Vec<String>, resolved: Vec<String>) -> Vec<String> {
+fn merge_meta_chain_with_resolved_for_read(
+    meta_chain: Vec<String>,
+    resolved: Vec<String>,
+) -> Vec<String> {
     let m = prefer_lifecycle_lineage_if_extends_db_prefix(meta_chain.clone(), resolved.clone());
     if m.len() < resolved.len()
         && meta_chain.len() == 1
@@ -273,21 +279,24 @@ fn overlay_chain_history_node_from_persisted_columns(
     current_value_usd_col: Option<Decimal>,
 ) {
     if let Some(s) = start_value_usd.filter(|x| *x > Decimal::ZERO)
-        && node.baseline_value_usd.is_zero() {
-            node.baseline_value_usd = s;
-            node.baseline_valuation_quality = Some("exact".to_string());
-        }
+        && node.baseline_value_usd.is_zero()
+    {
+        node.baseline_value_usd = s;
+        node.baseline_valuation_quality = Some("exact".to_string());
+    }
     if let Some(c) = current_value_usd_col.filter(|x| *x > Decimal::ZERO)
-        && node.current_value_usd.is_zero() {
-            node.current_value_usd = c;
-            node.current_valuation_quality = Some("exact".to_string());
-        }
+        && node.current_value_usd.is_zero()
+    {
+        node.current_value_usd = c;
+        node.current_valuation_quality = Some("exact".to_string());
+    }
     if node.closed_ts_utc.is_some()
         && let Some(e) = end_value_usd.filter(|x| *x > Decimal::ZERO)
-            && node.current_value_usd.is_zero() {
-                node.current_value_usd = e;
-                node.current_valuation_quality = Some("exact".to_string());
-            }
+        && node.current_value_usd.is_zero()
+    {
+        node.current_value_usd = e;
+        node.current_valuation_quality = Some("exact".to_string());
+    }
     node.net_pnl_usd = node.current_value_usd + node.realized_cashflow_usd
         - node.baseline_value_usd
         - node.tx_fees_usd;
@@ -314,10 +323,11 @@ fn overlay_chain_history_node_from_persisted_display_columns(
         }
     }
     if let (Some(lo), Some(hi)) = (tick_lower_open, tick_upper_open)
-        && lo < hi {
-            node.chain_history_tick_lower_open = Some(lo);
-            node.chain_history_tick_upper_open = Some(hi);
-        }
+        && lo < hi
+    {
+        node.chain_history_tick_lower_open = Some(lo);
+        node.chain_history_tick_upper_open = Some(hi);
+    }
     if let Some(s) = chain_history_decimal_column_string_positive(event_price_a_usd) {
         node.chain_history_event_spot_token_a_usd_open = Some(s);
     }
@@ -512,11 +522,7 @@ pub async fn materialize_chain_history_for_anchor(
     .await;
 
     // Re-roll totals after lifecycle open-start enrich so materialized `totals_json` matches nodes.
-    refresh_lineage_totals_from_nodes(
-        anchor.trim(),
-        &mut resp.totals,
-        &mut resp.nodes,
-    );
+    refresh_lineage_totals_from_nodes(anchor.trim(), &mut resp.totals, &mut resp.nodes);
 
     let mut tx = pool
         .begin()
@@ -582,7 +588,8 @@ pub async fn materialize_chain_history_for_anchor(
         } else {
             resp.chain.get(i - 1).cloned()
         };
-        let aux = fetch_chain_history_ledger_aux_best_effort(pool, node.position_address.as_str()).await;
+        let aux =
+            fetch_chain_history_ledger_aux_best_effort(pool, node.position_address.as_str()).await;
         let mut node_snapshot = node.clone();
         if let Some(ref p) = aux.pool_address {
             node_snapshot.chain_history_pool_address = Some(p.clone());
@@ -599,7 +606,8 @@ pub async fn materialize_chain_history_for_anchor(
             node_snapshot.chain_history_event_spot_token_a_usd_close =
                 chain_history_decimal_column_string_positive(Some(d));
         }
-        let raw_snapshot = serde_json::to_value(&node_snapshot).map_err(|e| ApiError::internal(e.to_string()))?;
+        let raw_snapshot =
+            serde_json::to_value(&node_snapshot).map_err(|e| ApiError::internal(e.to_string()))?;
         let principal_delta = node.current_value_usd - node.baseline_value_usd;
         let end_val = if node.closed_ts_utc.is_some() {
             Some(node.current_value_usd)
@@ -732,7 +740,8 @@ async fn resolve_chain_history_anchor_for_read(
     .bind(mode)
     .fetch_optional(pool)
     .await
-    .map_err(|e| ApiError::internal(format!("chain-history anchor resolve (nodes): {e}")))? {
+    .map_err(|e| ApiError::internal(format!("chain-history anchor resolve (nodes): {e}")))?
+    {
         return Ok(Some(root));
     }
     if let Some(root) = sqlx::query_scalar::<_, String>(
@@ -744,7 +753,8 @@ async fn resolve_chain_history_anchor_for_read(
     .bind(mode)
     .fetch_optional(pool)
     .await
-    .map_err(|e| ApiError::internal(format!("chain-history anchor resolve (meta.entry): {e}")))? {
+    .map_err(|e| ApiError::internal(format!("chain-history anchor resolve (meta.entry): {e}")))?
+    {
         return Ok(Some(root));
     }
     let from_chain = sqlx::query_scalar::<_, String>(
@@ -758,7 +768,11 @@ async fn resolve_chain_history_anchor_for_read(
     .bind(mode)
     .fetch_optional(pool)
     .await
-    .map_err(|e| ApiError::internal(format!("chain-history anchor resolve (meta.chain_json): {e}")))?;
+    .map_err(|e| {
+        ApiError::internal(format!(
+            "chain-history anchor resolve (meta.chain_json): {e}"
+        ))
+    })?;
     Ok(from_chain)
 }
 
@@ -906,10 +920,14 @@ pub async fn load_chain_history_from_db(
             .map_err(|e| ApiError::internal(format!("chain-history node tick_upper_open: {e}")))?;
         let event_price_a_usd: Option<Decimal> = r
             .try_get::<Option<Decimal>, _>("event_price_a_usd")
-            .map_err(|e| ApiError::internal(format!("chain-history node event_price_a_usd: {e}")))?;
+            .map_err(|e| {
+                ApiError::internal(format!("chain-history node event_price_a_usd: {e}"))
+            })?;
         let event_price_b_usd: Option<Decimal> = r
             .try_get::<Option<Decimal>, _>("event_price_b_usd")
-            .map_err(|e| ApiError::internal(format!("chain-history node event_price_b_usd: {e}")))?;
+            .map_err(|e| {
+                ApiError::internal(format!("chain-history node event_price_b_usd: {e}"))
+            })?;
         let snap = r
             .try_get::<serde_json::Value, _>("raw_snapshot")
             .map_err(|e| ApiError::internal(format!("chain-history node raw_snapshot: {e}")))?;
@@ -932,16 +950,22 @@ pub async fn load_chain_history_from_db(
     }
 
     let mut chain = meta_chain.clone();
-    let lineage_entry =
-        chain_history_lineage_entry_for_read(remapped, requested.as_str(), effective_anchor.as_str());
-    if let Ok(perf) = compute_position_stream_performance(state, lineage_entry.as_str(), true).await {
+    let lineage_entry = chain_history_lineage_entry_for_read(
+        remapped,
+        requested.as_str(),
+        effective_anchor.as_str(),
+    );
+    if let Ok(perf) = compute_position_stream_performance(state, lineage_entry.as_str(), true).await
+    {
         let resolved =
             resolve_lineage_chain_for_stream_pnl(state, &perf, lineage_entry.as_str()).await;
         chain = merge_meta_chain_with_resolved_for_read(meta_chain.clone(), resolved);
     }
 
     let missing: Vec<String> = chain
-        .iter().filter(|&p| !node_by_pos.contains_key(p.as_str())).cloned()
+        .iter()
+        .filter(|&p| !node_by_pos.contains_key(p.as_str()))
+        .cloned()
         .collect();
     if !missing.is_empty() {
         let futs: Vec<_> = missing
@@ -1005,9 +1029,9 @@ pub async fn load_chain_history_from_db(
     let needs_tx_usd = nodes
         .iter()
         .any(|n| n.tx_fee_lamports > 0 && n.tx_fees_usd.is_zero())
-        || chain_cost_summary.as_ref().is_some_and(|cs| {
-            cs.tx_fee_lamports_total > 0 && cs.tx_fees_usd_total.is_zero()
-        });
+        || chain_cost_summary
+            .as_ref()
+            .is_some_and(|cs| cs.tx_fee_lamports_total > 0 && cs.tx_fees_usd_total.is_zero());
     if needs_tx_usd {
         let (sol_px, _) = sol_usd_for_tx_fees(&nodes).await;
         if sol_px > 0.0 {

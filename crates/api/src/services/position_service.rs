@@ -719,7 +719,9 @@ Top up the API wallet and retry."
             return Err(classify_close_position_error(e));
         }
 
-        Ok(OperationResult::success_with_signature(submitted_signature.to_string()))
+        Ok(OperationResult::success_with_signature(
+            submitted_signature.to_string(),
+        ))
     }
 
     /// Collects fees from a position.

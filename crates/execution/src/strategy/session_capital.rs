@@ -77,7 +77,11 @@ pub fn reopen_chain_strict_empty() -> bool {
 }
 
 /// `min(RPC, portfolio cap)` when portfolio caps are loaded (flag already applied at load time).
-pub fn cap_rpc_with_portfolio(rpc_raw: u64, mint: &Pubkey, portfolio: Option<&SessionMintCaps>) -> u64 {
+pub fn cap_rpc_with_portfolio(
+    rpc_raw: u64,
+    mint: &Pubkey,
+    portfolio: Option<&SessionMintCaps>,
+) -> u64 {
     let Some(sc) = portfolio else {
         return rpc_raw;
     };
@@ -364,29 +368,33 @@ pub async fn load_reopen_portfolio_caps(
     owner: Option<&str>,
 ) -> Option<LoadedReopenCaps> {
     if chain_portfolio_enabled(chain_session_id)
-        && let Some(cid) = chain_session_id.map(str::trim).filter(|s| !s.is_empty()) {
-            if let Some(caps) = load_chain_mint_caps(db, cid, owner).await {
-                return Some(LoadedReopenCaps {
-                    caps,
-                    scope: ReopenPortfolioScope::Chain,
-                });
-            }
-            if reopen_chain_strict_empty()
-                && clmm_lp_data::wallet_session::chain_has_funding_lifecycle_rows(cid)
-            {
-                return Some(LoadedReopenCaps {
-                    caps: SessionMintCaps::empty(cid.to_string()),
-                    scope: ReopenPortfolioScope::Chain,
-                });
-            }
-        }
-    if let Some(sid) = rebalance_session_id.map(str::trim).filter(|s| !s.is_empty())
-        && let Some(caps) = load_session_mint_caps(db, sid, owner).await {
+        && let Some(cid) = chain_session_id.map(str::trim).filter(|s| !s.is_empty())
+    {
+        if let Some(caps) = load_chain_mint_caps(db, cid, owner).await {
             return Some(LoadedReopenCaps {
                 caps,
-                scope: ReopenPortfolioScope::Session,
+                scope: ReopenPortfolioScope::Chain,
             });
         }
+        if reopen_chain_strict_empty()
+            && clmm_lp_data::wallet_session::chain_has_funding_lifecycle_rows(cid)
+        {
+            return Some(LoadedReopenCaps {
+                caps: SessionMintCaps::empty(cid.to_string()),
+                scope: ReopenPortfolioScope::Chain,
+            });
+        }
+    }
+    if let Some(sid) = rebalance_session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        && let Some(caps) = load_session_mint_caps(db, sid, owner).await
+    {
+        return Some(LoadedReopenCaps {
+            caps,
+            scope: ReopenPortfolioScope::Session,
+        });
+    }
     None
 }
 
@@ -509,7 +517,9 @@ mod tests {
             .expect("auto chain caps");
         assert_eq!(loaded.scope, ReopenPortfolioScope::Chain);
         assert_eq!(
-            loaded.caps.cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
+            loaded
+                .caps
+                .cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
             3_000
         );
         unsafe {
@@ -563,7 +573,9 @@ mod tests {
             .expect("chain caps");
         assert_eq!(loaded.scope, ReopenPortfolioScope::Chain);
         assert_eq!(
-            loaded.caps.cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
+            loaded
+                .caps
+                .cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
             2_000
         );
         unsafe {
@@ -582,14 +594,8 @@ mod tests {
         unsafe {
             std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "0");
         }
-        assert_eq!(
-            cap_rpc_with_portfolio(100, &mint, Some(&caps)),
-            42
-        );
-        assert_eq!(
-            cap_rpc_with_session(100, &mint, Some(&caps)),
-            100
-        );
+        assert_eq!(cap_rpc_with_portfolio(100, &mint, Some(&caps)), 42);
+        assert_eq!(cap_rpc_with_session(100, &mint, Some(&caps)), 100);
         unsafe {
             std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
         }
@@ -644,8 +650,14 @@ mod tests {
         let out = load_session_mint_caps(None, sid, None)
             .await
             .expect("inventory");
-        assert_eq!(out.cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT), 1_500);
-        assert_eq!(out.cap_u64_for_mint(clmm_lp_data::wallet_session::USDC_MINT), 250);
+        assert_eq!(
+            out.cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
+            1_500
+        );
+        assert_eq!(
+            out.cap_u64_for_mint(clmm_lp_data::wallet_session::USDC_MINT),
+            250
+        );
         unsafe {
             std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
             std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");

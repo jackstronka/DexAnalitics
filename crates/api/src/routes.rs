@@ -32,7 +32,10 @@ fn create_base_http_router(state: AppState) -> Router {
         .route("/auth/phantom/verify", post(handlers::phantom_verify))
         // Position routes (read-only + lightweight)
         .route("/positions", get(handlers::list_positions))
-        .route("/positions/close-all", post(handlers::post_close_all_positions))
+        .route(
+            "/positions/close-all",
+            post(handlers::post_close_all_positions),
+        )
         .route(
             "/positions/close-all/preview",
             post(handlers::post_close_all_positions_preview),
@@ -433,7 +436,8 @@ pub fn create_versioned_router(
     // layer wrapping more routes than intended (depending on composition order). To make the
     // boundary unambiguous, we apply versioning with separate `nest("/api/v1", ...)` routers and
     // merge them at the top level.
-    let http_versioned = Router::new().nest("/api/v1", base_http.merge(chain_portfolio).merge(onchain));
+    let http_versioned =
+        Router::new().nest("/api/v1", base_http.merge(chain_portfolio).merge(onchain));
     let ws_versioned = Router::new().nest("/api/v1", ws);
     Router::new().merge(http_versioned).merge(ws_versioned)
 }

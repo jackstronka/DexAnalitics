@@ -14,12 +14,13 @@ use axum::{
     extract::{Path, Query, State},
 };
 use clmm_lp_data::providers::{OrcaListPoolsQuery, OrcaRestClient};
+use clmm_lp_execution::strategy::{
+    chain_wallet_notional_usd_sol_first, clamp_deposit_quote_to_portfolio,
+    clamp_target_usd_to_chain_wallet_notional, load_chain_scoped_pool_wallet,
+    portfolio_scope_label,
+};
 use clmm_lp_protocols::ledger::swap_cost_estimate::{
     DEFAULT_ESTIMATED_SWAP_NETWORK_FEE_LAMPORTS, median_historical_swap_network_fee_lamports,
-};
-use clmm_lp_execution::strategy::{
-    clamp_deposit_quote_to_portfolio, clamp_target_usd_to_chain_wallet_notional,
-    chain_wallet_notional_usd_sol_first, load_chain_scoped_pool_wallet, portfolio_scope_label,
 };
 use clmm_lp_protocols::orca::deposit_quote::quote_deposit_budget_in_range;
 use clmm_lp_protocols::prelude::WhirlpoolReader;
@@ -578,12 +579,7 @@ pub async fn quote_open_budget(
     .map_err(|m| ApiError::bad_request(m.to_string()))?;
 
     if let Some(ref caps) = chain_caps {
-        q = clamp_deposit_quote_to_portfolio(
-            &q,
-            caps,
-            &pool.token_mint_a,
-            &pool.token_mint_b,
-        );
+        q = clamp_deposit_quote_to_portfolio(&q, caps, &pool.token_mint_a, &pool.token_mint_b);
     }
 
     let a_ui = q.amount_a as f64 / 10f64.powi(i32::from(dec_a));

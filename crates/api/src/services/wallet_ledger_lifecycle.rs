@@ -31,7 +31,9 @@ fn postings_to_ledger_deltas(postings: &[(String, i128)]) -> Vec<WalletLedgerDel
 
 /// Best-effort: read lifecycle tail for `signature` and build journal deltas (close/collect/swap).
 #[must_use]
-pub fn journal_mirror_from_lifecycle_signature(signature: &str) -> Option<(Vec<WalletLedgerDelta>, &'static str)> {
+pub fn journal_mirror_from_lifecycle_signature(
+    signature: &str,
+) -> Option<(Vec<WalletLedgerDelta>, &'static str)> {
     let (v, lp_a, lp_b) = find_lifecycle_row_by_signature(ledger_read_path(), signature, 1_000)?;
     let (_, _, _, postings) = session_mint_deltas_from_lifecycle_json(&v, lp_a, lp_b)?;
     let deltas = postings_to_ledger_deltas(&postings);

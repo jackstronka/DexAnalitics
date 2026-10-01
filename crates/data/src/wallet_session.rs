@@ -58,10 +58,7 @@ impl SessionMintCaps {
     }
 
     pub fn cap_u64_for_mint(&self, mint: &str) -> u64 {
-        self.caps_by_mint
-            .get(mint.trim())
-            .copied()
-            .unwrap_or(0)
+        self.caps_by_mint.get(mint.trim()).copied().unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -156,10 +153,7 @@ pub fn chain_has_funding_lifecycle_rows(chain_session_id: &str) -> bool {
         let event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
         if matches!(
             event,
-            "bot_close_position"
-                | "position_close"
-                | "bot_collect_fees"
-                | "swap_exact_in"
+            "bot_close_position" | "position_close" | "bot_collect_fees" | "swap_exact_in"
         ) {
             return true;
         }
@@ -168,10 +162,7 @@ pub fn chain_has_funding_lifecycle_rows(chain_session_id: &str) -> bool {
 }
 
 /// When PSLR `chain_session_id` column is set but JSON lacks it (legacy backfill gap).
-pub fn ensure_chain_session_id_on_lifecycle_row(
-    raw: Value,
-    chain_session_id: &str,
-) -> Value {
+pub fn ensure_chain_session_id_on_lifecycle_row(raw: Value, chain_session_id: &str) -> Value {
     if chain_session_id_from_lifecycle_json(&raw).is_some() {
         return raw;
     }
@@ -241,7 +232,10 @@ fn caps_map_from_balance_rows(rows: &[(String, String)]) -> BTreeMap<String, u64
     out
 }
 
-fn merge_min_caps(gl: &BTreeMap<String, u64>, pslr: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+fn merge_min_caps(
+    gl: &BTreeMap<String, u64>,
+    pslr: &BTreeMap<String, u64>,
+) -> BTreeMap<String, u64> {
     let mut all: BTreeMap<String, ()> = BTreeMap::new();
     for m in gl.keys() {
         all.insert(m.clone(), ());
@@ -347,7 +341,10 @@ fn known_pool_leg_mints(pool_address: &str) -> Option<(&'static str, &'static st
     }
 }
 
-fn pool_address_from_row(v: &Value, details: Option<&serde_json::Map<String, Value>>) -> Option<String> {
+fn pool_address_from_row(
+    v: &Value,
+    details: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
     v.get("pool_address")
         .and_then(|x| x.as_str())
         .map(str::trim)
@@ -508,7 +505,10 @@ pub fn session_balance_usd_legs(
 
 fn open_usd_from_details(details: &serde_json::Map<String, Value>) -> (Option<f64>, &'static str) {
     for (key, src) in [
-        ("open_quote_estimated_value_usd", "open_quote_estimated_value_usd"),
+        (
+            "open_quote_estimated_value_usd",
+            "open_quote_estimated_value_usd",
+        ),
         ("open_target_usd", "open_target_usd"),
         ("open_prev_end_value_usd", "open_prev_end_value_usd"),
     ] {
@@ -566,7 +566,10 @@ fn insert_event_price_if_missing(
     if out.contains_key(m) {
         return;
     }
-    let Some(p) = price_v.and_then(json_f64).filter(|p| p.is_finite() && *p > 0.0) else {
+    let Some(p) = price_v
+        .and_then(json_f64)
+        .filter(|p| p.is_finite() && *p > 0.0)
+    else {
         return;
     };
     out.insert(m.to_string(), p);
@@ -686,7 +689,8 @@ fn build_open_start_from_row(
         amount_a,
         amount_b,
     );
-    let price_by_mint = price_map_from_open_details(details_map, mint_a.as_deref(), mint_b.as_deref());
+    let price_by_mint =
+        price_map_from_open_details(details_map, mint_a.as_deref(), mint_b.as_deref());
     let pre_open_balances = i128_map_to_balance_mints(pre_open);
     let pre_open_value_usd = value_usd_for_balance_mints(&pre_open_balances, &price_by_mint);
 
@@ -750,8 +754,7 @@ pub fn compute_session_open_start_from_lifecycle_rows(
             open_start = build_open_start_from_row(&raw, &cumulative);
         }
 
-        let Some((_, _, _, postings)) =
-            session_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
+        let Some((_, _, _, postings)) = session_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
         else {
             continue;
         };
@@ -807,7 +810,8 @@ pub fn resolve_session_metrics_from_open_start(
     current_balances: &[SessionBalanceMint],
     metrics_trusted: bool,
 ) -> SessionMetricsResolved {
-    let current_value_usd = value_usd_for_balance_mints(current_balances, &open_start.price_by_mint);
+    let current_value_usd =
+        value_usd_for_balance_mints(current_balances, &open_start.price_by_mint);
     let delta_vs_pre_open_usd = match (current_value_usd, open_start.pre_open_value_usd) {
         (Some(cur), Some(pre)) if cur.is_finite() && pre.is_finite() => Some(cur - pre),
         _ => None,
@@ -850,9 +854,7 @@ pub async fn compute_session_metrics_from_pslr(
     let trusted = session_principal_mints_trusted(&agg, session_id);
     let open_start = compute_session_open_start_from_lifecycle_rows(agg, session_id);
     Ok(match open_start {
-        Some(ref snap) => {
-            resolve_session_metrics_from_open_start(snap, current_balances, trusted)
-        }
+        Some(ref snap) => resolve_session_metrics_from_open_start(snap, current_balances, trusted),
         None => SessionMetricsResolved {
             open_start: None,
             current_value_usd: None,
@@ -867,7 +869,10 @@ fn is_lifecycle_collect_event(ev: &str) -> bool {
 }
 
 fn is_lifecycle_swap_event(ev: &str) -> bool {
-    matches!(ev, "cli_swap" | "bot_swap_exact_in" | "bot_swap" | "bot_orca_tx")
+    matches!(
+        ev,
+        "cli_swap" | "bot_swap_exact_in" | "bot_swap" | "bot_orca_tx"
+    )
 }
 
 /// `(session_id, event, signature, mint_deltas)` from one lifecycle JSONL row.
@@ -899,9 +904,7 @@ pub fn session_mint_deltas_from_lifecycle_json(
         .to_string();
 
     let details = v.get("details").and_then(|d| d.as_object());
-    let token_deltas = v
-        .get("fee_payer_token_deltas")
-        .and_then(|d| d.as_object());
+    let token_deltas = v.get("fee_payer_token_deltas").and_then(|d| d.as_object());
     let (mint_a, mint_b, _resolve_src) = pool_mints_from_lifecycle_row(v, details);
     let principal_events = is_lifecycle_close_event(&event)
         || is_lifecycle_open_event(&event)
@@ -1118,7 +1121,11 @@ pub fn find_lifecycle_row_by_signature(
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        let row_sig = v.get("signature").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let row_sig = v
+            .get("signature")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
         if row_sig != sig {
             continue;
         }
@@ -1166,10 +1173,7 @@ fn sums_to_spend_caps(sums: BTreeMap<String, i128>) -> BTreeMap<String, u64> {
 }
 
 /// Scan lifecycle JSONL file and build spend caps for `session_id`.
-pub fn caps_from_lifecycle_jsonl_path(
-    session_id: &str,
-    path: impl AsRef<Path>,
-) -> SessionMintCaps {
+pub fn caps_from_lifecycle_jsonl_path(session_id: &str, path: impl AsRef<Path>) -> SessionMintCaps {
     let sid = session_id.trim().to_string();
     let file = match File::open(path.as_ref()) {
         Ok(f) => f,
@@ -1362,7 +1366,9 @@ pub async fn resolve_session_mint_caps(
     }
 
     if let Some(db) = db {
-        let gl = read_session_balances(db, &sid, owner).await.unwrap_or_default();
+        let gl = read_session_balances(db, &sid, owner)
+            .await
+            .unwrap_or_default();
         let pslr = compute_session_balances_from_pslr(db, &sid)
             .await
             .unwrap_or_default();
@@ -1461,7 +1467,9 @@ pub async fn resolve_chain_mint_caps(
     }
 
     if let Some(db) = db {
-        let gl = read_chain_balances(db, &cid, owner).await.unwrap_or_default();
+        let gl = read_chain_balances(db, &cid, owner)
+            .await
+            .unwrap_or_default();
         let pslr = compute_chain_balances_from_pslr(db, &cid)
             .await
             .unwrap_or_default();
@@ -1516,12 +1524,10 @@ pub async fn session_lifecycle_posting_already_applied(
     db: &Database,
     event_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query(
-        r#"SELECT 1 AS ok FROM wallet_gl_posting WHERE event_id = $1 LIMIT 1"#,
-    )
-    .bind(event_id)
-    .fetch_optional(db.pool())
-    .await?;
+    let row = sqlx::query(r#"SELECT 1 AS ok FROM wallet_gl_posting WHERE event_id = $1 LIMIT 1"#)
+        .bind(event_id)
+        .fetch_optional(db.pool())
+        .await?;
     Ok(row.is_some())
 }
 
@@ -1615,12 +1621,11 @@ async fn read_account_balance_map(
     db: &Database,
     account_id: i64,
 ) -> Result<BTreeMap<String, i128>, sqlx::Error> {
-    let rows = sqlx::query(
-        r#"SELECT mint, amount_raw FROM wallet_gl_balance WHERE account_id = $1"#,
-    )
-    .bind(account_id)
-    .fetch_all(db.pool())
-    .await?;
+    let rows =
+        sqlx::query(r#"SELECT mint, amount_raw FROM wallet_gl_balance WHERE account_id = $1"#)
+            .bind(account_id)
+            .fetch_all(db.pool())
+            .await?;
     Ok(rows
         .iter()
         .map(|r| {
@@ -1694,10 +1699,7 @@ pub fn tx_fee_lamports_from_lifecycle_json(v: &Value) -> Option<u64> {
         .filter(|&n| n > 0)
 }
 
-async fn ensure_tx_fee_account(
-    db: &Database,
-    owner: Option<&str>,
-) -> Result<i64, sqlx::Error> {
+async fn ensure_tx_fee_account(db: &Database, owner: Option<&str>) -> Result<i64, sqlx::Error> {
     let row = sqlx::query(
         r#"
         INSERT INTO wallet_gl_account (account_type, account_code, owner, notes)
@@ -1769,7 +1771,10 @@ async fn ensure_wallet_account(db: &Database, owner: &str) -> Result<i64, sqlx::
     Ok(row.get::<i64, _>("id"))
 }
 
-pub async fn wallet_opening_import_already_applied(db: &Database, owner: &str) -> Result<bool, sqlx::Error> {
+pub async fn wallet_opening_import_already_applied(
+    db: &Database,
+    owner: &str,
+) -> Result<bool, sqlx::Error> {
     let event_id = wallet_opening_import_event_id(owner);
     session_lifecycle_posting_already_applied(db, &event_id).await
 }
@@ -1847,10 +1852,7 @@ pub fn chain_mint_deltas_from_lifecycle_json(
     let chain_id = chain_session_id_from_lifecycle_json(v)?;
     let mut patched = v.clone();
     if let Some(obj) = patched.as_object_mut() {
-        obj.insert(
-            "rebalance_session_id".to_string(),
-            Value::String(chain_id),
-        );
+        obj.insert("rebalance_session_id".to_string(), Value::String(chain_id));
     }
     session_mint_deltas_from_lifecycle_json(&patched, lp_collected_a_raw, lp_collected_b_raw)
 }
@@ -1867,8 +1869,7 @@ pub fn aggregate_chain_sums_from_lifecycle_rows(
         if row_cid.trim() != cid {
             continue;
         }
-        let Some((_, _, event, postings)) =
-            chain_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
+        let Some((_, _, event, postings)) = chain_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
         else {
             continue;
         };
@@ -2196,7 +2197,11 @@ mod tests {
         assert_eq!(sig, "sig-close-1");
         assert_eq!(ev, "bot_close_position");
         assert_eq!(posts.len(), 3);
-        assert!(posts.iter().any(|(m, d)| m == WSOL_MINT && *d == 1_000_000_000));
+        assert!(
+            posts
+                .iter()
+                .any(|(m, d)| m == WSOL_MINT && *d == 1_000_000_000)
+        );
         assert!(posts.iter().any(|(m, d)| m == USDC_MINT && *d == 2_000_000));
         assert!(posts.iter().any(|(m, d)| m == WSOL_MINT && *d == 50_000));
     }
@@ -2516,9 +2521,9 @@ mod tests {
             .expect("SOL leg on WSOL mint");
         assert_eq!(wsol, 94_165_873);
         assert!(
-            !posts.iter().any(|(m, d)| {
-                m == USDC_MINT && *d > 10_000_000
-            }),
+            !posts
+                .iter()
+                .any(|(m, d)| { m == USDC_MINT && *d > 10_000_000 }),
             "must not book ~94 USDC from SOL lamports raw"
         );
         let open = serde_json::json!({
@@ -2589,7 +2594,10 @@ mod tests {
         let gl_usd = metrics_gl.current_value_usd.unwrap_or(0.0);
         let pslr_usd = metrics_pslr.current_value_usd.unwrap_or(0.0);
         assert!(gl_usd < -15.0, "doubled GL should be ~-20 USD: {gl_usd}");
-        assert!(pslr_usd > -12.0 && pslr_usd < -8.0, "PSLR single open ~-10 USD: {pslr_usd}");
+        assert!(
+            pslr_usd > -12.0 && pslr_usd < -8.0,
+            "PSLR single open ~-10 USD: {pslr_usd}"
+        );
     }
 
     #[test]
@@ -2677,10 +2685,7 @@ mod tests {
                 "token_mint_b": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             }
         });
-        let mints = chain_strategy_wallet_mints_from_agg(
-            vec![(raw, None, None)],
-            "cid-1",
-        );
+        let mints = chain_strategy_wallet_mints_from_agg(vec![(raw, None, None)], "cid-1");
         assert!(mints.contains(WSOL_MINT));
         assert!(mints.contains("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
         assert!(!mints.contains("phantom-meme"));

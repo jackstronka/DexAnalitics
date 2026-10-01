@@ -786,7 +786,10 @@ impl WhirlpoolExecutor {
         if ixs.is_empty() {
             return Ok(None);
         }
-        let res = match self.send_transaction_with_signers(&ixs, payer, &[], true).await {
+        let res = match self
+            .send_transaction_with_signers(&ixs, payer, &[], true)
+            .await
+        {
             Ok(res) => res,
             Err(e) => {
                 let msg = e.to_string();
@@ -1353,7 +1356,11 @@ impl WhirlpoolExecutor {
         debug!(
             confirm,
             "Sending transaction{}",
-            if confirm { " (await confirm)" } else { " (submit only)" }
+            if confirm {
+                " (await confirm)"
+            } else {
+                " (submit only)"
+            }
         );
 
         if confirm {

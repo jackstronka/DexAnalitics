@@ -12,7 +12,7 @@ use clmm_lp_protocols::ledger::tx_lifecycle::{
     lifecycle_has_bot_close_for_position, lifecycle_has_row_with_signature,
 };
 use clmm_lp_protocols::prelude::RpcProvider;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use std::collections::HashMap;
@@ -332,10 +332,7 @@ pub async fn try_reconcile_stale_registry_open(
 }
 
 /// Best-effort: remove PDA from all strategy lists when on-chain account is absent.
-pub async fn try_prune_strategy_links_for_absent_position(
-    state: &AppState,
-    position: &str,
-) {
+pub async fn try_prune_strategy_links_for_absent_position(state: &AppState, position: &str) {
     if let Err(e) = remove_position_address_from_all_strategies(state, position).await {
         warn!(
             position = %position,
@@ -412,7 +409,9 @@ pub async fn prune_stale_addresses_in_strategy(
     let addresses: Vec<String> = {
         let strategies = state.strategies.read().await;
         let Some(s) = strategies.get(strategy_id) else {
-            return Err(ApiError::not_found(format!("Strategy not found: {strategy_id}")));
+            return Err(ApiError::not_found(format!(
+                "Strategy not found: {strategy_id}"
+            )));
         };
         s.config
             .get("parameters")

@@ -18,8 +18,8 @@ use crate::services::position_stream_lineage::{
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_valuation::{
-    compute_position_usd_valuation, fetch_prices_for_positions, monitored_position_from_chain,
-    PositionUsdValuation,
+    PositionUsdValuation, compute_position_usd_valuation, fetch_prices_for_positions,
+    monitored_position_from_chain,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
@@ -93,7 +93,8 @@ async fn seed_live_current_snapshot(
     else {
         return Ok(());
     };
-    let prices = fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
+    let prices =
+        fetch_prices_for_positions(state.provider.clone(), std::slice::from_ref(&pos)).await;
     let Ok(v) = compute_position_usd_valuation(state.provider.clone(), &pos, &prices).await else {
         return Ok(());
     };
@@ -980,7 +981,8 @@ pub struct SinglePositionDetailPnL {
 }
 
 fn pool_price_b_per_a(price_a_usd: f64, price_b_usd: f64) -> Option<Decimal> {
-    if price_a_usd.is_finite() && price_a_usd > 0.0 && price_b_usd.is_finite() && price_b_usd > 0.0 {
+    if price_a_usd.is_finite() && price_a_usd > 0.0 && price_b_usd.is_finite() && price_b_usd > 0.0
+    {
         Decimal::from_f64_retain(price_b_usd / price_a_usd)
     } else {
         None
@@ -1043,7 +1045,11 @@ async fn baseline_usd_from_snapshot_row(row: &sqlx::postgres::PgRow) -> Option<D
     }
     if let Some(o) = raw_json.as_object() {
         for key in ["token_mint_a", "token_mint_b"] {
-            if let Some(m) = o.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty())
+            if let Some(m) = o
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
             {
                 mints.insert(m.to_string());
             }
@@ -1055,15 +1061,23 @@ async fn baseline_usd_from_snapshot_row(row: &sqlx::postgres::PgRow) -> Option<D
             Err(_) => (BTreeMap::new(), "timeout".to_string()),
         };
         if pa.is_none_or(|p| p <= Decimal::ZERO)
-            && let Some(m) = row.try_get::<Option<String>, _>("token_mint_a").ok().flatten()
-                && let Some(f) = px.get(m.trim()) {
-                    pa = Decimal::from_f64_retain(*f);
-                }
+            && let Some(m) = row
+                .try_get::<Option<String>, _>("token_mint_a")
+                .ok()
+                .flatten()
+            && let Some(f) = px.get(m.trim())
+        {
+            pa = Decimal::from_f64_retain(*f);
+        }
         if pb.is_none_or(|p| p <= Decimal::ZERO)
-            && let Some(m) = row.try_get::<Option<String>, _>("token_mint_b").ok().flatten()
-                && let Some(f) = px.get(m.trim()) {
-                    pb = Decimal::from_f64_retain(*f);
-                }
+            && let Some(m) = row
+                .try_get::<Option<String>, _>("token_mint_b")
+                .ok()
+                .flatten()
+            && let Some(f) = px.get(m.trim())
+        {
+            pb = Decimal::from_f64_retain(*f);
+        }
     }
     let pa = pa.unwrap_or(Decimal::ZERO);
     let pb = pb.unwrap_or(Decimal::ZERO);
@@ -1145,7 +1159,9 @@ pub async fn baseline_value_usd_for_single_position(
         .await
         {
             let open_usd: Option<f64> = row.try_get("open_usd").ok().flatten();
-            if let Some(f) = open_usd.and_then(Decimal::from_f64_retain).filter(|d| *d > Decimal::ZERO)
+            if let Some(f) = open_usd
+                .and_then(Decimal::from_f64_retain)
+                .filter(|d| *d > Decimal::ZERO)
             {
                 return Some(f);
             }
@@ -1197,8 +1213,7 @@ pub async fn compute_single_position_detail_pnl(
         if let Ok(perf) = compute_position_stream_performance(state, &addr, false).await {
             let chain = resolve_lineage_chain_for_stream_pnl(state, &perf, addr.trim()).await;
             if chain.len() > 1
-                && let Ok(mut nodes) =
-                    lineage_nodes_for_chain_economic_rollup(state, &chain).await
+                && let Ok(mut nodes) = lineage_nodes_for_chain_economic_rollup(state, &chain).await
                 && let Some(mut totals) = maybe_compute_totals_from_nodes(
                     addr.trim(),
                     &None,
@@ -1250,10 +1265,10 @@ pub async fn compute_single_position_detail_pnl(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        apply_cashflow_fee_payer_deltas, chain_session_ids_from_edges, compute_stream_il_components,
-        current_snapshot_is_stale_open_baseline_values, is_end_close_snapshot, ratio_or_zero,
-        is_lifecycle_principal_event, pool_mints_for_hodl, positive_price_pair,
-        snapshot_price_time_kind,
+        apply_cashflow_fee_payer_deltas, chain_session_ids_from_edges,
+        compute_stream_il_components, current_snapshot_is_stale_open_baseline_values,
+        is_end_close_snapshot, is_lifecycle_principal_event, pool_mints_for_hodl,
+        positive_price_pair, ratio_or_zero, snapshot_price_time_kind,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal::Decimal;
@@ -1356,11 +1371,7 @@ mod tests {
             "MINTB": "-4.859"
         });
         let mut mint_deltas = BTreeMap::new();
-        apply_cashflow_fee_payer_deltas(
-            &mut mint_deltas,
-            Some("bot_open_position"),
-            Some(&deltas),
-        );
+        apply_cashflow_fee_payer_deltas(&mut mint_deltas, Some("bot_open_position"), Some(&deltas));
         assert!(mint_deltas.is_empty());
 
         apply_cashflow_fee_payer_deltas(
@@ -1368,7 +1379,10 @@ mod tests {
             Some("bot_rebalance_swap"),
             Some(&deltas),
         );
-        assert_eq!(mint_deltas.get("MINTA"), Some(&Decimal::from_str("-5").unwrap()));
+        assert_eq!(
+            mint_deltas.get("MINTA"),
+            Some(&Decimal::from_str("-5").unwrap())
+        );
         assert_eq!(
             mint_deltas.get("MINTB"),
             Some(&Decimal::from_str("-4.859").unwrap())

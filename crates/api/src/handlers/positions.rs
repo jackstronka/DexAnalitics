@@ -6,17 +6,16 @@ use crate::models::{
     BackfillValuationSnapshotsRequest, BackfillValuationSnapshotsResponse, ClosedPositionEntry,
     ClosedPositionsResponse, DecreaseLiquidityRequest, LinkPositionStrategyRequest,
     ListPositionsMeta, ListPositionsResponse, MaterializeChainHistoryResponse, MessageResponse,
-    StaleReconcileReportResponse,
-    OpenPositionRequest,
-    PnLResponse, PositionDiagnosticsResponse, PositionExperimentConfigResponse, PositionListExtrasEntry,
-    PositionsListExtrasRequest, PositionsListExtrasResponse,
-    PositionLastEvalSnapshot, PositionLifecycleEvent, PositionLifecycleSessionSummary,
-    PositionLifecycleSummaryResponse, PositionOpenResponse, PositionResponse, PositionStatus,
-    PositionStrategyDiagnostics, PositionStreamLineageResponse, PositionStreamPerformanceResponse,
-    PositionStreamPnLResponse, RebalanceRequest, SuggestStrategyLinkResponse,
-    SwapBeforeOpenRequest, SwapBeforeOpenResponse, UncollectedFeesInfo, WalletLedgerDelta,
-    WalletLedgerStatus,
+    OpenPositionRequest, PnLResponse, PositionDiagnosticsResponse,
+    PositionExperimentConfigResponse, PositionLastEvalSnapshot, PositionLifecycleEvent,
+    PositionLifecycleSessionSummary, PositionLifecycleSummaryResponse, PositionListExtrasEntry,
+    PositionOpenResponse, PositionResponse, PositionStatus, PositionStrategyDiagnostics,
+    PositionStreamLineageResponse, PositionStreamPerformanceResponse, PositionStreamPnLResponse,
+    PositionsListExtrasRequest, PositionsListExtrasResponse, RebalanceRequest,
+    StaleReconcileReportResponse, SuggestStrategyLinkResponse, SwapBeforeOpenRequest,
+    SwapBeforeOpenResponse, UncollectedFeesInfo, WalletLedgerDelta, WalletLedgerStatus,
 };
+use crate::services::position_agent_service;
 use crate::services::position_chain_history::{
     load_chain_history_from_db, materialize_chain_history_for_anchor,
     require_chain_history_refresh_auth, spawn_chain_history_materialize_background,
@@ -30,7 +29,6 @@ use crate::services::position_stream_pnl::{
     compute_position_stream_pnl, compute_position_stream_pnl_settlement_v1,
     compute_single_position_detail_pnl,
 };
-use crate::services::position_agent_service;
 use crate::services::strategy_service::{
     append_position_address_to_strategy, heal_rotated_strategy_link_best_effort,
     remove_position_address_from_all_strategies,
@@ -52,22 +50,24 @@ use tracing::{info, warn};
 
 use crate::position_registry_seed::{registry_open_position_pubkeys, registry_position_open_map};
 use crate::services::PositionService;
-use crate::services::position_close_ops::{execute_manual_close_with_wallet, ManualCloseLedgerContext};
+use crate::services::position_close_ops::{
+    ManualCloseLedgerContext, execute_manual_close_with_wallet,
+};
 use crate::services::position_close_signer::resolve_close_signer_for_position;
 use crate::services::position_executor::resolve_executor_for_position_ops;
-use crate::services::position_wallet_store::load_api_wallet_by_id;
 use crate::services::position_valuation::{
-    compute_position_usd_valuation, enrich_pool_ticks_for_display, fetch_prices_for_positions,
-    monitored_position_from_chain, range_usdc_and_in_range_for_pool_ticks,
-    refresh_position_fees_from_chain, uncollected_fees_info_for_position, PoolTicksEnrichment,
-    PositionUsdValuation,
+    PoolTicksEnrichment, PositionUsdValuation, compute_position_usd_valuation,
+    enrich_pool_ticks_for_display, fetch_prices_for_positions, monitored_position_from_chain,
+    range_usdc_and_in_range_for_pool_ticks, refresh_position_fees_from_chain,
+    uncollected_fees_info_for_position,
 };
-use crate::state::CachedUncollectedFees;
-use clmm_lp_execution::monitor::MonitoredPosition;
+use crate::services::position_wallet_store::load_api_wallet_by_id;
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::services::wallet_ledger;
+use crate::state::CachedUncollectedFees;
 use axum::extract::Query;
 use clmm_lp_domain::math::price_tick::tick_to_price;
+use clmm_lp_execution::monitor::MonitoredPosition;
 use clmm_lp_protocols::ledger::position_registry::registry_path;
 use clmm_lp_protocols::ledger::tx_lifecycle::ledger_read_path;
 use serde::Deserialize;
@@ -215,21 +215,23 @@ async fn collect_fees_ledger_deltas_from_op_data(
     let col_a = (pre_a - post_a).max(Decimal::ZERO);
     let col_b = (pre_b - post_b).max(Decimal::ZERO);
     if col_a > Decimal::ZERO
-        && let Some(s) = decimal_ui_to_positive_raw_i128_string(col_a, dec_a) {
-            out.push(WalletLedgerDelta {
-                mint: mint_a,
-                decimals: dec_a,
-                raw_delta_i128: s,
-            });
-        }
+        && let Some(s) = decimal_ui_to_positive_raw_i128_string(col_a, dec_a)
+    {
+        out.push(WalletLedgerDelta {
+            mint: mint_a,
+            decimals: dec_a,
+            raw_delta_i128: s,
+        });
+    }
     if col_b > Decimal::ZERO
-        && let Some(s) = decimal_ui_to_positive_raw_i128_string(col_b, dec_b) {
-            out.push(WalletLedgerDelta {
-                mint: mint_b,
-                decimals: dec_b,
-                raw_delta_i128: s,
-            });
-        }
+        && let Some(s) = decimal_ui_to_positive_raw_i128_string(col_b, dec_b)
+    {
+        out.push(WalletLedgerDelta {
+            mint: mint_b,
+            decimals: dec_b,
+            raw_delta_i128: s,
+        });
+    }
     out
 }
 
@@ -543,13 +545,11 @@ fn monitored_position_list_row_from_enrichment(
     let value_usd = p.pnl.current_value_usd;
     let fees_usd = p.pnl.fees_usd;
     let cached_uncollected = fees_cache.get(&p.address.to_string()).cloned();
-    let uncollected_fees = cached_uncollected.map(|c| {
-        UncollectedFeesInfo {
-            token_a_label: e.token_a_label.clone().unwrap_or_else(|| "A".to_string()),
-            token_b_label: e.token_b_label.clone().unwrap_or_else(|| "B".to_string()),
-            amount_a: c.amount_a,
-            amount_b: c.amount_b,
-        }
+    let uncollected_fees = cached_uncollected.map(|c| UncollectedFeesInfo {
+        token_a_label: e.token_a_label.clone().unwrap_or_else(|| "A".to_string()),
+        token_b_label: e.token_b_label.clone().unwrap_or_else(|| "B".to_string()),
+        amount_a: c.amount_a,
+        amount_b: c.amount_b,
     });
     let (range_lower_price, range_upper_price, range_price_quote) = e
         .range_price
@@ -773,8 +773,10 @@ pub async fn list_positions(
 
     let registry_candidates: HashSet<Pubkey> =
         registry_open_position_pubkeys().into_iter().collect();
-    let strategy_candidates: HashSet<Pubkey> =
-        running_strategy_position_pubkeys(&state).await.into_iter().collect();
+    let strategy_candidates: HashSet<Pubkey> = running_strategy_position_pubkeys(&state)
+        .await
+        .into_iter()
+        .collect();
     let mut supplemental: Vec<Pubkey> = registry_candidates
         .iter()
         .chain(strategy_candidates.iter())
@@ -829,7 +831,7 @@ pub async fn list_positions(
     let fees_cache = state.uncollected_fees_cache.read().await;
 
     if light_mode == ListPositionsLightMode::Fast {
-        use futures::{stream, StreamExt};
+        use futures::{StreamExt, stream};
 
         let concurrency = std::env::var("CLMM_LIST_POSITIONS_FAST_CONCURRENCY")
             .ok()
@@ -862,9 +864,7 @@ pub async fn list_positions(
         let default_enrich = PoolTicksEnrichment::default();
 
         for p in &positions {
-            let enrich = enrich_by_addr
-                .get(&p.address)
-                .unwrap_or(&default_enrich);
+            let enrich = enrich_by_addr.get(&p.address).unwrap_or(&default_enrich);
             responses.push(monitored_position_list_row_from_enrichment(
                 p,
                 enrich,
@@ -874,7 +874,7 @@ pub async fn list_positions(
         }
     } else if light_mode == ListPositionsLightMode::Valuation {
         let prices = fetch_prices_for_positions(state.provider.clone(), &positions).await;
-        use futures::{stream, StreamExt};
+        use futures::{StreamExt, stream};
 
         let concurrency = std::env::var("CLMM_LIST_POSITIONS_LIGHT_CONCURRENCY")
             .ok()
@@ -889,8 +889,7 @@ pub async fn list_positions(
                 let prices = prices.clone();
                 async move {
                     let addr = p.address;
-                    let val =
-                        compute_position_usd_valuation(provider, &p, &prices).await;
+                    let val = compute_position_usd_valuation(provider, &p, &prices).await;
                     (addr, val)
                 }
             })
@@ -917,23 +916,15 @@ pub async fn list_positions(
         }
 
         for p in &positions {
-            let valuation = valuation_by_addr
-                .get(&p.address)
-                .and_then(|o| o.clone());
+            let valuation = valuation_by_addr.get(&p.address).and_then(|o| o.clone());
             let valuation_source = if valuation.is_some() {
                 Some("list_light".to_string())
             } else {
                 Some("fallback_monitor".to_string())
             };
             responses.push(
-                monitored_position_list_row(
-                    &state,
-                    p,
-                    valuation,
-                    valuation_source,
-                    &fees_cache,
-                )
-                .await,
+                monitored_position_list_row(&state, p, valuation, valuation_source, &fees_cache)
+                    .await,
             );
         }
     } else {
@@ -958,14 +949,8 @@ pub async fn list_positions(
                 Some("fallback_monitor".to_string())
             };
             responses.push(
-                monitored_position_list_row(
-                    &state,
-                    p,
-                    valuation,
-                    valuation_source,
-                    &fees_cache,
-                )
-                .await,
+                monitored_position_list_row(&state, p, valuation, valuation_source, &fees_cache)
+                    .await,
             );
         }
         meta.light = false;
@@ -2261,36 +2246,35 @@ pub async fn swap_before_open(
         .filter(|s| !s.is_empty());
 
     if !state.dry_run
-        && let Some(ref owner) = ledger_owner {
-            let dec = fetch_mint_decimals_best_effort(
-                state.provider.as_ref(),
-                request.specified_mint.trim(),
-            )
-            .await
-            .unwrap_or(9);
-            let raw_in = request.amount_in as i128;
-            let deltas = vec![WalletLedgerDelta {
-                mint: request.specified_mint.trim().to_string(),
-                decimals: dec,
-                raw_delta_i128: (-raw_in).to_string(),
-            }];
-            let pending = wallet_ledger::new_ledger_event(
-                &correlation_id,
-                WalletLedgerStatus::Pending,
-                "swap_before_open",
-                Some(owner.clone()),
-                None,
-                Some(request.pool_address.trim().to_string()),
-                None,
-                cost_session_id.clone(),
-                false,
-                None,
-                deltas,
-                None,
-                "api:positions",
-            );
-            wallet_ledger::append_wallet_ledger_event(&state, pending).await;
-        }
+        && let Some(ref owner) = ledger_owner
+    {
+        let dec =
+            fetch_mint_decimals_best_effort(state.provider.as_ref(), request.specified_mint.trim())
+                .await
+                .unwrap_or(9);
+        let raw_in = request.amount_in as i128;
+        let deltas = vec![WalletLedgerDelta {
+            mint: request.specified_mint.trim().to_string(),
+            decimals: dec,
+            raw_delta_i128: (-raw_in).to_string(),
+        }];
+        let pending = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "swap_before_open",
+            Some(owner.clone()),
+            None,
+            Some(request.pool_address.trim().to_string()),
+            None,
+            cost_session_id.clone(),
+            false,
+            None,
+            deltas,
+            None,
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+    }
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
@@ -2463,24 +2447,25 @@ pub async fn open_position(
 
     if !state.dry_run
         && let Some(ref owner) = ledger_owner
-            && !open_deltas.is_empty() {
-                let pending = wallet_ledger::new_ledger_event(
-                    &correlation_id,
-                    WalletLedgerStatus::Pending,
-                    "open_position",
-                    Some(owner.clone()),
-                    None,
-                    Some(request.pool_address.trim().to_string()),
-                    None,
-                    cost_session_id.clone(),
-                    false,
-                    None,
-                    open_deltas.clone(),
-                    None,
-                    "api:positions",
-                );
-                wallet_ledger::append_wallet_ledger_event(&state, pending).await;
-            }
+        && !open_deltas.is_empty()
+    {
+        let pending = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "open_position",
+            Some(owner.clone()),
+            None,
+            Some(request.pool_address.trim().to_string()),
+            None,
+            cost_session_id.clone(),
+            false,
+            None,
+            open_deltas.clone(),
+            None,
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+    }
 
     let op = match svc.open_position(&request).await {
         Ok(o) => o,
@@ -2687,8 +2672,7 @@ pub async fn close_position(
     Path(address): Path<String>,
     Query(q): Query<CostSessionQuery>,
 ) -> ApiResult<Json<MessageResponse>> {
-    Pubkey::from_str(&address)
-        .map_err(|_| ApiError::bad_request("Invalid position address"))?;
+    Pubkey::from_str(&address).map_err(|_| ApiError::bad_request("Invalid position address"))?;
 
     info!(position = %address, dry_run = state.dry_run, "Closing position");
 
@@ -2730,9 +2714,7 @@ pub async fn close_position(
         Err(skip) => {
             return Err(ApiError::bad_request(format!(
                 "Cannot close position server-side: no API-managed wallet for owner {} (address {})",
-                skip
-                    .owner_pubkey
-                    .unwrap_or_else(|| "unknown".to_string()),
+                skip.owner_pubkey.unwrap_or_else(|| "unknown".to_string()),
                 skip.address
             )));
         }
@@ -2742,8 +2724,7 @@ pub async fn close_position(
     let mut ctx = ManualCloseLedgerContext::new_single();
     ctx.ledger_owner = resolved.close_signer_pubkey;
 
-    let msg =
-        execute_manual_close_with_wallet(&state, &address, sid, wallet, ctx).await?;
+    let msg = execute_manual_close_with_wallet(&state, &address, sid, wallet, ctx).await?;
     Ok(Json(msg))
 }
 
@@ -2967,24 +2948,25 @@ pub async fn decrease_liquidity(
     let pool_str = position_pool_address_best_effort(&state, &pubkey).await;
 
     if !state.dry_run
-        && let Some(ref owner) = ledger_owner {
-            let pending = wallet_ledger::new_ledger_event(
-                &correlation_id,
-                WalletLedgerStatus::Pending,
-                "decrease_liquidity",
-                Some(owner.clone()),
-                None,
-                pool_str.clone(),
-                Some(address.trim().to_string()),
-                None,
-                false,
-                None,
-                vec![],
-                None,
-                "api:positions",
-            );
-            wallet_ledger::append_wallet_ledger_event(&state, pending).await;
-        }
+        && let Some(ref owner) = ledger_owner
+    {
+        let pending = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "decrease_liquidity",
+            Some(owner.clone()),
+            None,
+            pool_str.clone(),
+            Some(address.trim().to_string()),
+            None,
+            false,
+            None,
+            vec![],
+            None,
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+    }
 
     let op = match svc.decrease_liquidity(&address, liquidity_amount).await {
         Ok(o) => o,
@@ -3038,8 +3020,7 @@ pub async fn decrease_liquidity(
                 None,
                 "api:positions",
             );
-            conf.decode_status =
-                Some(wallet_ledger::decode_status::DEFERRED_LIFECYCLE.to_string());
+            conf.decode_status = Some(wallet_ledger::decode_status::DEFERRED_LIFECYCLE.to_string());
             wallet_ledger::append_wallet_ledger_event(&state, conf).await;
         }
         spawn_chain_history_materialize_background(&state, address.clone(), "decrease_liquidity");
@@ -3105,24 +3086,25 @@ pub async fn rebalance_position(
     let pool_str = position_pool_address_best_effort(&state, &pubkey).await;
 
     if !state.dry_run
-        && let Some(ref owner) = ledger_owner {
-            let pending = wallet_ledger::new_ledger_event(
-                &correlation_id,
-                WalletLedgerStatus::Pending,
-                "rebalance_position",
-                Some(owner.clone()),
-                None,
-                pool_str.clone(),
-                Some(address.trim().to_string()),
-                None,
-                false,
-                None,
-                vec![],
-                None,
-                "api:positions",
-            );
-            wallet_ledger::append_wallet_ledger_event(&state, pending).await;
-        }
+        && let Some(ref owner) = ledger_owner
+    {
+        let pending = wallet_ledger::new_ledger_event(
+            &correlation_id,
+            WalletLedgerStatus::Pending,
+            "rebalance_position",
+            Some(owner.clone()),
+            None,
+            pool_str.clone(),
+            Some(address.trim().to_string()),
+            None,
+            false,
+            None,
+            vec![],
+            None,
+            "api:positions",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, pending).await;
+    }
 
     let mut svc = PositionService::new(state.clone());
     svc.set_dry_run(state.dry_run);
@@ -3393,9 +3375,9 @@ pub async fn suggest_position_strategy(
 #[cfg(test)]
 mod list_positions_display_tests {
     use super::{
-        monitored_position_list_row, parse_list_positions_light_mode,
-        position_list_row_fee_display_ready, position_list_row_value_display_ready,
-        ListPositionsLightMode, ListPositionsQuery,
+        ListPositionsLightMode, ListPositionsQuery, monitored_position_list_row,
+        parse_list_positions_light_mode, position_list_row_fee_display_ready,
+        position_list_row_value_display_ready,
     };
     use crate::models::PositionResponse;
     use crate::state::{ApiConfig, AppState};
@@ -3469,7 +3451,10 @@ mod list_positions_display_tests {
     #[test]
     fn default_list_query_uses_valuation_mode() {
         let q: ListPositionsQuery = serde_json::from_str("{}").expect("default light deserializes");
-        assert_eq!(parse_list_positions_light_mode(&q.light), ListPositionsLightMode::Valuation);
+        assert_eq!(
+            parse_list_positions_light_mode(&q.light),
+            ListPositionsLightMode::Valuation
+        );
     }
 
     #[test]
@@ -3477,7 +3462,10 @@ mod list_positions_display_tests {
         let q = ListPositionsQuery {
             light: "fast".to_string(),
         };
-        assert_eq!(parse_list_positions_light_mode(&q.light), ListPositionsLightMode::Fast);
+        assert_eq!(
+            parse_list_positions_light_mode(&q.light),
+            ListPositionsLightMode::Fast
+        );
     }
 
     #[tokio::test]
@@ -3533,12 +3521,8 @@ mod list_positions_display_tests {
             range_price_quote: None,
             token_a_label: Some("SOL".to_string()),
             token_b_label: Some("USDC".to_string()),
-            token_mint_a: Some(
-                "So11111111111111111111111111111111111111112".to_string(),
-            ),
-            token_mint_b: Some(
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
-            ),
+            token_mint_a: Some("So11111111111111111111111111111111111111112".to_string()),
+            token_mint_b: Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()),
             token_price_a_usd: Some(86.37),
             token_price_b_usd: Some(1.0),
             uncollected_fees: Some(crate::models::UncollectedFeesInfo {
