@@ -276,11 +276,10 @@ async fn plan_close_all(
 
 async fn update_job_item(batch_id: &str, address: &str, item: CloseAllBatchItem) {
     let mut jobs = CLOSE_ALL_JOBS.write().await;
-    if let Some(job) = jobs.get_mut(batch_id) {
-        if let Some(row) = job.items.iter_mut().find(|i| i.address == address) {
+    if let Some(job) = jobs.get_mut(batch_id)
+        && let Some(row) = job.items.iter_mut().find(|i| i.address == address) {
             *row = item;
         }
-    }
 }
 
 async fn finish_job(batch_id: &str, status: &str) {
@@ -292,13 +291,12 @@ async fn finish_job(batch_id: &str, status: &str) {
 }
 
 fn validate_close_all_slippage_bps(opt: Option<u16>) -> Result<u16, ApiError> {
-    if let Some(v) = opt {
-        if v > CLOSE_ALL_MAX_SLIPPAGE_BPS {
+    if let Some(v) = opt
+        && v > CLOSE_ALL_MAX_SLIPPAGE_BPS {
             return Err(ApiError::bad_request(format!(
                 "options.slippage_bps too high (max {CLOSE_ALL_MAX_SLIPPAGE_BPS})"
             )));
         }
-    }
     Ok(resolve_bulk_close_slippage_bps(opt))
 }
 
@@ -404,8 +402,7 @@ async fn close_wallet_group(
                         let poll_secs = inter_tx_secs.saturating_add(45);
                         if let CloseSignaturePoll::Failed(ref err) =
                             poll_close_signature_until_terminal(&state, &sig, poll_secs).await
-                        {
-                            if is_close_slippage_6018(err) && !ctx.slippage_6018_retry_done {
+                            && is_close_slippage_6018(err) && !ctx.slippage_6018_retry_done {
                                 let bumped =
                                     bump_close_slippage_bps_for_6018_retry(ctx.slippage_bps);
                                 if bumped > ctx.slippage_bps {
@@ -433,7 +430,6 @@ async fn close_wallet_group(
                                     continue;
                                 }
                             }
-                        }
 
                         let state_fin = state.clone();
                         let batch_fin = batch_id.clone();

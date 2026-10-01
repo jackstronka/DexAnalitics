@@ -206,26 +206,29 @@ pub async fn resolve_close_signer_for_position(
 mod tests {
     use super::*;
     use crate::state::{ApiConfig, AppState};
+    use crate::test_env::EnvGuard;
     use clmm_lp_data::repositories::Database;
     use clmm_lp_protocols::prelude::RpcConfig;
     use solana_sdk::signature::{Keypair, Signer};
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn test_state(wallets_dir: &std::path::Path, registry_path: &std::path::Path) -> AppState {
-        let mut cfg = ApiConfig::default();
-        cfg.wallets_dir_primary = Some(wallets_dir.to_string_lossy().to_string());
-        unsafe {
-            std::env::set_var(
-                "CLMM_POSITION_REGISTRY_PATH",
-                registry_path.to_string_lossy().to_string(),
-            );
-        }
+    fn test_state(
+        env: &mut EnvGuard,
+        wallets_dir: &std::path::Path,
+        registry_path: &std::path::Path,
+    ) -> AppState {
+        let cfg = ApiConfig {
+            wallets_dir_primary: Some(wallets_dir.to_string_lossy().to_string()),
+            ..ApiConfig::default()
+        };
+        env.set("CLMM_POSITION_REGISTRY_PATH", registry_path);
         AppState::new(RpcConfig::default(), cfg, None::<Database>)
     }
 
     #[test]
     fn registry_owner_preferred_over_default() {
+        let mut env = EnvGuard::blocking_lock();
         let tmp = TempDir::new().expect("tempdir");
         let kp = Keypair::new();
         let owner = kp.pubkey();
@@ -244,15 +247,14 @@ mod tests {
         let mut f = std::fs::File::create(&reg_path).expect("create reg");
         writeln!(f, "{line}").expect("write reg");
 
-        unsafe {
-            std::env::set_var("CLMM_POSITION_REGISTRY_PATH", reg_path.to_string_lossy().to_string());
-        }
+        env.set("CLMM_POSITION_REGISTRY_PATH", &reg_path);
         let snap = registry_last_open_snapshot(&pos).expect("snapshot");
         assert_eq!(snap.owner, owner);
     }
 
     #[tokio::test]
     async fn resolves_wallet_id_from_registry_owner() {
+        let mut env = EnvGuard::lock().await;
         let tmp = TempDir::new().expect("tempdir");
         let kp = Keypair::new();
         let owner = kp.pubkey();
@@ -271,7 +273,7 @@ mod tests {
         let mut f = std::fs::File::create(&reg_path).expect("create reg");
         writeln!(f, "{line}").expect("write reg");
 
-        let state = test_state(tmp.path(), &reg_path);
+        let state = test_state(&mut env, tmp.path(), &reg_path);
         let resolved = resolve_close_signer_for_position(&state, &pos.to_string())
             .await
             .expect("resolve")

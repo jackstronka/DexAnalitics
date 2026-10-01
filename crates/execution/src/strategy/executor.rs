@@ -272,6 +272,11 @@ impl StrategyExecutor {
         self.rebalance_executor.clone()
     }
 
+    /// Tag subsequent lifecycle rows with `chain_session_id` (operator open / manual flows).
+    pub fn set_active_chain_session_id(&self, id: Option<String>) {
+        self.rebalance_executor.set_active_chain_session_id(id);
+    }
+
     /// Replaces the set of position addresses for which this executor skips decisions/transactions.
     pub async fn set_skip_evaluation_for_addresses(&self, addresses: &[String]) {
         let mut set = HashSet::new();

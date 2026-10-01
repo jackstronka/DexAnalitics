@@ -16,6 +16,8 @@ import { ErrorBanner } from '@/components/ui/error-banner'
 import { InlineError } from '@/components/ui/inline-error'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import ApiDataHint from '@/components/ApiDataHint'
+import { WalletGlBalancesPanel } from '@/components/WalletGlBalancesPanel'
+import { WalletEffectiveSourceBanner } from '@/components/WalletEffectiveSourceBanner'
 import {
   getOrcaPositionsByOwner,
   getPortfolioAnalytics,
@@ -626,6 +628,9 @@ export default function Wallet() {
             <CardTitle>{t('wallet.onChainTitle')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            {balances ? (
+              <WalletEffectiveSourceBanner source={balances.effective_balance_source} />
+            ) : null}
             {bLoad && <div className="text-muted-foreground text-sm">{t('wallet.loading')}</div>}
             {bErr && (
               <ErrorBanner className="text-xs">
@@ -822,6 +827,8 @@ export default function Wallet() {
           </CardContent>
         </Card>
       )}
+
+      {ownerPk ? <WalletGlBalancesPanel owner={ownerPk} /> : null}
 
       <Card>
         <CardHeader>

@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
 import { PoolPairLabels } from '@/components/PoolPairLabels'
 import { PositionLifecycleTimeline } from '@/components/PositionLifecycleTimeline'
-import { SessionBalancesPanel } from '@/components/SessionBalancesPanel'
+import { ChainPortfolioPanel } from '@/components/ChainPortfolioPanel'
 import {
   getPosition,
   getPositionAgentChatUi,
@@ -32,6 +32,7 @@ import {
   getOrcaToken,
   linkPositionStrategy,
   runBacktestFromOpenPosition,
+  getWalletChainPortfolio,
   sendPositionAgentLlmReply,
   startPositionAgent,
   suggestPositionStrategy,
@@ -48,6 +49,8 @@ import {
 } from '@/lib/utils'
 import { getMetricsMode } from '@/lib/metricsMode'
 import { useI18n } from '@/lib/i18n'
+import { ChainEconomicQualityBanner } from '@/components/ChainEconomicQualityBanner'
+import { chainHeadlineEndNavUsd } from '@/lib/chainEconomicQuality'
 import { PositionLineageHistoryPanel } from '@/components/PositionLineageHistoryPanel'
 import { extractLifecycleOpenQuoteUsdByPosition } from '@/lib/lineageLedgerOpenQuote'
 
@@ -764,6 +767,26 @@ export default function PositionDetail() {
   const bySession = useMemo(() => groupLedgerBySession(ledgerRows), [ledgerRows])
 
   const streamTotals = streamLineage?.totals ?? streamPnl ?? null
+  const chainHeadLpNavUsd = useMemo(
+    () =>
+      chainHeadlineEndNavUsd(streamLineage, {
+        liveHeadValueUsd: position?.value_usd ?? null,
+        pagePositionAddress: address ?? null,
+      }),
+    [streamLineage, position?.value_usd, address],
+  )
+  const chainPortfolioFallbackStartUsd = useMemo(() => {
+    const chain = streamLineage?.chain ?? []
+    const fromTotals =
+      streamTotals?.baseline_value_usd != null && String(streamTotals.baseline_value_usd).trim() !== ''
+        ? String(streamTotals.baseline_value_usd)
+        : null
+    if (chain.length === 0) return fromTotals
+    const firstPda = chain[0]
+    const node = streamLineage?.nodes?.find((n) => n.position_address === firstPda)
+    const raw = node?.baseline_value_usd ?? fromTotals
+    return raw != null && String(raw).trim() !== '' ? String(raw) : null
+  }, [streamLineage?.chain, streamLineage?.nodes, streamTotals?.baseline_value_usd])
   const streamKnownPdas =
     streamLineage?.chain?.length && streamLineage.chain.length > 0
       ? streamLineage.chain.length
@@ -776,19 +799,47 @@ export default function PositionDetail() {
     return null
   }, [ilRows])
 
-  const lastRebalanceSession = useMemo(() => {
-    // Find newest session with any bot_close/bot_open events; useful even without IL ledger.
-    const sessions = Array.from(bySession.entries())
-    for (const [sid, rows] of sessions) {
-      const hasClose = rows.some((r) => typeof r.event === 'string' && r.event.includes('close'))
-      const hasOpen = rows.some((r) => typeof r.event === 'string' && r.event.includes('open'))
-      const hasSwap = rows.some((r) => typeof r.event === 'string' && r.event.includes('swap'))
-      if (hasClose || hasOpen || hasSwap) {
-        return { session: sid, rows, hasClose, hasOpen, hasSwap }
-      }
+  const chainPortfolioBriefQ = useQuery({
+    queryKey: ['chain-portfolio-brief', address],
+    queryFn: () => getWalletChainPortfolio({ anchor_position: address! }),
+    enabled: !!address,
+    staleTime: 60_000,
+  })
+
+  const reopenFromChainHref = useMemo(() => {
+    const cid = chainPortfolioBriefQ.data?.chain_session_id?.trim()
+    if (!cid || !position?.pool_address?.trim()) return null
+    const params = new URLSearchParams({
+      chain_session_id: cid,
+      pool: position.pool_address.trim(),
+    })
+    if (address?.trim()) params.set('anchor_position', address.trim())
+    const rsid =
+      typeof lastRebalanceIncomplete?.rebalance_session_id === 'string'
+        ? lastRebalanceIncomplete.rebalance_session_id.trim()
+        : ''
+    if (rsid) params.set('rebalance_session_id', rsid)
+    const details = lastRebalanceIncomplete?.details as Record<string, unknown> | undefined
+    const tickLo =
+      typeof details?.new_tick_lower === 'number'
+        ? details.new_tick_lower
+        : typeof details?.tick_lower === 'number'
+          ? details.tick_lower
+          : position.tick_lower
+    const tickHi =
+      typeof details?.new_tick_upper === 'number'
+        ? details.new_tick_upper
+        : typeof details?.tick_upper === 'number'
+          ? details.tick_upper
+          : position.tick_upper
+    if (typeof tickLo === 'number' && Number.isFinite(tickLo)) {
+      params.set('tick_lower', String(tickLo))
     }
-    return null
-  }, [bySession])
+    if (typeof tickHi === 'number' && Number.isFinite(tickHi)) {
+      params.set('tick_upper', String(tickHi))
+    }
+    return `/positions/new?${params.toString()}`
+  }, [chainPortfolioBriefQ.data?.chain_session_id, position?.pool_address, position?.tick_lower, position?.tick_upper, address, lastRebalanceIncomplete])
 
   const linkedStrategies = useMemo(() => {
     if (!address) {
@@ -1176,14 +1227,24 @@ export default function PositionDetail() {
         </Tabs.List>
 
         <Tabs.Content value="overview" className="mt-4 space-y-6">
-          {(lastRebalanceIncomplete || lastRebalanceSession) && (
+          {(lastRebalanceIncomplete || address) && (
             <Card>
               <CardHeader>
                 <CardTitle>
-                  {locale === 'pl' ? 'Ostatni rebalance — sesja i kapitał' : 'Last rebalance — session & capital'}
+                  {t('positionDetail.chainPortfolioSectionTitle')}
                 </CardTitle>
               </CardHeader>
               <CardContent className="text-sm space-y-2">
+                {address ? (
+                  <ChainPortfolioPanel
+                    embedded
+                    anchorPosition={address}
+                    poolAddress={position?.pool_address}
+                    lpNavUsd={chainHeadLpNavUsd}
+                    fallbackStartUsd={chainPortfolioFallbackStartUsd}
+                    className="rounded-md border border-primary/30 bg-primary/5 px-3 py-3 mb-3"
+                  />
+                ) : null}
                 {lastRebalanceIncomplete ? (
                   <ErrorBanner className="text-destructive-foreground">
                     <div className="font-medium">
@@ -1207,44 +1268,15 @@ export default function PositionDetail() {
                         <span className="font-medium">{locale === 'pl' ? 'wskazówka:' : 'hint:'}</span> {lastRebalanceIncomplete.hint}
                       </div>
                     ) : null}
-                  </ErrorBanner>
-                ) : null}
-
-                {!lastRebalanceIncomplete && lastRebalanceSession ? (
-                  <div className="space-y-3">
-                    <div className="rounded-md border border-border bg-muted/10 px-3 py-2">
-                      <div className="font-medium">
-                        {locale === 'pl' ? 'Sesja rebalance (ID z lifecycle)' : 'Rebalance session (ID from lifecycle)'}
+                    {reopenFromChainHref ? (
+                      <div className="mt-3">
+                        <Button asChild size="sm" variant="default">
+                          <Link to={reopenFromChainHref}>{t('positionDetail.reopenFromChain')}</Link>
+                        </Button>
+                        <p className="text-[11px] text-muted-foreground mt-1.5">{t('positionDetail.reopenFromChainHint')}</p>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        session:{' '}
-                        <span className="font-mono">
-                          {lastRebalanceSession.session === '_no_session'
-                            ? locale === 'pl'
-                              ? '(brak rebalance_session_id)'
-                              : '(no rebalance_session_id)'
-                            : String(lastRebalanceSession.session)}
-                        </span>
-                        {lastRebalanceSession.hasClose && !lastRebalanceSession.hasOpen
-                          ? locale === 'pl'
-                            ? ' · close bez open (prawdopodobnie niepełne)'
-                            : ' · close without open (likely incomplete)'
-                          : ''}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {t('positionDetail.openLedgerTabHintBefore')}
-                        <strong>{t('positionDetail.tabLedger')}</strong>
-                        {t('positionDetail.openLedgerTabHintAfter')}
-                      </div>
-                    </div>
-                    {lastRebalanceSession.session !== '_no_session' ? (
-                      <SessionBalancesPanel
-                        embedded
-                        sessionId={String(lastRebalanceSession.session)}
-                        className="rounded-md border border-dashed border-border px-3 py-2"
-                      />
                     ) : null}
-                  </div>
+                  </ErrorBanner>
                 ) : null}
 
                 {(!ledgerAnyPresent || !ilAnyPresent) && (
@@ -1592,6 +1624,7 @@ export default function PositionDetail() {
                     </div>
                     {streamTotals ? (
                       <div className="border-t border-border/60 pt-2 space-y-1">
+                        <ChainEconomicQualityBanner totals={streamTotals} />
                         <div className="flex justify-between text-sm">
                           <span className="text-muted-foreground">
                             {locale === 'pl' ? 'Baseline historii → ostatni mark łańcucha' : 'History baseline → latest chain mark'}
@@ -1622,22 +1655,26 @@ export default function PositionDetail() {
                             {formatPercentFixed(streamTotals.lp_vs_hodl_with_fees_pct, 3)})
                           </span>
                         </div>
-                        <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">{locale === 'pl' ? 'Zrealizowany cashflow (szerszy)' : 'Realized cashflow (broader)'}</span>
-                          <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.realized_cashflow_usd, 3)}</span>
-                        </div>
-                        <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">{locale === 'pl' ? 'Net PnL strategii' : 'Strategy Net PnL'}</span>
-                          <span
-                            className={
-                              parseFloat(streamTotals.net_pnl_pct) >= 0
-                                ? 'text-green-500 font-mono'
-                                : 'text-red-500 font-mono'
-                            }
-                          >
-                            {formatUsdFixed(streamTotals.net_pnl_usd, 3)} ({formatPercentFixed(streamTotals.net_pnl_pct, 3)})
-                          </span>
-                        </div>
+                        <details className="rounded border border-border/50 bg-muted/5 px-2 py-1.5 text-sm">
+                          <summary className="cursor-pointer text-xs text-muted-foreground select-none">
+                            {t('positionDetail.streamAuditSummary')}
+                          </summary>
+                          <div className="mt-2 space-y-1.5 border-t border-border/40 pt-2">
+                            <p className="text-[11px] text-amber-800 dark:text-amber-200 leading-snug">
+                              {t('lineage.cashflowWarning')}
+                            </p>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">{locale === 'pl' ? 'Zrealizowany cashflow' : 'Realized cashflow'}</span>
+                              <span className="font-mono tabular-nums">{formatUsdFixed(streamTotals.realized_cashflow_usd, 3)}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">{locale === 'pl' ? 'Net PnL (model)' : 'Net PnL (model)'}</span>
+                              <span className="font-mono tabular-nums text-muted-foreground">
+                                {formatUsdFixed(streamTotals.net_pnl_usd, 3)} ({formatPercentFixed(streamTotals.net_pnl_pct, 3)})
+                              </span>
+                            </div>
+                          </div>
+                        </details>
                         {streamTotals.price_basis_note ? (
                           <div className="text-[11px] text-muted-foreground leading-snug">
                             <span className="font-medium">{streamTotals.valuation_price_time_kind}</span>: {streamTotals.price_basis_note}

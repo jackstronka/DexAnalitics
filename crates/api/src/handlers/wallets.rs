@@ -8,12 +8,16 @@ use crate::models::{
     WalletEffectiveBalancesResponse, WalletEntry, WalletLedgerDelta, WalletLedgerEventsResponse,
     WalletLedgerStatus, WalletOpsStatsResponse, WalletReconcileItem, WalletReconcileResponse,
     WalletSessionBalancesResponse, WalletSessionGlBackfillReport, WalletSessionGlReconcileResponse,
+    WalletGlBalancesResponse, WalletGlOpeningImportReport, WalletGlRpcReconcileResponse,
+    WalletChainPortfolioResponse, WalletChainCollectedFeesSummary, WalletChainGlBackfillReport, WalletChainSessionIdBackfillReport,
+    WalletChainPortfolioHistoryResponse,
     WalletReconciliationStatus, WalletReplicationStatus, WalletTokenBalance,
     WalletTransferLogEntry, WalletTransferRequest, WalletTransferResponse,
     WalletTransfersListResponse, WalletWsStatusResponse, WalletsListResponse,
 };
 use crate::services::position_executor::load_wallet_from_env;
 use crate::services::wallet_gl_posting;
+use crate::services::chain_portfolio;
 use crate::services::wallet_ledger;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
@@ -47,6 +51,7 @@ use uuid::Uuid;
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const HEDGE_LATENCY_WINDOW: usize = 64;
 
 type WalletReplica = Option<(String, String)>;
@@ -1305,6 +1310,9 @@ pub async fn get_wallet_session_balances(
             session_id: session_id.to_string(),
             owner: q.owner.clone(),
             source: "gl_session_shadow_disabled".to_string(),
+            quality: "disabled".to_string(),
+            gl_matches_pslr: false,
+            needs_reconcile: false,
             balances: vec![],
             metrics: None,
         }));
@@ -1314,23 +1322,38 @@ pub async fn get_wallet_session_balances(
             session_id: session_id.to_string(),
             owner: q.owner.clone(),
             source: "gl_session_shadow_no_db".to_string(),
+            quality: "no_db".to_string(),
+            gl_matches_pslr: false,
+            needs_reconcile: false,
             balances: vec![],
             metrics: None,
         }));
     };
     let owner = q.owner.as_deref();
-    let (balances, source) =
+    let resolved =
         wallet_gl_posting::read_session_balances_resolved(db, session_id, owner)
             .await
             .map_err(|e| ApiError::internal(format!("session balances read failed: {e}")))?;
-    let metrics = wallet_gl_posting::resolve_session_metrics(db, session_id, owner, &balances)
-        .await
-        .map_err(|e| ApiError::internal(format!("session metrics read failed: {e}")))?;
+    let metrics = wallet_gl_posting::resolve_session_metrics(
+        db,
+        session_id,
+        owner,
+        &resolved.balances,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("session metrics read failed: {e}")))?;
+    let needs_reconcile = resolved.needs_reconcile
+        || metrics
+            .as_ref()
+            .is_some_and(|m| !m.metrics_trusted);
     Ok(Json(WalletSessionBalancesResponse {
         session_id: session_id.to_string(),
         owner: q.owner.clone(),
-        source,
-        balances,
+        source: resolved.source,
+        quality: resolved.quality,
+        gl_matches_pslr: resolved.gl_matches_pslr,
+        needs_reconcile,
+        balances: resolved.balances,
         metrics,
     }))
 }
@@ -1410,6 +1433,533 @@ pub async fn post_wallet_reconcile_session_gl(
         .await
         .map_err(|e| ApiError::internal(format!("session reconcile failed: {e}")))?;
     Ok(Json(resp))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletChainReconcileQuery {
+    pub chain_session_id: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// `POST /wallets/reconcile-chain-gl` — compare CHAIN GL vs PSLR aggregate.
+#[utoipa::path(
+    post,
+    path = "/wallets/reconcile-chain-gl",
+    tag = "Wallets",
+    params(
+        ("chain_session_id" = String, Query, description = "Stable chain_session_id"),
+        ("owner" = Option<String>, Query, description = "Optional owner filter for GL read")
+    ),
+    responses((status = 200, description = "Reconcile report", body = WalletSessionGlReconcileResponse))
+)]
+pub async fn post_wallet_reconcile_chain_gl(
+    State(state): State<AppState>,
+    Query(q): Query<WalletChainReconcileQuery>,
+) -> ApiResult<Json<WalletSessionGlReconcileResponse>> {
+    if !wallet_gl_posting::chain_reconcile_enabled() {
+        return Err(ApiError::bad_request(
+            "chain reconcile disabled (CLMM_WALLET_GL_CHAIN_RECONCILE=0)",
+        ));
+    }
+    let chain_session_id = q.chain_session_id.trim();
+    if chain_session_id.is_empty() {
+        return Err(ApiError::bad_request("chain_session_id is required"));
+    }
+    let Some(db) = state.db.as_ref() else {
+        return Err(ApiError::internal("database not connected"));
+    };
+    let resp = wallet_gl_posting::reconcile_chain_gl(db, chain_session_id, q.owner.as_deref())
+        .await
+        .map_err(|e| ApiError::internal(format!("chain reconcile failed: {e}")))?;
+    Ok(Json(resp))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletGlBalancesQuery {
+    pub owner: String,
+}
+
+fn ui_amount_to_positive_raw_i128(ui: &str, decimals: u8) -> Option<i128> {
+    let t = ui.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() || v <= 0.0 {
+        return None;
+    }
+    let scale = 10f64.powi(i32::from(decimals));
+    Some((v * scale).round() as i128)
+}
+
+fn wallet_opening_postings_from_effective(
+    eff: &WalletEffectiveBalancesResponse,
+) -> Vec<(String, i128)> {
+    let mut sums: BTreeMap<String, i128> = BTreeMap::new();
+    let sol_total =
+        i128::from(eff.native_effective_lamports) + i128::from(eff.wsol_effective_raw);
+    if sol_total > 0 {
+        sums.insert(WSOL_MINT.to_string(), sol_total);
+    }
+    for t in &eff.tokens {
+        if t.mint == WSOL_MINT {
+            continue;
+        }
+        let dec = if t.mint == USDC_MINT { 6 } else { 9 };
+        let Some(raw) = ui_amount_to_positive_raw_i128(&t.ui_amount, dec) else {
+            continue;
+        };
+        *sums.entry(t.mint.clone()).or_insert(0) += raw;
+    }
+    sums.into_iter().collect()
+}
+
+/// `GET /wallets/wallet-balances` — shadow GL for global `WALLET:{owner}`.
+#[utoipa::path(
+    get,
+    path = "/wallets/wallet-balances",
+    tag = "Wallets",
+    params(("owner" = String, Query, description = "Wallet pubkey")),
+    responses((status = 200, description = "WALLET GL balances", body = WalletGlBalancesResponse))
+)]
+pub async fn get_wallet_gl_balances(
+    State(state): State<AppState>,
+    Query(q): Query<WalletGlBalancesQuery>,
+) -> ApiResult<Json<WalletGlBalancesResponse>> {
+    let owner = q.owner.trim();
+    if owner.is_empty() {
+        return Err(ApiError::bad_request("owner is required"));
+    }
+    Pubkey::from_str(owner).map_err(|_| ApiError::bad_request("invalid owner pubkey"))?;
+    let Some(db) = state.db.as_ref() else {
+        return Ok(Json(WalletGlBalancesResponse {
+            owner: owner.to_string(),
+            source: "gl_wallet_shadow_no_db".to_string(),
+            quality: "no_db".to_string(),
+            needs_reconcile: false,
+            opening_import_applied: false,
+            balances: vec![],
+        }));
+    };
+    let resp = wallet_gl_posting::read_wallet_gl_balances(db, owner)
+        .await
+        .map_err(|e| ApiError::internal(format!("wallet GL read failed: {e}")))?;
+    Ok(Json(resp))
+}
+
+/// `POST /wallets/wallet-balances/opening-import` — snapshot effective balances into WALLET GL.
+#[utoipa::path(
+    post,
+    path = "/wallets/wallet-balances/opening-import",
+    tag = "Wallets",
+    params(("owner" = String, Query, description = "Wallet pubkey")),
+    responses((status = 200, description = "Opening import report", body = WalletGlOpeningImportReport))
+)]
+pub async fn post_wallet_gl_opening_import(
+    State(state): State<AppState>,
+    Query(q): Query<WalletGlBalancesQuery>,
+) -> ApiResult<Json<WalletGlOpeningImportReport>> {
+    let owner_trim = q.owner.trim();
+    if owner_trim.is_empty() {
+        return Err(ApiError::bad_request("owner is required"));
+    }
+    let owner_pk =
+        Pubkey::from_str(owner_trim).map_err(|_| ApiError::bad_request("invalid owner pubkey"))?;
+    let Some(db) = state.db.as_ref() else {
+        return Err(ApiError::internal("database not connected"));
+    };
+    if !wallet_gl_posting::wallet_posting_enabled() {
+        return Err(ApiError::bad_request(
+            "wallet GL posting disabled (CLMM_WALLET_GL_WALLET_POSTING=0)",
+        ));
+    }
+    let eff = compute_effective_balances(&state, owner_pk).await?;
+    let postings = wallet_opening_postings_from_effective(&eff);
+    let report = wallet_gl_posting::import_wallet_opening_balance(db, owner_trim, &postings)
+        .await
+        .map_err(|e| ApiError::internal(format!("wallet opening import failed: {e}")))?;
+    Ok(Json(report))
+}
+
+/// `GET /wallets/reconcile-wallet-gl` — compare WALLET GL vs effective-balances RPC (D3 shadow).
+#[utoipa::path(
+    get,
+    path = "/wallets/reconcile-wallet-gl",
+    tag = "Wallets",
+    params(("owner" = String, Query, description = "Wallet pubkey")),
+    responses((status = 200, description = "GL vs RPC reconcile report", body = WalletGlRpcReconcileResponse))
+)]
+pub async fn get_wallet_reconcile_wallet_gl(
+    State(state): State<AppState>,
+    Query(q): Query<WalletGlBalancesQuery>,
+) -> ApiResult<Json<WalletGlRpcReconcileResponse>> {
+    if !wallet_gl_posting::wallet_rpc_compare_enabled() {
+        return Err(ApiError::bad_request(
+            "wallet GL vs RPC compare disabled (CLMM_WALLET_GL_WALLET_RPC_COMPARE=0)",
+        ));
+    }
+    let owner_trim = q.owner.trim();
+    if owner_trim.is_empty() {
+        return Err(ApiError::bad_request("owner is required"));
+    }
+    let owner_pk =
+        Pubkey::from_str(owner_trim).map_err(|_| ApiError::bad_request("invalid owner pubkey"))?;
+    let eff = compute_effective_balances(&state, owner_pk).await?;
+    let rpc_postings = wallet_opening_postings_from_effective(&eff);
+    let rpc_confidence = match eff.confidence {
+        WalletBalanceConfidence::Verified => "verified",
+        WalletBalanceConfidence::Projected => "projected",
+        WalletBalanceConfidence::Degraded => "degraded",
+    };
+    let gl = if let Some(db) = state.db.as_ref() {
+        wallet_gl_posting::read_wallet_gl_balances(db, owner_trim)
+            .await
+            .map_err(|e| ApiError::internal(format!("wallet GL read failed: {e}")))?
+    } else {
+        WalletGlBalancesResponse {
+            owner: owner_trim.to_string(),
+            source: "gl_wallet_shadow_no_db".to_string(),
+            quality: "no_db".to_string(),
+            needs_reconcile: true,
+            opening_import_applied: false,
+            balances: vec![],
+        }
+    };
+    let resp = wallet_gl_posting::reconcile_wallet_gl_vs_rpc(
+        owner_trim,
+        &gl,
+        &rpc_postings,
+        rpc_confidence,
+        eff.is_stale,
+        Some(eff.as_of_utc.as_str()),
+    );
+    Ok(Json(resp))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletChainPortfolioQuery {
+    #[serde(default)]
+    pub chain_session_id: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub anchor_position: Option<String>,
+    /// Optional head NAV USD for reconcile (same as UI „w puli teraz”).
+    #[serde(default)]
+    pub lp_nav_usd: Option<String>,
+    /// When true, include optional lineage reconcile block (slow — may RPC; default off for KPI hot path).
+    #[serde(default)]
+    pub include_lineage_reconcile: Option<bool>,
+}
+
+/// `GET /wallets/chain-portfolio` — GL balances for `CHAIN:{chain_session_id}` (portfel łańcucha).
+#[utoipa::path(
+    get,
+    path = "/wallets/chain-portfolio",
+    tag = "Wallets",
+    params(
+        ("chain_session_id" = String, Query, description = "Stable id for the whole rotation chain"),
+        ("owner" = Option<String>, Query, description = "Optional owner pubkey filter"),
+        ("anchor_position" = Option<String>, Query, description = "When chain_session_id unknown, resolve from position PDA"),
+        ("include_lineage_reconcile" = Option<bool>, Query, description = "Include slow lineage reconcile audit block (default false)")
+    ),
+    responses((status = 200, description = "CHAIN mint balances", body = WalletChainPortfolioResponse))
+)]
+pub async fn get_wallet_chain_portfolio(
+    State(state): State<AppState>,
+    Query(q): Query<WalletChainPortfolioQuery>,
+) -> ApiResult<Json<WalletChainPortfolioResponse>> {
+    let mut chain_session_id = q.chain_session_id.trim().to_string();
+    if chain_session_id.is_empty() {
+        if let Some(anchor) = q
+            .anchor_position
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            chain_session_id = chain_portfolio::resolve_chain_session_id_for_position(&state, anchor)
+                .await
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "chain_session_id required (or pass anchor_position to resolve)",
+                    )
+                })?;
+        } else {
+            return Err(ApiError::bad_request("chain_session_id is required"));
+        }
+    }
+    if !wallet_gl_posting::chain_read_enabled() {
+        let meta = chain_portfolio::fetch_chain_session_meta(
+            &state,
+            &chain_session_id,
+            q.anchor_position.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten();
+        return Ok(Json(WalletChainPortfolioResponse {
+            chain_session_id: chain_session_id.clone(),
+            owner: q.owner.clone(),
+            source: "gl_chain_shadow_disabled".to_string(),
+            quality: "disabled".to_string(),
+            gl_matches_pslr: false,
+            needs_reconcile: false,
+            balances: vec![],
+            metrics: None,
+            anchor_position: q.anchor_position.clone(),
+            meta,
+            reconcile: None,
+            ledger_events: vec![],
+            portfolio_balance_usd: None,
+            chain_balance_usd_legs: vec![],
+            collected_fees: WalletChainCollectedFeesSummary::default(),
+            chain_wallet_excluded_mint_count: 0,
+            lp_nav_usd: q
+                .lp_nav_usd
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        }));
+    }
+    let Some(db) = state.db.as_ref() else {
+        return Ok(Json(WalletChainPortfolioResponse {
+            chain_session_id: chain_session_id.clone(),
+            owner: q.owner.clone(),
+            source: "gl_chain_shadow_no_db".to_string(),
+            quality: "no_db".to_string(),
+            gl_matches_pslr: false,
+            needs_reconcile: false,
+            balances: vec![],
+            metrics: None,
+            anchor_position: q.anchor_position.clone(),
+            meta: None,
+            reconcile: None,
+            ledger_events: vec![],
+            portfolio_balance_usd: None,
+            chain_balance_usd_legs: vec![],
+            collected_fees: WalletChainCollectedFeesSummary::default(),
+            chain_wallet_excluded_mint_count: 0,
+            lp_nav_usd: q
+                .lp_nav_usd
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        }));
+    };
+    let owner = q.owner.as_deref();
+    let (resolved_result, meta, ledger_result) = tokio::join!(
+        wallet_gl_posting::read_chain_portfolio_resolved(db, &chain_session_id, owner),
+        chain_portfolio::fetch_chain_session_meta(
+            &state,
+            &chain_session_id,
+            q.anchor_position.as_deref(),
+        ),
+        chain_portfolio::build_chain_portfolio_ledger(db, &chain_session_id),
+    );
+    let (resolved, metrics) = resolved_result
+        .map_err(|e| ApiError::internal(format!("chain portfolio read failed: {e}")))?;
+    let meta = meta.ok().flatten();
+    let (mut ledger_events, spot_prices, collected_fees, strategy_mints) = ledger_result
+        .map_err(|e| ApiError::internal(format!("chain portfolio ledger failed: {e}")))?;
+    if let Some(ref m) = metrics
+        && let Some(start) = chain_portfolio::ledger_start_event_from_open_start(&m.open_start) {
+            ledger_events.insert(0, start);
+        }
+    let needs_reconcile = resolved.needs_reconcile
+        || metrics
+            .as_ref()
+            .is_some_and(|m| !m.metrics_trusted);
+    let reconcile = if q.include_lineage_reconcile == Some(true) {
+        if let Some(anchor) = q
+            .anchor_position
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            chain_portfolio::compute_chain_lineage_reconcile_best_effort(
+                &state,
+                &chain_session_id,
+                anchor,
+                metrics.as_ref(),
+                q.lp_nav_usd.as_deref(),
+            )
+            .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let (strategy_balances, chain_wallet_excluded_mint_count) =
+        chain_portfolio::filter_strategy_wallet_balances(&resolved.balances, &strategy_mints);
+    let display_prices = chain_portfolio::chain_wallet_display_prices(metrics.as_ref(), &spot_prices);
+    let portfolio_balance_usd = chain_portfolio::portfolio_balance_usd_from_balances(
+        &strategy_balances,
+        &display_prices,
+    )
+    .or_else(|| {
+        metrics
+            .as_ref()
+            .filter(|m| m.metrics_trusted)
+            .and_then(|m| m.current_value_usd.clone())
+    });
+    let chain_balance_usd_legs = if metrics.as_ref().is_some_and(|m| {
+        m.metrics_trusted && !m.current_balance_usd_legs.is_empty()
+    }) {
+        chain_portfolio::filter_usd_legs_to_strategy_mints(
+            &metrics.as_ref().expect("checked above").current_balance_usd_legs,
+            &strategy_mints,
+        )
+    } else {
+        chain_portfolio::chain_balance_usd_legs_from_balances(&strategy_balances, &display_prices)
+    };
+    let lp_nav_usd = q
+        .lp_nav_usd
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Ok(Json(WalletChainPortfolioResponse {
+        chain_session_id,
+        owner: q.owner.clone(),
+        source: resolved.source,
+        quality: resolved.quality,
+        gl_matches_pslr: resolved.gl_matches_pslr,
+        needs_reconcile,
+        balances: resolved.balances,
+        metrics,
+        anchor_position: q.anchor_position.clone(),
+        meta,
+        reconcile,
+        ledger_events,
+        portfolio_balance_usd,
+        chain_balance_usd_legs,
+        collected_fees,
+        chain_wallet_excluded_mint_count,
+        lp_nav_usd,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletChainPortfolioHistoryQuery {
+    #[serde(default)]
+    pub chain_session_id: String,
+    #[serde(default)]
+    pub anchor_position: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /wallets/chain-portfolio/history` — ordered lifecycle timeline for one chain cycle.
+#[utoipa::path(
+    get,
+    path = "/wallets/chain-portfolio/history",
+    tag = "Wallets",
+    params(
+        ("chain_session_id" = String, Query, description = "Stable id for the whole rotation chain"),
+        ("anchor_position" = Option<String>, Query, description = "Resolve chain_session_id when omitted"),
+        ("limit" = Option<usize>, Query, description = "Max rows (default 500, max 2000)")
+    ),
+    responses((status = 200, description = "Chain cycle timeline", body = WalletChainPortfolioHistoryResponse))
+)]
+pub async fn get_wallet_chain_portfolio_history(
+    State(state): State<AppState>,
+    Query(q): Query<WalletChainPortfolioHistoryQuery>,
+) -> ApiResult<Json<WalletChainPortfolioHistoryResponse>> {
+    let mut chain_session_id = q.chain_session_id.trim().to_string();
+    if chain_session_id.is_empty() {
+        if let Some(anchor) = q
+            .anchor_position
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            chain_session_id = chain_portfolio::resolve_chain_session_id_for_position(&state, anchor)
+                .await
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "chain_session_id required (or pass anchor_position to resolve)",
+                    )
+                })?;
+        } else {
+            return Err(ApiError::bad_request("chain_session_id is required"));
+        }
+    }
+    let limit = q.limit.unwrap_or(500);
+    let resp = chain_portfolio::fetch_chain_portfolio_history(&state, &chain_session_id, limit)
+        .await?;
+    Ok(Json(resp))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletChainBackfillQuery {
+    #[serde(default)]
+    pub chain_session_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `POST /wallets/chain-portfolio/backfill` — replay PSLR rows into CHAIN GL (idempotent).
+#[utoipa::path(
+    post,
+    path = "/wallets/chain-portfolio/backfill",
+    tag = "Wallets",
+    params(
+        ("chain_session_id" = Option<String>, Query, description = "One chain UUID; omit to backfill up to `limit` distinct chains"),
+        ("limit" = Option<usize>, Query, description = "Max chains when chain_session_id omitted (default 50, max 500)")
+    ),
+    responses((status = 200, description = "Backfill report", body = WalletChainGlBackfillReport))
+)]
+pub async fn post_wallet_chain_portfolio_backfill(
+    State(state): State<AppState>,
+    Query(q): Query<WalletChainBackfillQuery>,
+) -> ApiResult<Json<WalletChainGlBackfillReport>> {
+    let Some(db) = state.db.as_ref() else {
+        return Err(ApiError::internal("database not connected"));
+    };
+    let limit = q.limit.unwrap_or(50);
+    let report = wallet_gl_posting::backfill_chain_postings_from_pslr(
+        db,
+        q.chain_session_id.as_deref(),
+        limit,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("chain backfill failed: {e}")))?;
+    Ok(Json(report))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletChainIdBackfillQuery {
+    pub anchor_position: String,
+    #[serde(default)]
+    pub chain_session_id: Option<String>,
+}
+
+/// `POST /wallets/chain-portfolio/backfill-chain-ids` — assign one `chain_session_id` to a rotation component.
+#[utoipa::path(
+    post,
+    path = "/wallets/chain-portfolio/backfill-chain-ids",
+    tag = "Wallets",
+    params(
+        ("anchor_position" = String, Query, description = "Any PDA in the rotation component (usually head)"),
+        ("chain_session_id" = Option<String>, Query, description = "Optional fixed UUID; generated when omitted")
+    ),
+    responses((status = 200, description = "Backfill report", body = WalletChainSessionIdBackfillReport))
+)]
+pub async fn post_wallet_chain_portfolio_backfill_chain_ids(
+    State(state): State<AppState>,
+    Query(q): Query<WalletChainIdBackfillQuery>,
+) -> ApiResult<Json<WalletChainSessionIdBackfillReport>> {
+    let report = chain_portfolio::backfill_chain_session_ids_for_position(
+        &state,
+        &q.anchor_position,
+        q.chain_session_id.clone(),
+    )
+    .await?;
+    Ok(Json(report))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2220,6 +2770,7 @@ fn build_effective_balances(
         token_2022_error: chain.token_2022_error,
         cache_source: Some("chain".to_string()),
         cache_updated_at_utc: Some(now_utc_iso()),
+        effective_balance_source: None,
     }
 }
 
@@ -2413,6 +2964,7 @@ async fn build_warmup_placeholder(
         token_2022_error: Some("warmup: effective cache miss, refresh in progress".to_string()),
         cache_source: Some("warmup".to_string()),
         cache_updated_at_utc: None,
+        effective_balance_source: None,
     }
 }
 
@@ -2495,6 +3047,23 @@ async fn store_wallet_effective_response(
     Ok(response)
 }
 
+async fn overlay_wallet_gl_effective_read(
+    state: &AppState,
+    owner: &str,
+    resp: WalletEffectiveBalancesResponse,
+) -> WalletEffectiveBalancesResponse {
+    if !wallet_gl_posting::wallet_effective_read_enabled() {
+        return resp;
+    }
+    let gl = match state.db.as_ref() {
+        Some(db) => wallet_gl_posting::read_wallet_gl_balances(db, owner)
+            .await
+            .ok(),
+        None => None,
+    };
+    wallet_gl_posting::apply_wallet_gl_effective_read_overlay(resp, gl.as_ref())
+}
+
 #[utoipa::path(
     get,
     path = "/wallets/effective-balances",
@@ -2525,7 +3094,8 @@ pub async fn get_wallet_effective_balances(
         let resp = store_wallet_effective_response(&state, &owner, resp, "memory", true)
             .await
             .map_err(|e| ApiError::internal(format!("persist wallet effective cache: {e}")))?;
-        return Ok(Json(stale_marked_response(resp, false, 0)));
+        let resp = overlay_wallet_gl_effective_read(&state, &owner, stale_marked_response(resp, false, 0)).await;
+        return Ok(Json(resp));
     }
     let ttl = Duration::from_secs(wallet_effective_cache_ttl_secs());
     {
@@ -2536,15 +3106,19 @@ pub async fn get_wallet_effective_balances(
                 spawn_effective_refresh_if_needed(state.clone(), owner.clone(), owner_pk).await;
             }
             let age_ms = cached.updated_at.elapsed().as_millis() as u64;
-            return Ok(Json(stale_marked_response(
-                cached.response.clone(),
-                !is_fresh,
-                if is_fresh { 0 } else { age_ms },
-            )));
+            let resp = overlay_wallet_gl_effective_read(
+                &state,
+                &owner,
+                stale_marked_response(cached.response.clone(), !is_fresh, if is_fresh { 0 } else { age_ms }),
+            )
+            .await;
+            return Ok(Json(resp));
         }
     }
     spawn_effective_refresh_if_needed(state.clone(), owner.clone(), owner_pk).await;
-    Ok(Json(build_warmup_placeholder(&state, &owner).await))
+    Ok(Json(
+        overlay_wallet_gl_effective_read(&state, &owner, build_warmup_placeholder(&state, &owner).await).await,
+    ))
 }
 
 pub async fn refresh_wallet_effective_owner(state: &AppState, owner: &str) -> anyhow::Result<()> {
@@ -3121,6 +3695,7 @@ mod tests {
             token_2022_error: None,
             cache_source: None,
             cache_updated_at_utc: None,
+            effective_balance_source: None,
         }
     }
 

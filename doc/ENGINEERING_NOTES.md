@@ -1,3 +1,267 @@
+## 2026-09-30 — Faza 0 planu testów: hermetyczny test registry, gate script w repo, semver baseline
+
+keywords: testing, hermetic-tests, EnvGuard, test_env, registry_stale_reconcile, position_close_signer, CLMM_POSITION_REGISTRY_PATH, CLMM_POSITION_LIFECYCLE_LEDGER_PATH, critical-area-test-gate, semver, ci, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-01, BUG-20260930-04
+
+- **What:** `clmm-lp-api` ma `#[cfg(test)] test_env::EnvGuard` — każdy test mutujący env w tym crate trzyma guard (wspólny `tokio::sync::Mutex`; `lock().await` / `blocking_lock()`), wartości przywracane w `Drop`. Test `backfill_9vhky_*` (mainnet RPC + lokalny ledger + `set_current_dir`) zastąpiony 3 hermetycznymi testami orphan-close / snapshot / early-exit bez RPC; wersja mainnet zostaje jako `#[ignore]` manual repair. `.gitignore`: `/scripts/*` + `!/scripts/ci/` → `scripts/ci/critical-area-test-gate.sh` w repo (job `critical_area_requires_tests` wcześniej nie miał skryptu). `semver.yml`: baseline `origin/main` na PR. Plan i mapa fal → testy: `doc/IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`.
+- **paths:** `crates/api/src/test_env.rs`, `crates/api/src/lib.rs`, `crates/api/src/services/registry_stale_reconcile.rs`, `crates/api/src/services/position_close_signer.rs`, `.gitignore`, `scripts/ci/critical-area-test-gate.sh`, `.github/workflows/semver.yml`
+
+## 2026-09-30 — T-PR1: zielony baseline testów (cargo test, clippy, tsc)
+
+keywords: testing, regression, cargo-test, clippy, TEST_ENV_LOCK, session_capital, env-var-race, tsc, vitest, TESTING_REGRESSION_PLAN, BUG-20260930-01, BUG-20260930-02, BUG-20260930-03
+
+- **What:** Przywrócony zielony stan: `cargo test --workspace` (634 pass), `cargo clippy --all-targets --all-features -D warnings` (0), `web: tsc --noEmit` (0) + vitest 49/49. Testy mutujące env w `clmm-lp-execution` serializowane przez `session_capital::TEST_ENV_LOCK` (`tokio::sync::Mutex`; async `.lock().await`, sync `.blocking_lock()`). Poprawki clippy bez zmiany zachowania (let-chains, `clamp`, `#[allow(too_many_arguments / large_enum_variant / deprecated)]` wg istniejącej konwencji, scalone identyczne gałęzie). Latentny błąd decimals → BUG-20260930-02 (niezmieniony). `cargo fmt --check` nadal czerwony (38 plików) — osobny commit; CI fmt job nie sprawdza → BUG-20260930-03. `npm run lint` w `web/` nie działa (brak konfiguracji ESLint).
+- **paths:** `crates/api/src/services/position_service.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/protocols/src/orca/executor.rs`, `crates/api/src/{routes.rs,handlers/*,services/*}`, `web/src/lib/*.test.ts`, `doc/TESTING_REGRESSION_PLAN.md`
+
+## 2026-05-27 — UI Przegląd: quote/open/swap z portfela CHAIN (nie global RPC)
+
+keywords: PositionCreate, PositionDetail, ChainPortfolioPanel, chain_session_id, chainCapital, quote-open-budget, Overview, BUG-20260526-01
+
+- **What:** Z Przeglądu (Overview) linki „Open / swap z portfela CHAIN” i „Dokończ open z portfela CHAIN” prowadzą do `/positions/new?chain_session_id=…` z pulą/tickami. `PositionCreate` przekazuje `chain_session_id` do quote-open-budget, open i swap-before-open; funding + swap-mix capowane do inventory CHAIN (`chainInventoryUi`), nie do globalnego portfela RPC. Preflight `ChainCapitalPreflight` zamiast sesji gdy jest chain id.
+- **paths:** `web/src/pages/PositionCreate.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/components/ChainPortfolioPanel.tsx`, `web/src/components/ChainCapitalPreflight.tsx`, `web/src/lib/chainCapital.ts`, `web/src/lib/api.ts`, `web/src/lib/i18n.tsx`
+
+## 2026-05-27 — Executor/API: quoty i swap tylko z konta CHAIN
+
+keywords: quote-open-budget, chain_session_id, load_chain_scoped_pool_wallet, swap_before_open, CHAIN inventory, portfolio caps, BUG-20260526-01
+
+- **What:** `POST /pools/{addr}/quote-open-budget` z `chain_session_id`/`cost_session_id` — sizing z inventory `CHAIN:{id}` (notional + clamp target + token_max). Swap/open/operational top-up/reopen preflight używają `load_chain_scoped_pool_wallet` / caps (nie global RPC wallet).
+- **paths:** `session_capital.rs`, `rebalance.rs`, `handlers/pools.rs`, `position_service.rs`, `models.rs`
+
+## 2026-05-27 — Executor CHAIN-first: auto caps gdy `chain_session_id` (bez flagi env)
+
+keywords: CLMM_REOPEN_USE_CHAIN_PORTFOLIO, chain_portfolio_enabled, session_capital, rebalance executor, phantom USDC, CHAIN-first, operator open, BUG-20260526-01
+
+- **What:** Domyślnie executor/API open używa caps portfela **CHAIN** gdy jest `chain_session_id` (env `CLMM_REOPEN_USE_CHAIN_PORTFOLIO=0` wyłącza). Open/swap capowane do inventory CHAIN; błąd `portfolio_capital_insufficient` zamiast cichego dofinansowania z globalnego portfela. Pierwszy open cyklu bez close — bez caps (wyjątek `chain_has_funding_lifecycle_rows`).
+- **paths:** `session_capital.rs`, `rebalance.rs`, `wallet_session.rs`
+
+## 2026-05-27 — CHAIN portfel tokenów: filtr mintów strategii (bez phantom GL)
+
+keywords: chain_strategy_wallet_mints, chain_balance_usd_legs, phantom, chain_wallet_excluded_mint_count, BUG-20260527-02
+
+- **What:** Stopka portfela CHAIN — tylko minty z lifecycle (pula + swap + WSOL); ukryte phantom/GL noise; USD z cen open-start gdy trusted; UI note + `chain_wallet_excluded_mint_count`.
+- **paths:** `wallet_session.rs`, `chain_portfolio.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`, `models.rs`
+
+## 2026-05-27 — ChainPortfolioPanel: bez migania przy ładowaniu NAV lineage
+
+keywords: ChainPortfolioPanel, react-query, keepPreviousData, lpNavUsd, flicker, BUG-20260527-01
+
+- **What:** Stabilny cache key chain-portfolio (bez `lpNavUsd`); poprzednie dane przy refetch; NAV w stopce z props lineage; usunięty refetch co 30s na wolnym `/wallets/chain-portfolio`.
+- **paths:** `ChainPortfolioPanel.tsx`, `i18n.tsx`, `doc/BUGS.md`
+
+## 2026-05-27 — CHAIN księga: zebrane fee LP (tokeny + USD)
+
+keywords: chain-portfolio, collected_fees, WalletChainCollectedFeesSummary, collect_fees, ChainPortfolioPanel
+
+- **What:** `GET /wallets/chain-portfolio` → `collected_fees` (Σ `bot_collect_fees` + `lp_collected_*` na close, bez principalu). UI: sekcja pod portfelem CHAIN z tabelą mint/ilość/USD i liczbą collectów.
+- **paths:** `chain_portfolio.rs`, `models.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`, `api.ts`, `i18n.tsx`
+
+## 2026-05-27 — CHAIN stopka: tokeny cyklu zamiast „Bilans portfela”
+
+keywords: chain-portfolio, chain_balance_usd_legs, ChainPortfolioPanel, CHAIN wallet tokens
+
+- **What:** Stopka księgi — lista tokenów konta `CHAIN:{id}` (ilość + USD per mint + suma), nie jedna liczba „bilans”. API: `chain_balance_usd_legs[]` ze spot mapy ledgeru. NAV w puli obok bez zmian.
+- **paths:** `chain_portfolio.rs`, `handlers/wallets.rs`, `models.rs`, `ChainPortfolioPanel.tsx`, `api.ts`, `i18n.tsx`
+
+## 2026-05-27 — CHAIN ledger: bilans portfela ze spot cache + SOL na opłaty tx
+
+keywords: chain-portfolio, portfolio_balance_usd, tx_fee, seed_wsol_spot, spot_prices, ChainPortfolioPanel
+
+- **What:** `portfolio_balance_usd` — fallback: suma sald GL CHAIN × mapa spot z build ledger (gdy `metrics.current_value_usd` puste). Opłaty tx: `fetch_sol_usd_best_effort` przed pętlą i w enrich; enrich scala feed do `running` (timeout 5s). UI: stopka zawsze przy niepustej księdze; małe kwoty USD do 6 miejsc po przecinku.
+- **paths:** `chain_portfolio.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`
+
+## 2026-05-27 — NAV w puli (footer księgi): głowa łańcucha, nie stream totals
+
+keywords: chain-portfolio, NAV, chainHeadlineEndNavUsd, position.value_usd, chain_economic_totals
+
+- **What:** Stopka „NAV w puli” brała `streamTotals.current_value_usd` (nagłówek ekonomiczny). Teraz `chainHeadlineEndNavUsd`: węzeł głowy łańcucha + live `position.value_usd` gdy oglądasz głowę (jak `chain_headline_end_nav_usd` w Rust).
+- **paths:** `web/src/lib/chainEconomicQuality.ts`, `PositionDetail.tsx`, `api.ts`
+
+## 2026-05-27 — CHAIN ledger USD: event-time + fallback cen ze startu cyklu
+
+keywords: chain-portfolio, ledger_events, event_price, CHAIN_SESSION_PORTFOLIO, merged_ledger_prices, pricing
+
+- **What:** Wiersze `ledger_events` — mapa cen: pierwszy open + akumulacja event-time w kolejności; patch `chain_session_id` w JSON gdy jest tylko kolumna PSLR; alias SOL/WSOL; ostatni fallback Gecko (`fetch_mint_prices_usd`) dla brakujących mintów. Naprawia puste kolumny USD / bilans portfela przy backfill bez JSON id.
+- **paths:** `crates/api/src/services/chain_portfolio.rs`
+
+## 2026-05-27 — CHAIN ledger: lista zdarzeń + bilans / NAV w stopce
+
+keywords: chain-portfolio, ledger_events, ChainPortfolioPanel, wallet_gl_posting, lifecycle, Przegląd, CHAIN_SESSION_PORTFOLIO
+
+- **What:** `GET /wallets/chain-portfolio` zwraca `ledger_events[]` (PSLR → ruchy portfela CHAIN + osobne wiersze `tx_fee`), `portfolio_balance_usd`, echo `lp_nav_usd`. UI Przegląd: tabela chronologiczna zamiast hero/tokenów; stopka **Bilans portfela | NAV w puli**. Usunięte z Przeglądu: audyt GL/backfill, pierwszy open (audyt), ostatni rebalance SESSION.
+- **paths:** `chain_portfolio.rs`, `handlers/wallets.rs`, `models.rs`, `wallet_session.rs` (`lifecycle_price_by_mint`), `ChainPortfolioPanel.tsx`, `api.ts`, `i18n.tsx`
+
+## 2026-05-27 — UI Przegląd: uproszczenie portfela łańcucha (norma §4)
+
+keywords: chain-portfolio, ChainPortfolioPanel, strategia vs start, SESSION, overview, CHAIN_SESSION_PORTFOLIO, UI
+
+- **What:** Przegląd pozycji — jeden widok decyzyjny (hero + tokeny CHAIN + suma USD); księga/backfill/reconcile, pierwszy open i historia cyklu w `<details>`; SESSION (ostatni rebalance) zwinięty. Poprawione tytuły i18n (SESSION ≠ start cyklu).
+- **paths:** `ChainPortfolioPanel.tsx`, `PositionDetail.tsx`, `web/src/lib/i18n.tsx`
+
+keywords: chain-history, remapped anchor, HTybm, merge_meta_chain, chain-portfolio, CLMM_CHAIN_PORTFOLIO_REQUEST_TIMEOUT_SECS, strategy vs start, stream-lineage
+
+- **What:** Postgres chain-history read: gdy `requested` PDA mapuje na starszy anchor, live merge lineage od **requested** (nie `effective_anchor`) — tail rotacji w tabeli. Chain-portfolio: osobny router HTTP timeout 45s; UI 50s; hero fallback start z stream-lineage gdy błąd CP **lub** brak `metrics.open_start.value_usd` (np. `value_usd_source=unknown`).
+- **paths:** `position_chain_history.rs`, `routes.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`, `doc/BUGS.md` BUG-20260526-04
+
+## 2026-05-26 — chain-portfolio hot path: SQL meta + reconcile timeout
+
+keywords: chain-portfolio, chain_portfolio, timeout, compute_position_stream_performance, compute_chain_lineage_reconcile, CLMM_CHAIN_PORTFOLIO_RECONCILE_TIMEOUT_SECS, strategy vs start
+
+- **What:** `GET /wallets/chain-portfolio` — meta tylko z `chain_session_registry`; resolve `chain_session_id` tylko z Postgres (bez skanu lifecycle JSONL); jeden fetch PSLR + równoległy GL (`read_chain_portfolio_resolved`); reconcile vs lineage domyślnie off (`include_lineage_reconcile=1`).
+- **paths:** `crates/api/src/services/chain_portfolio.rs`, `crates/api/src/handlers/wallets.rs`, `doc/BUGS.md` BUG-20260526-03
+
+## 2026-05-26 — Migracje 015/016: fix semicolon w notes (Postgres chain-history 503)
+
+keywords: migrate, 015_wallet_gl_tx_fee_account, 016_wallet_gl_wallet_account, semicolon split, connect_db_best_effort, chain-history, database health
+
+- **What:** Migracje wallet GL **015** (TX_FEE) i **016** (WALLET convention) — usunięto `;` z literałów `notes` (runner `Database::migrate` tnie po `;`). Bez tego `db init` / start API kończyły się `db: None` → 503 na chain-history mimo działającego Postgresa.
+- **paths:** `crates/data/migrations/015_wallet_gl_tx_fee_account.sql`, `crates/data/migrations/016_wallet_gl_wallet_account.sql`, `doc/BUGS.md` BUG-20260526-03
+
+## 2026-05-26 — Wallet GL Faza D5: close-out docs + testy integracyjne CHAIN/WALLET
+
+keywords: wallet_gl, Faza D, D5, session_gl_integration, DATA_CATALOG, CHAIN GL, WALLET GL, close-out
+
+- **What:** D5 domknięcie Fazy D — `session_gl_integration` rozszerzony o `chain_gl_lifecycle_posting_matches_pslr` i `wallet_gl_opening_import_and_journal_postings`; `DATA_CATALOG.md` opisuje endpointy/env D1–D4 (SESSION/CHAIN/WALLET); checkboxy i test commands w `WALLET_GL.md` §6.
+- **paths:** `crates/data/tests/session_gl_integration.rs`, `doc/DATA_CATALOG.md`, `doc/WALLET_GL.md`, `doc/WALLET_GL_PHASE_D_PLAN.md`
+
+## 2026-05-26 — Wallet GL Faza D4: effective-balances z WALLET GL (flaga)
+
+keywords: wallet_gl, Faza D, D4, CLMM_WALLET_GL_EFFECTIVE_READ, effective-balances, effective_balance_source, gl_wallet, rpc_fallback
+
+- **What:** Env `CLMM_WALLET_GL_EFFECTIVE_READ=1` (default off) nakłada salda z `WALLET:{owner}` na odpowiedź `GET /wallets/effective-balances` gdy GL zaufane (opening import, `needs_reconcile=false`, `quality=exact`, brak pending convert, nie stale). Cache RPC bez zmian; overlay tylko przy odczycie. Pole `effective_balance_source`: `gl_wallet` | `rpc_fallback`. UI banner na Wallet + PositionCreate. Rollback: flag off + restart.
+- **paths:** `wallet_gl_posting.rs`, `handlers/wallets.rs`, `models.rs`, `WalletEffectiveSourceBanner.tsx`, `doc/FUNCTIONAL_SPECIFICATION.md` §5
+
+## 2026-05-26 — Wallet GL Faza D3: shadow compare GL vs RPC
+
+keywords: wallet_gl, Faza D, D3, reconcile-wallet-gl, effective-balances, WALLET owner, shadow compare, CLMM_WALLET_GL_WALLET_RPC_COMPARE
+
+- **What:** `GET /wallets/reconcile-wallet-gl?owner=` — porównanie konta `WALLET:{owner}` z snapshotem `effective-balances` (native+WSOL→WSOL mint + SPL). Pola `gaps[]` z `delta_raw`; `tracing::warn` gdy \|Δ\| > próg na WSOL/USDC. UI: przycisk „Porównaj GL vs RPC” w `WalletGlBalancesPanel`. Env: `CLMM_WALLET_GL_WALLET_RPC_COMPARE` (default on), `CLMM_WALLET_GL_WALLET_RPC_COMPARE_WARN_RAW` (default 1M lamports).
+- **paths:** `wallet_gl_posting.rs`, `handlers/wallets.rs`, `models.rs`, `WalletGlBalancesPanel.tsx`, `doc/WALLET_GL.md`
+
+## 2026-05-26 — Wallet GL Faza D1+D2: quality flags, reconcile-chain-gl, WALLET:{owner}
+
+keywords: wallet_gl, Faza D, D1, D2, needs_reconcile, quality, reconcile-chain-gl, WALLET owner, opening-import, migration 016, wallet_gl_posting
+
+- **What:** D1: `GlScopeReadResolved` + pola `quality` / `gl_matches_pslr` / `needs_reconcile` na GET session/chain; `POST /wallets/reconcile-chain-gl`; UI banner + reconcile w `SessionBalancesPanel` / `ChainPortfolioPanel`. D2: migracja 016, konto `WALLET:{owner}`, posting journal `transfer_sol`/`convert_sol`, `GET /wallets/wallet-balances`, `POST …/opening-import`, panel `WalletGlBalancesPanel` na stronie Wallet. D0 pominięte (operator).
+- **paths:** `crates/api/src/services/wallet_gl_posting.rs`, `handlers/wallets.rs`, `crates/data/migrations/016_wallet_gl_wallet_account.sql`, `wallet_session.rs`, `web/src/components/{SessionBalancesPanel,ChainPortfolioPanel,WalletGlBalancesPanel}.tsx`, `doc/WALLET_GL.md`
+
+## 2026-05-26 — Orphan rebalance close: lifecycle append-before-enrich + on-chain backfill
+
+keywords: 9vhKYHA, rebalance, lifecycle, record_execution_success, registry_stale_reconcile, orphan close, backfill, bot_close_position, API restart
+
+- **What:** Po confirm close/open rebalance executor dopisuje lifecycle **przed** `enrich_open_close_ledger_details` (tylko sync merge `event_slot`). `POST /positions/reconcile-stale` uruchamia też `repair_orphan_lifecycle_closes`: registry-closed bez `bot_close_position` → backfill z `getSignaturesForAddress` + append lifecycle/registry (`close_kind: strategy`).
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/registry_stale_reconcile.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`
+
+## 2026-05-26 — Wallet GL Faza D: weryfikacja planu vs kod (shadow ~60%)
+
+keywords: wallet_gl, Faza D, verification, shadow read model, SESSION GL, CHAIN GL, reconcile-session-gl, source gl_session_shadow
+
+- **What:** Audyt planu D vs repo: SESSION/CHAIN read+posting+backfill+UI hero już wdrożone (SESSION plan 2a–4, CSP F2–F5); brakuje WALLET:{owner}, GL↔RPC compare, flag effective-read, formal `needs_reconcile` na GET. Zaktualizowano [`WALLET_GL_PHASE_D_PLAN.md`](WALLET_GL_PHASE_D_PLAN.md) §0.
+- **paths:** `doc/WALLET_GL_PHASE_D_PLAN.md`, `wallet_gl_posting.rs`, `handlers/wallets.rs`, `ChainPortfolioPanel.tsx`, `SessionBalancesPanel.tsx`
+
+## 2026-05-26 — Wallet GL Faza D: plan read model (D0–D5)
+
+keywords: wallet_gl, Faza D, WALLET_GL_PHASE_D_PLAN, read model, needs_reconcile, GlReadQuality, WALLET owner, opening balance, effective-balances
+
+- **What:** Plan implementacji Fazy D — od shadow SESSION/CHAIN (już jest) przez `quality`/`needs_reconcile` (D1), konto `WALLET:{owner}` + opening import (D2), compare GL↔RPC (D3), flaga `CLMM_WALLET_GL_EFFECTIVE_READ` (D4). Operator D0 = backfill CHAIN przed kodem.
+- **paths:** [`doc/WALLET_GL_PHASE_D_PLAN.md`](WALLET_GL_PHASE_D_PLAN.md), [`doc/WALLET_GL.md`](WALLET_GL.md) §3 Faza D
+
+## 2026-05-26 — Wallet GL Faza C3–C5: decode_status decrease + TX_FEE account
+
+keywords: wallet_gl, Faza C, TX_FEE, deferred_lifecycle, migration 015, tx_fee_lamports, decrease_liquidity decode_status
+
+- **What:** C3: `decrease_liquidity` journal `confirmed` → `decode_status=deferred_lifecycle` (zamiast `pending_decode`; brak op delt v1). C4: migracja 015 seed `TX_FEE`; posting `tx_fee_lamports` z lifecycle na konto system (WSOL raw), idempotent `tx_fee:{signature}`; env `CLMM_WALLET_GL_TX_FEE_POSTING`. C5: checkboxy Faza C w `WALLET_GL.md`.
+- **paths:** `crates/data/migrations/015_wallet_gl_tx_fee_account.sql`, `crates/data/src/wallet_session.rs`, `crates/api/src/services/wallet_gl_posting.rs`, `crates/api/src/handlers/positions.rs`, `doc/WALLET_GL_PHASE_C_PLAN.md`
+
+## 2026-05-26 — Wallet GL Faza C1+C2: decode_status + cap open debit (G5)
+
+keywords: wallet_gl, Faza C, decode_status, lifecycle_mirror, cap_open_debit, G5, phantom USDC, migration 014, wallet_ledger_lifecycle
+
+- **What:** C1: `WalletLedgerEvent.decode_status` (+ migracja 014); close `confirmed` mirror z lifecycle lub `deferred_lifecycle`; warn na pusty confirmed; decrease/rebalance/tx submit statusy. C2: `cap_open_debits_against_running_balance` w aggregate + `apply_session_mint_postings` / CHAIN — brak ujemnego USDC w GL przy open bez credit.
+- **paths:** `crates/data/migrations/014_wallet_gl_journal_decode_status.sql`, `crates/data/src/wallet_session.rs`, `crates/api/src/services/wallet_ledger.rs`, `wallet_ledger_lifecycle.rs`, `position_close_ops.rs`, `doc/WALLET_GL_PHASE_C_PLAN.md`
+
+## 2026-05-26 — Wallet GL Faza B v1: journal `tx/submit-signed` + plan pokrycia
+
+keywords: wallet_gl, wallet_ledger, Faza B, WALLET_GL_PHASE_B_PLAN, tx/submit-signed, increase_liquidity, ledger_kind, wallet_ledger_tx
+
+- **What:** [`doc/WALLET_GL_PHASE_B_PLAN.md`](WALLET_GL_PHASE_B_PLAN.md) — tabela endpoint→`kind`. `POST /tx/submit-signed` dopisuje pending→confirmed/failed gdy body ma `correlation_id`, `ledger_kind`, `wallet_pubkey` (z build). `BuildUnsignedTxResponse.ledger_kind`. Moduł `wallet_ledger_tx.rs` + testy registry. close-all: journal source `api:positions:close-all`.
+- **paths:** `crates/api/src/services/wallet_ledger_tx.rs`, `crates/api/src/handlers/tx.rs`, `crates/api/src/models.rs`, `crates/api/src/services/position_close_ops.rs`, `doc/WALLET_GL.md`
+
+## 2026-05-26 — UI-1: hero „Strategia vs start” + demotion net PnL/cashflow
+
+keywords: ChainStrategyHero, chainStrategy, UI-1, decision KPI, net PnL audit, cashflow warning, PositionDetail, PositionLineageHistoryPanel
+
+- **What:** Hero KPI `(CHAIN wallet + LP NAV) − start − tx fees` na górze `ChainPortfolioPanel`; net PnL i cashflow lineage zwinięte w `<details>` (Przegląd + Historia) z ostrzeżeniem swap-mix; SESSION przemianowane na „Ostatni rebalance (szczegóły)”.
+- **paths:** `web/src/components/ChainStrategyHero.tsx`, `web/src/components/ChainPortfolioPanel.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/components/PositionLineageHistoryPanel.tsx`, `web/src/lib/i18n.tsx`
+
+## 2026-05-26 — F5: zamknięcie cyklu + historia + reconcile CHAIN vs lineage
+
+keywords: chain_session_portfolio, F5, chain_session_registry, chain-portfolio history, lineage reconcile, manual close, closed_at
+
+- **What:** `chain_session_registry.status` (`active`/`closed`) + `closed_at` przy ręcznym close głowy łańcucha; `GET /wallets/chain-portfolio/history`; response chain-portfolio rozszerzony o `meta` + `reconcile` (CHAIN vs start vs stream-lineage net PnL). UI: badge statusu, reconcile, tabela historii.
+- **paths:** `crates/api/src/services/chain_portfolio.rs`, `crates/api/src/services/position_close_ops.rs`, `crates/api/src/handlers/wallets.rs`, `web/src/components/ChainPortfolioPanel.tsx`
+
+## 2026-05-26 — F4 executor: reopen caps z portfela CHAIN (`CLMM_REOPEN_USE_CHAIN_PORTFOLIO`)
+
+keywords: chain_session_portfolio, CLMM_REOPEN_USE_CHAIN_PORTFOLIO, session_capital, rebalance executor, F4, portfolio caps, phantom USDC
+
+- **What:** Reopen/swap-mix/open używa `min(RPC, CHAIN|SESSION)` przez `load_reopen_portfolio_caps` (preferuje CHAIN gdy flag=1). `apply_portfolio_caps_to_wallet_raw`, `portfolio_caps_for_reopen`, strict empty via `portfolio_capital_error_if_strict`. Flaga domyślnie off; włączenie blokuje cichy open z globalnego portfela.
+- **paths:** `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/data/src/wallet_session.rs` (`resolve_chain_mint_caps`)
+
+## 2026-05-22 — Faza E: `economic_quality` + banner UI
+
+keywords: economic_quality, end_nav_source, ChainEconomicQualityBanner, chain_economic_totals, CHAIN_ECONOMIC_NET_REFACTOR_PLAN
+
+- **What:** `PositionStreamPnLResponse` ma opcjonalnie `economic_quality` (`exact`|`mixed`|`estimated`|`degraded`) i `end_nav_source` (np. `live_current`, `close_estimate`); ustawiane w `apply_chain_economic_quality_meta` po rollupie węzłów. Web: `ChainEconomicQualityBanner` przy net PnL (lineage, Historia PG, Wyniki, closed detail).
+- **paths:** `chain_economic_totals.rs`, `models.rs`, `ChainEconomicQualityBanner.tsx`, `chainEconomicQuality.ts`, `PositionLineageHistoryPanel.tsx`, `PositionDetail.tsx`, `ClosedPositionDetail.tsx`
+
+## 2026-05-26 — F3 UI: ChainPortfolioPanel (portfel łańcucha)
+
+keywords: chainPortfolio, ChainPortfolioPanel, PositionDetail, chain-portfolio API, F3
+
+- **What:** Panel „Portfel łańcucha” na `PositionDetail` (Przegląd): `GET /wallets/chain-portfolio?anchor_position=`, backfill chain id + CHAIN GL, metryki start/teraz, NAV w puli, ostrzeżenie ujemnego mintu. SESSION per rebalance zostaje poniżej z adnotacją.
+- **paths:** `web/src/components/ChainPortfolioPanel.tsx`, `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`, `web/src/lib/i18n.tsx`
+
+## 2026-05-26 — Implementacja F1+F2: `chain_session_id` + konto GL `CHAIN:`
+
+keywords: chain_session_portfolio, chain_session_id, CHAIN GL, migration 013, chain-portfolio API, wallet_session, rebalance executor, PSLR backfill
+
+- **What:** F1+F2 z [`IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md`](IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md): pole `chain_session_id` w lifecycle/PSLR, propagacja w rebalance executor + operator open, migracja `013_chain_session_portfolio.sql`, posting GL `CHAIN:{id}` (osobny `chain_lifecycle:` event_id), API `GET/POST /wallets/chain-portfolio*`, backfill `backfill-chain-ids` dla historycznych łańcuchów.
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/data/migrations/013_chain_session_portfolio.sql`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/chain_portfolio.rs`, `crates/api/src/services/wallet_gl_posting.rs`, `crates/api/src/handlers/wallets.rs`
+
+## 2026-05-26 — Norma: portfel łańcucha sesji (`chain_session_id`) — docs only
+
+keywords: chain_session_portfolio, chain_session_id, CHAIN GL, logical_position_id, SESSION GL, operator capital, CHAIN_SESSION_PORTFOLIO
+
+- **What:** Norma produktowa + plan wdrożenia: **jeden logiczny portfel** na cały cykl strategii (open → rotacje → ręczny close), oddzielny od `SESSION:{rebalance_session_id}` i od globalnego portfela on-chain. Reguły Δ, metryki UI (start / portfel / NAV LP / vs start), fazy F1–F5 z reuse istniejącego SESSION GL / lifecycle / lineage.
+- **paths:** `doc/CHAIN_SESSION_PORTFOLIO.md`, `doc/IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md`, wskaźnik w `doc/WALLET_GL.md` §2.2
+
+## 2026-05-22 — Faza F (ops): chain-history refresh = lineage totals
+
+keywords: chain-history, refresh, materialize, Faza F, CHAIN_ECONOMIC_NET_REFACTOR_PLAN, BFdX9AzL
+
+- **What:** Po Fazach B–D `POST …/chain-history/refresh` materializuje `totals_json` zgodne z live `stream-lineage` (np. anchor `BFdX9AzL…`: net PnL ~$0.088, diff &lt; $0.00000012 vs lineage). Stare wiersze PG bez refresh nadal pokazują −100% / single-segment net.
+- **Ops:** `POST /api/v1/positions/{anchor}/chain-history/refresh` na **8081** (~16s dla 2 PDA); opcjonalnie `CLMM_CHAIN_HISTORY_REFRESH_SECRET` w Bearer.
+
+## 2026-05-21 — Refactor Faza D: stream-pnl + GET position = rollup łańcucha
+
+keywords: sync_chain_economic_totals_from_nodes, apply_chain_economic_rollup_when_rotated, compute_single_position_detail_pnl, lineage_nodes_for_chain_economic_rollup, stream-pnl, CHAIN_ECONOMIC_NET_REFACTOR_PLAN
+
+- **What:** Dla `lineage_chain.len() > 1`: `compute_position_stream_pnl` / `settlement_v1` i karta Wyniki (`compute_single_position_detail_pnl`) wołają `lineage_nodes_for_chain_economic_rollup` + `sync_chain_economic_totals_from_nodes` — net/current/baseline jak nagłówek lineage. Detail używa lekkiego rollupu węzłów (bez pełnego `compute_position_stream_pnl_for_stream_members`), żeby uniknąć timeoutu i fallbacku single-PDA.
+- **paths:** `position_stream_pnl.rs`, `position_stream_lineage.rs` (`lineage_nodes_for_chain_economic_rollup`), `chain_economic_totals.rs`
+
+## 2026-05-21 — Refactor Faza C: close NAV z lifecycle `close_amount_*_raw`
+
+keywords: lifecycle_close_nav_usd, close_amount_a_raw, ChainEndNavSource, enrich_nodes_lifecycle_close_nav, chain_economic_totals, BUG-20260521-06
+
+- **What:** End NAV przed estymatą baseline+fees: `lifecycle_close_nav_usd` z `close_amount_*_raw` × event spot (ledger close row). Uzupełniane w `node_metrics`, przy materializacji/odczycie chain-history (`enrich_nodes_lifecycle_close_nav_from_ledger`). `lineage_node_end_nav_with_source` → `LifecycleCloseAmounts`.
+- **paths:** `chain_economic_totals.rs`, `models.rs`, `position_chain_history.rs`, `position_stream_lineage.rs`
+
+## 2026-05-21 — Refactor Faza A/B: moduł `chain_economic_totals` + materialize refresh
+
+keywords: chain_economic_totals, net_pnl_usd, refresh_lineage_totals_from_nodes, chain-history, materialize, CHAIN_ECONOMIC_NET_REFACTOR_PLAN
+
+- **What:** Ekstrakcja rollupu wyniku ekonomicznego łańcucha do `chain_economic_totals.rs` (end NAV, reconcile, refresh). `materialize_chain_history_for_anchor` ponownie woła `refresh_lineage_totals_from_nodes` po enrich lifecycle open-start, żeby `totals_json` w PG = węzły.
+- **paths:** `crates/api/src/services/chain_economic_totals.rs`, `position_stream_lineage.rs` (re-export), `position_chain_history.rs`, `doc/CHAIN_ECONOMIC_NET_REFACTOR_PLAN.md`
+
 ## 2026-05-21 — Chain net PnL: nie −100% gdy zamknięta pozycja ma current $0
 
 keywords: net_pnl_usd, current_value_usd, closed, chain_headline_end_nav, lineage_node_end_nav, refresh_lineage_totals_from_nodes

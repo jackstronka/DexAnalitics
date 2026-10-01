@@ -181,7 +181,16 @@ impl PositionService {
             )));
         };
 
+        let chain_session_id = request
+            .chain_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| ledger_session.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         let guard = executor.read().await;
+        guard.set_active_chain_session_id(Some(chain_session_id.clone()));
         let sig_opt = guard
             .execute_swap_exact_in(
                 &pool_pubkey,
@@ -202,6 +211,8 @@ impl PositionService {
 
         let mut data = serde_json::json!({
             "swap_signature": swap_signature.to_string(),
+            "chain_session_id": chain_session_id,
+            "cost_session_id": ledger_session,
         });
         if let Some(ref sid) = ledger_session {
             data["cost_session_id"] = serde_json::json!(sid);
@@ -341,7 +352,19 @@ impl PositionService {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let chain_session_id = request
+            .chain_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| ledger_session.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let rebalance_session_id = ledger_session
+            .clone()
+            .unwrap_or_else(|| chain_session_id.clone());
+
         let guard = executor.read().await;
+        guard.set_active_chain_session_id(Some(chain_session_id.clone()));
         // Guardrail: fail fast if API wallet doesn't have enough SOL to cover rent/fees.
         // This avoids long opaque simulation errors when accounts must be created.
         if let Some(wallet_pk) = guard.wallet_pubkey() {
@@ -376,7 +399,7 @@ Top up the API wallet and retry."
                     sw.amount_in,
                     request.slippage_tolerance_bps,
                     None,
-                    ledger_session.clone(),
+                    Some(rebalance_session_id.clone()),
                 )
                 .await
                 .map_err(|e| ApiError::internal(format!("swap before open failed: {e}")))?;
@@ -385,6 +408,11 @@ Top up the API wallet and retry."
             }
         }
 
+        let open_details = serde_json::json!({
+            "open_origin": "operator_api",
+            "chain_session_id": chain_session_id,
+            "rebalance_session_id": rebalance_session_id,
+        });
         let opened_position = guard
             .execute_open_position(
                 &pool_pubkey,
@@ -394,8 +422,8 @@ Top up the API wallet and retry."
                 request.amount_b,
                 request.slippage_tolerance_bps,
                 request.full_range,
-                ledger_session.clone(),
-                Some(serde_json::json!({ "open_origin": "operator_api" })),
+                Some(rebalance_session_id.clone()),
+                Some(open_details),
             )
             .await
             .map_err(classify_open_position_error)?;
@@ -420,10 +448,13 @@ Top up the API wallet and retry."
         if let Some(ref sid) = ledger_session {
             data["cost_session_id"] = serde_json::json!(sid);
         }
+        data["chain_session_id"] = serde_json::json!(chain_session_id);
+        data["rebalance_session_id"] = serde_json::json!(rebalance_session_id);
         if let Some(ref s) = swap_signature {
             data["swap_signature"] = serde_json::json!(s);
         }
 
+        guard.set_active_chain_session_id(None);
         Ok(OperationResult::success_with_data(data))
     }
 
@@ -1339,6 +1370,7 @@ mod tests {
             strategy_id: None,
             swap_before_open: None,
             cost_session_id: None,
+            chain_session_id: None,
         }
     }
 

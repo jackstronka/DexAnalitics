@@ -1,7 +1,8 @@
 # Plan implementacji — wykonawczy
 
 **Status:** aktywny backlog wdrożeń (2026-05-20).  
-**Analiza i uzasadnienie priorytetów:** [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md).
+**Analiza i uzasadnienie priorytetów:** [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md).  
+**Siatka regresji / tempo z agentami:** [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md).
 
 **keywords:** implementation-plan, execution-backlog, PR-slices, sprint, acceptance-criteria, F1-F5
 

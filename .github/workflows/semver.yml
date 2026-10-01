@@ -52,4 +52,4 @@ jobs:
           rust-toolchain: stable
           # For pre-1.0 versions, compare against the latest git tag
           # If no tag exists, this will compare against crates.io (if published)
-          baseline-rev: ${{ github.event_name == 'push' && 'HEAD~1' || 'main' }}
+          baseline-rev: ${{ github.event_name == 'push' && 'HEAD~1' || 'origin/main' }}

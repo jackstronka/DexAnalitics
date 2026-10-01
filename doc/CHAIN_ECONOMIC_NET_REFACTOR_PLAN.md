@@ -1,6 +1,6 @@
 # Plan refaktoru — wynik ekonomiczny łańcucha (net PnL)
 
-**Status:** plan (bez implementacji do czasu **GO** operatora).  
+**Status:** w toku — **Fazy A, B, C** wdrożone 2026-05-21. Backlog: **D** (stream-pnl + GET position), **E** (quality flags UI).  
 **Data:** 2026-05-21  
 **keywords:** net_pnl_usd, chain economic result, stream-lineage, chain-history, stream-pnl, lineage totals, chain_headline_end_nav, refresh_lineage_totals, valuation_quality
 

@@ -42,7 +42,7 @@
 
 - Nie utrzymuje **salda per konto** wyłącznie z sumy wierszy GL.
 - **Effective wallet / salda UI** nadal opierają się na **RPC + cache** (`effective-balances` itd.), **nie** na replice z GL.
-- Nie obejmuje jeszcze **wszystkich** typów operacji API (np. ścieżki `tx/*` submit, `increase_liquidity` — do dopięcia w fazie B+ / C).
+- Nie obejmuje jeszcze **pełnych delt tokenów** dla close/decrease/rebalance (Faza C / lifecycle-first). **`increase_liquidity`** jest objęte journaliem przez `/tx/*/build` + `/tx/submit-signed` (Phase B v1).
 
 ### 2.1 Decyzja architektoniczna: PostgreSQL jako docelowy magazyn GL
 
@@ -103,6 +103,8 @@ Szczegóły migracji (nazwy tabel, kolejność rollout) dopisujemy przy pierwszy
 **Analiza spięcia z lifecycle / lineage (źródło prawdy, pipeline):** [`WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md`](WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md).  
 **Plan produktyzacji executora (reopen / cały cykl na SESSION, faza 5):** [`WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md`](WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md).
 
+**Rozszerzenie normy (2026-05-26):** jeden **portfel łańcucha** od pierwszego open do zamknięcia cyklu (`chain_session_id`, konto `CHAIN:{id}`) — nie mylić z `SESSION:{rebalance_session_id}` (pojedynczy rebalance). Pełna specyfikacja: [`CHAIN_SESSION_PORTFOLIO.md`](CHAIN_SESSION_PORTFOLIO.md), plan: [`IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md`](IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md).
+
 **keywords:** rebalance_session_id, cost_session_id, session account, logical sub-account, policy-3A, returned_raw, SESSION, chart of accounts, read model
 
 ---
@@ -116,35 +118,60 @@ Szczegóły migracji (nazwy tabel, kolejność rollout) dopisujemy przy pierwszy
 - [x] GET + UI przeglądu.
 - [x] Katalog danych + notatki inżynierskie.
 
-### Faza B — *Kompletność zdarzeń API („każda” operacja portfela przez API)*
+### Faza B — *Kompletność zdarzeń API („każda” operacja portfela przez API)* ✅ v1
 
 **Cel:** każda **operacja wykonywana przez API**, która zmienia stan portfela / pozycji z perspektywy podpisu, generuje wpis (najlepiej ten sam wzorzec pending → wynik).
 
-- [x] `close_position`
+**Plan szczegółowy (pokrycie endpointów):** [`WALLET_GL_PHASE_B_PLAN.md`](WALLET_GL_PHASE_B_PLAN.md)
+
+**Plan Fazy C (delty + plan kont):** [`WALLET_GL_PHASE_C_PLAN.md`](WALLET_GL_PHASE_C_PLAN.md)
+
+**Plan Fazy D (read model sald):** [`WALLET_GL_PHASE_D_PLAN.md`](WALLET_GL_PHASE_D_PLAN.md)
+
+- [x] `open_position`, `swap_before_open`
+- [x] `close_position` (single + `close-all` via `position_close_ops`)
 - [x] `collect_fees`
 - [x] `decrease_liquidity`
+- [x] `increase_liquidity` (ścieżka `/tx/increase/build` + `/tx/submit-signed`)
 - [x] `rebalance_position`
-- [ ] Ewentualnie: ścieżki `tx/*` submit jeśli uznacie je za „portfel API”.
+- [x] `transfer_sol`, `convert_sol`
+- [x] `POST /tx/submit-signed` (pending → confirmed/failed z metadata build)
+- [ ] Bot executor rebalance → journal API (lifecycle wystarcza; poza v1)
+- [ ] Pełne delty tokenów close/decrease/rebalance (Faza C / decode)
 
-**Kryterium ukończenia:** lista endpointów w sekcji „pokrycie” w tym dokumencie + test regresyjny (np. mock `append` / inspekcja `kind` w tailu) dla każdej nowej ścieżki.
+**Kryterium ukończenia v1:** tabela w [`WALLET_GL_PHASE_B_PLAN.md`](WALLET_GL_PHASE_B_PLAN.md) + testy `wallet_ledger_tx` (registry `kind`, audit submit).
 
-### Faza C — *Chart of accounts + spójne delty*
+### Faza C — *Chart of accounts + spójne delty* ✅ v1 (C1–C5)
 
-**Cel:** **PostgreSQL:** tabele (lub widoki materializowane) planu kont + reguły w kodzie (Rust): jakie delty zapisujemy dla każdego `kind` + kierunku (np. `SOL_NATIVE`, `WSOL`, `SPL:{mint}`, `TX_FEE_ESTIMATE`, …).
+**Plan:** [`WALLET_GL_PHASE_C_PLAN.md`](WALLET_GL_PHASE_C_PLAN.md)
 
-- [ ] Tabele planu kont + konwencja znaku (powiązanie z mint / „kontem logicznym”). **Seed:** `wallet_gl_token_account` / `wallet_gl_curated_pool` (migracja 009) — rozszerzaj przy zmianie listy w `curated_backtest_pools()`.
-- [ ] Konta **`SESSION:{rebalance_session_id}`** per mint — norma: [§2.2](#22-konto-logiczne-per-cykl-życia-pozycji-rebalance_session_id--norma-docelowa); powiązanie journal ↔ lifecycle.
-- [ ] Walidacja: brak zapisu `confirmed` bez kompletu delt (lub jawny `decode_status`).
+- [x] **C1** `decode_status` w journal + close mirror z lifecycle / `deferred_lifecycle`
+- [x] **C2** Cap open debit vs saldo SESSION/CHAIN (G5 phantom USDC)
+- [x] **C3** `decode_status` na decrease/rebalance/tx submit (bez pełnych delt decrease v1)
+- [x] **C4** Konto system `TX_FEE` + posting z lifecycle `tx_fee_lamports` (migracja 015)
+- [x] Konta SESSION/CHAIN — posting z lifecycle (011/013)
+- [x] Walidacja: warn gdy `confirmed` bez delt i bez `decode_status`
+- [ ] Pełne delty decrease z op RPC (poza v1 — wymaga enrich executor)
 
-### Faza D — *Read model: stan z GL (+ opcjonalnie cache)*
+### Faza D — *Read model: stan z GL (+ opcjonalnie cache)* ✅ (kod D1–D5)
 
-**Cel:** warstwa **„saldo z GL”** w **PostgreSQL** (agregacja / projekcja po `owner` + `mint` lub `account_id`) z:
+**Plan szczegółowy (slice D0–D5):** [`WALLET_GL_PHASE_D_PLAN.md`](WALLET_GL_PHASE_D_PLAN.md)
 
-- [ ] czytelnym **opening balance** (snapshot lub import),
-- [ ] **inkrementalną** aktualizacją przy każdym `confirmed` (trigger, worker lub transakcja aplikacji),
-- [ ] flagą **stale / needs_reconcile** gdy brakuje zdarzeń lub wykryto lukę.
+- [ ] **D0** operator: backfill CHAIN + weryfikacja hero (narzędzia ✅, dane operatora ❓) — opcjonalnie
+- [x] **D1** doprecyzowanie: `quality` / `needs_reconcile` / `POST reconcile-chain-gl` + UI (session + chain)
+- [x] **D2** konto `WALLET:{owner}` + opening balance import + journal transfer/convert + UI Wallet page
+- [x] **D3** `GET /reconcile-wallet-gl` — shadow compare GL vs RPC + UI diagnostyka
+- [x] **D4** flaga `CLMM_WALLET_GL_EFFECTIVE_READ` — effective-balances z GL (overlay przy odczycie)
+- [x] **D5** docs close-out + testy integracyjne CHAIN/WALLET (`session_gl_integration`)
+- [x] Shadow v0: session/chain read, posting lifecycle, backfill, session reconcile, UI hero/panele
 
-**Uwaga produktowa:** dopóki Faza B nie jest kompletna, **stan z GL** musi być oznaczony jako **eksperymentalny / shadow** względem RPC.
+**Cel (zrealizowany w shadow + flaga D4):**
+
+- [x] czytelny **opening balance** (`POST …/opening-import`, idempotent)
+- [x] **inkrementalna** aktualizacja przy `confirmed` (journal + lifecycle posting)
+- [x] flaga **`needs_reconcile` / `quality`** na GET session/chain/wallet
+
+**Uwaga produktowa:** domyślnie saldo UI = RPC (`§5`). Po **`CLMM_WALLET_GL_EFFECTIVE_READ=1`** (D4) kwoty effective-balances pochodzą z WALLET GL gdy zaufane — patrz [`WALLET_GL.md`](WALLET_GL.md) §6 Krok C.
 
 ### Faza E — *Reconcile GL ↔ on-chain*
 
@@ -192,11 +219,24 @@ CLMM_REOPEN_USE_SESSION_CAPITAL=1
 
 **Rollback:** `CLMM_REOPEN_USE_SESSION_CAPITAL=0` (lub usuń z env) + restart API — zachowanie jak przed 5a; dane GL zostają w PG.
 
-### Testy automatyczne (dev)
+### Krok C — effective-balances z WALLET GL (Faza D4)
+
+Po D2 opening import + D3 reconcile akceptowalny:
+
+```env
+CLMM_WALLET_GL_EFFECTIVE_READ=1
+```
+
+**Checklist:** `GET /wallets/reconcile-wallet-gl` → `gl_matches_rpc=true`; banner „Saldo z księgi WALLET” na Wallet i Otwórz pozycję.
+
+**Rollback:** `CLMM_WALLET_GL_EFFECTIVE_READ=0` (lub usuń) + restart API — UI wraca do RPC; cache effective i dane GL w PG bez zmian.
+
+### Testy automatyczne (Faza D)
 
 ```bash
 cargo test -p clmm-lp-data wallet_session
-cargo test -p clmm-lp-data --test session_gl_integration   # wymaga DATABASE_URL
+cargo test -p clmm-lp-data --test session_gl_integration   # wymaga DATABASE_URL (SESSION + CHAIN + WALLET)
+cargo test -p clmm-lp-api wallet_gl_posting
 cargo test -p clmm-lp-execution session_cap
 ```
 
@@ -215,6 +255,9 @@ cargo test -p clmm-lp-execution session_cap
 
 | Data | Zmiana |
 | ---- | ------ |
+| 2026-05-26 | **Faza D plan:** [`WALLET_GL_PHASE_D_PLAN.md`](WALLET_GL_PHASE_D_PLAN.md) — slice D0–D5 (quality, WALLET, opening, GL vs RPC, flag effective-read). |
+| 2026-05-26 | **Faza C v1:** C1–C5 done; link do `WALLET_GL_PHASE_C_PLAN.md`. |
+| 2026-05-26 | **Faza B v1:** plan [`WALLET_GL_PHASE_B_PLAN.md`](WALLET_GL_PHASE_B_PLAN.md); journal na `POST /tx/submit-signed`; `ledger_kind` w build response; `increase_liquidity`; close-all source `api:positions:close-all`. |
 | 2026-05-20 | **§6:** runbook rollout operatora (SESSION GL + flaga reopen 5a); zaktualizowany stan §2.2 (shadow v1 done). |
 | 2026-05-20 | **§2.2:** norma docelowa konta logicznego `SESSION:{rebalance_session_id}` (kapitał cyklu, fee, reopen); relacja z policy 3A i fazami C–D. |
 | 2026-05-15 | **Postgres journal:** `wallet_gl_journal_event` (migracja `010_*`), dual-write przy append, odczyt z PG + fallback JSONL. |

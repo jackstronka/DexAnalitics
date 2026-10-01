@@ -40,6 +40,9 @@ pub struct SwapBeforeOpenRequest {
     /// Optional bookkeeping id; same value groups swap + open rows in `orca_position_lifecycle.jsonl`.
     #[serde(default)]
     pub cost_session_id: Option<String>,
+    /// Stable chain cycle id for CHAIN portfolio caps (distinct from `cost_session_id` on reopen).
+    #[serde(default)]
+    pub chain_session_id: Option<String>,
 }
 
 /// Response for `POST /positions/swap-before-open`.
@@ -83,6 +86,9 @@ pub struct OpenPositionRequest {
     /// (`rebalance_session_id`) so costs can be summed **per opened position** after the fact.
     #[serde(default)]
     pub cost_session_id: Option<String>,
+    /// Stable chain cycle id (`CHAIN:{id}` inventory). When set, distinct from `cost_session_id` on reopen.
+    #[serde(default)]
+    pub chain_session_id: Option<String>,
 }
 
 fn default_slippage() -> u16 {
@@ -436,6 +442,12 @@ pub struct PositionStreamPnLResponse {
     /// Net PnL% vs baseline value.
     #[schema(value_type = String)]
     pub net_pnl_pct: Decimal,
+    /// Chain economic net quality: `exact` | `mixed` | `estimated` | `degraded` (see `doc/CHAIN_ECONOMIC_NET_REFACTOR_PLAN.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economic_quality: Option<String>,
+    /// How headline end NAV was resolved (`live_current`, `lifecycle_close_amounts`, `close_estimate`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_nav_source: Option<String>,
     /// Short Polish captions so UI can show economic PnL and IL benchmark side-by-side without mixing them.
     #[serde(default)]
     pub interpretation: StreamPnLInterpretation,
@@ -606,6 +618,10 @@ pub struct PositionStreamLineageNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub chain_history_event_spot_token_a_usd_close: Option<String>,
+    /// NAV at close from lifecycle `close_amount_*_raw` × event spot (exact at tx); used when `current_value_usd` is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub lifecycle_close_nav_usd: Option<String>,
 }
 
 /// Aggregated **network costs** and **LP fees collected** across the full rotation chain.
@@ -726,6 +742,9 @@ pub struct StaleReconcileReportResponse {
     pub strategy_links_removed: u32,
     pub still_on_chain: u32,
     pub rpc_errors: u32,
+    /// Lifecycle `bot_close_position` rows recovered from on-chain close txs.
+    #[serde(default)]
+    pub lifecycle_backfilled: Vec<String>,
 }
 
 fn default_bulk_skip_pre_collect() -> bool {
@@ -1194,6 +1213,8 @@ pub struct BuildUnsignedTxResponse {
     pub unsigned_tx_base64: String,
     /// Correlation identifier for audit.
     pub correlation_id: String,
+    /// Wallet GL journal `kind` for paired `POST /tx/submit-signed` audit (Phase B).
+    pub ledger_kind: String,
     /// Programs expected in message.
     pub expected_program_ids: Vec<String>,
     /// Position mint created for open-position flow (if applicable).
@@ -1206,6 +1227,7 @@ pub struct BuildUnsignedTxResponse {
 
 /// Submit signed tx request.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Default)]
 pub struct SubmitSignedTxRequest {
     /// Base64 serialized signed transaction.
     pub signed_tx_base64: String,
@@ -1213,7 +1235,23 @@ pub struct SubmitSignedTxRequest {
     /// materialized chain-history after a successful RPC send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_history_anchors: Option<Vec<String>>,
+    /// From `BuildUnsignedTxResponse.correlation_id` — ties submit to build (Phase B journal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// From `BuildUnsignedTxResponse.ledger_kind` (e.g. `increase_liquidity`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_kind: Option<String>,
+    /// Fee payer / signer wallet (from build request `wallet_pubkey`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_session_id: Option<String>,
 }
+
 
 /// Submit signed tx response.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1694,6 +1732,12 @@ pub struct QuoteOpenBudgetRequest {
     pub tick_upper: i32,
     /// Desired position value in USD (both legs, at server price snapshot).
     pub target_usd: f64,
+    /// When set, quote sizes against **CHAIN:{id}** inventory (not global wallet). Same id as open `cost_session_id` / chain cycle.
+    #[serde(default)]
+    pub chain_session_id: Option<String>,
+    /// Alias for `chain_session_id` (bookkeeping session from swap/open flow).
+    #[serde(default)]
+    pub cost_session_id: Option<String>,
 }
 
 /// Suggested `amount_a` / `amount_b` for `POST /positions` (raw + UI).
@@ -1711,6 +1755,15 @@ pub struct QuoteOpenBudgetResponse {
     pub in_range: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_session_id: Option<String>,
+    /// CHAIN/SESSION wallet notional used for sizing (USD, capped inventory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_wallet_notional_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_usd_clamped: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portfolio_scope: Option<String>,
 }
 
 // ============================================================================
@@ -3062,6 +3115,9 @@ pub struct WalletEffectiveBalancesResponse {
     /// Wall-clock timestamp when this effective snapshot was written to the cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_updated_at_utc: Option<String>,
+    /// When `CLMM_WALLET_GL_EFFECTIVE_READ=1`: `gl_wallet` (amounts from WALLET GL) or `rpc_fallback`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_balance_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -3407,7 +3463,7 @@ pub struct WalletLedgerEvent {
     pub correlation_id: String,
     pub status: WalletLedgerStatus,
     /// e.g. `swap_before_open`, `open_position`, `close_position`, `collect_fees`,
-    /// `decrease_liquidity`, `rebalance_position`, `transfer_sol`, `convert_sol`
+    /// `decrease_liquidity`, `increase_liquidity`, `rebalance_position`, `transfer_sol`, `convert_sol`
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -3428,6 +3484,9 @@ pub struct WalletLedgerEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub source: String,
+    /// Phase C: `exact`, `lifecycle_mirror`, `deferred_lifecycle`, `pending_decode`, …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_status: Option<String>,
 }
 
 /// Response for `GET /wallets/ledger-events`.
@@ -3461,6 +3520,12 @@ pub struct WalletSessionBalancesResponse {
     pub owner: Option<String>,
     /// `gl_session_shadow` until reconcile/product switch.
     pub source: String,
+    /// Phase D1: `exact`, `pslr_fallback`, `pslr_corrected`, `empty`, `disabled`, `no_db`.
+    pub quality: String,
+    /// GL aggregate matches PSLR replay for this session.
+    pub gl_matches_pslr: bool,
+    /// True when GL is empty/mismatch/untrusted — run backfill or reconcile.
+    pub needs_reconcile: bool,
     pub balances: Vec<WalletSessionBalanceRow>,
     /// Cycle-start reference from first open row in lifecycle (when Postgres + PSLR rows exist).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3486,6 +3551,19 @@ pub struct WalletSessionOpenStartSnapshot {
     pub pre_open_value_usd: Option<String>,
     /// `details` | `pool_address` | `incomplete` — pool leg mint resolution for open row.
     pub mint_resolution: String,
+    /// USD prices from open lifecycle row (`event_price_*`), used to mark current session wallet.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub price_by_mint_usd: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletSessionBalanceUsdLeg {
+    pub mint: String,
+    pub amount_raw: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_usd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -3496,6 +3574,9 @@ pub struct WalletSessionMetrics {
     /// Current session USD minus pre-open USD (open event prices).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_vs_pre_open_usd: Option<String>,
+    /// Per-mint USD legs for current session wallet (sum ≈ `current_value_usd`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub current_balance_usd_legs: Vec<WalletSessionBalanceUsdLeg>,
     /// False when lifecycle rows lack resolvable pool mints (legacy close rows); USD session metrics may be wrong.
     pub metrics_trusted: bool,
 }
@@ -3508,6 +3589,168 @@ pub struct WalletSessionGlBackfillReport {
     pub postings_applied: u32,
     pub rows_skipped_already: u32,
     pub rows_skipped_no_deltas: u32,
+}
+
+/// Response for `GET /wallets/chain-portfolio`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainPortfolioResponse {
+    pub chain_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub source: String,
+    /// Phase D1: read quality tag (see `WalletSessionBalancesResponse.quality`).
+    pub quality: String,
+    pub gl_matches_pslr: bool,
+    pub needs_reconcile: bool,
+    pub balances: Vec<WalletSessionBalanceRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<WalletSessionMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<WalletChainSessionMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile: Option<WalletChainLineageReconcile>,
+    /// Chronological strategy wallet journal (one row per lifecycle posting / tx fee).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ledger_events: Vec<WalletChainPortfolioLedgerEvent>,
+    /// CHAIN GL wallet total USD (open-time prices); excludes LP NAV.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portfolio_balance_usd: Option<String>,
+    /// Non-zero CHAIN wallet mints with USD legs (cycle spot; excludes LP NAV).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_balance_usd_legs: Vec<WalletSessionBalanceUsdLeg>,
+    /// LP fees realized in this chain cycle (collect rows + fee legs on close; not tx fees).
+    pub collected_fees: WalletChainCollectedFeesSummary,
+    /// Non-strategy mint rows hidden from `chain_balance_usd_legs` (phantom GL / PSLR noise).
+    #[serde(default)]
+    pub chain_wallet_excluded_mint_count: u32,
+    /// Echo of `lp_nav_usd` query param (head position NAV from caller).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_nav_usd: Option<String>,
+}
+
+/// Σ LP fees collected across one `chain_session_id` (collect + close fee legs; excludes principal).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainCollectedFeesSummary {
+    /// Count of `bot_collect_fees` lifecycle rows in the chain.
+    pub collect_events: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legs: Vec<WalletSessionBalanceUsdLeg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainPortfolioLedgerLeg {
+    pub mint: String,
+    pub amount_raw: String,
+    /// Portfolio perspective: `in` = credit to chain wallet, `out` = debit to pool/swap/fee.
+    pub direction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_usd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainPortfolioLedgerEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts_utc: Option<String>,
+    /// UI kind: `open_to_pool`, `close_from_pool`, `collect_fees`, `swap`, `tx_fee`.
+    pub kind: String,
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legs: Vec<WalletChainPortfolioLedgerLeg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainSessionMeta {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_pda_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainLineageReconcile {
+    pub chain_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_start_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_wallet_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_lp_nav_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_combined_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_vs_start_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineage_net_pnl_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineage_baseline_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineage_current_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_chain_vs_lineage_usd: Option<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainPortfolioHistoryRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts_utc: Option<String>,
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_pubkey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebalance_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_fee_lamports: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// Response for `GET /wallets/chain-portfolio/history`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainPortfolioHistoryResponse {
+    pub chain_session_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    pub rows: Vec<WalletChainPortfolioHistoryRow>,
+    pub row_count: u32,
+}
+
+/// Report for `POST /wallets/chain-portfolio/backfill`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainGlBackfillReport {
+    pub chains_processed: u32,
+    pub rows_scanned: u32,
+    pub postings_applied: u32,
+    pub rows_skipped_already: u32,
+    pub rows_skipped_no_deltas: u32,
+}
+
+/// Report for `POST /wallets/chain-portfolio/backfill-chain-ids`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletChainSessionIdBackfillReport {
+    pub chain_session_id: String,
+    pub anchor_position: String,
+    pub chain_pda_count: u32,
+    pub rebalance_sessions_linked: u32,
+    pub pslr_rows_updated: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -3530,6 +3773,58 @@ pub struct WalletSessionGlReconcileResponse {
     pub last_close_returned: Vec<WalletSessionBalanceRow>,
     pub gaps: Vec<WalletSessionGlReconcileGap>,
     pub gl_matches_pslr: bool,
+    pub note: String,
+}
+
+/// Response for `GET /wallets/wallet-balances` (shadow GL for `WALLET:{owner}`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletGlBalancesResponse {
+    pub owner: String,
+    pub source: String,
+    pub quality: String,
+    pub needs_reconcile: bool,
+    /// True after a successful `POST …/opening-import` for this owner.
+    pub opening_import_applied: bool,
+    pub balances: Vec<WalletSessionBalanceRow>,
+}
+
+/// Report for `POST /wallets/wallet-balances/opening-import`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletGlOpeningImportReport {
+    pub owner: String,
+    pub mints_posted: u32,
+    pub status: String,
+    pub note: String,
+}
+
+/// Per-mint gap for `GET /wallets/reconcile-wallet-gl` (GL vs effective-balances RPC).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletGlRpcReconcileGap {
+    pub mint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gl_amount_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_amount_raw: Option<String>,
+    /// GL − RPC in raw on-chain units (string i128).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_raw: Option<String>,
+}
+
+/// Response for `GET /wallets/reconcile-wallet-gl` — shadow compare WALLET GL vs RPC.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WalletGlRpcReconcileResponse {
+    pub owner: String,
+    pub gl_source: String,
+    pub gl_quality: String,
+    pub gl_opening_import_applied: bool,
+    pub rpc_confidence: String,
+    pub rpc_is_stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_as_of_utc: Option<String>,
+    pub gl_balances: Vec<WalletSessionBalanceRow>,
+    pub rpc_balances: Vec<WalletSessionBalanceRow>,
+    pub gaps: Vec<WalletGlRpcReconcileGap>,
+    pub gl_matches_rpc: bool,
     pub note: String,
 }
 

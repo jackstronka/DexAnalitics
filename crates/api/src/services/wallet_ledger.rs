@@ -88,7 +88,39 @@ pub fn new_ledger_event(
         deltas,
         error,
         source: source.to_string(),
+        decode_status: None,
     }
+}
+
+/// Phase C decode quality markers (see `doc/WALLET_GL_PHASE_C_PLAN.md`).
+pub mod decode_status {
+    pub const EXACT: &str = "exact";
+    pub const LIFECYCLE_MIRROR: &str = "lifecycle_mirror";
+    pub const DEFERRED_LIFECYCLE: &str = "deferred_lifecycle";
+    pub const PENDING_DECODE: &str = "pending_decode";
+}
+
+fn warn_confirmed_without_deltas_or_status(ev: &WalletLedgerEvent) {
+    if !matches!(ev.status, WalletLedgerStatus::Confirmed) {
+        return;
+    }
+    if !ev.deltas.is_empty() {
+        return;
+    }
+    if ev
+        .decode_status
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return;
+    }
+    tracing::warn!(
+        kind = %ev.kind,
+        event_id = %ev.event_id,
+        correlation_id = %ev.correlation_id,
+        "wallet_ledger: confirmed row without deltas or decode_status"
+    );
 }
 
 async fn persist_wallet_ledger_event_pg(db: &Database, ev: &WalletLedgerEvent) {
@@ -108,11 +140,11 @@ async fn persist_wallet_ledger_event_pg(db: &Database, ev: &WalletLedgerEvent) {
         INSERT INTO wallet_gl_journal_event (
             event_id, schema_version, ts_utc, correlation_id, status, kind,
             owner, signature, pool_address, position_pda, cost_session_id,
-            dry_run, native_lamports_delta, deltas_json, error, source
+            dry_run, native_lamports_delta, deltas_json, error, source, decode_status
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16
+            $12, $13, $14, $15, $16, $17
         )
         ON CONFLICT (event_id) DO NOTHING
         "#,
@@ -133,6 +165,7 @@ async fn persist_wallet_ledger_event_pg(db: &Database, ev: &WalletLedgerEvent) {
     .bind(deltas_json)
     .bind(ev.error.as_deref())
     .bind(&ev.source)
+    .bind(ev.decode_status.as_deref())
     .execute(db.pool())
     .await
     {
@@ -162,6 +195,7 @@ fn wallet_ledger_event_from_pg_row(row: &sqlx::postgres::PgRow) -> Option<Wallet
         deltas,
         error: row.try_get("error").ok(),
         source: row.try_get("source").ok()?,
+        decode_status: row.try_get("decode_status").ok(),
     })
 }
 
@@ -185,7 +219,7 @@ async fn read_wallet_ledger_tail_pg(
         SELECT
             schema_version, ts_utc, event_id, correlation_id, status, kind,
             owner, signature, pool_address, position_pda, cost_session_id,
-            dry_run, native_lamports_delta, deltas_json, error, source
+            dry_run, native_lamports_delta, deltas_json, error, source, decode_status
         FROM wallet_gl_journal_event
         WHERE ($1::text IS NULL OR owner ILIKE $1)
           AND ($2::text IS NULL OR kind ILIKE '%' || $2 || '%')
@@ -208,6 +242,7 @@ async fn read_wallet_ledger_tail_pg(
 }
 
 pub async fn append_wallet_ledger_event(state: &AppState, ev: WalletLedgerEvent) {
+    warn_confirmed_without_deltas_or_status(&ev);
     let path = wallet_ledger_events_path();
     let _guard = state.wallet_ledger_append_lock.lock().await;
     if let Some(dir) = path.parent()
@@ -247,6 +282,7 @@ pub async fn append_wallet_ledger_event(state: &AppState, ev: WalletLedgerEvent)
     if let Some(db) = state.db.as_ref() {
         persist_wallet_ledger_event_pg(db, &ev).await;
         wallet_gl_posting::apply_session_postings_from_journal(db, &ev).await;
+        wallet_gl_posting::apply_wallet_postings_from_journal(db, &ev).await;
     }
 }
 
@@ -266,11 +302,10 @@ pub fn wallet_ledger_event_matches_filters(
             return false;
         }
     }
-    if let Some(k) = kind_filter.map(str::trim).filter(|s| !s.is_empty()) {
-        if ev.kind != k && !ev.kind.contains(k) {
+    if let Some(k) = kind_filter.map(str::trim).filter(|s| !s.is_empty())
+        && ev.kind != k && !ev.kind.contains(k) {
             return false;
         }
-    }
     if let Some(s) = status_filter.map(str::trim).filter(|s| !s.is_empty()) {
         let got = wallet_ledger_status_str(ev.status);
         if got != s && !got.contains(s) {

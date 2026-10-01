@@ -13,6 +13,7 @@ pub mod position_agent_service;
 pub mod position_close_all;
 pub mod position_close_ops;
 pub mod position_close_signer;
+pub mod chain_economic_totals;
 pub mod position_chain_history;
 pub mod position_executor;
 pub mod position_service;
@@ -29,7 +30,10 @@ pub mod stranded_rebalance_watchdog;
 pub mod strategy_service;
 pub mod uncollected_fees_cache;
 pub mod wallet_gl_posting;
+pub mod chain_portfolio;
 pub mod wallet_ledger;
+pub mod wallet_ledger_lifecycle;
+pub mod wallet_ledger_tx;
 
 pub use orca_read_service::OrcaReadService;
 pub use orca_tx_service::OrcaTxService;

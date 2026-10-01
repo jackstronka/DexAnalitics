@@ -185,6 +185,10 @@ export interface PositionStreamPnLResponse {
   realized_cashflow_usd: string
   net_pnl_usd: string
   net_pnl_pct: string
+  /** `exact` | `mixed` | `estimated` | `degraded` */
+  economic_quality?: string | null
+  /** e.g. `live_current`, `lifecycle_close_amounts`, `close_estimate` */
+  end_nav_source?: string | null
   interpretation?: StreamPnLInterpretation
   note?: string | null
 }
@@ -235,6 +239,8 @@ export interface PositionStreamLineageNode {
   chain_history_tick_upper_open?: number | null
   chain_history_event_spot_token_a_usd_open?: string | null
   chain_history_event_spot_token_a_usd_close?: string | null
+  /** Close NAV from lifecycle close amounts × event prices (chain-history). */
+  lifecycle_close_nav_usd?: string | null
 }
 
 /** Sums of per-node network costs vs collected fees across the full rotation chain. */
@@ -1525,6 +1531,8 @@ export interface SwapBeforeOpenRequest {
   slippage_tolerance_bps?: number
   /** Groups swap + open rows in `orca_position_lifecycle.jsonl` for per-position cost sums. */
   cost_session_id?: string
+  /** Stable CHAIN cycle id — executor caps swap/open to `CHAIN:{id}` inventory. */
+  chain_session_id?: string
 }
 
 export interface SwapBeforeOpenResponse {
@@ -1558,6 +1566,8 @@ export interface BuildUnsignedTxRequest {
 export interface BuildUnsignedTxResponse {
   unsigned_tx_base64: string
   correlation_id: string
+  /** Wallet GL journal kind for paired submit (Phase B). */
+  ledger_kind: string
   expected_program_ids: string[]
   position_mint?: string | null
   position_address?: string | null
@@ -1568,6 +1578,12 @@ export interface SubmitSignedTxRequest {
   signed_tx_base64: string
   /** Position (or chain) pubkeys to refresh materialized chain-history after a successful send. */
   chain_history_anchors?: string[] | null
+  correlation_id?: string | null
+  ledger_kind?: string | null
+  wallet_pubkey?: string | null
+  pool_address?: string | null
+  position_address?: string | null
+  cost_session_id?: string | null
 }
 
 export interface SubmitSignedTxResponse {
@@ -1602,6 +1618,9 @@ export async function txSubmitSigned(
     chain_history_anchors?: string[] | null
     /** When set, `position_address` from the build response is included as anchors. */
     build?: BuildUnsignedTxResponse | null
+    /** Original build request fields for wallet GL journal (Phase B). */
+    buildRequest?: BuildUnsignedTxRequest | null
+    cost_session_id?: string | null
   },
 ): Promise<SubmitSignedTxResponse> {
   const fromBuild = opts?.build ? chainHistoryAnchorsFromTxBuild(opts.build) : []
@@ -1609,9 +1628,19 @@ export async function txSubmitSigned(
     .map((s) => (typeof s === 'string' ? s.trim() : ''))
     .filter(Boolean)
   const merged = [...new Set([...fromBuild, ...explicit])]
+  const build = opts?.build
+  const req = opts?.buildRequest
   const body: SubmitSignedTxRequest = {
     signed_tx_base64: signedTxBase64,
     ...(merged.length > 0 ? { chain_history_anchors: merged } : {}),
+    ...(build?.correlation_id ? { correlation_id: build.correlation_id } : {}),
+    ...(build?.ledger_kind ? { ledger_kind: build.ledger_kind } : {}),
+    ...(req?.wallet_pubkey ? { wallet_pubkey: req.wallet_pubkey } : {}),
+    ...(req?.pool_address ? { pool_address: req.pool_address } : {}),
+    ...(build?.position_address ? { position_address: build.position_address } : req?.position_address
+      ? { position_address: req.position_address }
+      : {}),
+    ...(opts?.cost_session_id ? { cost_session_id: opts.cost_session_id } : {}),
   }
   return fetchJsonLong<SubmitSignedTxResponse>('/tx/submit-signed', {
     method: 'POST',
@@ -1640,6 +1669,8 @@ export const openPosition = (data: {
   swap_before_open?: SwapInPoolBeforeOpen
   /** Groups swap + open ledger rows for per-position cost accounting. */
   cost_session_id?: string
+  /** Stable CHAIN cycle id — distinct from `cost_session_id` on reopen. */
+  chain_session_id?: string
 }) => fetchJsonLong<PositionOpenResponse>('/positions', {
   method: 'POST',
   body: JSON.stringify(data),
@@ -1749,6 +1780,8 @@ export interface QuoteOpenBudgetRequest {
   tick_lower: number
   tick_upper: number
   target_usd: number
+  chain_session_id?: string
+  cost_session_id?: string
 }
 
 export interface QuoteOpenBudgetResponse {
@@ -1762,6 +1795,10 @@ export interface QuoteOpenBudgetResponse {
   liquidity: string
   in_range: boolean
   note?: string
+  chain_session_id?: string
+  chain_wallet_notional_usd?: number
+  target_usd_clamped?: number
+  portfolio_scope?: string
 }
 
 export const quoteOpenBudget = (poolAddress: string, body: QuoteOpenBudgetRequest) =>
@@ -1869,6 +1906,8 @@ export interface WalletEffectiveBalancesResponse extends WalletBalancesResponse 
   wsol_effective_raw: number
   cache_source?: string | null
   cache_updated_at_utc?: string | null
+  /** When CLMM_WALLET_GL_EFFECTIVE_READ=1: gl_wallet | rpc_fallback */
+  effective_balance_source?: string | null
 }
 
 export interface ApiSignerWalletResponse {
@@ -2071,6 +2110,13 @@ export interface WalletSessionBalanceRow {
   decimals?: number | null
 }
 
+export interface WalletSessionBalanceUsdLeg {
+  mint: string
+  amount_raw: string
+  price_usd?: string | null
+  value_usd?: string | null
+}
+
 export interface WalletSessionOpenStartSnapshot {
   ts_utc?: string | null
   signature: string
@@ -2083,12 +2129,16 @@ export interface WalletSessionOpenStartSnapshot {
   pre_open_value_usd?: string | null
   /** details | pool_address | incomplete */
   mint_resolution?: string
+  /** event_price_* from open row — used to mark current wallet USD */
+  price_by_mint_usd?: Record<string, string>
 }
 
 export interface WalletSessionMetrics {
   open_start: WalletSessionOpenStartSnapshot
   current_value_usd?: string | null
   delta_vs_pre_open_usd?: string | null
+  /** Per-mint USD legs; sum ≈ current_value_usd */
+  current_balance_usd_legs?: WalletSessionBalanceUsdLeg[]
   /** False when lifecycle close/open rows lack pool mints — session USD may not match wallet. */
   metrics_trusted?: boolean
 }
@@ -2098,6 +2148,9 @@ export interface WalletSessionBalancesResponse {
   owner?: string | null
   /** e.g. gl_session_shadow, gl_session_shadow_pslr_fallback */
   source: string
+  quality: string
+  gl_matches_pslr: boolean
+  needs_reconcile: boolean
   balances: WalletSessionBalanceRow[]
   metrics?: WalletSessionMetrics | null
 }
@@ -2154,6 +2207,232 @@ export const postWalletReconcileSessionGl = (opts: { session_id: string; owner?:
   if (opts?.owner?.trim()) params.set('owner', opts.owner.trim())
   return fetchJson<WalletSessionGlReconcileResponse>(
     `/wallets/reconcile-session-gl?${params}`,
+    { method: 'POST' },
+  )
+}
+
+export const postWalletReconcileChainGl = (opts: {
+  chain_session_id: string
+  owner?: string
+}) => {
+  const params = new URLSearchParams()
+  params.set('chain_session_id', opts.chain_session_id.trim())
+  if (opts?.owner?.trim()) params.set('owner', opts.owner.trim())
+  return fetchJson<WalletSessionGlReconcileResponse>(`/wallets/reconcile-chain-gl?${params}`, {
+    method: 'POST',
+  })
+}
+
+export interface WalletGlBalancesResponse {
+  owner: string
+  source: string
+  quality: string
+  needs_reconcile: boolean
+  opening_import_applied: boolean
+  balances: WalletSessionBalanceRow[]
+}
+
+export interface WalletGlOpeningImportReport {
+  owner: string
+  mints_posted: number
+  status: string
+  note: string
+}
+
+export const getWalletGlBalances = (opts: { owner: string }) => {
+  const params = new URLSearchParams()
+  params.set('owner', opts.owner.trim())
+  return fetchJson<WalletGlBalancesResponse>(`/wallets/wallet-balances?${params}`)
+}
+
+export const postWalletGlOpeningImport = (opts: { owner: string }) => {
+  const params = new URLSearchParams()
+  params.set('owner', opts.owner.trim())
+  return fetchJson<WalletGlOpeningImportReport>(
+    `/wallets/wallet-balances/opening-import?${params}`,
+    { method: 'POST' },
+  )
+}
+
+export interface WalletGlRpcReconcileGap {
+  mint: string
+  gl_amount_raw?: string | null
+  rpc_amount_raw?: string | null
+  delta_raw?: string | null
+}
+
+export interface WalletGlRpcReconcileResponse {
+  owner: string
+  gl_source: string
+  gl_quality: string
+  gl_opening_import_applied: boolean
+  rpc_confidence: string
+  rpc_is_stale: boolean
+  rpc_as_of_utc?: string | null
+  gl_balances: WalletSessionBalanceRow[]
+  rpc_balances: WalletSessionBalanceRow[]
+  gaps: WalletGlRpcReconcileGap[]
+  gl_matches_rpc: boolean
+  note: string
+}
+
+export const getWalletReconcileWalletGl = (opts: { owner: string }) => {
+  const params = new URLSearchParams()
+  params.set('owner', opts.owner.trim())
+  return fetchJson<WalletGlRpcReconcileResponse>(`/wallets/reconcile-wallet-gl?${params}`)
+}
+
+export interface WalletChainSessionMeta {
+  status: string
+  closed_at?: string | null
+  anchor_position?: string | null
+  head_position?: string | null
+  chain_pda_count?: number | null
+}
+
+export interface WalletChainLineageReconcile {
+  chain_session_id: string
+  chain_start_usd?: string | null
+  chain_wallet_usd?: string | null
+  chain_lp_nav_usd?: string | null
+  chain_combined_usd?: string | null
+  chain_vs_start_usd?: string | null
+  lineage_net_pnl_usd?: string | null
+  lineage_baseline_usd?: string | null
+  lineage_current_usd?: string | null
+  diff_chain_vs_lineage_usd?: string | null
+  note: string
+}
+
+export interface WalletChainPortfolioResponse {
+  chain_session_id: string
+  owner?: string | null
+  source: string
+  quality: string
+  gl_matches_pslr: boolean
+  needs_reconcile: boolean
+  balances: WalletSessionBalanceRow[]
+  metrics?: WalletSessionMetrics | null
+  anchor_position?: string | null
+  meta?: WalletChainSessionMeta | null
+  reconcile?: WalletChainLineageReconcile | null
+  ledger_events?: WalletChainPortfolioLedgerEvent[]
+  portfolio_balance_usd?: string | null
+  chain_balance_usd_legs?: WalletSessionBalanceUsdLeg[]
+  collected_fees?: WalletChainCollectedFeesSummary
+  chain_wallet_excluded_mint_count?: number
+  lp_nav_usd?: string | null
+}
+
+export interface WalletChainCollectedFeesSummary {
+  collect_events: number
+  legs?: WalletSessionBalanceUsdLeg[]
+  total_usd?: string | null
+}
+
+export interface WalletChainPortfolioLedgerLeg {
+  mint: string
+  amount_raw: string
+  direction: 'in' | 'out' | string
+  value_usd?: string | null
+}
+
+export interface WalletChainPortfolioLedgerEvent {
+  ts_utc?: string | null
+  kind: string
+  event: string
+  signature?: string | null
+  position_pubkey?: string | null
+  legs: WalletChainPortfolioLedgerLeg[]
+  total_usd?: string | null
+}
+
+export interface WalletChainPortfolioHistoryRow {
+  ts_utc?: string | null
+  event: string
+  signature?: string | null
+  position_pubkey?: string | null
+  rebalance_session_id?: string | null
+  tx_fee_lamports?: number | null
+  summary?: string | null
+}
+
+export interface WalletChainPortfolioHistoryResponse {
+  chain_session_id: string
+  status: string
+  closed_at?: string | null
+  rows: WalletChainPortfolioHistoryRow[]
+  row_count: number
+}
+
+export interface WalletChainGlBackfillReport {
+  chains_processed: number
+  rows_scanned: number
+  postings_applied: number
+  rows_skipped_already: number
+  rows_skipped_no_deltas: number
+}
+
+export interface WalletChainSessionIdBackfillReport {
+  chain_session_id: string
+  anchor_position: string
+  chain_pda_count: number
+  rebalance_sessions_linked: number
+  pslr_rows_updated: number
+}
+
+export const getWalletChainPortfolio = (opts: {
+  chain_session_id?: string
+  anchor_position?: string
+  owner?: string
+  lp_nav_usd?: string
+}) => {
+  const params = new URLSearchParams()
+  if (opts.chain_session_id?.trim()) params.set('chain_session_id', opts.chain_session_id.trim())
+  if (opts.anchor_position?.trim()) params.set('anchor_position', opts.anchor_position.trim())
+  if (opts.owner?.trim()) params.set('owner', opts.owner.trim())
+  if (opts.lp_nav_usd?.trim()) params.set('lp_nav_usd', opts.lp_nav_usd.trim())
+  return fetchJsonWithTimeout<WalletChainPortfolioResponse>(
+    `/wallets/chain-portfolio?${params}`,
+    50_000,
+  )
+}
+
+export const getWalletChainPortfolioHistory = (opts: {
+  chain_session_id?: string
+  anchor_position?: string
+  limit?: number
+}) => {
+  const params = new URLSearchParams()
+  if (opts.chain_session_id?.trim()) params.set('chain_session_id', opts.chain_session_id.trim())
+  if (opts.anchor_position?.trim()) params.set('anchor_position', opts.anchor_position.trim())
+  if (opts.limit != null) params.set('limit', String(opts.limit))
+  return fetchJson<WalletChainPortfolioHistoryResponse>(`/wallets/chain-portfolio/history?${params}`)
+}
+
+export const postWalletChainPortfolioBackfill = (opts?: {
+  chain_session_id?: string
+  limit?: number
+}) => {
+  const params = new URLSearchParams()
+  if (opts?.chain_session_id?.trim()) params.set('chain_session_id', opts.chain_session_id.trim())
+  if (opts?.limit != null) params.set('limit', String(opts.limit))
+  const q = params.toString()
+  return fetchJson<WalletChainGlBackfillReport>(
+    `/wallets/chain-portfolio/backfill${q ? `?${q}` : ''}`,
+    { method: 'POST' },
+  )
+}
+
+export const postWalletChainPortfolioBackfillChainIds = (opts: {
+  anchor_position: string
+  chain_session_id?: string
+}) => {
+  const params = new URLSearchParams()
+  params.set('anchor_position', opts.anchor_position.trim())
+  if (opts.chain_session_id?.trim()) params.set('chain_session_id', opts.chain_session_id.trim())
+  return fetchJson<WalletChainSessionIdBackfillReport>(
+    `/wallets/chain-portfolio/backfill-chain-ids?${params}`,
     { method: 'POST' },
   )
 }

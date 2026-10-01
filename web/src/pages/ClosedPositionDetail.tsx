@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
+import { ChainEconomicQualityBanner } from '@/components/ChainEconomicQualityBanner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
@@ -503,6 +504,7 @@ export default function ClosedPositionDetail() {
                 {totals.interpretation?.economic_net_pnl_caption_pl ? (
                   <p className="text-[11px] leading-snug">{totals.interpretation.economic_net_pnl_caption_pl}</p>
                 ) : null}
+                <ChainEconomicQualityBanner totals={totals} />
                 <div className="flex flex-wrap gap-x-6 gap-y-1">
                   <div>
                     <span className="text-muted-foreground">baseline</span>{' '}

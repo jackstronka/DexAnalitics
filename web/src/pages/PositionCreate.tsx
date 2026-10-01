@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Link, useSearchParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
 import { InlineError } from '@/components/ui/inline-error'
+import { WalletEffectiveSourceBanner } from '@/components/WalletEffectiveSourceBanner'
 import {
   getMintPricesUsd,
   getOrcaToken,
@@ -16,6 +17,7 @@ import {
   getApiSignerWallet,
   getDataSnapshots,
   getWalletEffectiveBalances,
+  getWalletChainPortfolio,
   getWallets,
   openPosition,
   quoteOpenBudget,
@@ -38,9 +40,14 @@ import { getDevWalletPubkey } from '@/lib/devWallet'
 import { formatUSD, shortenAddress } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
 import {
+  ChainCapitalPreflight,
+  useChainCapitalCheck,
+} from '@/components/ChainCapitalPreflight'
+import {
   SessionCapitalPreflight,
   useSessionCapitalCheck,
 } from '@/components/SessionCapitalPreflight'
+import { chainInventoryUi, quoteOpenBudgetBody } from '@/lib/chainCapital'
 
 const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -145,16 +152,16 @@ async function solveTargetUsdForLegAmount(
   leg: 'a' | 'b',
   targetLegUi: number,
   signal?: AbortSignal,
+  chainSessionId?: string,
 ): Promise<{ target_usd: number; quote: QuoteOpenBudgetResponse } | null> {
   if (!Number.isFinite(targetLegUi) || targetLegUi <= 0) return null
 
   const fetchQ = async (target_usd: number) => {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    return quoteOpenBudget(poolAddress, {
-      tick_lower: tickLower,
-      tick_upper: tickUpper,
-      target_usd,
-    })
+    return quoteOpenBudget(
+      poolAddress,
+      quoteOpenBudgetBody(tickLower, tickUpper, target_usd, chainSessionId),
+    )
   }
 
   const g = (q: QuoteOpenBudgetResponse) => legUiFromQuote(q, leg)
@@ -258,6 +265,7 @@ export default function PositionCreate() {
   const L = (pl: string, en: string) => (locale === 'pl' ? pl : en)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
 
   const curatedPools = useMemo(
     () => [
@@ -302,6 +310,9 @@ export default function PositionCreate() {
   const [swapCostSessionId, setSwapCostSessionId] = useState<string | null>(null)
   /** Optional reuse of rebalance_session_id (reopen / incomplete rebalance). */
   const [sessionIdInput, setSessionIdInput] = useState('')
+  /** Stable CHAIN cycle id — quotes/swap/open size against `CHAIN:{id}` inventory. */
+  const [chainSessionIdInput, setChainSessionIdInput] = useState('')
+  const [anchorPositionInput, setAnchorPositionInput] = useState('')
   const [swapSignature, setSwapSignature] = useState<string | null>(null)
   const [swapStepInfo, setSwapStepInfo] = useState<string | null>(null)
   const [swapStepError, setSwapStepError] = useState<string | null>(null)
@@ -404,12 +415,43 @@ export default function PositionCreate() {
   }, [effectiveOwnerPk, queryClient])
 
   useEffect(() => {
+    const chain = searchParams.get('chain_session_id')?.trim()
+    const rebalance = searchParams.get('rebalance_session_id')?.trim()
+    const pool = searchParams.get('pool')?.trim() || searchParams.get('pool_address')?.trim()
+    const tl = searchParams.get('tick_lower')
+    const tu = searchParams.get('tick_upper')
+    const anchor = searchParams.get('anchor_position')?.trim()
+    if (chain) setChainSessionIdInput(chain)
+    if (rebalance) setSessionIdInput(rebalance)
+    if (pool) {
+      setPoolAddress(pool)
+      setTickAutoSync(false)
+    }
+    if (tl != null && tl !== '' && Number.isFinite(Number(tl))) setTickLower(Number(tl))
+    if (tu != null && tu !== '' && Number.isFinite(Number(tu))) setTickUpper(Number(tu))
+    if (anchor) setAnchorPositionInput(anchor)
+  }, [searchParams])
+
+  useEffect(() => {
     if (swapCostSessionId?.trim()) {
       setSessionIdInput(swapCostSessionId.trim())
     }
   }, [swapCostSessionId])
 
   const effectiveSessionId = (swapCostSessionId?.trim() || sessionIdInput.trim()) || ''
+  const effectiveChainSessionId = chainSessionIdInput.trim()
+
+  const chainPortfolioQ = useQuery({
+    queryKey: ['chain-portfolio-open', effectiveChainSessionId, anchorPositionInput.trim(), effectiveOwnerPk ?? ''],
+    queryFn: () =>
+      getWalletChainPortfolio({
+        chain_session_id: effectiveChainSessionId,
+        anchor_position: anchorPositionInput.trim() || undefined,
+        owner: effectiveOwnerPk ?? undefined,
+      }),
+    enabled: effectiveChainSessionId.length > 0,
+    staleTime: 15_000,
+  })
 
   const strategyOptions = useMemo(
     () => strategiesQ.data?.strategies ?? [],
@@ -670,13 +712,12 @@ export default function PositionCreate() {
     (budgetTickRangeInPrice !== false)
 
   const budgetQuoteQ = useQuery({
-    queryKey: ['quote-open-budget', poolAddress.trim(), tickLower, tickUpper, totalUsd],
+    queryKey: ['quote-open-budget', poolAddress.trim(), tickLower, tickUpper, totalUsd, effectiveChainSessionId],
     queryFn: () =>
-      quoteOpenBudget(poolAddress.trim(), {
-        tick_lower: Number(tickLower),
-        tick_upper: Number(tickUpper),
-        target_usd: Number(totalUsd),
-      }),
+      quoteOpenBudget(
+        poolAddress.trim(),
+        quoteOpenBudgetBody(Number(tickLower), Number(tickUpper), Number(totalUsd), effectiveChainSessionId),
+      ),
     enabled: budgetQuoteEnabled,
     staleTime: 10_000,
   })
@@ -699,7 +740,7 @@ export default function PositionCreate() {
       setBudgetLegSyncing(true)
       setBudgetLegSyncError(null)
       try {
-        const solved = await solveTargetUsdForLegAmount(pool, tl, tu, leg, num, ac.signal)
+        const solved = await solveTargetUsdForLegAmount(pool, tl, tu, leg, num, ac.signal, effectiveChainSessionId || undefined)
         if (!solved) {
           // Przerwany request (nowa edycja / unmount) zwraca `null` — nie pokazuj błędu „dopasowania”.
           if (ac.signal.aborted) return
@@ -708,7 +749,7 @@ export default function PositionCreate() {
         }
         const t = Number(solved.target_usd.toFixed(10))
         queryClient.setQueryData<QuoteOpenBudgetResponse>(
-          ['quote-open-budget', pool, tickLower, tickUpper, t],
+          ['quote-open-budget', pool, tickLower, tickUpper, t, effectiveChainSessionId],
           solved.quote,
         )
         setTotalUsd(t)
@@ -724,7 +765,7 @@ export default function PositionCreate() {
         setBudgetLegSyncing(false)
       }
     },
-    [poolAddress, tickLower, tickUpper, budgetTickRangeInPrice, queryClient],
+    [poolAddress, tickLower, tickUpper, budgetTickRangeInPrice, queryClient, effectiveChainSessionId],
   )
 
   const scheduleBudgetLegSync = useCallback(
@@ -837,10 +878,22 @@ export default function PositionCreate() {
       needA = budgetQuoteCaps.a / 10 ** tokenA.decimals
       needB = budgetQuoteCaps.b / 10 ** tokenB.decimals
     }
-    const haveA = getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data)
-    const haveB = getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data)
-    if (haveA === null || haveB === null) {
-      return empty
+    let haveA: number
+    let haveB: number
+    if (effectiveChainSessionId) {
+      if (!chainPortfolioQ.data) {
+        return empty
+      }
+      haveA = chainInventoryUi(chainPortfolioQ.data, tokenA.mint, tokenA.decimals)
+      haveB = chainInventoryUi(chainPortfolioQ.data, tokenB.mint, tokenB.decimals)
+    } else {
+      const ha = getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data)
+      const hb = getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data)
+      if (ha === null || hb === null) {
+        return empty
+      }
+      haveA = ha
+      haveB = hb
     }
     const nativeSol = parseFloat(effectiveBalancesQ.data.sol)
     const nativeSolUi = Number.isFinite(nativeSol) ? nativeSol : 0
@@ -977,11 +1030,16 @@ export default function PositionCreate() {
     amountBUi,
     pricesQ.data,
     apiSignerQ.data?.min_open_lamports,
+    effectiveChainSessionId,
+    chainPortfolioQ.data,
   ])
 
   /** Single-sided deficit: ExactIn swap in **this** pool (mint + raw amount) for `swap_before_open`. */
   const swapBeforeOpenPlan = useMemo(() => {
     if (!fundingCheck.ready || !tokenA || !tokenB || !effectiveBalancesQ.data) {
+      return null
+    }
+    if (effectiveChainSessionId && !chainPortfolioQ.data) {
       return null
     }
     if (fundingCheck.shortA && fundingCheck.shortB) {
@@ -990,6 +1048,16 @@ export default function PositionCreate() {
     const px = pricesQ.data?.prices
     const capPct = 0.92
     const poolPriceRaw = Number(poolStateQ.data?.price ?? poolQ.data?.price)
+
+    const haveUiForMint = (mint: string, decimals: number, effectiveHave?: number | null): number | null => {
+      if (effectiveHave != null && Number.isFinite(effectiveHave)) {
+        return effectiveHave
+      }
+      if (effectiveChainSessionId && chainPortfolioQ.data) {
+        return chainInventoryUi(chainPortfolioQ.data, mint, decimals)
+      }
+      return getAvailableUiAmount(mint, effectiveBalancesQ.data)
+    }
 
     // Operational SOL deficit (native rent+fee buffer) with balanced pool legs:
     // allow single in-pool swap to WSOL before open for WSOL pairs.
@@ -1012,7 +1080,7 @@ export default function PositionCreate() {
       if (!rawEst || rawEst <= 0) {
         return null
       }
-      const haveIn = getAvailableUiAmount(inToken.mint, effectiveBalancesQ.data)
+      const haveIn = haveUiForMint(inToken.mint, inToken.decimals)
       if (haveIn == null) {
         return null
       }
@@ -1052,8 +1120,8 @@ export default function PositionCreate() {
       if (rawEst <= 0) {
         return null
       }
-      // Cap swap-in by what user can spend: same SOL-first leg as `fundingCheck` (native SOL, not SPL WSOL-only).
-      const haveAUi = fundingCheck.effectiveHaveA ?? getAvailableUiAmount(tokenA.mint, effectiveBalancesQ.data) ?? 0
+      // Cap swap-in by CHAIN inventory when chain_session_id is set (not global RPC wallet).
+      const haveAUi = haveUiForMint(tokenA.mint, tokenA.decimals, fundingCheck.effectiveHaveA) ?? 0
       const maxRaw = Math.floor(haveAUi * 10 ** tokenA.decimals * capPct)
       const amount_in = Math.min(Math.floor(rawEst), maxRaw)
       if (amount_in <= 0) {
@@ -1086,7 +1154,7 @@ export default function PositionCreate() {
       if (rawEst <= 0) {
         return null
       }
-      const haveBUi = fundingCheck.effectiveHaveB ?? getAvailableUiAmount(tokenB.mint, effectiveBalancesQ.data) ?? 0
+      const haveBUi = haveUiForMint(tokenB.mint, tokenB.decimals, fundingCheck.effectiveHaveB) ?? 0
       const maxRaw = Math.floor(haveBUi * 10 ** tokenB.decimals * capPct)
       const amount_in = Math.min(Math.floor(rawEst), maxRaw)
       if (amount_in <= 0) {
@@ -1100,10 +1168,22 @@ export default function PositionCreate() {
     }
 
     return null
-  }, [fundingCheck, tokenA, tokenB, pricesQ.data, effectiveBalancesQ.data, poolQ.data?.price, poolStateQ.data?.price])
+  }, [
+    fundingCheck,
+    tokenA,
+    tokenB,
+    pricesQ.data,
+    effectiveBalancesQ.data,
+    poolQ.data?.price,
+    poolStateQ.data?.price,
+    effectiveChainSessionId,
+    chainPortfolioQ.data,
+  ])
 
   const sessionPreflightProps = useMemo(() => {
-    if (!effectiveSessionId || !tokenA || !tokenB || !fundingCheck.ready) return null
+    if (effectiveChainSessionId || !effectiveSessionId || !tokenA || !tokenB || !fundingCheck.ready) {
+      return null
+    }
     return {
       sessionId: effectiveSessionId,
       owner: effectiveOwnerPk ?? undefined,
@@ -1118,9 +1198,34 @@ export default function PositionCreate() {
       walletHaveA: fundingCheck.effectiveHaveA ?? 0,
       walletHaveB: fundingCheck.effectiveHaveB ?? 0,
     }
-  }, [effectiveSessionId, tokenA, tokenB, fundingCheck, effectiveOwnerPk])
+  }, [effectiveChainSessionId, effectiveSessionId, tokenA, tokenB, fundingCheck, effectiveOwnerPk])
+
+  const chainPreflightProps = useMemo(() => {
+    if (!effectiveChainSessionId || !tokenA || !tokenB || !fundingCheck.ready) return null
+    return {
+      chainSessionId: effectiveChainSessionId,
+      anchorPosition: anchorPositionInput.trim() || undefined,
+      owner: effectiveOwnerPk ?? undefined,
+      tokenAMint: tokenA.mint,
+      tokenASymbol: tokenA.symbol,
+      tokenADecimals: tokenA.decimals,
+      tokenBMint: tokenB.mint,
+      tokenBSymbol: tokenB.symbol,
+      tokenBDecimals: tokenB.decimals,
+      needA: fundingCheck.needA,
+      needB: fundingCheck.needB,
+    }
+  }, [
+    effectiveChainSessionId,
+    anchorPositionInput,
+    tokenA,
+    tokenB,
+    fundingCheck,
+    effectiveOwnerPk,
+  ])
 
   const sessionCheck = useSessionCapitalCheck(sessionPreflightProps)
+  const chainCheck = useChainCapitalCheck(chainPreflightProps)
 
   const swapBeforeOpenInputMeta = useMemo(() => {
     if (!swapBeforeOpenPlan || !tokenA || !tokenB) return null
@@ -1381,7 +1486,18 @@ export default function PositionCreate() {
       return
     }
 
-    const blockByTokenDeficit = fundingCheck.ready && (fundingCheck.shortA || fundingCheck.shortB)
+    if (chainCheck.ready && chainCheck.blocked) {
+      const parts = [
+        chainCheck.shortA && tokenA ? tokenA.symbol : null,
+        chainCheck.shortB && tokenB ? tokenB.symbol : null,
+      ].filter(Boolean)
+      const tokenList = parts.length > 0 ? parts.join(', ') : '—'
+      setOpenStepError(t('positionCreate.chainCapitalBlocked').replace('{tokens}', tokenList))
+      return
+    }
+
+    const blockByTokenDeficit =
+      !effectiveChainSessionId && fundingCheck.ready && (fundingCheck.shortA || fundingCheck.shortB)
     if (blockByTokenDeficit) {
       if (swapBeforeOpen) {
         // Two-step flow: open is allowed only after swap succeeded.
@@ -1460,6 +1576,7 @@ export default function PositionCreate() {
       amount_b: bRaw,
       ...(strategyId.trim() ? { strategy_id: strategyId.trim() } : {}),
       cost_session_id: openCostSessionId,
+      ...(effectiveChainSessionId ? { chain_session_id: effectiveChainSessionId } : {}),
     })
   }
 
@@ -1493,6 +1610,7 @@ export default function PositionCreate() {
       specified_mint: swapBeforeOpenPlan.specified_mint,
       amount_in: swapBeforeOpenPlan.amount_in,
       cost_session_id: id,
+      ...(effectiveChainSessionId ? { chain_session_id: effectiveChainSessionId } : {}),
     })
   }
 
@@ -1977,6 +2095,9 @@ export default function PositionCreate() {
                   ) : null}
                 </div>
               ) : null}
+              {effectiveBalancesQ.data ? (
+                <WalletEffectiveSourceBanner source={effectiveBalancesQ.data.effective_balance_source} />
+              ) : null}
               {!!effectiveBalancesQ.data?.is_stale && (
                 <InlineError as="div" className="text-xs flex items-center justify-between gap-3">
                   <span>
@@ -2137,6 +2258,21 @@ export default function PositionCreate() {
               ) : null}
 
               <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-3 space-y-2">
+                <label className="block text-sm font-medium" htmlFor="chain-session-id">
+                  {t('positionCreate.chainSessionIdLabel')}
+                </label>
+                <p className="text-xs text-muted-foreground">{t('positionCreate.chainSessionIdHint')}</p>
+                <input
+                  id="chain-session-id"
+                  type="text"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                  value={chainSessionIdInput}
+                  onChange={(e) => setChainSessionIdInput(e.target.value)}
+                  placeholder={t('positionCreate.chainSessionIdPlaceholder')}
+                />
+              </div>
+
+              <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-3 space-y-2">
                 <label className="block text-sm font-medium" htmlFor="cost-session-id">
                   {t('positionCreate.sessionIdLabel')}
                 </label>
@@ -2160,9 +2296,10 @@ export default function PositionCreate() {
                 ) : null}
               </div>
 
+              {chainPreflightProps ? <ChainCapitalPreflight {...chainPreflightProps} /> : null}
               {sessionPreflightProps ? <SessionCapitalPreflight {...sessionPreflightProps} /> : null}
 
-              {fundingCheck.ready && fundingCheck.blocked && (
+              {fundingCheck.ready && fundingCheck.blocked && !effectiveChainSessionId && (
                 <ErrorBanner className="py-2.5 space-y-2">
                   <p className="font-medium">
                     {L(

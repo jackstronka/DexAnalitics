@@ -5,7 +5,7 @@ use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::Row;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,23 @@ use std::str::FromStr;
 
 pub const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 pub const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+/// System GL account for accumulated network tx fees (Phase C4).
+pub const TX_FEE_ACCOUNT_CODE: &str = "TX_FEE";
+
+/// Global operator wallet GL account code (Phase D2).
+pub fn wallet_account_code(owner: &str) -> String {
+    format!("WALLET:{}", owner.trim())
+}
+
+/// Idempotent opening balance import for `WALLET:{owner}`.
+pub fn wallet_opening_import_event_id(owner: &str) -> String {
+    format!("opening_import:{}", owner.trim())
+}
+
+/// Journal WALLET posting id (distinct from SESSION lifecycle keys).
+pub fn wallet_journal_posting_event_id(journal_event_id: &str) -> String {
+    format!("wallet_journal:{}", journal_event_id.trim())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionCapsSource {
@@ -88,9 +105,103 @@ pub fn session_account_code(session_id: &str) -> String {
     format!("SESSION:{session_id}")
 }
 
+pub fn chain_account_code(chain_session_id: &str) -> String {
+    format!("CHAIN:{chain_session_id}")
+}
+
+/// Read `chain_session_id` from lifecycle row (top-level or `details`).
+pub fn chain_session_id_from_lifecycle_json(v: &Value) -> Option<String> {
+    v.get("chain_session_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            v.get("details")
+                .and_then(|d| d.get("chain_session_id"))
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+/// True when lifecycle already has close/collect/swap rows for this chain (reopen funding path).
+/// First operator open of a new chain has no such rows — CHAIN caps stay off until first credit.
+pub fn chain_has_funding_lifecycle_rows(chain_session_id: &str) -> bool {
+    let cid = chain_session_id.trim();
+    if cid.is_empty() {
+        return false;
+    }
+    let path = default_lifecycle_ledger_path();
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let Some(row_cid) = chain_session_id_from_lifecycle_json(&v) else {
+            continue;
+        };
+        if row_cid != cid {
+            continue;
+        }
+        let event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
+        if matches!(
+            event,
+            "bot_close_position"
+                | "position_close"
+                | "bot_collect_fees"
+                | "swap_exact_in"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// When PSLR `chain_session_id` column is set but JSON lacks it (legacy backfill gap).
+pub fn ensure_chain_session_id_on_lifecycle_row(
+    raw: Value,
+    chain_session_id: &str,
+) -> Value {
+    if chain_session_id_from_lifecycle_json(&raw).is_some() {
+        return raw;
+    }
+    let cid = chain_session_id.trim();
+    if cid.is_empty() {
+        return raw;
+    }
+    let mut out = raw;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "chain_session_id".to_string(),
+            Value::String(cid.to_string()),
+        );
+    }
+    out
+}
+
 /// Idempotent GL posting key. Must fit `wallet_gl_posting.event_id` (VARCHAR 128 after migration 012).
 pub fn lifecycle_posting_event_id(signature: &str) -> String {
     format!("lifecycle:{}", signature.trim())
+}
+
+/// CHAIN scope uses a distinct prefix so SESSION + CHAIN can both post the same lifecycle row.
+pub fn chain_lifecycle_posting_event_id(signature: &str) -> String {
+    format!("chain_lifecycle:{}", signature.trim())
+}
+
+/// Idempotent GL posting key for network fee accumulation (Phase C4).
+pub fn tx_fee_posting_event_id(signature: &str) -> String {
+    format!("tx_fee:{}", signature.trim())
 }
 
 /// Max length for `lifecycle:{signature}` (Solana sig ~88 + prefix).
@@ -362,6 +473,39 @@ fn value_usd_for_balance_mints(
     priced_any.then_some(total)
 }
 
+/// Per-mint USD mark for session wallet rows (same prices as [`value_usd_for_balance_mints`]).
+#[derive(Debug, Clone)]
+pub struct SessionBalanceUsdLeg {
+    pub mint: String,
+    pub amount_raw: String,
+    pub price_usd: Option<f64>,
+    pub value_usd: Option<f64>,
+}
+
+pub fn session_balance_usd_legs(
+    balances: &[SessionBalanceMint],
+    price_by_mint: &BTreeMap<String, f64>,
+) -> Vec<SessionBalanceUsdLeg> {
+    balances
+        .iter()
+        .map(|b| {
+            let price = price_by_mint
+                .get(b.mint.trim())
+                .copied()
+                .filter(|p| p.is_finite());
+            let value_usd = price.and_then(|p| {
+                raw_to_ui_f64(&b.amount_raw, default_mint_decimals(&b.mint)).map(|ui| ui * p)
+            });
+            SessionBalanceUsdLeg {
+                mint: b.mint.clone(),
+                amount_raw: b.amount_raw.clone(),
+                price_usd: price,
+                value_usd,
+            }
+        })
+        .collect()
+}
+
 fn open_usd_from_details(details: &serde_json::Map<String, Value>) -> (Option<f64>, &'static str) {
     for (key, src) in [
         ("open_quote_estimated_value_usd", "open_quote_estimated_value_usd"),
@@ -409,6 +553,45 @@ fn deployed_usd_from_open_details(
     } else {
         (None, "unknown".to_string())
     }
+}
+
+fn insert_event_price_if_missing(
+    out: &mut BTreeMap<String, f64>,
+    mint: Option<&str>,
+    price_v: Option<&Value>,
+) {
+    let Some(m) = mint.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if out.contains_key(m) {
+        return;
+    }
+    let Some(p) = price_v.and_then(json_f64).filter(|p| p.is_finite() && *p > 0.0) else {
+        return;
+    };
+    out.insert(m.to_string(), p);
+}
+
+/// Spot USD prices from one lifecycle row (`event_price_*_usd` on pool mints).
+pub fn lifecycle_price_by_mint(v: &Value) -> BTreeMap<String, f64> {
+    let details = v.get("details").and_then(|d| d.as_object());
+    let (mint_a, mint_b, _) = pool_mints_from_lifecycle_row(v, details);
+    let mut out = details
+        .map(|d| price_map_from_open_details(d, mint_a.as_deref(), mint_b.as_deref()))
+        .unwrap_or_default();
+    if let Some(d) = details {
+        insert_event_price_if_missing(
+            &mut out,
+            d.get("token_mint_a").and_then(|x| x.as_str()),
+            d.get("event_price_a_usd"),
+        );
+        insert_event_price_if_missing(
+            &mut out,
+            d.get("token_mint_b").and_then(|x| x.as_str()),
+            d.get("event_price_b_usd"),
+        );
+    }
+    out
 }
 
 fn price_map_from_open_details(
@@ -611,7 +794,7 @@ pub fn session_principal_mints_trusted<'a>(
             continue;
         }
         let details = raw.get("details").and_then(|d| d.as_object());
-        let (_, _, src) = pool_mints_from_lifecycle_row(&raw, details);
+        let (_, _, src) = pool_mints_from_lifecycle_row(raw, details);
         if src == PoolMintResolveSource::Unresolved {
             return false;
         }
@@ -687,12 +870,15 @@ fn is_lifecycle_swap_event(ev: &str) -> bool {
     matches!(ev, "cli_swap" | "bot_swap_exact_in" | "bot_swap" | "bot_orca_tx")
 }
 
+/// `(session_id, event, signature, mint_deltas)` from one lifecycle JSONL row.
+type SessionLifecycleMintDeltas = (String, String, String, Vec<(String, i128)>);
+
 /// Build SESSION mint deltas from one lifecycle JSONL row.
 pub fn session_mint_deltas_from_lifecycle_json(
     v: &Value,
     lp_collected_a_raw: Option<i64>,
     lp_collected_b_raw: Option<i64>,
-) -> Option<(String, String, String, Vec<(String, i128)>)> {
+) -> Option<SessionLifecycleMintDeltas> {
     let session_id = v
         .get("rebalance_session_id")
         .and_then(|x| x.as_str())
@@ -875,6 +1061,80 @@ pub fn session_mint_deltas_from_lifecycle_json(
     }
 }
 
+/// Cap open debits so SESSION/CHAIN logical balance never goes negative (Phase C2 / G5).
+pub fn cap_open_debits_against_running_balance(
+    event: &str,
+    running: &BTreeMap<String, i128>,
+    postings: &mut [(String, i128)],
+) {
+    if !is_lifecycle_open_event(event) {
+        return;
+    }
+    for (mint, delta) in postings.iter_mut() {
+        if *delta >= 0 {
+            continue;
+        }
+        let available = running.get(mint.as_str()).copied().unwrap_or(0).max(0);
+        let want = delta.saturating_neg();
+        let actual = want.min(available);
+        *delta = -actual;
+    }
+}
+
+fn apply_capped_postings_to_sums(
+    sums: &mut BTreeMap<String, i128>,
+    event: &str,
+    postings: &[(String, i128)],
+) {
+    let mut batch = postings.to_vec();
+    cap_open_debits_against_running_balance(event, sums, &mut batch);
+    for (mint, delta) in batch {
+        if delta == 0 {
+            continue;
+        }
+        let e = sums.entry(mint).or_insert(0);
+        *e = e.saturating_add(delta);
+    }
+}
+
+/// Scan lifecycle JSONL tail for a row matching `signature` (newest wins).
+pub fn find_lifecycle_row_by_signature(
+    path: impl AsRef<Path>,
+    signature: &str,
+    max_lines: usize,
+) -> Option<(Value, Option<i64>, Option<i64>)> {
+    let sig = signature.trim();
+    if sig.is_empty() {
+        return None;
+    }
+    let file = File::open(path.as_ref()).ok()?;
+    let lines: Vec<String> = BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(max_lines.max(1));
+    for line in lines[start..].iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let row_sig = v.get("signature").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if row_sig != sig {
+            continue;
+        }
+        let lp_a = v
+            .get("lp_collected_token_a_raw")
+            .and_then(parse_u64_json)
+            .map(|n| n as i64);
+        let lp_b = v
+            .get("lp_collected_token_b_raw")
+            .and_then(parse_u64_json)
+            .map(|n| n as i64);
+        return Some((v, lp_a, lp_b));
+    }
+    None
+}
+
 /// Aggregate signed raw balances for one session from lifecycle JSON values.
 pub fn aggregate_session_sums_from_lifecycle_rows(
     rows: impl IntoIterator<Item = (Value, Option<i64>, Option<i64>)>,
@@ -883,7 +1143,7 @@ pub fn aggregate_session_sums_from_lifecycle_rows(
     let sid = session_id.trim();
     let mut sums: BTreeMap<String, i128> = BTreeMap::new();
     for (raw, lp_a, lp_b) in rows {
-        let Some((row_sid, _, _, postings)) =
+        let Some((row_sid, _, event, postings)) =
             session_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
         else {
             continue;
@@ -891,10 +1151,7 @@ pub fn aggregate_session_sums_from_lifecycle_rows(
         if row_sid.trim() != sid {
             continue;
         }
-        for (mint, delta) in postings {
-            let e = sums.entry(mint).or_insert(0);
-            *e = e.saturating_add(delta);
-        }
+        apply_capped_postings_to_sums(&mut sums, &event, &postings);
     }
     sums
 }
@@ -1148,6 +1405,105 @@ pub async fn resolve_session_mint_caps(
     caps_from_lifecycle_jsonl_path(&sid, default_lifecycle_ledger_path())
 }
 
+/// Scan lifecycle JSONL and build spend caps for `chain_session_id`.
+pub fn caps_from_lifecycle_jsonl_path_chain(
+    chain_session_id: &str,
+    path: impl AsRef<Path>,
+) -> SessionMintCaps {
+    let cid = chain_session_id.trim().to_string();
+    let file = match File::open(path.as_ref()) {
+        Ok(f) => f,
+        Err(_) => return SessionMintCaps::empty(cid),
+    };
+    let reader = BufReader::new(file);
+    let mut rows: Vec<(Value, Option<i64>, Option<i64>)> = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let lp_a = v
+            .get("lp_collected_token_a_raw")
+            .and_then(parse_u64_json)
+            .map(|n| n as i64);
+        let lp_b = v
+            .get("lp_collected_token_b_raw")
+            .and_then(parse_u64_json)
+            .map(|n| n as i64);
+        rows.push((v, lp_a, lp_b));
+    }
+    let sums = aggregate_chain_sums_from_lifecycle_rows(rows, &cid);
+    let caps = sums_to_spend_caps(sums);
+    let source = if caps.is_empty() {
+        SessionCapsSource::Empty
+    } else {
+        SessionCapsSource::LifecycleFile
+    };
+    SessionMintCaps {
+        session_id: cid,
+        caps_by_mint: caps,
+        source,
+    }
+}
+
+/// Resolve spend caps for `CHAIN:{chain_session_id}` (GL + PSLR min, else lifecycle JSONL).
+pub async fn resolve_chain_mint_caps(
+    db: Option<&Database>,
+    chain_session_id: &str,
+    owner: Option<&str>,
+) -> SessionMintCaps {
+    let cid = chain_session_id.trim().to_string();
+    if cid.is_empty() {
+        return SessionMintCaps::empty(cid);
+    }
+
+    if let Some(db) = db {
+        let gl = read_chain_balances(db, &cid, owner).await.unwrap_or_default();
+        let pslr = compute_chain_balances_from_pslr(db, &cid)
+            .await
+            .unwrap_or_default();
+        let gl_rows: Vec<(String, String)> = gl
+            .iter()
+            .map(|b| (b.mint.clone(), b.amount_raw.clone()))
+            .collect();
+        let pslr_rows: Vec<(String, String)> = pslr
+            .iter()
+            .map(|b| (b.mint.clone(), b.amount_raw.clone()))
+            .collect();
+        let gl_caps = caps_map_from_balance_rows(&gl_rows);
+        let pslr_caps = caps_map_from_balance_rows(&pslr_rows);
+
+        if reopen_session_require_reconcile() && !gl_pslr_match(&gl, &pslr) {
+            return SessionMintCaps {
+                session_id: cid,
+                caps_by_mint: BTreeMap::new(),
+                source: SessionCapsSource::Empty,
+            };
+        }
+
+        if !gl_caps.is_empty() || !pslr_caps.is_empty() {
+            let merged = merge_min_caps(&gl_caps, &pslr_caps);
+            let source = if !gl_caps.is_empty() && gl_pslr_match(&gl, &pslr) {
+                SessionCapsSource::Gl
+            } else if !pslr_caps.is_empty() && gl_caps.is_empty() {
+                SessionCapsSource::PslrFallback
+            } else {
+                SessionCapsSource::ReconciledMin
+            };
+            return SessionMintCaps {
+                session_id: cid,
+                caps_by_mint: merged,
+                source,
+            };
+        }
+    }
+
+    caps_from_lifecycle_jsonl_path_chain(&cid, default_lifecycle_ledger_path())
+}
+
 /// Outcome of applying one lifecycle row to SESSION GL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLifecyclePostingOutcome {
@@ -1255,6 +1611,26 @@ async fn apply_balance_delta(
     tx.commit().await
 }
 
+async fn read_account_balance_map(
+    db: &Database,
+    account_id: i64,
+) -> Result<BTreeMap<String, i128>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT mint, amount_raw FROM wallet_gl_balance WHERE account_id = $1"#,
+    )
+    .bind(account_id)
+    .fetch_all(db.pool())
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let mint: String = r.get("mint");
+            let raw: String = r.get("amount_raw");
+            (mint, parse_raw_i128(&raw).unwrap_or(0))
+        })
+        .collect())
+}
+
 /// Apply signed mint deltas to a SESSION account (creates account row if needed).
 pub async fn apply_session_mint_postings(
     db: &Database,
@@ -1268,8 +1644,16 @@ pub async fn apply_session_mint_postings(
         return Ok(());
     }
     let account_id = ensure_session_account(db, owner, session_id).await?;
-    for (mint, delta) in postings {
-        apply_balance_delta(db, account_id, mint, *delta, event_id, kind).await?;
+    let mut running = read_account_balance_map(db, account_id).await?;
+    let mut batch = postings.to_vec();
+    cap_open_debits_against_running_balance(kind, &running, &mut batch);
+    for (mint, delta) in batch {
+        if delta == 0 {
+            continue;
+        }
+        apply_balance_delta(db, account_id, &mint, delta, event_id, kind).await?;
+        let e = running.entry(mint).or_insert(0);
+        *e = e.saturating_add(delta);
     }
     Ok(())
 }
@@ -1300,6 +1684,491 @@ pub async fn apply_session_postings_from_lifecycle_row(
     let owner = owner_from_lifecycle_json(v);
     apply_session_mint_postings(db, &session_id, owner, &event_id, &event, &postings).await?;
     Ok(SessionLifecyclePostingOutcome::Applied)
+}
+
+/// Lamports charged for the tx (network fee only), when present on a lifecycle row.
+#[must_use]
+pub fn tx_fee_lamports_from_lifecycle_json(v: &Value) -> Option<u64> {
+    v.get("tx_fee_lamports")
+        .and_then(|x| x.as_u64())
+        .filter(|&n| n > 0)
+}
+
+async fn ensure_tx_fee_account(
+    db: &Database,
+    owner: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO wallet_gl_account (account_type, account_code, owner, notes)
+        VALUES ('system', $1, $2, 'accumulated network tx fees (WSOL raw lamports)')
+        ON CONFLICT (account_code) DO UPDATE SET
+            owner = COALESCE(EXCLUDED.owner, wallet_gl_account.owner),
+            updated_at = NOW()
+        RETURNING id
+        "#,
+    )
+    .bind(TX_FEE_ACCOUNT_CODE)
+    .bind(owner)
+    .fetch_one(db.pool())
+    .await?;
+    Ok(row.get::<i64, _>("id"))
+}
+
+/// Apply TX_FEE GL posting from one lifecycle JSON object (idempotent on `tx_fee:{signature}`).
+pub async fn apply_tx_fee_posting_from_lifecycle_row(
+    db: &Database,
+    v: &Value,
+) -> Result<SessionLifecyclePostingOutcome, sqlx::Error> {
+    let Some(fee) = tx_fee_lamports_from_lifecycle_json(v) else {
+        return Ok(SessionLifecyclePostingOutcome::SkippedNoDeltas);
+    };
+    let Some(signature) = v
+        .get("signature")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(SessionLifecyclePostingOutcome::SkippedNoDeltas);
+    };
+    let event_id = tx_fee_posting_event_id(signature);
+    if session_lifecycle_posting_already_applied(db, &event_id).await? {
+        return Ok(SessionLifecyclePostingOutcome::SkippedAlready);
+    }
+    let owner = owner_from_lifecycle_json(v);
+    let account_id = ensure_tx_fee_account(db, owner).await?;
+    apply_balance_delta(
+        db,
+        account_id,
+        WSOL_MINT,
+        i128::from(fee),
+        &event_id,
+        "tx_fee",
+    )
+    .await?;
+    Ok(SessionLifecyclePostingOutcome::Applied)
+}
+
+async fn ensure_wallet_account(db: &Database, owner: &str) -> Result<i64, sqlx::Error> {
+    let owner = owner.trim();
+    let code = wallet_account_code(owner);
+    let row = sqlx::query(
+        r#"
+        INSERT INTO wallet_gl_account (account_type, account_code, owner, notes)
+        VALUES ('wallet', $1, $2, 'global operator wallet GL (Phase D2)')
+        ON CONFLICT (account_code) DO UPDATE SET
+            owner = COALESCE(EXCLUDED.owner, wallet_gl_account.owner),
+            updated_at = NOW()
+        RETURNING id
+        "#,
+    )
+    .bind(&code)
+    .bind(owner)
+    .fetch_one(db.pool())
+    .await?;
+    Ok(row.get::<i64, _>("id"))
+}
+
+pub async fn wallet_opening_import_already_applied(db: &Database, owner: &str) -> Result<bool, sqlx::Error> {
+    let event_id = wallet_opening_import_event_id(owner);
+    session_lifecycle_posting_already_applied(db, &event_id).await
+}
+
+/// Apply signed mint deltas to `WALLET:{owner}` (no open-debit cap).
+pub async fn apply_wallet_mint_postings(
+    db: &Database,
+    owner: &str,
+    event_id: &str,
+    kind: &str,
+    postings: &[(String, i128)],
+) -> Result<(), sqlx::Error> {
+    if postings.is_empty() {
+        return Ok(());
+    }
+    let account_id = ensure_wallet_account(db, owner).await?;
+    for (mint, delta) in postings {
+        if *delta == 0 {
+            continue;
+        }
+        apply_balance_delta(db, account_id, mint, *delta, event_id, kind).await?;
+    }
+    Ok(())
+}
+
+pub async fn read_wallet_balances(
+    db: &Database,
+    owner: &str,
+) -> Result<Vec<SessionBalanceMint>, sqlx::Error> {
+    let code = wallet_account_code(owner);
+    let rows = sqlx::query(
+        r#"
+        SELECT b.mint, b.amount_raw
+        FROM wallet_gl_balance b
+        JOIN wallet_gl_account a ON a.id = b.account_id
+        WHERE a.account_code = $1
+        ORDER BY b.mint
+        "#,
+    )
+    .bind(&code)
+    .fetch_all(db.pool())
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| SessionBalanceMint {
+            mint: r.get("mint"),
+            amount_raw: r.get("amount_raw"),
+        })
+        .collect())
+}
+
+/// Idempotent RPC snapshot → WALLET GL (delta from zero balance per mint).
+pub async fn apply_wallet_opening_import(
+    db: &Database,
+    owner: &str,
+    postings: &[(String, i128)],
+) -> Result<SessionLifecyclePostingOutcome, sqlx::Error> {
+    if postings.is_empty() {
+        return Ok(SessionLifecyclePostingOutcome::SkippedNoDeltas);
+    }
+    let event_id = wallet_opening_import_event_id(owner);
+    if session_lifecycle_posting_already_applied(db, &event_id).await? {
+        return Ok(SessionLifecyclePostingOutcome::SkippedAlready);
+    }
+    apply_wallet_mint_postings(db, owner, &event_id, "opening_import", postings).await?;
+    Ok(SessionLifecyclePostingOutcome::Applied)
+}
+
+/// Build CHAIN mint deltas — reuses SESSION rules with `chain_session_id` as scope id.
+pub fn chain_mint_deltas_from_lifecycle_json(
+    v: &Value,
+    lp_collected_a_raw: Option<i64>,
+    lp_collected_b_raw: Option<i64>,
+) -> Option<SessionLifecycleMintDeltas> {
+    let chain_id = chain_session_id_from_lifecycle_json(v)?;
+    let mut patched = v.clone();
+    if let Some(obj) = patched.as_object_mut() {
+        obj.insert(
+            "rebalance_session_id".to_string(),
+            Value::String(chain_id),
+        );
+    }
+    session_mint_deltas_from_lifecycle_json(&patched, lp_collected_a_raw, lp_collected_b_raw)
+}
+
+pub fn aggregate_chain_sums_from_lifecycle_rows(
+    rows: impl IntoIterator<Item = (Value, Option<i64>, Option<i64>)>,
+    chain_session_id: &str,
+) -> BTreeMap<String, i128> {
+    let cid = chain_session_id.trim();
+    let mut sums: BTreeMap<String, i128> = BTreeMap::new();
+    for (raw, lp_a, lp_b) in rows {
+        let raw = ensure_chain_session_id_on_lifecycle_row(raw, cid);
+        let row_cid = chain_session_id_from_lifecycle_json(&raw).unwrap_or_default();
+        if row_cid.trim() != cid {
+            continue;
+        }
+        let Some((_, _, event, postings)) =
+            chain_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
+        else {
+            continue;
+        };
+        apply_capped_postings_to_sums(&mut sums, &event, &postings);
+    }
+    sums
+}
+
+pub async fn read_chain_balances(
+    db: &Database,
+    chain_session_id: &str,
+    owner: Option<&str>,
+) -> Result<Vec<SessionBalanceMint>, sqlx::Error> {
+    let code = chain_account_code(chain_session_id);
+    let rows = if let Some(o) = owner.map(str::trim).filter(|s| !s.is_empty()) {
+        sqlx::query(
+            r#"
+            SELECT b.mint, b.amount_raw
+            FROM wallet_gl_balance b
+            JOIN wallet_gl_account a ON a.id = b.account_id
+            WHERE a.account_code = $1 AND a.owner = $2
+            ORDER BY b.mint
+            "#,
+        )
+        .bind(&code)
+        .bind(o)
+        .fetch_all(db.pool())
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT b.mint, b.amount_raw
+            FROM wallet_gl_balance b
+            JOIN wallet_gl_account a ON a.id = b.account_id
+            WHERE a.account_code = $1
+            ORDER BY b.mint
+            "#,
+        )
+        .bind(&code)
+        .fetch_all(db.pool())
+        .await?
+    };
+
+    Ok(rows
+        .iter()
+        .map(|r| SessionBalanceMint {
+            mint: r.get("mint"),
+            amount_raw: r.get("amount_raw"),
+        })
+        .collect())
+}
+
+pub async fn compute_chain_balances_from_pslr(
+    db: &Database,
+    chain_session_id: &str,
+) -> Result<Vec<SessionBalanceMint>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT raw_json, lp_collected_token_a_raw, lp_collected_token_b_raw
+        FROM position_stream_ledger_rows
+        WHERE chain_session_id = $1
+        ORDER BY ts_utc ASC NULLS LAST
+        "#,
+    )
+    .bind(chain_session_id)
+    .fetch_all(db.pool())
+    .await?;
+
+    let agg: Vec<(Value, Option<i64>, Option<i64>)> = rows
+        .iter()
+        .map(|r| {
+            let raw: Value = r.get("raw_json");
+            let lp_a: Option<i64> = r.try_get("lp_collected_token_a_raw").ok().flatten();
+            let lp_b: Option<i64> = r.try_get("lp_collected_token_b_raw").ok().flatten();
+            (raw, lp_a, lp_b)
+        })
+        .collect();
+    let sums = aggregate_chain_sums_from_lifecycle_rows(agg, chain_session_id);
+    Ok(sums
+        .into_iter()
+        .map(|(mint, amount_raw)| SessionBalanceMint {
+            mint,
+            amount_raw: format_raw_i128(amount_raw),
+        })
+        .collect())
+}
+
+/// First open in chain order → cycle-start reference (same semantics as SESSION, scoped by chain id).
+pub fn compute_chain_open_start_from_lifecycle_rows(
+    rows: impl IntoIterator<Item = (Value, Option<i64>, Option<i64>)>,
+    chain_session_id: &str,
+) -> Option<SessionOpenStartSnapshot> {
+    let cid = chain_session_id.trim();
+    if cid.is_empty() {
+        return None;
+    }
+    let mut cumulative: BTreeMap<String, i128> = BTreeMap::new();
+    let mut open_start: Option<SessionOpenStartSnapshot> = None;
+
+    for (raw, lp_a, lp_b) in rows {
+        let raw = ensure_chain_session_id_on_lifecycle_row(raw, cid);
+        let row_cid = chain_session_id_from_lifecycle_json(&raw).unwrap_or_default();
+        if row_cid.trim() != cid {
+            continue;
+        }
+        let event = raw
+            .get("event")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+
+        if open_start.is_none() && is_lifecycle_open_event(event) {
+            open_start = build_open_start_from_row(&raw, &cumulative);
+        }
+
+        let Some((_, _, event, postings)) = chain_mint_deltas_from_lifecycle_json(&raw, lp_a, lp_b)
+        else {
+            continue;
+        };
+        apply_capped_postings_to_sums(&mut cumulative, &event, &postings);
+    }
+
+    open_start
+}
+
+/// Best-effort spot map from any lifecycle row in a scoped chain (for ledger USD fallback).
+pub fn bootstrap_chain_spot_prices_from_rows(
+    rows: impl IntoIterator<Item = (Value, Option<i64>, Option<i64>)>,
+    chain_session_id: &str,
+) -> BTreeMap<String, f64> {
+    let cid = chain_session_id.trim();
+    let mut out = BTreeMap::new();
+    if cid.is_empty() {
+        return out;
+    }
+    for (raw, _, _) in rows {
+        let raw = ensure_chain_session_id_on_lifecycle_row(raw, cid);
+        for (mint, px) in lifecycle_price_by_mint(&raw) {
+            out.entry(mint).or_insert(px);
+        }
+    }
+    out
+}
+
+pub fn chain_principal_mints_trusted<'a>(
+    rows: impl IntoIterator<Item = &'a (Value, Option<i64>, Option<i64>)>,
+    chain_session_id: &str,
+) -> bool {
+    let cid = chain_session_id.trim();
+    if cid.is_empty() {
+        return false;
+    }
+    for (raw, _, _) in rows.into_iter() {
+        let raw = ensure_chain_session_id_on_lifecycle_row(raw.clone(), cid);
+        let row_cid = chain_session_id_from_lifecycle_json(&raw).unwrap_or_default();
+        if row_cid.trim() != cid {
+            continue;
+        }
+        let event = raw
+            .get("event")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if !is_lifecycle_close_event(event)
+            && !is_lifecycle_open_event(event)
+            && !is_lifecycle_collect_event(event)
+        {
+            continue;
+        }
+        let details = raw.get("details").and_then(|d| d.as_object());
+        let (_, _, src) = pool_mints_from_lifecycle_row(&raw, details);
+        if src == PoolMintResolveSource::Unresolved {
+            return false;
+        }
+    }
+    true
+}
+
+/// Minty logicznego portfela strategii: pary pul z lifecycle + minty ze swapów + WSOL (opłaty tx).
+pub fn chain_strategy_wallet_mints_from_agg(
+    rows: impl IntoIterator<Item = (Value, Option<i64>, Option<i64>)>,
+    chain_session_id: &str,
+) -> BTreeSet<String> {
+    let cid = chain_session_id.trim();
+    let mut mints = BTreeSet::new();
+    mints.insert(WSOL_MINT.to_string());
+    if cid.is_empty() {
+        return mints;
+    }
+    for (raw, _, _) in rows {
+        let raw = ensure_chain_session_id_on_lifecycle_row(raw, cid);
+        let row_cid = chain_session_id_from_lifecycle_json(&raw).unwrap_or_default();
+        if row_cid.trim() != cid {
+            continue;
+        }
+        let event = raw
+            .get("event")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        let details = raw.get("details").and_then(|d| d.as_object());
+        if is_lifecycle_close_event(event)
+            || is_lifecycle_open_event(event)
+            || is_lifecycle_collect_event(event)
+        {
+            let (ma, mb, src) = pool_mints_from_lifecycle_row(&raw, details);
+            if src != PoolMintResolveSource::Unresolved {
+                if let Some(m) = ma {
+                    mints.insert(m);
+                }
+                if let Some(m) = mb {
+                    mints.insert(m);
+                }
+            }
+        } else if is_lifecycle_swap_event(event)
+            && let Some(obj) = raw
+                .get("fee_payer_token_deltas")
+                .and_then(|d| d.as_object())
+        {
+            for mint in obj.keys() {
+                let m = mint.trim();
+                if !m.is_empty() {
+                    mints.insert(m.to_string());
+                }
+            }
+        }
+    }
+    mints
+}
+
+async fn ensure_chain_account(
+    db: &Database,
+    owner: Option<&str>,
+    chain_session_id: &str,
+) -> Result<i64, sqlx::Error> {
+    let code = chain_account_code(chain_session_id);
+    let row = sqlx::query(
+        r#"
+        INSERT INTO wallet_gl_account (account_type, account_code, owner, session_id, notes)
+        VALUES ('chain', $1, $2, $3, 'chain portfolio; analytics retention; never auto-closed')
+        ON CONFLICT (account_code) DO UPDATE SET
+            updated_at = NOW()
+        RETURNING id
+        "#,
+    )
+    .bind(&code)
+    .bind(owner)
+    .bind(chain_session_id)
+    .fetch_one(db.pool())
+    .await?;
+    Ok(row.get::<i64, _>("id"))
+}
+
+pub async fn apply_chain_mint_postings(
+    db: &Database,
+    chain_session_id: &str,
+    owner: Option<&str>,
+    event_id: &str,
+    kind: &str,
+    postings: &[(String, i128)],
+) -> Result<(), sqlx::Error> {
+    if postings.is_empty() {
+        return Ok(());
+    }
+    let account_id = ensure_chain_account(db, owner, chain_session_id).await?;
+    let mut running = read_account_balance_map(db, account_id).await?;
+    let mut batch = postings.to_vec();
+    cap_open_debits_against_running_balance(kind, &running, &mut batch);
+    for (mint, delta) in batch {
+        if delta == 0 {
+            continue;
+        }
+        apply_balance_delta(db, account_id, &mint, delta, event_id, kind).await?;
+        let e = running.entry(mint).or_insert(0);
+        *e = e.saturating_add(delta);
+    }
+    Ok(())
+}
+
+pub type ChainLifecyclePostingOutcome = SessionLifecyclePostingOutcome;
+
+/// Apply CHAIN GL postings from one lifecycle JSON object (idempotent on `event_id`).
+pub async fn apply_chain_postings_from_lifecycle_row(
+    db: &Database,
+    v: &Value,
+    lp_collected_a_raw: Option<i64>,
+    lp_collected_b_raw: Option<i64>,
+) -> Result<ChainLifecyclePostingOutcome, sqlx::Error> {
+    let Some((chain_id, signature, event, postings)) =
+        chain_mint_deltas_from_lifecycle_json(v, lp_collected_a_raw, lp_collected_b_raw)
+    else {
+        return Ok(ChainLifecyclePostingOutcome::SkippedNoDeltas);
+    };
+    let event_id = chain_lifecycle_posting_event_id(&signature);
+    if session_lifecycle_posting_already_applied(db, &event_id).await? {
+        return Ok(ChainLifecyclePostingOutcome::SkippedAlready);
+    }
+    let owner = owner_from_lifecycle_json(v);
+    apply_chain_mint_postings(db, &chain_id, owner, &event_id, &event, &postings).await?;
+    Ok(ChainLifecyclePostingOutcome::Applied)
 }
 
 #[cfg(test)]
@@ -1351,6 +2220,105 @@ mod tests {
     #[test]
     fn session_account_code_format() {
         assert_eq!(session_account_code("abc"), "SESSION:abc");
+        assert_eq!(chain_account_code("abc"), "CHAIN:abc");
+        assert_eq!(TX_FEE_ACCOUNT_CODE, "TX_FEE");
+        assert_eq!(wallet_account_code("Owner1"), "WALLET:Owner1");
+    }
+
+    #[test]
+    fn wallet_opening_import_event_id_is_stable() {
+        let id = wallet_opening_import_event_id("Owner1");
+        assert!(id.starts_with("opening_import:"));
+        assert!(id.len() <= LIFECYCLE_POSTING_EVENT_ID_MAX_LEN);
+    }
+
+    #[test]
+    fn tx_fee_lamports_from_lifecycle_json_filters_zero_and_missing() {
+        assert!(tx_fee_lamports_from_lifecycle_json(&serde_json::json!({})).is_none());
+        assert!(
+            tx_fee_lamports_from_lifecycle_json(&serde_json::json!({"tx_fee_lamports": 0}))
+                .is_none()
+        );
+        assert_eq!(
+            tx_fee_lamports_from_lifecycle_json(&serde_json::json!({"tx_fee_lamports": 5000})),
+            Some(5000)
+        );
+    }
+
+    #[test]
+    fn tx_fee_posting_event_id_fits_wallet_gl_column() {
+        let sig = "5".repeat(88);
+        let id = tx_fee_posting_event_id(&sig);
+        assert!(id.starts_with("tx_fee:"));
+        assert!(id.len() <= LIFECYCLE_POSTING_EVENT_ID_MAX_LEN);
+    }
+
+    #[test]
+    fn chain_mint_deltas_use_chain_session_id_scope() {
+        let v = serde_json::json!({
+            "event": "bot_open_position",
+            "signature": "sig-open-chain",
+            "chain_session_id": "chain-uuid-1",
+            "rebalance_session_id": "rebalance-uuid-1",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC_MINT,
+                "open_amount_a_raw": 1000u64,
+                "open_amount_b_raw": 2000u64
+            }
+        });
+        let (cid, _, _, posts) =
+            chain_mint_deltas_from_lifecycle_json(&v, None, None).expect("posts");
+        assert_eq!(cid, "chain-uuid-1");
+        assert!(posts.iter().any(|(m, d)| m == WSOL_MINT && *d == -1000));
+        assert!(posts.iter().any(|(m, d)| m == USDC_MINT && *d == -2000));
+    }
+
+    #[test]
+    fn open_debit_capped_when_wallet_has_no_prior_credit() {
+        let sid = "sess-cap-open";
+        let open = serde_json::json!({
+            "event": "bot_open_position",
+            "signature": "sig-open-cap",
+            "rebalance_session_id": sid,
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC_MINT,
+                "open_amount_a_raw": 1_000u64,
+                "open_amount_b_raw": 2_080_000u64
+            }
+        });
+        let rows = vec![(open, None, None)];
+        let sums = aggregate_session_sums_from_lifecycle_rows(rows, sid);
+        assert_eq!(sums.get(USDC_MINT).copied().unwrap_or(0), 0);
+        assert_eq!(sums.get(WSOL_MINT).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn open_debit_allowed_after_swap_credit_in_same_session() {
+        let sid = "sess-cap-swap-open";
+        let swap = serde_json::json!({
+            "event": "bot_swap_exact_in",
+            "signature": "sig-swap",
+            "rebalance_session_id": sid,
+            "fee_payer_token_deltas": {
+                USDC_MINT: "2.08"
+            }
+        });
+        let open = serde_json::json!({
+            "event": "bot_open_position",
+            "signature": "sig-open",
+            "rebalance_session_id": sid,
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC_MINT,
+                "open_amount_a_raw": 1_000u64,
+                "open_amount_b_raw": 2_080_000u64
+            }
+        });
+        let rows = vec![(swap, None, None), (open, None, None)];
+        let sums = aggregate_session_sums_from_lifecycle_rows(rows, sid);
+        assert_eq!(sums.get(USDC_MINT).copied().unwrap_or(0), 0);
     }
 
     #[test]
@@ -1674,5 +2642,47 @@ mod tests {
         unsafe {
             std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
         }
+    }
+
+    #[test]
+    fn session_balance_usd_legs_sum_matches_total() {
+        let mut prices = BTreeMap::new();
+        prices.insert(WSOL_MINT.to_string(), 86.7193923673177);
+        prices.insert(USDC_MINT.to_string(), 0.9987177675254816);
+        let balances = vec![
+            SessionBalanceMint {
+                mint: WSOL_MINT.to_string(),
+                amount_raw: "54625411".to_string(),
+            },
+            SessionBalanceMint {
+                mint: USDC_MINT.to_string(),
+                amount_raw: "-4152294".to_string(),
+            },
+        ];
+        let legs = session_balance_usd_legs(&balances, &prices);
+        let sum: f64 = legs.iter().filter_map(|l| l.value_usd).sum();
+        let total = value_usd_for_balance_mints(&balances, &prices).expect("total");
+        assert!((sum - total).abs() < 1e-6, "sum={sum} total={total}");
+        assert!(total > 0.58 && total < 0.61);
+    }
+
+    #[test]
+    fn chain_strategy_wallet_mints_from_open_row() {
+        let raw = serde_json::json!({
+            "event": "bot_open_position",
+            "chain_session_id": "cid-1",
+            "signature": "sig1",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            }
+        });
+        let mints = chain_strategy_wallet_mints_from_agg(
+            vec![(raw, None, None)],
+            "cid-1",
+        );
+        assert!(mints.contains(WSOL_MINT));
+        assert!(mints.contains("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
+        assert!(!mints.contains("phantom-meme"));
     }
 }

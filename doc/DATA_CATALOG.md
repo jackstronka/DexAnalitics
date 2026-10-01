@@ -37,12 +37,34 @@ tags: domain=wallet; source=postgres; freshness=static(curated); quality=authori
 
 - **Tag:** `wallet_gl`, `SESSION`, `shadow`, `postgres`
 - Logical GL sub-ledger per `SESSION:{session_id}` (mint dimension in `wallet_gl_balance`). Migracja `011_wallet_gl_session_accounts.sql`. Posting: best-effort on each `confirmed` journal row with `cost_session_id` + `deltas[]` (`CLMM_WALLET_GL_SESSION_POSTING`, default on). **Retention:** session accounts are **not** closed or liquidated after manual close — balances kept for analytics.
-- Odczyt: `GET /api/v1/wallets/session-balances?session_id=&owner=` (`source=gl_session_shadow` lub `gl_session_shadow_pslr_fallback`; `CLMM_WALLET_GL_SESSION_READ`).
+- Odczyt: `GET /api/v1/wallets/session-balances?session_id=&owner=` — pola `quality`, `gl_matches_pslr`, `needs_reconcile`; `source` m.in. `gl_session_shadow`, `gl_session_shadow_pslr_fallback` (`CLMM_WALLET_GL_SESSION_READ`).
 - Backfill: `POST /api/v1/wallets/session-balances/backfill?session_id=&limit=` — replay PSLR → GL (idempotent).
 - Reconcile: `POST /api/v1/wallets/reconcile-session-gl?session_id=` — GL vs PSLR vs ostatni close (`CLMM_WALLET_GL_SESSION_RECONCILE`).
 - Executor reopen (5a): `CLMM_REOPEN_USE_SESSION_CAPITAL=1` (default **off**) — kapsy `min(RPC, SESSION)`; `CLMM_REOPEN_SESSION_STRICT_EMPTY` (default on); `CLMM_REOPEN_SESSION_REQUIRE_RECONCILE` (default off). Rollout: [`WALLET_GL.md` §6](WALLET_GL.md#6-rollout-operatora--session-gl--reopen-5a).
 - GL SESSION env: `CLMM_WALLET_GL_SESSION_POSTING`, `CLMM_WALLET_GL_SESSION_LIFECYCLE_POSTING`, `CLMM_WALLET_GL_SESSION_READ`, `CLMM_WALLET_GL_SESSION_RECONCILE` (domyślnie read/posting on, reconcile on dla endpointu).
-- UI: `SessionBalancesPanel`, `PositionCreate` preflight (`cost_session_id`) — nie zastępują `effective-balances` (§5 spec).
+- UI: `SessionBalancesPanel`, `PositionCreate` preflight (`cost_session_id`) — nie zastępują `effective-balances` (§5 spec) dopóki `CLMM_WALLET_GL_EFFECTIVE_READ=0`.
+
+### `wallet_gl_account` — CHAIN (Postgres)
+
+- **Tag:** `wallet_gl`, `CHAIN`, `shadow`, `postgres`, `chain-portfolio`
+- Logical GL per **`CHAIN:{chain_session_id}`** (migracja `013_chain_session_portfolio.sql`). Posting z lifecycle + backfill operatora. **Retention:** konto nie jest zamykane po close cyklu.
+- Odczyt: `GET /api/v1/wallets/chain-portfolio?anchor_position=&owner=` — `quality`, `needs_reconcile`, `gl_matches_pslr`, metryki cyklu.
+- Backfill: `POST /api/v1/wallets/chain-portfolio/backfill-chain-ids?anchor_position=`; `POST /api/v1/wallets/chain-portfolio/backfill?chain_session_id=`.
+- Reconcile GL↔PSLR: `POST /api/v1/wallets/reconcile-chain-gl?chain_session_id=` (`CLMM_WALLET_GL_CHAIN_RECONCILE`).
+- UI: `ChainPortfolioPanel`.
+- GL CHAIN env: `CLMM_WALLET_GL_CHAIN_POSTING`, `CLMM_WALLET_GL_CHAIN_READ`, `CLMM_WALLET_GL_CHAIN_RECONCILE`.
+
+### `wallet_gl_account` — WALLET global (Postgres)
+
+- **Tag:** `wallet_gl`, `WALLET`, `owner`, `postgres`, `effective-read`
+- Logical GL per **`WALLET:{owner}`** (migracja `016_wallet_gl_wallet_account.sql`). Opening snapshot + journal `transfer_sol` / `convert_sol`.
+- Odczyt: `GET /api/v1/wallets/wallet-balances?owner=`.
+- Opening: `POST /api/v1/wallets/wallet-balances/opening-import?owner=`.
+- Shadow compare: `GET /api/v1/wallets/reconcile-wallet-gl?owner=` (`CLMM_WALLET_GL_WALLET_RPC_COMPARE`).
+- Effective switch: `CLMM_WALLET_GL_EFFECTIVE_READ=1` → overlay na `GET /api/v1/wallets/effective-balances` (`effective_balance_source`: `gl_wallet` | `rpc_fallback`). Rollback: [`WALLET_GL.md` §6 Krok C](WALLET_GL.md#krok-c--effective-balances-z-wallet-gl-faza-d4).
+- GL WALLET env: `CLMM_WALLET_GL_WALLET_POSTING`, `CLMM_WALLET_GL_WALLET_READ`, `CLMM_WALLET_GL_WALLET_RPC_COMPARE`, `CLMM_WALLET_GL_EFFECTIVE_READ`.
+- UI: `WalletGlBalancesPanel`, `WalletEffectiveSourceBanner`.
+- Test integracyjny: `cargo test -p clmm-lp-data --test session_gl_integration` (wymaga `DATABASE_URL`).
 
 ### `wallet_gl_curated_pool` (Postgres)
 

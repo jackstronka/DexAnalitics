@@ -1,7 +1,9 @@
 import { Link } from 'react-router-dom'
+import { ChainEconomicQualityBanner } from '@/components/ChainEconomicQualityBanner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import type { PositionStreamLineageResponse } from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
 import {
   FEE_BASE_UNITS_TOOLTIP,
   formatDate,
@@ -181,6 +183,7 @@ export function PositionLineageHistoryPanel({
   readBadgeStream,
   ledgerOpenQuoteUsdByPosition,
 }: PositionLineageHistoryPanelProps) {
+  const { t } = useI18n()
   const totalsSourceBadge = buildTotalsSourceBadge(lineage, isSettlementMode)
   const fromPostgres = badgeMode === 'postgres'
   const singleNodeOpeningExtra =
@@ -538,99 +541,89 @@ export function PositionLineageHistoryPanel({
                     : 'Show non-zero only'}
               </Button>
             </div>
-            <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
-              <div className="text-xs font-medium text-foreground">
-                {isSettlementMode
-                  ? locale === 'pl'
-                    ? 'Settlement v1 — wynik ekonomiczny łańcucha (net PnL)'
-                    : 'Settlement v1 — chain economic result (net PnL)'
-                  : locale === 'pl'
-                    ? 'Wynik ekonomiczny łańcucha (net PnL)'
-                    : 'Chain economic result (net PnL)'}
+            <details className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground select-none list-none [&::-webkit-details-marker]:hidden">
+                {t('lineage.auditModelSummary')}
+              </summary>
+              <div className="space-y-2 pt-1 border-t border-border/40">
+                <div className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${totalsSourceBadge.className}`}>
+                  {totalsSourceBadge.label}
+                </div>
+                <p className="text-[10px] text-muted-foreground leading-snug">{t('lineage.auditModelHint')}</p>
+                <p className="text-[10px] text-amber-800 dark:text-amber-200 leading-snug">{t('lineage.cashflowWarning')}</p>
+                <ChainEconomicQualityBanner totals={lineage.totals} />
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                  <div>
+                    <span className="text-muted-foreground">baseline</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(lineage.totals.baseline_value_usd, 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">current</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(lineage.totals.current_value_usd, 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">tx fees</span>{' '}
+                    <span className="font-mono text-[11px] leading-tight inline-block align-top">
+                      {lineage.chain_cost_summary != null ? (
+                        <>
+                          <span className="block">{lineage.chain_cost_summary.tx_fee_lamports_total.toLocaleString()} λ</span>
+                          <span className="block text-muted-foreground">
+                            {formatUsdFixed(parseFloat(String(lineage.chain_cost_summary.tx_fees_usd_total)), 4)}
+                          </span>
+                        </>
+                      ) : (
+                        formatUsdFixed(lineage.totals.tx_fees_usd, 3)
+                      )}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">cashflow</span>{' '}
+                    <span className="font-mono">{formatUsdFixed(lineage.totals.realized_cashflow_usd, 3)}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">
+                      {locale === 'pl' ? 'Realized LP fees (sum)' : 'Realized LP fees (sum)'}
+                    </span>{' '}
+                    <span className="font-mono text-[11px] leading-tight inline-block align-top">
+                      {lineage.chain_cost_summary != null ? (
+                        <>
+                          <span className="block">
+                            {formatLineageFeesCollectedUsdMain(
+                              lineage.chain_cost_summary.fees_collected_usd_total,
+                              lineage.chain_cost_summary.collect_events_total,
+                            )}
+                          </span>
+                          <span className="block text-muted-foreground">
+                            {lineage.chain_cost_summary.collect_events_total}x collect
+                          </span>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">net PnL</span>{' '}
+                    <span className="font-mono text-muted-foreground">
+                      {formatUsdFixed(lineage.totals.net_pnl_usd, 3)} ({formatPercentFixed(lineage.totals.net_pnl_pct, 3)})
+                    </span>
+                  </div>
+                </div>
+                {lineage.nodes?.length ? (
+                  <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                    {lineage.nodes.map((n) => {
+                      const lam = n.tx_fee_lamports ?? 0
+                      if (showOnlyNonZeroBreakdown && lam <= 0) return null
+                      return (
+                        <div key={`tx-breakdown-${n.position_address}`} className="font-mono">
+                          {shortenAddress(n.position_address, 6)}: {lam.toLocaleString()} λ · {formatUsdField(n.tx_fees_usd, 4)}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : null}
               </div>
-              <div className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] ${totalsSourceBadge.className}`}>
-                {totalsSourceBadge.label}
-              </div>
-              <p className="text-[10px] text-muted-foreground leading-snug">
-                {locale === 'pl'
-                  ? 'End NAV + cashflow z ledgera − baseline − opłaty sieci SOL (USD). To inna metryka niż IL vs HODL.'
-                  : 'End NAV + ledger cashflow − baseline − SOL network fees (USD). This metric is different from IL vs HODL.'}
-              </p>
-              <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-                <div>
-                  <span className="text-muted-foreground">baseline</span>{' '}
-                  <span className="font-mono">{formatUsdFixed(lineage.totals.baseline_value_usd, 3)}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">current</span>{' '}
-                  <span className="font-mono">{formatUsdFixed(lineage.totals.current_value_usd, 3)}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">tx fees</span>{' '}
-                  <span className="font-mono text-[11px] leading-tight inline-block align-top">
-                    {lineage.chain_cost_summary != null ? (
-                      <>
-                        <span className="block">{lineage.chain_cost_summary.tx_fee_lamports_total.toLocaleString()} λ</span>
-                        <span className="block text-muted-foreground">
-                          {formatUsdFixed(parseFloat(String(lineage.chain_cost_summary.tx_fees_usd_total)), 4)}
-                        </span>
-                      </>
-                    ) : (
-                      formatUsdFixed(lineage.totals.tx_fees_usd, 3)
-                    )}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">cashflow</span>{' '}
-                  <span className="font-mono">{formatUsdFixed(lineage.totals.realized_cashflow_usd, 3)}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">
-                    {locale === 'pl' ? 'Realized LP fees (sum)' : 'Realized LP fees (sum)'}
-                  </span>{' '}
-                  <span className="font-mono text-[11px] leading-tight inline-block align-top">
-                    {lineage.chain_cost_summary != null ? (
-                      <>
-                        <span className="block">
-                          {formatLineageFeesCollectedUsdMain(
-                            lineage.chain_cost_summary.fees_collected_usd_total,
-                            lineage.chain_cost_summary.collect_events_total,
-                          )}
-                        </span>
-                        <span className="block text-muted-foreground">
-                          {lineage.chain_cost_summary.collect_events_total}x collect
-                        </span>
-                      </>
-                    ) : (
-                      '—'
-                    )}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">net PnL</span>{' '}
-                  <span
-                    className={
-                      parseFloat(lineage.totals.net_pnl_pct) >= 0 ? 'font-mono text-green-500' : 'font-mono text-red-500'
-                    }
-                  >
-                    {formatUsdFixed(lineage.totals.net_pnl_usd, 3)} ({formatPercentFixed(lineage.totals.net_pnl_pct, 3)})
-                  </span>
-                </div>
-              </div>
-              {lineage.nodes?.length ? (
-                <div className="mt-1 space-y-1 text-xs text-muted-foreground">
-                  {lineage.nodes.map((n) => {
-                    const lam = n.tx_fee_lamports ?? 0
-                    if (showOnlyNonZeroBreakdown && lam <= 0) return null
-                    return (
-                      <div key={`tx-breakdown-${n.position_address}`} className="font-mono">
-                        {shortenAddress(n.position_address, 6)}: {lam.toLocaleString()} λ · {formatUsdField(n.tx_fees_usd, 4)}
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : null}
-            </div>
+            </details>
             <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-2 space-y-2">
               <div className="text-xs font-medium text-foreground">
                 {isSettlementMode

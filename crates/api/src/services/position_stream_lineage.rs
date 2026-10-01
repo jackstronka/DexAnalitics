@@ -32,6 +32,12 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 use tokio::time::{Duration, sleep, timeout};
 
+pub use crate::services::chain_economic_totals::{
+    chain_headline_end_nav_usd, lineage_node_end_nav_usd, reconcile_stream_pnl_totals_with_nodes,
+    refresh_lineage_totals_from_nodes,
+};
+use crate::services::chain_economic_totals::maybe_compute_totals_from_nodes;
+
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const WHETH_MINT: &str = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs";
 
@@ -2800,7 +2806,7 @@ pub(crate) fn apply_tx_fees_usd_from_lamports_on_nodes(
             continue;
         }
         node.tx_fees_usd = tx_fees_usd_from_lamports(node.tx_fee_lamports, sol_usd_px);
-        let end_nav = lineage_node_end_nav_usd(node);
+        let end_nav = crate::services::chain_economic_totals::lineage_node_end_nav_usd(node);
         node.net_pnl_usd = end_nav + node.realized_cashflow_usd - node.baseline_value_usd - node.tx_fees_usd;
         if !node.baseline_value_usd.is_zero() {
             node.net_pnl_pct = node.net_pnl_usd / node.baseline_value_usd;
@@ -2836,7 +2842,7 @@ fn decimal_ui_from_raw_u64(raw: u64, decimals: u8) -> Decimal {
     d
 }
 
-async fn fetch_mint_decimals_best_effort(
+pub(crate) async fn fetch_mint_decimals_best_effort(
     provider: &clmm_lp_protocols::rpc::RpcProvider,
     mint: &solana_sdk::pubkey::Pubkey,
 ) -> Option<u8> {
@@ -3457,6 +3463,7 @@ pub(crate) async fn node_metrics(
         chain_history_tick_upper_open: None,
         chain_history_event_spot_token_a_usd_open: None,
         chain_history_event_spot_token_a_usd_close: None,
+        lifecycle_close_nav_usd: None,
     })
 }
 
@@ -4273,7 +4280,7 @@ pub(crate) async fn refresh_chain_history_node_fees_from_ledger(
     Ok(())
 }
 
-async fn node_metrics_fast_for_chain(
+pub(crate) async fn node_metrics_fast_for_chain(
     state: &AppState,
     chain: &[String],
 ) -> Result<Vec<PositionStreamLineageNode>, ApiError> {
@@ -4518,6 +4525,7 @@ async fn node_metrics_fast_for_chain(
             chain_history_tick_upper_open: None,
             chain_history_event_spot_token_a_usd_open: None,
             chain_history_event_spot_token_a_usd_close: None,
+        lifecycle_close_nav_usd: None,
         });
     }
     Ok(out)
@@ -4993,6 +5001,9 @@ async fn node_metrics_from_lifecycle_best_effort(
         chain_history_tick_upper_open: None,
         chain_history_event_spot_token_a_usd_open: None,
         chain_history_event_spot_token_a_usd_close: None,
+        lifecycle_close_nav_usd: end_value_usd_from_close
+            .filter(|v| *v > Decimal::ZERO)
+            .map(|d| d.round_dp(12).normalize().to_string()),
     })
 }
 
@@ -5190,9 +5201,7 @@ pub async fn compute_position_stream_lineage_opts(
 
     // Persist open/close valuation snapshots before stream PnL totals so baseline baskets use
     // `open_amount_*_raw` (not fee_payer deltas alone) and upsert can repair one-leg baselines.
-    if state.db.is_some() && chain.len() <= 8 {
-        persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await?;
-    } else if opts.await_valuation_snapshot_persist && state.db.is_some() {
+    if state.db.is_some() && (chain.len() <= 8 || opts.await_valuation_snapshot_persist) {
         persist_event_valuation_snapshots_for_positions(state, &rows, &chain).await?;
     }
 
@@ -5419,294 +5428,6 @@ fn apply_baseline_fallback_from_prev_end(nodes: &mut [PositionStreamLineageNode]
                         .to_string(),
                 );
             }
-        }
-    }
-}
-
-/// Positive USD from optional chain-history column string (materialized end/start marks).
-fn positive_usd_from_chain_history_column(col: Option<&str>) -> Option<Decimal> {
-    let t = col?.trim();
-    if t.is_empty() {
-        return None;
-    }
-    let d: Decimal = t.parse().ok()?;
-    (d > Decimal::ZERO).then_some(d)
-}
-
-/// End NAV for one lineage node: live/current mark, else materialized `end_value_usd` when closed.
-pub(crate) fn lineage_node_end_nav_usd(n: &PositionStreamLineageNode) -> Decimal {
-    if n.current_value_usd > Decimal::ZERO {
-        return n.current_value_usd;
-    }
-    if let Some(end) =
-        positive_usd_from_chain_history_column(n.chain_history_end_value_usd.as_deref())
-    {
-        return end;
-    }
-    // Closed without `end_close` snapshot: avoid headline net PnL ≈ −100% (current left at 0).
-    if n.closed_ts_utc.is_some() && n.baseline_value_usd > Decimal::ZERO {
-        let est = n.baseline_value_usd + n.fees_collected_usd + n.realized_cashflow_usd - n.tx_fees_usd;
-        if est > Decimal::ZERO {
-            return est;
-        }
-    }
-    Decimal::ZERO
-}
-
-/// Headline **current** for chain totals: last node's end NAV, scanning backward if still zero.
-pub(crate) fn chain_headline_end_nav_usd(nodes: &[PositionStreamLineageNode]) -> Decimal {
-    for n in nodes.iter().rev() {
-        let v = lineage_node_end_nav_usd(n);
-        if v > Decimal::ZERO {
-            return v;
-        }
-    }
-    Decimal::ZERO
-}
-
-/// When DB stream PnL totals disagree with per-node lineage marks (e.g. one-leg baseline snapshot
-/// before `open_amount_*_raw` enrichment), align headline totals with node rows best-effort.
-pub fn reconcile_stream_pnl_totals_with_nodes(
-    totals: &mut crate::models::PositionStreamPnLResponse,
-    nodes: &[PositionStreamLineageNode],
-) {
-    let (Some(first), Some(last)) = (nodes.first(), nodes.last()) else {
-        return;
-    };
-    let baseline = first.baseline_value_usd;
-    if baseline.is_zero() {
-        return;
-    }
-
-    let end_nav = chain_headline_end_nav_usd(nodes);
-    let hodl_degraded = totals.hodl_value_usd < baseline * Decimal::new(8, 1);
-    let current_stale = totals.current_ts_utc.is_none()
-        || totals.current_ts_utc == totals.baseline_ts_utc
-        || totals.current_value_usd == totals.baseline_value_usd;
-    let current_missing = totals.current_value_usd.is_zero() && end_nav > Decimal::ZERO;
-
-    if !hodl_degraded && !current_stale && !current_missing {
-        return;
-    }
-
-    totals.baseline_value_usd = baseline;
-    totals.baseline_ts_utc = first.opened_ts_utc.clone();
-    totals.current_value_usd = if end_nav > Decimal::ZERO {
-        end_nav
-    } else {
-        last.current_value_usd
-    };
-    totals.current_ts_utc = last
-        .closed_ts_utc
-        .clone()
-        .or_else(|| last.opened_ts_utc.clone());
-
-    if hodl_degraded {
-        totals.hodl_value_usd = baseline;
-        totals.il_usd = totals.current_value_usd - totals.hodl_value_usd;
-        totals.il_pct = if totals.hodl_value_usd.is_zero() {
-            Decimal::ZERO
-        } else {
-            totals.il_usd / totals.hodl_value_usd
-        };
-        totals.clean_il_usd = totals.il_usd;
-        totals.clean_il_pct = totals.il_pct;
-        totals.lp_vs_hodl_with_fees_usd = totals.il_usd + totals.lp_fees_total_usd;
-        totals.lp_vs_hodl_with_fees_pct = if totals.hodl_value_usd.is_zero() {
-            Decimal::ZERO
-        } else {
-            totals.lp_vs_hodl_with_fees_usd / totals.hodl_value_usd
-        };
-    }
-
-    totals.net_pnl_usd = totals.current_value_usd + totals.realized_cashflow_usd
-        - totals.baseline_value_usd
-        - totals.tx_fees_usd;
-    totals.net_pnl_pct = if totals.baseline_value_usd.is_zero() {
-        Decimal::ZERO
-    } else {
-        totals.net_pnl_usd / totals.baseline_value_usd
-    };
-}
-
-fn maybe_compute_totals_from_nodes(
-    entry: &str,
-    existing: &Option<crate::models::PositionStreamPnLResponse>,
-    nodes: &[PositionStreamLineageNode],
-    note: Option<&str>,
-) -> Option<crate::models::PositionStreamPnLResponse> {
-    if nodes.is_empty() {
-        return None;
-    }
-    let totals_is_placeholder = existing.as_ref().is_some_and(|t| {
-        let note_lc = t
-            .note
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let stale_meta = note_lc.contains("no valuation snapshots")
-            || t.valuation_price_time_kind == "node_fallback_unavailable";
-        (t.baseline_value_usd.is_zero()
-            && t.current_value_usd.is_zero()
-            && t.tx_fees_usd.is_zero()
-            && t.realized_cashflow_usd.is_zero()
-            && t.net_pnl_usd.is_zero()
-            && stale_meta)
-            || (t.baseline_value_usd.is_zero()
-                && !t.current_value_usd.is_zero()
-                && stale_meta)
-    });
-    if existing.is_some() && !totals_is_placeholder {
-        return None;
-    }
-
-    let baseline_value_usd = nodes
-        .first()
-        .map(|n| n.baseline_value_usd)
-        .unwrap_or(Decimal::ZERO);
-    let current_value_usd = chain_headline_end_nav_usd(nodes);
-    let tx_fees_usd: Decimal = nodes.iter().map(|n| n.tx_fees_usd).sum();
-    let realized_cashflow_usd: Decimal = nodes.iter().map(|n| n.realized_cashflow_usd).sum();
-    let realized_lp_fees_usd: Decimal = nodes.iter().map(|n| n.fees_collected_usd).sum();
-    let clean_il_usd = Decimal::ZERO;
-    let clean_il_pct = Decimal::ZERO;
-    let lp_fees_total_usd = realized_lp_fees_usd;
-    let net_pnl_usd = current_value_usd + realized_cashflow_usd - baseline_value_usd - tx_fees_usd;
-    let net_pnl_pct = if baseline_value_usd.is_zero() {
-        Decimal::ZERO
-    } else {
-        net_pnl_usd / baseline_value_usd
-    };
-
-    Some(crate::models::PositionStreamPnLResponse {
-        position_address: entry.to_string(),
-        baseline_ts_utc: nodes.first().and_then(|n| n.opened_ts_utc.clone()),
-        current_ts_utc: nodes.last().and_then(|n| n.closed_ts_utc.clone()),
-        baseline_value_usd,
-        current_value_usd,
-        hodl_value_usd: Decimal::ZERO,
-        il_usd: Decimal::ZERO,
-        il_pct: Decimal::ZERO,
-        clean_il_usd,
-        clean_il_pct,
-        realized_lp_fees_usd,
-        uncollected_lp_fees_usd: Decimal::ZERO,
-        lp_fees_total_usd,
-        lp_vs_hodl_with_fees_usd: lp_fees_total_usd,
-        lp_vs_hodl_with_fees_pct: Decimal::ZERO,
-        valuation_price_time_kind: "node_fallback_unavailable".to_string(),
-        price_basis_note: Some(
-            "Fallback totals from lineage nodes do not have baseline token basket, so HODL/IL price basis is unavailable.".to_string(),
-        ),
-        tx_fees_usd,
-        realized_cashflow_usd,
-        net_pnl_usd,
-        net_pnl_pct,
-        interpretation: crate::models::StreamPnLInterpretation {
-            economic_net_pnl_caption_pl:
-                "Wynik ekonomiczny (fallback z węzłów lineage, bez pełnych snapshotów DB): końcowy NAV + suma cashflow z węzłów − baseline pierwszego węzła − suma tx fees z węzłów."
-                    .to_string(),
-            il_vs_initial_hodl_caption_pl:
-                "Benchmark IL vs HODL: w tym trybie nie liczony (brak ilości tokenów ze snapshotów); pola il_* są zerowe."
-                    .to_string(),
-        },
-        note: note.map(|s| s.to_string()),
-    })
-}
-
-/// Refresh persisted/stream totals from per-node marks (e.g. stale `totals_json` on chain-history read).
-pub fn refresh_lineage_totals_from_nodes(
-    entry: &str,
-    totals: &mut Option<crate::models::PositionStreamPnLResponse>,
-    nodes: &mut [PositionStreamLineageNode],
-) {
-    if nodes.is_empty() {
-        return;
-    }
-    // Lift end NAV into `current_value_usd` on nodes so totals + per-PDA rows stay consistent.
-    for n in nodes.iter_mut() {
-        if n.current_value_usd.is_zero() {
-            let end = lineage_node_end_nav_usd(n);
-            if end > Decimal::ZERO {
-                n.current_value_usd = end;
-                n.net_pnl_usd =
-                    end + n.realized_cashflow_usd - n.baseline_value_usd - n.tx_fees_usd;
-                if !n.baseline_value_usd.is_zero() {
-                    n.net_pnl_pct = n.net_pnl_usd / n.baseline_value_usd;
-                }
-            }
-        }
-    }
-    let first_baseline = nodes
-        .first()
-        .map(|n| n.baseline_value_usd)
-        .unwrap_or(Decimal::ZERO);
-    let stale_baseline = totals
-        .as_ref()
-        .is_some_and(|t| t.baseline_value_usd.is_zero() && first_baseline > Decimal::ZERO);
-    if totals.is_none() || stale_baseline {
-        if let Some(fresh) = maybe_compute_totals_from_nodes(
-            entry,
-            if stale_baseline { &None } else { totals },
-            nodes,
-            Some(
-                "Totals refreshed from lineage nodes on read (materialized totals_json was stale).",
-            ),
-        ) {
-            *totals = Some(fresh);
-        }
-    }
-    if let Some(t) = totals.as_mut() {
-        reconcile_stream_pnl_totals_with_nodes(t, nodes);
-        let tx_sum: Decimal = nodes.iter().map(|n| n.tx_fees_usd).sum();
-        let fee_sum: Decimal = nodes.iter().map(|n| n.fees_collected_usd).sum();
-        let cashflow_sum: Decimal = nodes.iter().map(|n| n.realized_cashflow_usd).sum();
-        if t.tx_fees_usd.is_zero() && tx_sum > Decimal::ZERO {
-            t.tx_fees_usd = tx_sum;
-        }
-        if t.realized_lp_fees_usd.is_zero() && fee_sum > Decimal::ZERO {
-            t.realized_lp_fees_usd = fee_sum;
-            t.lp_fees_total_usd = fee_sum + t.uncollected_lp_fees_usd;
-        }
-        if t.realized_cashflow_usd.is_zero() && cashflow_sum != Decimal::ZERO {
-            t.realized_cashflow_usd = cashflow_sum;
-        }
-        let end_nav = chain_headline_end_nav_usd(nodes);
-        if t.current_value_usd.is_zero() && end_nav > Decimal::ZERO {
-            t.current_value_usd = end_nav;
-            t.current_ts_utc = nodes
-                .last()
-                .and_then(|n| n.closed_ts_utc.clone())
-                .or_else(|| nodes.last().and_then(|n| n.opened_ts_utc.clone()));
-        }
-        if !t.hodl_value_usd.is_zero() {
-            t.lp_vs_hodl_with_fees_usd = t.il_usd + t.lp_fees_total_usd;
-            t.lp_vs_hodl_with_fees_pct = if t.hodl_value_usd.is_zero() {
-                Decimal::ZERO
-            } else {
-                t.lp_vs_hodl_with_fees_usd / t.hodl_value_usd
-            };
-        }
-        t.net_pnl_usd = t.current_value_usd + t.realized_cashflow_usd
-            - t.baseline_value_usd
-            - t.tx_fees_usd;
-        t.net_pnl_pct = if t.baseline_value_usd.is_zero() {
-            Decimal::ZERO
-        } else {
-            t.net_pnl_usd / t.baseline_value_usd
-        };
-        if !t.hodl_value_usd.is_zero()
-            && (!t.il_usd.is_zero() || !t.clean_il_usd.is_zero())
-            && t.valuation_price_time_kind == "node_fallback_unavailable"
-        {
-            t.valuation_price_time_kind = "lineage_nodes_reconciled".to_string();
-            t.price_basis_note = Some(
-                "HODL/IL from first→last node USD marks on read. Full token-basket HODL needs DB valuation snapshots (refresh chain-history after rotations)."
-                    .to_string(),
-            );
-            t.interpretation.il_vs_initial_hodl_caption_pl =
-                "Benchmark IL vs HODL: wartość LP na końcu łańcucha minus HODL przybliżony z baseline pierwszego węzła (bez pełnego koszyka tokenów ze snapshotów DB)."
-                    .to_string();
         }
     }
 }
@@ -5990,6 +5711,48 @@ pub async fn backfill_valuation_snapshots_from_lifecycle_current_prices(
         price_source,
         note,
     })
+}
+
+/// Build lineage nodes for chain economic rollup (`stream-pnl`, position detail).
+pub(crate) async fn lineage_nodes_for_chain_economic_rollup(
+    state: &AppState,
+    chain: &[String],
+) -> Result<Vec<PositionStreamLineageNode>, ApiError> {
+    if chain.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut nodes = if chain.len() > 8 {
+        node_metrics_fast_for_chain(state, chain).await?
+    } else {
+        let st = state.clone();
+        let futs: Vec<_> = chain
+            .iter()
+            .map(|p| {
+                let st = st.clone();
+                let p = p.clone();
+                async move { node_metrics(&st, &p, true).await }
+            })
+            .collect();
+        let mut out = Vec::with_capacity(futs.len());
+        for res in join_all(futs).await {
+            out.push(res?);
+        }
+        out
+    };
+    let rows = lifecycle_rows_cached_best_effort().await;
+    hydrate_lineage_open_close_ts_and_mints_from_lifecycle(&rows, &mut nodes);
+    apply_end_value_fallback_from_next_baseline(&mut nodes);
+    apply_baseline_fallback_from_prev_end(&mut nodes);
+    if let Some(db) = state.db.as_ref() {
+        refresh_chain_history_node_fees_from_ledger(state, chain, &mut nodes).await?;
+        crate::services::chain_economic_totals::enrich_nodes_lifecycle_close_nav_from_ledger(
+            state,
+            db.pool(),
+            &mut nodes,
+        )
+        .await;
+    }
+    Ok(nodes)
 }
 
 /// Best-effort inference: parent PDA only when lifecycle shows a **rotation** into this open
@@ -6295,6 +6058,7 @@ mod tests {
             chain_history_tick_upper_open: None,
             chain_history_event_spot_token_a_usd_open: None,
             chain_history_event_spot_token_a_usd_close: None,
+        lifecycle_close_nav_usd: None,
         }
     }
 
@@ -7092,161 +6856,4 @@ mod tests {
         assert!(nodes[0].net_pnl_usd < Decimal::from_str("-0.01").unwrap());
     }
 
-    #[test]
-    fn chain_headline_end_nav_uses_close_estimate_when_current_zero() {
-        let mut n = mk_node(
-            "PDA",
-            Decimal::from_str("9.901").unwrap(),
-            Decimal::ZERO,
-        );
-        n.closed_ts_utc = Some("2026-05-21T20:00:00Z".to_string());
-        n.fees_collected_usd = Decimal::from_str("0.032").unwrap();
-        n.tx_fees_usd = Decimal::from_str("0.0035").unwrap();
-        assert!(lineage_node_end_nav_usd(&n) > Decimal::from_str("9.92").unwrap());
-        assert_eq!(
-            chain_headline_end_nav_usd(std::slice::from_ref(&n)),
-            lineage_node_end_nav_usd(&n)
-        );
-    }
-
-    #[test]
-    fn refresh_lineage_totals_repairs_zero_current_closed_chain_net_pnl() {
-        use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
-
-        let mut totals = Some(PositionStreamPnLResponse {
-            position_address: "PDA".to_string(),
-            baseline_ts_utc: None,
-            current_ts_utc: None,
-            baseline_value_usd: Decimal::from_str("9.901").unwrap(),
-            current_value_usd: Decimal::ZERO,
-            hodl_value_usd: Decimal::from_str("9.901").unwrap(),
-            il_usd: Decimal::ZERO,
-            il_pct: Decimal::ZERO,
-            clean_il_usd: Decimal::ZERO,
-            clean_il_pct: Decimal::ZERO,
-            realized_lp_fees_usd: Decimal::from_str("0.032").unwrap(),
-            uncollected_lp_fees_usd: Decimal::ZERO,
-            lp_fees_total_usd: Decimal::from_str("0.032").unwrap(),
-            lp_vs_hodl_with_fees_usd: Decimal::from_str("0.032").unwrap(),
-            lp_vs_hodl_with_fees_pct: Decimal::ZERO,
-            valuation_price_time_kind: "live_price".to_string(),
-            price_basis_note: None,
-            tx_fees_usd: Decimal::from_str("0.0035").unwrap(),
-            realized_cashflow_usd: Decimal::ZERO,
-            net_pnl_usd: Decimal::from_str("-9.905").unwrap(),
-            net_pnl_pct: Decimal::from_str("-1").unwrap(),
-            interpretation: StreamPnLInterpretation {
-                economic_net_pnl_caption_pl: String::new(),
-                il_vs_initial_hodl_caption_pl: String::new(),
-            },
-            note: None,
-        });
-        let mut nodes = vec![mk_node(
-            "PDA",
-            Decimal::from_str("9.901").unwrap(),
-            Decimal::ZERO,
-        )];
-        nodes[0].closed_ts_utc = Some("2026-05-21T20:00:00Z".to_string());
-        nodes[0].fees_collected_usd = Decimal::from_str("0.032").unwrap();
-        nodes[0].tx_fees_usd = Decimal::from_str("0.0035").unwrap();
-        refresh_lineage_totals_from_nodes("PDA", &mut totals, &mut nodes);
-        let t = totals.as_ref().expect("totals");
-        assert!(t.current_value_usd > Decimal::from_str("9.90").unwrap());
-        assert!(t.net_pnl_usd > Decimal::from_str("-0.05").unwrap());
-        assert!(t.net_pnl_usd < Decimal::from_str("0.10").unwrap());
-        assert!(t.net_pnl_pct > Decimal::from_str("-0.05").unwrap());
-        assert!(t.net_pnl_pct < Decimal::from_str("0.02").unwrap());
-    }
-
-    #[test]
-    fn refresh_lineage_totals_repairs_stale_chain_history_meta_baseline_zero() {
-        use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
-
-        let mut totals = Some(PositionStreamPnLResponse {
-            position_address: "HySR".to_string(),
-            baseline_ts_utc: None,
-            current_ts_utc: None,
-            baseline_value_usd: Decimal::ZERO,
-            current_value_usd: Decimal::from_str("9.95054476807043").unwrap(),
-            hodl_value_usd: Decimal::ZERO,
-            il_usd: Decimal::ZERO,
-            il_pct: Decimal::ZERO,
-            clean_il_usd: Decimal::ZERO,
-            clean_il_pct: Decimal::ZERO,
-            realized_lp_fees_usd: Decimal::ZERO,
-            uncollected_lp_fees_usd: Decimal::ZERO,
-            lp_fees_total_usd: Decimal::ZERO,
-            lp_vs_hodl_with_fees_usd: Decimal::ZERO,
-            lp_vs_hodl_with_fees_pct: Decimal::ZERO,
-            valuation_price_time_kind: "node_fallback_unavailable".to_string(),
-            price_basis_note: None,
-            tx_fees_usd: Decimal::ZERO,
-            realized_cashflow_usd: Decimal::ZERO,
-            net_pnl_usd: Decimal::from_str("9.95054476807043").unwrap(),
-            net_pnl_pct: Decimal::ZERO,
-            interpretation: StreamPnLInterpretation {
-                economic_net_pnl_caption_pl: String::new(),
-                il_vs_initial_hodl_caption_pl: String::new(),
-            },
-            note: Some("No valuation snapshots yet; totals computed best-effort from lineage nodes (IL/HODL unavailable).".to_string()),
-        });
-        let mut nodes = vec![
-            mk_node(
-                "At6",
-                Decimal::from_str("9.973205210329806").unwrap(),
-                Decimal::from_str("10.003062304519507").unwrap(),
-            ),
-            mk_node(
-                "HySR",
-                Decimal::from_str("9.948260832969006").unwrap(),
-                Decimal::from_str("9.94637160185368").unwrap(),
-            ),
-        ];
-        refresh_lineage_totals_from_nodes("HySR", &mut totals, &mut nodes);
-        let t = totals.as_ref().expect("totals");
-        assert!(t.baseline_value_usd > Decimal::from_str("9.9").unwrap());
-        assert!(t.hodl_value_usd > Decimal::from_str("9.9").unwrap());
-        assert!(t.net_pnl_usd.abs() < Decimal::from_str("0.5").unwrap());
-        assert!(!t.il_usd.is_zero() || !t.clean_il_usd.is_zero());
-    }
-
-    #[test]
-    fn reconcile_stream_pnl_totals_with_nodes_repairs_degraded_hodl_and_stale_current() {
-        use crate::models::{PositionStreamPnLResponse, StreamPnLInterpretation};
-
-        let mut totals = PositionStreamPnLResponse {
-            position_address: "PDA".to_string(),
-            baseline_ts_utc: Some("2026-05-20T20:49:54Z".to_string()),
-            current_ts_utc: Some("2026-05-20T20:49:54Z".to_string()),
-            baseline_value_usd: Decimal::from_str("10.004").unwrap(),
-            current_value_usd: Decimal::from_str("10.004").unwrap(),
-            hodl_value_usd: Decimal::from_str("4.859").unwrap(),
-            il_usd: Decimal::from_str("5.145").unwrap(),
-            il_pct: Decimal::ONE,
-            clean_il_usd: Decimal::from_str("5.145").unwrap(),
-            clean_il_pct: Decimal::ONE,
-            realized_lp_fees_usd: Decimal::ZERO,
-            uncollected_lp_fees_usd: Decimal::ZERO,
-            lp_fees_total_usd: Decimal::ZERO,
-            lp_vs_hodl_with_fees_usd: Decimal::from_str("5.145").unwrap(),
-            lp_vs_hodl_with_fees_pct: Decimal::ONE,
-            valuation_price_time_kind: "live_price".to_string(),
-            price_basis_note: None,
-            tx_fees_usd: Decimal::ZERO,
-            realized_cashflow_usd: Decimal::ZERO,
-            net_pnl_usd: Decimal::ZERO,
-            net_pnl_pct: Decimal::ZERO,
-            interpretation: StreamPnLInterpretation {
-                economic_net_pnl_caption_pl: String::new(),
-                il_vs_initial_hodl_caption_pl: String::new(),
-            },
-            note: None,
-        };
-        let mut node = mk_node("PDA", Decimal::from_str("10.004").unwrap(), Decimal::from_str("10.011").unwrap());
-        node.opened_ts_utc = Some("2026-05-20T20:49:54Z".to_string());
-        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
-        assert_eq!(totals.hodl_value_usd, Decimal::from_str("10.004").unwrap());
-        assert_eq!(totals.current_value_usd, Decimal::from_str("10.011").unwrap());
-        assert_eq!(totals.net_pnl_usd, Decimal::from_str("0.007").unwrap());
-    }
 }
