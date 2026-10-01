@@ -166,3 +166,8 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 - **`db`**: `postgres:16` jako service, `CLMM_REQUIRE_DB_TESTS=1` → `session_gl_integration` bez bazy = FAIL (wcześniej cichy pass). Lokalnie bez env dalej skip.
 - Triggery: PR do `main` / `release/**` + push na `main` (koniec podwójnych runów push+PR na gałęziach); `concurrency` anuluje stare runy PR. `quality_gates`: usunięty duplikat `lineage_shadow_diff` (golden jest w `cargo test --workspace`). `code_coverage`: tylko push `main` / ręcznie.
 - Branch protection: wymagane `rust`, `web`, `db`, `critical_area_requires_tests`.
+
+### A6–A7 (2026-10-01) — hermetyczne testy + CI bez sieci
+
+- **A6:** `test_env::EnvGuard` (wspólna blokada + przywracanie w `Drop`, także przy panice) w `api`, `cli`, `data`, `execution`; każdy test zmieniający env go używa (`session_capital::TEST_ENV_LOCK` i lokalny lock `position_agent_service` usunięte). `local_swap_fees`: test pisze do tempdir (w testach `repo_data_dir()` bez ustawionego katalogu = panic, nie repo `data/`). `wallets.rs` stale-age: wstrzyknięty zegar, dokładnie 6000 ms. `test_state_no_db` (lineage): `fallback_urls` puste (wcześniej `RpcConfig::default()` dokładał publiczne RPC mainnet).
+- **A7:** job `rust`: `cargo test --workspace --no-run`, potem `unshare -rn` (tylko loopback) + `--offline --no-fail-fast`. Pierwszy run: 0 testów wymagało sieci (api lib 1,4 s w CI vs ~10 s lokalnie — lokalnie część testów dalej próbuje sieci, patrz BUG-20260930-04 residual).

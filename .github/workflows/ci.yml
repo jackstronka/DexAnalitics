@@ -53,7 +53,7 @@ jobs:
       - name: tests (no network)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          unshare -rn sh -c 'ip link set lo up && cargo test --workspace --offline'
+          unshare -rn sh -c 'ip link set lo up && cargo test --workspace --offline --no-fail-fast'
 
   db:
     runs-on: ubuntu-latest
