@@ -1,3 +1,10 @@
+## 2026-10-01 — A8/A9/A11: bramka plików krytycznych liczy dodane testy, reguła test-integrity, sekcja testów w planach
+
+keywords: critical-area-test-gate, quality_gates, no-tests-needed, pr-label, test-integrity, cursor-rules, golden-delta, AI_MERGE_CHECKLIST, TEST_SECTION, plan-template, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Bramka `critical_area_requires_tests` przepuszczała każdą zmianę pliku krytycznego, bo za test uznawała sam fakt, że plik zawiera `mod tests`. Teraz wymaga pliku testowego albo dodanych linii testowych (`#[test]`, `assert*!`, `proptest!`, `insta::assert`) w diffie; lista objęła GL / SESSION / lineage-PnL / migracje. Czysty refaktor: etykieta PR `no-tests-needed` + powód w opisie. Reguła agenta `test-integrity.mdc` (klasy padów i dozwolone akcje, zakaz osłabiania asercji). Szablon `doc/templates/TEST_SECTION.md` + sekcje w 4 aktywnych planach.
+- **paths:** `scripts/ci/critical-area-test-gate.sh`, `.github/workflows/quality_gates.yml`, `.cursor/rules/test-integrity.mdc`, `doc/AI_MERGE_CHECKLIST.md`, `doc/templates/TEST_SECTION.md`
+
 ## 2026-10-01 — A6–A7: `EnvGuard` w każdym crate, testy bez repo `data/`, CI testy bez sieci
 
 keywords: hermetic, EnvGuard, test_env, env-var-race, unshare, network-namespace, offline-tests, no-fail-fast, local_swap_fees, tempdir, wall-clock, RpcConfig-fallback, clmm-lp-api, clmm-lp-cli, clmm-lp-data, clmm-lp-execution, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-04

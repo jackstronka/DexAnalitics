@@ -136,6 +136,28 @@
 
 ---
 
+## Testy i kryteria regresji
+
+Szablon: [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md).
+
+**Obszar testów (R1):** Decision layer / agent + Backtest / strategie.  
+**Pozycja w mapie rozwoju:** Fala 3 ([`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §7).
+
+| Co chronimy | Typ testu | Fixture / dane | Stan |
+| ----------- | --------- | -------------- | ---- |
+| Faza 1: słabe dane → `no_go`, brak rankingu i brak apply — niezależnie od wejścia | niezmiennik (proptest) | generowane raporty readiness | 🟡 (test append JSONL gate jest; niezmiennik — brak) |
+| Faza 2 / F3.3: wyniki optimize → raport N wariantów, winner vs obecny `width_pct`, deterministyczny | golden | zapisany wynik optimize (mały) | ❌ |
+| Faza 3 / F3.4: real vs sim — tabela optimize + wiersz stream-pnl | golden | fixture 9vhKY (B1) | ❌ |
+| Faza 4 / F3.6: `optimize_apply_policy` × źródło (subprocess / HTTP) → 200 / 409; `approved: false` nie zmienia executora | tabela przypadków (API) | stan API w teście | ❌ |
+| Audyt `agent_decisions.jsonl` / `orchestrator-run-v1`: schemat wpisu, odtworzenie wyniku z wpisu | kontrakt (snapshot schematu) | [`examples/orchestrator-run-v1.example.json`](examples/orchestrator-run-v1.example.json) | ❌ |
+
+**Test exit gate:** niezmiennik NO-GO + golden F3.3 przed zamknięciem Fazy 2; F3.4 przed Fazą 3; tabela F3.6 przed Fazą 4.  
+**Bugi powiązane:** brak otwartych.  
+**Golden delta:** zmiana punktacji / rankingu = delta w goldenie F3.3, opisana w PR.  
+**Poza automatem:** harmonogram (cron) i decyzja operatora — runbook.
+
+---
+
 ## Kolejność PR (sugerowana)
 
 1. ~~Faza 0~~ (kontrakt w §8 + [`doc/examples/orchestrator-run-v1.example.json`](examples/orchestrator-run-v1.example.json); `inputs_ref` — później).  
