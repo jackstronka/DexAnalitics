@@ -291,7 +291,9 @@ impl ApiServer {
         let db = connect_db_best_effort().await;
         let state = AppState::new(config.rpc_config.clone(), config.api_config.clone(), db);
         if state.db.is_some() {
-            tracing::info!("Postgres connected: chain-history and DB-backed stream paths are enabled");
+            tracing::info!(
+                "Postgres connected: chain-history and DB-backed stream paths are enabled"
+            );
         } else {
             tracing::warn!(
                 "Postgres not available: DATABASE_URL missing, connect/migrate failed, or timed out — GET …/chain-history returns 503; this is unchanged startup behavior (not per-request chain-history code)"
@@ -356,11 +358,7 @@ impl ApiServer {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
 
         // Best-effort: re-add open positions into monitor after restart.
-        seed_monitor_from_registry(
-            self.state.monitor.clone(),
-            self.state.provider.clone(),
-        )
-        .await;
+        seed_monitor_from_registry(self.state.monitor.clone(), self.state.provider.clone()).await;
         match crate::handlers::wallets::hydrate_wallet_effective_cache_from_disk(&self.state).await
         {
             Ok(n) if n > 0 => info!(owners = n, "Hydrated wallet effective cache from disk"),
@@ -396,11 +394,7 @@ impl ApiServer {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
 
         // Best-effort: re-add open positions into monitor after restart.
-        seed_monitor_from_registry(
-            self.state.monitor.clone(),
-            self.state.provider.clone(),
-        )
-        .await;
+        seed_monitor_from_registry(self.state.monitor.clone(), self.state.provider.clone()).await;
         match crate::handlers::wallets::hydrate_wallet_effective_cache_from_disk(&self.state).await
         {
             Ok(n) if n > 0 => info!(owners = n, "Hydrated wallet effective cache from disk"),

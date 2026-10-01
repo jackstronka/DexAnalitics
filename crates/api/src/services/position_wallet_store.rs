@@ -3,7 +3,7 @@
 use crate::error::ApiError;
 use crate::state::AppState;
 use clmm_lp_execution::prelude::Wallet;
-use solana_sdk::signature::{read_keypair_file, Signer};
+use solana_sdk::signature::{Signer, read_keypair_file};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,11 @@ pub fn resolve_wallet_stores(state: &AppState) -> WalletStores {
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
         .or_else(|| state.config.wallets_dir.as_ref().map(PathBuf::from))
-        .or_else(|| std::env::var("CLMM_WALLETS_DIR_PRIMARY").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("CLMM_WALLETS_DIR_PRIMARY")
+                .ok()
+                .map(PathBuf::from)
+        })
         .or_else(|| std::env::var("CLMM_WALLETS_DIR").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("wallets"));
     let secondary = state

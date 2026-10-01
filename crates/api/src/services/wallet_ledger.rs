@@ -303,9 +303,11 @@ pub fn wallet_ledger_event_matches_filters(
         }
     }
     if let Some(k) = kind_filter.map(str::trim).filter(|s| !s.is_empty())
-        && ev.kind != k && !ev.kind.contains(k) {
-            return false;
-        }
+        && ev.kind != k
+        && !ev.kind.contains(k)
+    {
+        return false;
+    }
     if let Some(s) = status_filter.map(str::trim).filter(|s| !s.is_empty()) {
         let got = wallet_ledger_status_str(ev.status);
         if got != s && !got.contains(s) {

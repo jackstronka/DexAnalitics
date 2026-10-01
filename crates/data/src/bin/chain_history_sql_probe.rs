@@ -82,7 +82,12 @@ async fn print_coverage_recent(pool: &sqlx::PgPool, days: i32, cap: i64) -> anyh
         }
     }
 
-    println!("  distinct_pdas_checked={} covered={} missing={}", rows.len(), ok, miss);
+    println!(
+        "  distinct_pdas_checked={} covered={} missing={}",
+        rows.len(),
+        ok,
+        miss
+    );
     if !missing.is_empty() {
         println!("  missing_chain_history_live (first {}):", missing.len());
         for pk in &missing {

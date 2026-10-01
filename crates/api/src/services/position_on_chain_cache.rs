@@ -1,13 +1,13 @@
 //! Short-lived negative cache: position PDA with no on-chain account (404), to avoid
 //! re-querying stale `registry_open` / strategy links on every `GET /positions`.
 
+use crate::error::ApiError;
+use crate::state::AppState;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::env;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
-use crate::error::ApiError;
-use crate::state::AppState;
 
 pub fn position_absent_cache_ttl() -> Duration {
     let secs = env::var("CLMM_POSITION_ABSENT_CACHE_SECS")
@@ -25,9 +25,7 @@ pub fn api_error_is_account_absent(err: &ApiError) -> bool {
 pub async fn is_position_absent_cached(state: &AppState, pk: &Pubkey) -> bool {
     let key = pk.to_string();
     let guard = state.position_absent_cache.read().await;
-    guard
-        .get(&key)
-        .is_some_and(|until| *until > Instant::now())
+    guard.get(&key).is_some_and(|until| *until > Instant::now())
 }
 
 pub async fn record_position_absent(state: &AppState, pk: &Pubkey) {
@@ -155,9 +153,12 @@ pub async fn fetch_supplement_positions_parallel(
     from_strategies: &std::collections::HashSet<Pubkey>,
     reg_state: &HashMap<Pubkey, bool>,
     concurrency: usize,
-) -> (Vec<clmm_lp_execution::monitor::MonitoredPosition>, SupplementFetchStats) {
+) -> (
+    Vec<clmm_lp_execution::monitor::MonitoredPosition>,
+    SupplementFetchStats,
+) {
     use crate::services::position_valuation::monitored_position_from_chain;
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
 
     prune_expired_position_absent_cache(state).await;
 

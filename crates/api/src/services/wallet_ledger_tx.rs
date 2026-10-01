@@ -134,7 +134,8 @@ pub async fn append_tx_submit_outcome(
     );
     let mut ev = ev;
     if matches!(status, WalletLedgerStatus::Confirmed) && ev.deltas.is_empty() {
-        ev.decode_status = Some(crate::services::wallet_ledger::decode_status::PENDING_DECODE.to_string());
+        ev.decode_status =
+            Some(crate::services::wallet_ledger::decode_status::PENDING_DECODE.to_string());
     }
     wallet_ledger::append_wallet_ledger_event(state, ev).await;
 }

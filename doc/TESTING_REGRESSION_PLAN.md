@@ -144,3 +144,13 @@ Odkryte przy okazji (nie naprawione w T-PR1):
 | `semver-*` (`main^{tree}`) | `baseline-rev: origin/main` | — |
 
 Wynik CI PR #2 (`b5d73ba`): zielone `run_tests` (2 runy), `lint`, `build`, `semver-*` ×7, `critical_area_requires_tests`, `lineage_shadow_diff`, `format_check` (nadal nie sprawdza — BUG-20260930-03, A1), **`code_coverage_report` też zielony** (był czerwony od maja; tarpaulin uruchamia te same testy, więc najpewniej padał na nich — przyczyny historycznej nie weryfikowano).
+
+PR #2 zmergowany do `main` 2026-10-01 (`f823d0f`, merge commit).
+
+### A10 (2026-10-01) — branch protection `main`
+
+Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / usuwania. Wymagane checki: `run_tests`, `lint`, `build (ubuntu-latest)`, `build (ubuntu-22.04)`, `critical_area_requires_tests`, `lineage_shadow_diff`, od A1 także `format_check`. Coverage i Docker — niewymagane. Po A3–A5 (job `rust`, `web`, `db`) zaktualizować listę.
+
+### A1 (2026-10-01) — format egzekwowany w CI
+
+`cargo fmt --all` jako osobny commit `6b0c849` (38 plików, wyłącznie format) + `.git-blame-ignore-revs`; `format_check.yml` → `make fmt-check` (`cargo fmt --all --check`). BUG-20260930-03 → fixed. Lokalnie: `git config blame.ignoreRevsFile .git-blame-ignore-revs`.

@@ -40,7 +40,7 @@ fmt:
 # Check formatting
 .PHONY: fmt-check
 fmt-check:
-	cargo +stable fmt --check
+	cargo +stable fmt --all --check
 
 # Run Clippy for linting
 .PHONY: lint

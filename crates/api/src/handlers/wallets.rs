@@ -4,20 +4,20 @@ use crate::error::{ApiError, ApiResult};
 use crate::models::{
     ActiveSignerResponse, ApiSignerWalletResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateWalletRequest, CreateWalletResponse, SetActiveSignerRequest,
-    WalletBalanceConfidence, WalletBalancesResponse, WalletConvertOpResponse,
-    WalletEffectiveBalancesResponse, WalletEntry, WalletLedgerDelta, WalletLedgerEventsResponse,
+    WalletBalanceConfidence, WalletBalancesResponse, WalletChainCollectedFeesSummary,
+    WalletChainGlBackfillReport, WalletChainPortfolioHistoryResponse, WalletChainPortfolioResponse,
+    WalletChainSessionIdBackfillReport, WalletConvertOpResponse, WalletEffectiveBalancesResponse,
+    WalletEntry, WalletGlBalancesResponse, WalletGlOpeningImportReport,
+    WalletGlRpcReconcileResponse, WalletLedgerDelta, WalletLedgerEventsResponse,
     WalletLedgerStatus, WalletOpsStatsResponse, WalletReconcileItem, WalletReconcileResponse,
-    WalletSessionBalancesResponse, WalletSessionGlBackfillReport, WalletSessionGlReconcileResponse,
-    WalletGlBalancesResponse, WalletGlOpeningImportReport, WalletGlRpcReconcileResponse,
-    WalletChainPortfolioResponse, WalletChainCollectedFeesSummary, WalletChainGlBackfillReport, WalletChainSessionIdBackfillReport,
-    WalletChainPortfolioHistoryResponse,
-    WalletReconciliationStatus, WalletReplicationStatus, WalletTokenBalance,
+    WalletReconciliationStatus, WalletReplicationStatus, WalletSessionBalancesResponse,
+    WalletSessionGlBackfillReport, WalletSessionGlReconcileResponse, WalletTokenBalance,
     WalletTransferLogEntry, WalletTransferRequest, WalletTransferResponse,
     WalletTransfersListResponse, WalletWsStatusResponse, WalletsListResponse,
 };
+use crate::services::chain_portfolio;
 use crate::services::position_executor::load_wallet_from_env;
 use crate::services::wallet_gl_posting;
-use crate::services::chain_portfolio;
 use crate::services::wallet_ledger;
 use crate::state::AppState;
 use axum::{Json, extract::Query, extract::State};
@@ -1330,22 +1330,15 @@ pub async fn get_wallet_session_balances(
         }));
     };
     let owner = q.owner.as_deref();
-    let resolved =
-        wallet_gl_posting::read_session_balances_resolved(db, session_id, owner)
+    let resolved = wallet_gl_posting::read_session_balances_resolved(db, session_id, owner)
+        .await
+        .map_err(|e| ApiError::internal(format!("session balances read failed: {e}")))?;
+    let metrics =
+        wallet_gl_posting::resolve_session_metrics(db, session_id, owner, &resolved.balances)
             .await
-            .map_err(|e| ApiError::internal(format!("session balances read failed: {e}")))?;
-    let metrics = wallet_gl_posting::resolve_session_metrics(
-        db,
-        session_id,
-        owner,
-        &resolved.balances,
-    )
-    .await
-    .map_err(|e| ApiError::internal(format!("session metrics read failed: {e}")))?;
-    let needs_reconcile = resolved.needs_reconcile
-        || metrics
-            .as_ref()
-            .is_some_and(|m| !m.metrics_trusted);
+            .map_err(|e| ApiError::internal(format!("session metrics read failed: {e}")))?;
+    let needs_reconcile =
+        resolved.needs_reconcile || metrics.as_ref().is_some_and(|m| !m.metrics_trusted);
     Ok(Json(WalletSessionBalancesResponse {
         session_id: session_id.to_string(),
         owner: q.owner.clone(),
@@ -1385,13 +1378,10 @@ pub async fn post_wallet_session_balances_backfill(
         return Err(ApiError::internal("database not connected"));
     };
     let limit = q.limit.unwrap_or(50);
-    let report = wallet_gl_posting::backfill_session_postings_from_pslr(
-        db,
-        q.session_id.as_deref(),
-        limit,
-    )
-    .await
-    .map_err(|e| ApiError::internal(format!("session backfill failed: {e}")))?;
+    let report =
+        wallet_gl_posting::backfill_session_postings_from_pslr(db, q.session_id.as_deref(), limit)
+            .await
+            .map_err(|e| ApiError::internal(format!("session backfill failed: {e}")))?;
     Ok(Json(report))
 }
 
@@ -1497,8 +1487,7 @@ fn wallet_opening_postings_from_effective(
     eff: &WalletEffectiveBalancesResponse,
 ) -> Vec<(String, i128)> {
     let mut sums: BTreeMap<String, i128> = BTreeMap::new();
-    let sol_total =
-        i128::from(eff.native_effective_lamports) + i128::from(eff.wsol_effective_raw);
+    let sol_total = i128::from(eff.native_effective_lamports) + i128::from(eff.wsol_effective_raw);
     if sol_total > 0 {
         sums.insert(WSOL_MINT.to_string(), sol_total);
     }
@@ -1678,13 +1667,14 @@ pub async fn get_wallet_chain_portfolio(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            chain_session_id = chain_portfolio::resolve_chain_session_id_for_position(&state, anchor)
-                .await
-                .ok_or_else(|| {
-                    ApiError::bad_request(
-                        "chain_session_id required (or pass anchor_position to resolve)",
-                    )
-                })?;
+            chain_session_id =
+                chain_portfolio::resolve_chain_session_id_for_position(&state, anchor)
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::bad_request(
+                            "chain_session_id required (or pass anchor_position to resolve)",
+                        )
+                    })?;
         } else {
             return Err(ApiError::bad_request("chain_session_id is required"));
         }
@@ -1765,13 +1755,12 @@ pub async fn get_wallet_chain_portfolio(
     let (mut ledger_events, spot_prices, collected_fees, strategy_mints) = ledger_result
         .map_err(|e| ApiError::internal(format!("chain portfolio ledger failed: {e}")))?;
     if let Some(ref m) = metrics
-        && let Some(start) = chain_portfolio::ledger_start_event_from_open_start(&m.open_start) {
-            ledger_events.insert(0, start);
-        }
-    let needs_reconcile = resolved.needs_reconcile
-        || metrics
-            .as_ref()
-            .is_some_and(|m| !m.metrics_trusted);
+        && let Some(start) = chain_portfolio::ledger_start_event_from_open_start(&m.open_start)
+    {
+        ledger_events.insert(0, start);
+    }
+    let needs_reconcile =
+        resolved.needs_reconcile || metrics.as_ref().is_some_and(|m| !m.metrics_trusted);
     let reconcile = if q.include_lineage_reconcile == Some(true) {
         if let Some(anchor) = q
             .anchor_position
@@ -1795,22 +1784,25 @@ pub async fn get_wallet_chain_portfolio(
     };
     let (strategy_balances, chain_wallet_excluded_mint_count) =
         chain_portfolio::filter_strategy_wallet_balances(&resolved.balances, &strategy_mints);
-    let display_prices = chain_portfolio::chain_wallet_display_prices(metrics.as_ref(), &spot_prices);
-    let portfolio_balance_usd = chain_portfolio::portfolio_balance_usd_from_balances(
-        &strategy_balances,
-        &display_prices,
-    )
-    .or_else(|| {
-        metrics
-            .as_ref()
-            .filter(|m| m.metrics_trusted)
-            .and_then(|m| m.current_value_usd.clone())
-    });
-    let chain_balance_usd_legs = if metrics.as_ref().is_some_and(|m| {
-        m.metrics_trusted && !m.current_balance_usd_legs.is_empty()
-    }) {
+    let display_prices =
+        chain_portfolio::chain_wallet_display_prices(metrics.as_ref(), &spot_prices);
+    let portfolio_balance_usd =
+        chain_portfolio::portfolio_balance_usd_from_balances(&strategy_balances, &display_prices)
+            .or_else(|| {
+                metrics
+                    .as_ref()
+                    .filter(|m| m.metrics_trusted)
+                    .and_then(|m| m.current_value_usd.clone())
+            });
+    let chain_balance_usd_legs = if metrics
+        .as_ref()
+        .is_some_and(|m| m.metrics_trusted && !m.current_balance_usd_legs.is_empty())
+    {
         chain_portfolio::filter_usd_legs_to_strategy_mints(
-            &metrics.as_ref().expect("checked above").current_balance_usd_legs,
+            &metrics
+                .as_ref()
+                .expect("checked above")
+                .current_balance_usd_legs,
             &strategy_mints,
         )
     } else {
@@ -1877,20 +1869,21 @@ pub async fn get_wallet_chain_portfolio_history(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            chain_session_id = chain_portfolio::resolve_chain_session_id_for_position(&state, anchor)
-                .await
-                .ok_or_else(|| {
-                    ApiError::bad_request(
-                        "chain_session_id required (or pass anchor_position to resolve)",
-                    )
-                })?;
+            chain_session_id =
+                chain_portfolio::resolve_chain_session_id_for_position(&state, anchor)
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::bad_request(
+                            "chain_session_id required (or pass anchor_position to resolve)",
+                        )
+                    })?;
         } else {
             return Err(ApiError::bad_request("chain_session_id is required"));
         }
     }
     let limit = q.limit.unwrap_or(500);
-    let resp = chain_portfolio::fetch_chain_portfolio_history(&state, &chain_session_id, limit)
-        .await?;
+    let resp =
+        chain_portfolio::fetch_chain_portfolio_history(&state, &chain_session_id, limit).await?;
     Ok(Json(resp))
 }
 
@@ -2891,10 +2884,11 @@ fn merge_tokens_from_prev_where_regressive(
             continue;
         }
         if let Some(next_ui) = next_by_mint.get_mut(mint)
-            && *next_ui <= MONOTONIC_ZERO_EPS {
-                *next_ui = *prev_ui;
-                changed = true;
-            }
+            && *next_ui <= MONOTONIC_ZERO_EPS
+        {
+            *next_ui = *prev_ui;
+            changed = true;
+        }
     }
 
     if !changed {
@@ -3094,7 +3088,9 @@ pub async fn get_wallet_effective_balances(
         let resp = store_wallet_effective_response(&state, &owner, resp, "memory", true)
             .await
             .map_err(|e| ApiError::internal(format!("persist wallet effective cache: {e}")))?;
-        let resp = overlay_wallet_gl_effective_read(&state, &owner, stale_marked_response(resp, false, 0)).await;
+        let resp =
+            overlay_wallet_gl_effective_read(&state, &owner, stale_marked_response(resp, false, 0))
+                .await;
         return Ok(Json(resp));
     }
     let ttl = Duration::from_secs(wallet_effective_cache_ttl_secs());
@@ -3109,7 +3105,11 @@ pub async fn get_wallet_effective_balances(
             let resp = overlay_wallet_gl_effective_read(
                 &state,
                 &owner,
-                stale_marked_response(cached.response.clone(), !is_fresh, if is_fresh { 0 } else { age_ms }),
+                stale_marked_response(
+                    cached.response.clone(),
+                    !is_fresh,
+                    if is_fresh { 0 } else { age_ms },
+                ),
             )
             .await;
             return Ok(Json(resp));
@@ -3117,7 +3117,12 @@ pub async fn get_wallet_effective_balances(
     }
     spawn_effective_refresh_if_needed(state.clone(), owner.clone(), owner_pk).await;
     Ok(Json(
-        overlay_wallet_gl_effective_read(&state, &owner, build_warmup_placeholder(&state, &owner).await).await,
+        overlay_wallet_gl_effective_read(
+            &state,
+            &owner,
+            build_warmup_placeholder(&state, &owner).await,
+        )
+        .await,
     ))
 }
 
@@ -3387,31 +3392,32 @@ pub async fn convert_sol(
     };
 
     if !state.dry_run
-        && let Some(ref sig_s) = signature {
-            let n_delta = post_native_lamports as i64 - pre_native_lamports as i64;
-            let w_delta = post_wsol_raw as i128 - pre_wsol_raw as i128;
-            let deltas = vec![WalletLedgerDelta {
-                mint: wallet_ledger::WSOL_MINT.to_string(),
-                decimals: 9,
-                raw_delta_i128: w_delta.to_string(),
-            }];
-            let ev = wallet_ledger::new_ledger_event(
-                &convert_correlation_id,
-                WalletLedgerStatus::Confirmed,
-                "convert_sol",
-                Some(owner.to_string()),
-                Some(sig_s.clone()),
-                None,
-                None,
-                None,
-                false,
-                Some(n_delta),
-                deltas,
-                None,
-                "api:wallets",
-            );
-            wallet_ledger::append_wallet_ledger_event(&state, ev).await;
-        }
+        && let Some(ref sig_s) = signature
+    {
+        let n_delta = post_native_lamports as i64 - pre_native_lamports as i64;
+        let w_delta = post_wsol_raw as i128 - pre_wsol_raw as i128;
+        let deltas = vec![WalletLedgerDelta {
+            mint: wallet_ledger::WSOL_MINT.to_string(),
+            decimals: 9,
+            raw_delta_i128: w_delta.to_string(),
+        }];
+        let ev = wallet_ledger::new_ledger_event(
+            &convert_correlation_id,
+            WalletLedgerStatus::Confirmed,
+            "convert_sol",
+            Some(owner.to_string()),
+            Some(sig_s.clone()),
+            None,
+            None,
+            None,
+            false,
+            Some(n_delta),
+            deltas,
+            None,
+            "api:wallets",
+        );
+        wallet_ledger::append_wallet_ledger_event(&state, ev).await;
+    }
 
     let op_id = Uuid::new_v4().to_string();
     let mut reconciliation_status = WalletReconciliationStatus::ConfirmedUnreconciled;

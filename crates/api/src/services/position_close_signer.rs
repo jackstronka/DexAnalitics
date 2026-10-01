@@ -175,8 +175,8 @@ pub async fn resolve_close_signer_for_position(
     state: &AppState,
     address: &str,
 ) -> Result<Result<CloseSignerResolution, CloseSignerSkipped>, String> {
-    let position = Pubkey::from_str(address.trim())
-        .map_err(|_| "invalid position address".to_string())?;
+    let position =
+        Pubkey::from_str(address.trim()).map_err(|_| "invalid position address".to_string())?;
     let addr = position.to_string();
 
     let Some(owner) = resolve_owner_effective(state, &position).await else {

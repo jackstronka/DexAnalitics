@@ -3,9 +3,8 @@
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
     ApplyOptimizeResultRequest, CreateStrategyRequest, ListStrategiesResponse, MessageResponse,
-    StaleReconcileReportResponse,
-    OptimizeApplyPolicy, StrategyParameters, StrategyPerformanceResponse,
-    StrategyPositionExecutorRequest, StrategyResponse, StrategyType,
+    OptimizeApplyPolicy, StaleReconcileReportResponse, StrategyParameters,
+    StrategyPerformanceResponse, StrategyPositionExecutorRequest, StrategyResponse, StrategyType,
 };
 use crate::services::optimization_runner::{
     apply_optimize_result_parsed, end_optimize_busy, try_begin_optimize_busy,

@@ -3,7 +3,9 @@
 //! Single place for: end NAV per node / chain headline, totals refresh from lineage nodes,
 //! and reconciliation with stream PnL totals. See `doc/CHAIN_ECONOMIC_NET_REFACTOR_PLAN.md`.
 
-use crate::models::{PositionStreamLineageNode, PositionStreamPnLResponse, StreamPnLInterpretation};
+use crate::models::{
+    PositionStreamLineageNode, PositionStreamPnLResponse, StreamPnLInterpretation,
+};
 use rust_decimal::Decimal;
 
 /// Source tag for end NAV resolution (diagnostics / future API `end_nav_source`).
@@ -53,7 +55,9 @@ pub fn close_nav_usd_from_raw_amounts_and_prices(
 }
 
 /// End NAV for one lineage node with source tag (see [`lineage_node_end_nav_usd`]).
-pub fn lineage_node_end_nav_with_source(n: &PositionStreamLineageNode) -> (Decimal, ChainEndNavSource) {
+pub fn lineage_node_end_nav_with_source(
+    n: &PositionStreamLineageNode,
+) -> (Decimal, ChainEndNavSource) {
     if n.current_value_usd > Decimal::ZERO {
         return (n.current_value_usd, ChainEndNavSource::LiveCurrent);
     }
@@ -62,13 +66,13 @@ pub fn lineage_node_end_nav_with_source(n: &PositionStreamLineageNode) -> (Decim
     {
         return (end, ChainEndNavSource::MaterializedEnd);
     }
-    if let Some(end) =
-        positive_usd_from_chain_history_column(n.lifecycle_close_nav_usd.as_deref())
+    if let Some(end) = positive_usd_from_chain_history_column(n.lifecycle_close_nav_usd.as_deref())
     {
         return (end, ChainEndNavSource::LifecycleCloseAmounts);
     }
     if n.closed_ts_utc.is_some() && n.baseline_value_usd > Decimal::ZERO {
-        let est = n.baseline_value_usd + n.fees_collected_usd + n.realized_cashflow_usd - n.tx_fees_usd;
+        let est =
+            n.baseline_value_usd + n.fees_collected_usd + n.realized_cashflow_usd - n.tx_fees_usd;
         if est > Decimal::ZERO {
             return (est, ChainEndNavSource::CloseEstimate);
         }
@@ -167,11 +171,7 @@ pub(crate) fn maybe_compute_totals_from_nodes(
         return None;
     }
     let totals_is_placeholder = existing.as_ref().is_some_and(|t| {
-        let note_lc = t
-            .note
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let note_lc = t.note.as_deref().unwrap_or_default().to_ascii_lowercase();
         let stale_meta = note_lc.contains("no valuation snapshots")
             || t.valuation_price_time_kind == "node_fallback_unavailable";
         (t.baseline_value_usd.is_zero()
@@ -180,9 +180,7 @@ pub(crate) fn maybe_compute_totals_from_nodes(
             && t.realized_cashflow_usd.is_zero()
             && t.net_pnl_usd.is_zero()
             && stale_meta)
-            || (t.baseline_value_usd.is_zero()
-                && !t.current_value_usd.is_zero()
-                && stale_meta)
+            || (t.baseline_value_usd.is_zero() && !t.current_value_usd.is_zero() && stale_meta)
     });
     if existing.is_some() && !totals_is_placeholder {
         return None;
@@ -296,9 +294,8 @@ fn apply_economic_totals_fields_from_nodes(
             t.lp_vs_hodl_with_fees_usd / t.hodl_value_usd
         };
     }
-    t.net_pnl_usd = t.current_value_usd + t.realized_cashflow_usd
-        - t.baseline_value_usd
-        - t.tx_fees_usd;
+    t.net_pnl_usd =
+        t.current_value_usd + t.realized_cashflow_usd - t.baseline_value_usd - t.tx_fees_usd;
     t.net_pnl_pct = if t.baseline_value_usd.is_zero() {
         Decimal::ZERO
     } else {
@@ -335,7 +332,9 @@ pub fn apply_chain_economic_quality_meta(
 }
 
 /// End NAV source for quality tags — closed nodes ignore lifted `current_value_usd` (would read as live).
-fn lineage_end_nav_source_for_quality(n: &PositionStreamLineageNode) -> (Decimal, ChainEndNavSource) {
+fn lineage_end_nav_source_for_quality(
+    n: &PositionStreamLineageNode,
+) -> (Decimal, ChainEndNavSource) {
     if n.closed_ts_utc.is_some() {
         if let Some(end) =
             positive_usd_from_chain_history_column(n.chain_history_end_value_usd.as_deref())
@@ -348,8 +347,8 @@ fn lineage_end_nav_source_for_quality(n: &PositionStreamLineageNode) -> (Decimal
             return (end, ChainEndNavSource::LifecycleCloseAmounts);
         }
         if n.baseline_value_usd > Decimal::ZERO {
-            let est =
-                n.baseline_value_usd + n.fees_collected_usd + n.realized_cashflow_usd - n.tx_fees_usd;
+            let est = n.baseline_value_usd + n.fees_collected_usd + n.realized_cashflow_usd
+                - n.tx_fees_usd;
             if est > Decimal::ZERO {
                 return (est, ChainEndNavSource::CloseEstimate);
             }
@@ -444,7 +443,11 @@ fn infer_chain_economic_quality(
         return "mixed";
     }
     if matches!(end_src, ChainEndNavSource::LiveCurrent)
-        && node_mark_is_exact(nodes.first().and_then(|n| n.baseline_valuation_quality.as_deref()))
+        && node_mark_is_exact(
+            nodes
+                .first()
+                .and_then(|n| n.baseline_valuation_quality.as_deref()),
+        )
         && !hodl_degraded
     {
         return "exact";
@@ -485,7 +488,10 @@ fn append_economic_quality_caption_suffix(
         _ => "",
     };
     if !suffix.is_empty() {
-        totals.interpretation.economic_net_pnl_caption_pl.push_str(suffix);
+        totals
+            .interpretation
+            .economic_net_pnl_caption_pl
+            .push_str(suffix);
     }
 }
 
@@ -527,9 +533,10 @@ pub fn refresh_lineage_totals_from_nodes(
             Some(
                 "Totals refreshed from lineage nodes on read (materialized totals_json was stale).",
             ),
-        ) {
-            *totals = Some(fresh);
-        }
+        )
+    {
+        *totals = Some(fresh);
+    }
     if let Some(t) = totals.as_mut() {
         reconcile_stream_pnl_totals_with_nodes(t, nodes);
         apply_economic_totals_fields_from_nodes(t, nodes, true);
@@ -621,14 +628,16 @@ pub async fn enrich_nodes_lifecycle_close_nav_from_ledger(
         {
             continue;
         }
-        let Some(aux) = fetch_close_ledger_aux_best_effort(pool, node.position_address.as_str()).await
+        let Some(aux) =
+            fetch_close_ledger_aux_best_effort(pool, node.position_address.as_str()).await
         else {
             continue;
         };
         let (Some(raw_a), Some(raw_b)) = (aux.close_amount_a_raw, aux.close_amount_b_raw) else {
             continue;
         };
-        let (Some(ma), Some(mb)) = (node.token_mint_a.as_deref(), node.token_mint_b.as_deref()) else {
+        let (Some(ma), Some(mb)) = (node.token_mint_a.as_deref(), node.token_mint_b.as_deref())
+        else {
             continue;
         };
         let Ok(pk_a) = Pubkey::from_str(ma.trim()) else {
@@ -637,10 +646,12 @@ pub async fn enrich_nodes_lifecycle_close_nav_from_ledger(
         let Ok(pk_b) = Pubkey::from_str(mb.trim()) else {
             continue;
         };
-        let Some(dec_a) = fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk_a).await else {
+        let Some(dec_a) = fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk_a).await
+        else {
             continue;
         };
-        let Some(dec_b) = fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk_b).await else {
+        let Some(dec_b) = fetch_mint_decimals_best_effort(state.provider.as_ref(), &pk_b).await
+        else {
             continue;
         };
         let Some(nav) = close_nav_usd_from_raw_amounts_and_prices(
@@ -713,11 +724,7 @@ mod tests {
 
     #[test]
     fn lineage_node_end_nav_prefers_lifecycle_close_nav_over_estimate() {
-        let mut n = mk_node(
-            "PDA",
-            Decimal::from_str("9.901").unwrap(),
-            Decimal::ZERO,
-        );
+        let mut n = mk_node("PDA", Decimal::from_str("9.901").unwrap(), Decimal::ZERO);
         n.closed_ts_utc = Some("2026-05-21T20:00:00Z".to_string());
         n.fees_collected_usd = Decimal::from_str("0.032").unwrap();
         n.tx_fees_usd = Decimal::from_str("0.0035").unwrap();
@@ -746,11 +753,7 @@ mod tests {
 
     #[test]
     fn chain_headline_end_nav_uses_close_estimate_when_current_zero() {
-        let mut n = mk_node(
-            "PDA",
-            Decimal::from_str("9.901").unwrap(),
-            Decimal::ZERO,
-        );
+        let mut n = mk_node("PDA", Decimal::from_str("9.901").unwrap(), Decimal::ZERO);
         n.closed_ts_utc = Some("2026-05-21T20:00:00Z".to_string());
         n.fees_collected_usd = Decimal::from_str("0.032").unwrap();
         n.tx_fees_usd = Decimal::from_str("0.0035").unwrap();
@@ -904,7 +907,10 @@ mod tests {
         node.opened_ts_utc = Some("2026-05-20T20:49:54Z".to_string());
         reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
         assert_eq!(totals.hodl_value_usd, Decimal::from_str("10.004").unwrap());
-        assert_eq!(totals.current_value_usd, Decimal::from_str("10.011").unwrap());
+        assert_eq!(
+            totals.current_value_usd,
+            Decimal::from_str("10.011").unwrap()
+        );
         assert_eq!(totals.net_pnl_usd, Decimal::from_str("0.007").unwrap());
     }
 }

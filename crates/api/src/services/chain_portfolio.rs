@@ -2,26 +2,28 @@
 
 use crate::error::ApiError;
 use crate::models::{
-    WalletChainCollectedFeesSummary, WalletChainLineageReconcile, WalletChainPortfolioHistoryRow,
-    WalletChainPortfolioHistoryResponse, WalletChainPortfolioLedgerEvent,
-    WalletChainPortfolioLedgerLeg, WalletChainSessionIdBackfillReport,
-    WalletChainSessionMeta, WalletSessionBalanceUsdLeg, WalletSessionMetrics,
-    WalletSessionOpenStartSnapshot,
+    WalletChainCollectedFeesSummary, WalletChainLineageReconcile,
+    WalletChainPortfolioHistoryResponse, WalletChainPortfolioHistoryRow,
+    WalletChainPortfolioLedgerEvent, WalletChainPortfolioLedgerLeg,
+    WalletChainSessionIdBackfillReport, WalletChainSessionMeta, WalletSessionBalanceUsdLeg,
+    WalletSessionMetrics, WalletSessionOpenStartSnapshot,
 };
 use crate::services::position_stream_performance::compute_position_stream_performance;
 use crate::services::position_stream_pnl::compute_position_stream_pnl;
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use clmm_lp_data::repositories::Database;
-use clmm_lp_data::wallet_session::{self, ensure_chain_session_id_on_lifecycle_row, is_lifecycle_open_event};
+use clmm_lp_data::wallet_session::{
+    self, ensure_chain_session_id_on_lifecycle_row, is_lifecycle_open_event,
+};
+use rust_decimal::Decimal;
+use serde_json::Value;
+use sqlx::Row;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::timeout;
-use rust_decimal::Decimal;
-use serde_json::Value;
-use sqlx::Row;
 use uuid::Uuid;
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -63,7 +65,10 @@ pub async fn backfill_chain_session_ids_for_position(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let head = positions.last().cloned().unwrap_or_else(|| anchor.to_string());
+    let head = positions
+        .last()
+        .cloned()
+        .unwrap_or_else(|| anchor.to_string());
     sqlx::query(
         r#"
         INSERT INTO chain_session_registry (chain_session_id, anchor_position, head_position, status)
@@ -159,13 +164,14 @@ pub async fn resolve_chain_session_id_for_position(
         .bind(pos)
         .fetch_optional(db.pool())
         .await
-            && let Some(r) = row {
-                let cid: String = r.try_get("chain_session_id").unwrap_or_default();
-                let t = cid.trim();
-                if !t.is_empty() {
-                    return Some(t.to_string());
-                }
+            && let Some(r) = row
+        {
+            let cid: String = r.try_get("chain_session_id").unwrap_or_default();
+            let t = cid.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
             }
+        }
         if let Ok(row) = sqlx::query(
             r#"
             SELECT chain_session_id
@@ -180,13 +186,14 @@ pub async fn resolve_chain_session_id_for_position(
         .bind(pos)
         .fetch_optional(db.pool())
         .await
-            && let Some(r) = row {
-                let cid: String = r.try_get("chain_session_id").unwrap_or_default();
-                let t = cid.trim();
-                if !t.is_empty() {
-                    return Some(t.to_string());
-                }
+            && let Some(r) = row
+        {
+            let cid: String = r.try_get("chain_session_id").unwrap_or_default();
+            let t = cid.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
             }
+        }
     }
     None
 }
@@ -243,7 +250,10 @@ pub async fn fetch_chain_session_meta(
         WalletChainSessionMeta {
             status: "active".to_string(),
             closed_at: None,
-            anchor_position: anchor_hint.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+            anchor_position: anchor_hint
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             head_position: None,
             chain_pda_count: None,
         }
@@ -280,16 +290,15 @@ pub async fn mark_chain_session_closed_after_manual_close(
     let Some(reg) = registry else {
         return Ok(());
     };
-    let status: String = reg.try_get("status").unwrap_or_else(|_| "active".to_string());
+    let status: String = reg
+        .try_get("status")
+        .unwrap_or_else(|_| "active".to_string());
     if status.trim().eq_ignore_ascii_case("closed") {
         return Ok(());
     }
     let head: Option<String> = reg.try_get("head_position").ok().flatten();
     let anchor: Option<String> = reg.try_get("anchor_position").ok().flatten();
-    let probe = anchor
-        .as_deref()
-        .or(head.as_deref())
-        .unwrap_or(pos);
+    let probe = anchor.as_deref().or(head.as_deref()).unwrap_or(pos);
     let is_head = match compute_position_stream_performance(state, probe, false).await {
         Ok(perf) => perf.positions.last().is_some_and(|last| last.trim() == pos),
         Err(_) => head.as_deref().map(str::trim) == Some(pos),
@@ -425,7 +434,9 @@ fn fmt_ledger_usd(v: f64) -> String {
     format!("{:.8}", v)
 }
 
-fn price_by_mint_from_open_start(open_start: &WalletSessionOpenStartSnapshot) -> BTreeMap<String, f64> {
+fn price_by_mint_from_open_start(
+    open_start: &WalletSessionOpenStartSnapshot,
+) -> BTreeMap<String, f64> {
     open_start
         .price_by_mint_usd
         .iter()
@@ -613,26 +624,30 @@ fn push_lp_collected_fee_deltas(
 ) {
     let details = raw.get("details").and_then(|d| d.as_object());
     let (mint_a, mint_b, _) = wallet_session::pool_mints_from_lifecycle_row(raw, details);
-    let lp_a = lp_a.or_else(|| {
-        raw.get("lp_collected_token_a_raw")
-            .and_then(parse_u64_json_value)
-            .map(|n| n as i64)
-    }).or_else(|| {
-        details
-            .and_then(|d| d.get("lp_collected_token_a_raw"))
-            .and_then(parse_u64_json_value)
-            .map(|n| n as i64)
-    });
-    let lp_b = lp_b.or_else(|| {
-        raw.get("lp_collected_token_b_raw")
-            .and_then(parse_u64_json_value)
-            .map(|n| n as i64)
-    }).or_else(|| {
-        details
-            .and_then(|d| d.get("lp_collected_token_b_raw"))
-            .and_then(parse_u64_json_value)
-            .map(|n| n as i64)
-    });
+    let lp_a = lp_a
+        .or_else(|| {
+            raw.get("lp_collected_token_a_raw")
+                .and_then(parse_u64_json_value)
+                .map(|n| n as i64)
+        })
+        .or_else(|| {
+            details
+                .and_then(|d| d.get("lp_collected_token_a_raw"))
+                .and_then(parse_u64_json_value)
+                .map(|n| n as i64)
+        });
+    let lp_b = lp_b
+        .or_else(|| {
+            raw.get("lp_collected_token_b_raw")
+                .and_then(parse_u64_json_value)
+                .map(|n| n as i64)
+        })
+        .or_else(|| {
+            details
+                .and_then(|d| d.get("lp_collected_token_b_raw"))
+                .and_then(parse_u64_json_value)
+                .map(|n| n as i64)
+        });
     if let (Some(ma), Some(a)) = (mint_a.as_ref(), lp_a.filter(|&x| x > 0)) {
         *out.entry(ma.clone()).or_insert(0) += a as i128;
     }
@@ -696,11 +711,7 @@ pub fn aggregate_chain_collected_fees(
         let mut total = 0.0f64;
         let mut any = false;
         for leg in &legs {
-            if let Some(v) = leg
-                .value_usd
-                .as_deref()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
+            if let Some(v) = leg.value_usd.as_deref().and_then(|s| s.parse::<f64>().ok()) {
                 total += v;
                 any = true;
             }
@@ -739,7 +750,11 @@ pub fn portfolio_balance_usd_from_balances(
     any.then(|| fmt_ledger_usd(total))
 }
 
-fn leg_value_usd_opt(mint: &str, amount_raw: i128, prices: &BTreeMap<String, f64>) -> Option<String> {
+fn leg_value_usd_opt(
+    mint: &str,
+    amount_raw: i128,
+    prices: &BTreeMap<String, f64>,
+) -> Option<String> {
     let price = price_for_mint(mint, prices)?;
     let dec = mint_decimals_ledger(mint);
     let ui = (amount_raw.unsigned_abs() as f64) / 10f64.powi(i32::from(dec));
@@ -795,14 +810,11 @@ fn ledger_event_kind(event: &str) -> &'static str {
 }
 
 fn sol_price_from_map(prices: &BTreeMap<String, f64>) -> Option<f64> {
-    prices
-        .get(WSOL_MINT)
-        .copied()
-        .or_else(|| {
-            prices
-                .get("So11111111111111111111111111111111111111111")
-                .copied()
-        })
+    prices.get(WSOL_MINT).copied().or_else(|| {
+        prices
+            .get("So11111111111111111111111111111111111111111")
+            .copied()
+    })
 }
 
 fn tx_fee_ledger_event(
@@ -845,7 +857,8 @@ fn ledger_event_from_lifecycle_row(
     lp_b: Option<i64>,
     prices: &BTreeMap<String, f64>,
 ) -> Option<WalletChainPortfolioLedgerEvent> {
-    let (_, _, ev, postings) = wallet_session::chain_mint_deltas_from_lifecycle_json(raw, lp_a, lp_b)?;
+    let (_, _, ev, postings) =
+        wallet_session::chain_mint_deltas_from_lifecycle_json(raw, lp_a, lp_b)?;
     let legs: Vec<WalletChainPortfolioLedgerLeg> = postings
         .into_iter()
         .filter(|(_, delta)| *delta != 0)
@@ -865,7 +878,11 @@ fn ledger_event_from_lifecycle_row(
     Some(WalletChainPortfolioLedgerEvent {
         ts_utc,
         kind: ledger_event_kind(&ev).to_string(),
-        event: if event.trim().is_empty() { ev } else { event.trim().to_string() },
+        event: if event.trim().is_empty() {
+            ev
+        } else {
+            event.trim().to_string()
+        },
         signature,
         position_pubkey,
         total_usd: sum_leg_usd(&legs),
@@ -963,12 +980,10 @@ pub async fn build_chain_portfolio_ledger(
         })
         .collect();
 
-    let start_prices = wallet_session::compute_chain_open_start_from_lifecycle_rows(
-        agg.iter().cloned(),
-        cid,
-    )
-    .map(|snap| snap.price_by_mint)
-    .unwrap_or_default();
+    let start_prices =
+        wallet_session::compute_chain_open_start_from_lifecycle_rows(agg.iter().cloned(), cid)
+            .map(|snap| snap.price_by_mint)
+            .unwrap_or_default();
     let boot = wallet_session::bootstrap_chain_spot_prices_from_rows(agg.iter().cloned(), cid);
     let mut running = start_prices.clone();
     for (mint, px) in boot {
@@ -1015,8 +1030,7 @@ pub async fn build_chain_portfolio_ledger(
 
     enrich_ledger_events_usd_from_feed(&mut events, &mut running).await;
     let collected_fees = aggregate_chain_collected_fees(&agg, &running);
-    let strategy_mints =
-        wallet_session::chain_strategy_wallet_mints_from_agg(agg.clone(), cid);
+    let strategy_mints = wallet_session::chain_strategy_wallet_mints_from_agg(agg.clone(), cid);
     Ok((events, running, collected_fees, strategy_mints))
 }
 
@@ -1078,8 +1092,7 @@ pub async fn compute_chain_lineage_reconcile(
         return Ok(None);
     }
     let lineage = compute_position_stream_pnl(state, anchor).await?;
-    let chain_start = metrics
-        .and_then(|m| parse_usd_decimal(m.open_start.value_usd.as_deref()));
+    let chain_start = metrics.and_then(|m| parse_usd_decimal(m.open_start.value_usd.as_deref()));
     let chain_wallet = metrics.and_then(|m| parse_usd_decimal(m.current_value_usd.as_deref()));
     let lp_nav = parse_usd_decimal(lp_nav_usd);
     let chain_combined = match (chain_wallet, lp_nav) {
@@ -1088,8 +1101,12 @@ pub async fn compute_chain_lineage_reconcile(
         (None, Some(nav)) => Some(nav),
         (None, None) => None,
     };
-    let chain_vs_start = chain_start.zip(chain_combined).map(|(start, combined)| combined - start);
-    let diff = chain_vs_start.zip(Some(lineage.net_pnl_usd)).map(|(c, l)| c - l);
+    let chain_vs_start = chain_start
+        .zip(chain_combined)
+        .map(|(start, combined)| combined - start);
+    let diff = chain_vs_start
+        .zip(Some(lineage.net_pnl_usd))
+        .map(|(c, l)| c - l);
     let note = "Chain model: GL wallet (+ optional head NAV) minus cycle start at open prices. \
                 Lineage: baseline→current NAV + lifecycle cashflow − tx fees. \
                 Expect small gaps from price basis, phantom SESSION debits, and uncollected LP."
@@ -1156,10 +1173,7 @@ mod tests {
             }],
             pre_open_value_usd: Some("150.00000000".to_string()),
             mint_resolution: "details".to_string(),
-            price_by_mint_usd: BTreeMap::from([(
-                WSOL_MINT.to_string(),
-                "150".to_string(),
-            )]),
+            price_by_mint_usd: BTreeMap::from([(WSOL_MINT.to_string(), "150".to_string())]),
         };
         let evt = ledger_start_event_from_open_start(&snap).expect("start row");
         assert_eq!(evt.kind, "portfolio_start");

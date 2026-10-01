@@ -2,20 +2,21 @@
 
 use crate::error::ApiError;
 use crate::models::{
-    CloseAllBatchItem, CloseAllBatchStatusResponse, CloseAllBatchSummary, CloseAllItemStatus,
-    CloseAllPositionsPreviewResponse, CloseAllPositionsRequest, CloseAllPositionsStartResponse,
-    CloseAllSkippedPreview, CloseAllWalletGroup, CLOSE_ALL_MAX_SLIPPAGE_BPS,
+    CLOSE_ALL_MAX_SLIPPAGE_BPS, CloseAllBatchItem, CloseAllBatchStatusResponse,
+    CloseAllBatchSummary, CloseAllItemStatus, CloseAllPositionsPreviewResponse,
+    CloseAllPositionsRequest, CloseAllPositionsStartResponse, CloseAllSkippedPreview,
+    CloseAllWalletGroup,
 };
 use crate::position_registry_seed::{registry_open_position_pubkeys, registry_position_open_map};
 use crate::services::position_close_ops::{
+    CloseSignaturePoll, ManualCloseLedgerContext, ManualCloseSubmitOutcome,
     bump_close_slippage_bps_for_6018_retry, execute_manual_close_with_wallet,
-    finalize_manual_close_send_first, is_close_slippage_6018,
-    poll_close_signature_until_terminal, resolve_bulk_close_slippage_bps,
-    submit_manual_close_send_first, wait_close_signature_processed, CloseSignaturePoll,
-    ManualCloseLedgerContext, ManualCloseSubmitOutcome,
+    finalize_manual_close_send_first, is_close_slippage_6018, poll_close_signature_until_terminal,
+    resolve_bulk_close_slippage_bps, submit_manual_close_send_first,
+    wait_close_signature_processed,
 };
 use crate::services::position_close_signer::{
-    resolve_close_signer_for_position, CloseSignerSkipReason,
+    CloseSignerSkipReason, resolve_close_signer_for_position,
 };
 use crate::services::position_on_chain_cache::{
     fetch_supplement_positions_parallel, running_strategy_position_pubkeys,
@@ -106,8 +107,10 @@ pub async fn collect_monitored_position_addresses(state: &AppState) -> Vec<Strin
 
     let registry_candidates: HashSet<Pubkey> =
         registry_open_position_pubkeys().into_iter().collect();
-    let strategy_candidates: HashSet<Pubkey> =
-        running_strategy_position_pubkeys(state).await.into_iter().collect();
+    let strategy_candidates: HashSet<Pubkey> = running_strategy_position_pubkeys(state)
+        .await
+        .into_iter()
+        .collect();
     let mut supplemental: Vec<Pubkey> = registry_candidates
         .iter()
         .chain(strategy_candidates.iter())
@@ -215,7 +218,10 @@ async fn plan_close_all(
         match resolve_close_signer_for_position(state, addr).await {
             Ok(Ok(res)) => {
                 *group_counts
-                    .entry((res.close_signer_wallet_id.clone(), res.close_signer_pubkey.clone()))
+                    .entry((
+                        res.close_signer_wallet_id.clone(),
+                        res.close_signer_pubkey.clone(),
+                    ))
                     .or_insert(0) += 1;
                 items.push(CloseAllBatchItem {
                     address: res.address.clone(),
@@ -277,9 +283,10 @@ async fn plan_close_all(
 async fn update_job_item(batch_id: &str, address: &str, item: CloseAllBatchItem) {
     let mut jobs = CLOSE_ALL_JOBS.write().await;
     if let Some(job) = jobs.get_mut(batch_id)
-        && let Some(row) = job.items.iter_mut().find(|i| i.address == address) {
-            *row = item;
-        }
+        && let Some(row) = job.items.iter_mut().find(|i| i.address == address)
+    {
+        *row = item;
+    }
 }
 
 async fn finish_job(batch_id: &str, status: &str) {
@@ -292,11 +299,12 @@ async fn finish_job(batch_id: &str, status: &str) {
 
 fn validate_close_all_slippage_bps(opt: Option<u16>) -> Result<u16, ApiError> {
     if let Some(v) = opt
-        && v > CLOSE_ALL_MAX_SLIPPAGE_BPS {
-            return Err(ApiError::bad_request(format!(
-                "options.slippage_bps too high (max {CLOSE_ALL_MAX_SLIPPAGE_BPS})"
-            )));
-        }
+        && v > CLOSE_ALL_MAX_SLIPPAGE_BPS
+    {
+        return Err(ApiError::bad_request(format!(
+            "options.slippage_bps too high (max {CLOSE_ALL_MAX_SLIPPAGE_BPS})"
+        )));
+    }
     Ok(resolve_bulk_close_slippage_bps(opt))
 }
 
@@ -357,14 +365,23 @@ async fn close_wallet_group(
         )
         .await;
 
-        let mut ctx =
-            ManualCloseLedgerContext::for_bulk(&batch_id, &ledger_owner, skip_pre_collect, slippage_bps);
+        let mut ctx = ManualCloseLedgerContext::for_bulk(
+            &batch_id,
+            &ledger_owner,
+            skip_pre_collect,
+            slippage_bps,
+        );
 
         if send_first {
             loop {
-                let submit =
-                    submit_manual_close_send_first(&state, &addr, None, wallet.clone(), ctx.clone())
-                        .await;
+                let submit = submit_manual_close_send_first(
+                    &state,
+                    &addr,
+                    None,
+                    wallet.clone(),
+                    ctx.clone(),
+                )
+                .await;
                 match submit {
                     Ok(ManualCloseSubmitOutcome::AlreadyClosed) => {
                         update_job_item(
@@ -402,34 +419,35 @@ async fn close_wallet_group(
                         let poll_secs = inter_tx_secs.saturating_add(45);
                         if let CloseSignaturePoll::Failed(ref err) =
                             poll_close_signature_until_terminal(&state, &sig, poll_secs).await
-                            && is_close_slippage_6018(err) && !ctx.slippage_6018_retry_done {
-                                let bumped =
-                                    bump_close_slippage_bps_for_6018_retry(ctx.slippage_bps);
-                                if bumped > ctx.slippage_bps {
-                                    ctx.slippage_6018_retry_done = true;
-                                    ctx.slippage_bps = bumped;
-                                    info!(
-                                        batch_id = %batch_id,
-                                        position = %addr,
-                                        slippage_bps = bumped,
-                                        "close-all: on-chain 6018 after submit, retrying with higher slippage"
-                                    );
-                                    update_job_item(
-                                        &batch_id,
-                                        &addr,
-                                        CloseAllBatchItem {
-                                            address: addr.clone(),
-                                            owner_pubkey: Some(ledger_owner.clone()),
-                                            close_signer_wallet_id: Some(wallet_id.clone()),
-                                            status: CloseAllItemStatus::PendingOnChain,
-                                            signature: None,
-                                            error: None,
-                                        },
-                                    )
-                                    .await;
-                                    continue;
-                                }
+                            && is_close_slippage_6018(err)
+                            && !ctx.slippage_6018_retry_done
+                        {
+                            let bumped = bump_close_slippage_bps_for_6018_retry(ctx.slippage_bps);
+                            if bumped > ctx.slippage_bps {
+                                ctx.slippage_6018_retry_done = true;
+                                ctx.slippage_bps = bumped;
+                                info!(
+                                    batch_id = %batch_id,
+                                    position = %addr,
+                                    slippage_bps = bumped,
+                                    "close-all: on-chain 6018 after submit, retrying with higher slippage"
+                                );
+                                update_job_item(
+                                    &batch_id,
+                                    &addr,
+                                    CloseAllBatchItem {
+                                        address: addr.clone(),
+                                        owner_pubkey: Some(ledger_owner.clone()),
+                                        close_signer_wallet_id: Some(wallet_id.clone()),
+                                        status: CloseAllItemStatus::PendingOnChain,
+                                        signature: None,
+                                        error: None,
+                                    },
+                                )
+                                .await;
+                                continue;
                             }
+                        }
 
                         let state_fin = state.clone();
                         let batch_fin = batch_id.clone();
@@ -439,9 +457,7 @@ async fn close_wallet_group(
                         let wallet_id_fin = wallet_id.clone();
                         finalize_handles.push(tokio::spawn(async move {
                             let item = match finalize_manual_close_send_first(
-                                &state_fin,
-                                wallet_fin,
-                                flight,
+                                &state_fin, wallet_fin, flight,
                             )
                             .await
                             {
@@ -581,12 +597,7 @@ async fn run_close_all_worker(state: AppState, batch_id: String, req: CloseAllPo
                 j.items
                     .iter()
                     .filter(|i| i.status == CloseAllItemStatus::Queued)
-                    .filter_map(|i| {
-                        Some((
-                            i.address.clone(),
-                            i.close_signer_wallet_id.clone()?,
-                        ))
-                    })
+                    .filter_map(|i| Some((i.address.clone(), i.close_signer_wallet_id.clone()?)))
                     .collect()
             })
             .unwrap_or_default()

@@ -150,10 +150,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             chain_sid = sid.clone();
         }
         if let Some(ref cid) = chain_sid
-            && let Some(obj) = v.as_object_mut() {
-                obj.entry("chain_session_id".to_string())
-                    .or_insert_with(|| Value::String(cid.clone()));
-            }
+            && let Some(obj) = v.as_object_mut()
+        {
+            obj.entry("chain_session_id".to_string())
+                .or_insert_with(|| Value::String(cid.clone()));
+        }
         let position = v
             .get("position_pda")
             .and_then(|x| x.as_str())
@@ -232,11 +233,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .bind(&v)
             .execute(db.pool())
             .await?;
-            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, lp_a, lp_b)
-                .await;
-            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, lp_a, lp_b)
-                .await;
-            if let (Some(ref sig), Some(ref cid)) = (sig_for_chain_update.as_ref(), chain_sid.as_ref()) {
+            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, lp_a, lp_b).await;
+            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, lp_a, lp_b).await;
+            if let (Some(ref sig), Some(ref cid)) =
+                (sig_for_chain_update.as_ref(), chain_sid.as_ref())
+            {
                 let _ = sqlx::query(
                     r#"
                     UPDATE position_stream_ledger_rows
@@ -285,11 +286,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .bind(&v)
             .execute(db.pool())
             .await?;
-            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None)
-                .await;
-            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, None, None)
-                .await;
-            if let (Some(ref sig), Some(ref cid)) = (sig_for_chain_update.as_ref(), chain_sid.as_ref()) {
+            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None).await;
+            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, None, None).await;
+            if let (Some(ref sig), Some(ref cid)) =
+                (sig_for_chain_update.as_ref(), chain_sid.as_ref())
+            {
                 let _ = sqlx::query(
                     r#"
                     UPDATE position_stream_ledger_rows
@@ -336,11 +337,11 @@ async fn ingest_lifecycle_rows_best_effort(state: &AppState) -> anyhow::Result<(
             .bind(&v)
             .execute(db.pool())
             .await?;
-            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None)
-                .await;
-            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, None, None)
-                .await;
-            if let (Some(ref sig), Some(ref cid)) = (sig_for_chain_update.as_ref(), chain_sid.as_ref()) {
+            wallet_gl_posting::apply_session_postings_from_lifecycle_json(db, &v, None, None).await;
+            wallet_gl_posting::apply_chain_postings_from_lifecycle_json(db, &v, None, None).await;
+            if let (Some(ref sig), Some(ref cid)) =
+                (sig_for_chain_update.as_ref(), chain_sid.as_ref())
+            {
                 let _ = sqlx::query(
                     r#"
                     UPDATE position_stream_ledger_rows

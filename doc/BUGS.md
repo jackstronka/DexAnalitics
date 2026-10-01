@@ -48,17 +48,17 @@ keywords: hermetic, flaky, non_hermetic, mainnet rpc in test, set_current_dir, e
 
 ### BUG-20260930-03 — CI „Format Check” formatuje zamiast sprawdzać (zawsze zielony)
 
-status: open  
+status: fixed  
 severity: low  
 reported_by: ai  
 first_seen: 2026-09-30  
-fixed_in:  
-keywords: ci, format_check.yml, make fmt, fmt-check, rustfmt, quality gate, TESTING_REGRESSION_PLAN
+fixed_in: chore/a1-cargo-fmt (6b0c849 + workflow)  
+keywords: ci, format_check.yml, make fmt, fmt-check, rustfmt, quality gate, TESTING_REGRESSION_PLAN, git-blame-ignore-revs
 
 - **Symptom:** Job „Format Check” w GitHub Actions jest zielony, a `cargo fmt --all --check` lokalnie zgłasza 38 niesformatowanych plików (także zacommitowanych, np. `handlers/strategies.rs`, `server.rs`).
 - **Root cause:** `.github/workflows/format_check.yml` uruchamia `make fmt` (`cargo fmt --all` — zapisuje zmiany w runnerze) zamiast `make fmt-check`.
-- **Fix:** (planowane, A1 w `IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`) jednorazowy commit `cargo fmt --all`, potem workflow na `cargo fmt --all --check`.
-- **Guards/tests:** job CI z `--check`.
+- **Fix:** (A1, 2026-10-01) jednorazowy commit `cargo fmt --all` (`6b0c849`, 38 plików, tylko format; w `.git-blame-ignore-revs`); `format_check.yml` → `make fmt-check`; `Makefile` `fmt-check` → `cargo fmt --all --check` (wcześniej bez `--all`).
+- **Guards/tests:** job CI `format_check` sprawdza (nie formatuje) i jest wymaganym checkiem w branch protection `main`.
 - **Paths:** `.github/workflows/format_check.yml`, `Makefile`
 
 ---
