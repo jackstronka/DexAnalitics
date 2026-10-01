@@ -1,3 +1,10 @@
+## 2026-10-01 — A1/A10: `cargo fmt` egzekwowany w CI, branch protection `main`
+
+keywords: ci, rustfmt, fmt-check, format_check.yml, git-blame-ignore-revs, branch-protection, required-checks, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-03
+
+- **What:** Jednorazowy commit `cargo fmt --all` (`6b0c849`, wyłącznie format) wpisany do `.git-blame-ignore-revs`. `format_check` w CI uruchamia `make fmt-check` (`cargo fmt --all --check`) — niesformatowany kod = czerwony PR. `main` chroniony: tylko PR, wymagane checki (lista w `doc/TESTING_REGRESSION_PLAN.md` §6), obowiązuje też admina. Przed push: `cargo fmt --all`.
+- **paths:** `.github/workflows/format_check.yml`, `Makefile`, `.git-blame-ignore-revs`
+
 ## 2026-09-30 — Faza 0 planu testów: hermetyczny test registry, gate script w repo, semver baseline
 
 keywords: testing, hermetic-tests, EnvGuard, test_env, registry_stale_reconcile, position_close_signer, CLMM_POSITION_REGISTRY_PATH, CLMM_POSITION_LIFECYCLE_LEDGER_PATH, critical-area-test-gate, semver, ci, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-01, BUG-20260930-04
