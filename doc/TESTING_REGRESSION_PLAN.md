@@ -154,3 +154,7 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 ### A1 (2026-10-01) — format egzekwowany w CI
 
 `cargo fmt --all` jako osobny commit `6b0c849` (38 plików, wyłącznie format) + `.git-blame-ignore-revs`; `format_check.yml` → `make fmt-check` (`cargo fmt --all --check`). BUG-20260930-03 → fixed. Lokalnie: `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
+### A2 (2026-10-01) — `make verify` + hook pre-push
+
+`make verify` (= `verify-rust`: fmt-check, clippy `-D warnings`, `cargo test --workspace`; `verify-web`: `tsc --noEmit`, `vitest run`) i `tools/verify.ps1` (Windows; flagi `-SkipRust` / `-SkipWeb`; fail-fast + tabela krok / status / czas). `.githooks/pre-push` patrzy na pliki w pushowanym zakresie: tylko docs → pomija; tylko `web/` → same kroki web; Rust / `Cargo.*` / `Makefile` / `.github/` → kroki Rust. Włączenie: `git config core.hooksPath .githooks` (per klon). `.gitattributes`: `*.sh` i `.githooks/*` z LF. `npm run lint` poza verify (brak configu ESLint — C6). Sprawdzone: ścieżka FAIL (fmt) zatrzymuje się na 1. kroku; docs-only i delete → skip; web-only → 2 kroki web (~25 s); pełna ścieżka Rust — przy pushu tej gałęzi.

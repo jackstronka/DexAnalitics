@@ -578,6 +578,15 @@
         "run",
         "copy_command"
       ]
+    },
+    {
+      "id": "verify",
+      "path": "tools/verify.ps1",
+      "summary": "Te same sprawdzenia co CI: cargo fmt --check, clippy -D warnings, cargo test --workspace, web tsc + vitest; tabela podsumowania. Odpowiednik make verify; uruchamiany przez .githooks/pre-push.",
+      "when_to_use": "Przed push / PR, w terminalu (kompiluje caly workspace - nie z dashboardu przy dzialajacym API). Hook: git config core.hooksPath .githooks. Flagi: -SkipRust, -SkipWeb.",
+      "risk": "low",
+      "runnable": false,
+      "actions": ["copy_command"]
     }
   ]
 }

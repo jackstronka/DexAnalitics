@@ -1,0 +1,48 @@
+#!/bin/sh
+# Runs the same checks as CI for the parts of the repo touched by this push.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Skip once (CI still enforces):  git push --no-verify
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+zero=0000000000000000000000000000000000000000
+changed=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    base=$(git merge-base "$local_sha" origin/main 2>/dev/null)
+  else
+    base=$remote_sha
+  fi
+  if [ -z "$base" ] || ! files=$(git diff --name-only "$base" "$local_sha" 2>/dev/null); then
+    files="ALL"
+  fi
+  changed="$changed
+$files"
+done
+
+rust=0
+web=0
+printf '%s\n' "$changed" | grep -qE '^(ALL|crates/|Cargo\.(toml|lock)|rust-toolchain|rustfmt\.toml|clippy\.toml|Makefile|\.github/)' && rust=1
+printf '%s\n' "$changed" | grep -qE '^(ALL|web/|\.github/)' && web=1
+
+if [ "$rust" -eq 0 ] && [ "$web" -eq 0 ]; then
+  echo "pre-push: no Rust/web changes, skipping verify"
+  exit 0
+fi
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    set --
+    [ "$rust" -eq 0 ] && set -- "$@" -SkipRust
+    [ "$web" -eq 0 ] && set -- "$@" -SkipWeb
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/verify.ps1 "$@"
+    ;;
+  *)
+    targets=""
+    [ "$rust" -eq 1 ] && targets="$targets verify-rust"
+    [ "$web" -eq 1 ] && targets="$targets verify-web"
+    # shellcheck disable=SC2086
+    exec make $targets
+    ;;
+esac
