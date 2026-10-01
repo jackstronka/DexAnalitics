@@ -61,14 +61,11 @@ mod tests {
         let bytes = kp.to_bytes();
         fs::write(&path, serde_json::to_string(&bytes.to_vec()).unwrap()).unwrap();
 
-        let old = std::env::var("KEYPAIR_PATH").ok();
-        unsafe { std::env::set_var("KEYPAIR_PATH", path.to_str().unwrap()) };
+        let mut env = crate::test_env::EnvGuard::blocking_lock();
+        env.set("KEYPAIR_PATH", &path);
         let w = load_signing_wallet(None).expect("env path");
         assert_eq!(w.pubkey(), kp.pubkey());
-        match old {
-            Some(v) => unsafe { std::env::set_var("KEYPAIR_PATH", v) },
-            None => unsafe { std::env::remove_var("KEYPAIR_PATH") },
-        }
+        drop(env);
         let _ = fs::remove_file(&path);
     }
 }

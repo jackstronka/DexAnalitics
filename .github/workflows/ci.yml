@@ -45,8 +45,15 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: tests
-        run: cargo test --workspace
+      - name: build tests
+        run: cargo test --workspace --no-run
+
+      # Unit/integration tests must be hermetic: run them in a network namespace with only loopback
+      # (local mock servers work, public RPC / HTTP APIs fail fast instead of passing by luck).
+      - name: tests (no network)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare -rn sh -c 'ip link set lo up && cargo test --workspace --offline'
 
   db:
     runs-on: ubuntu-latest

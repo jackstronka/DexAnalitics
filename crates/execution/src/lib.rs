@@ -35,3 +35,6 @@ pub mod sync;
 pub mod transaction;
 /// Wallet management.
 pub mod wallet;
+
+#[cfg(test)]
+mod test_env;

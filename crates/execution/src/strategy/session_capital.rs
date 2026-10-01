@@ -426,13 +426,10 @@ pub fn portfolio_capital_error_if_strict(loaded: &LoadedReopenCaps) -> Option<St
     }
 }
 
-/// Serializes crate tests that mutate process-wide `CLMM_REOPEN_*` / lifecycle-ledger env vars.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
     use clmm_lp_data::wallet_session::SessionCapsSource;
 
     fn write_empty_lifecycle_jsonl(dir: &tempfile::TempDir) -> String {
@@ -443,21 +440,14 @@ mod tests {
 
     #[tokio::test]
     async fn load_session_mint_caps_none_when_flag_off() {
-        let _env = TEST_ENV_LOCK.lock().await;
+        let mut env = EnvGuard::lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path_s = write_empty_lifecycle_jsonl(&dir);
-        unsafe {
-            std::env::set_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "0");
-            std::env::set_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "0");
-        }
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
+        env.set("CLMM_REOPEN_USE_SESSION_CAPITAL", "0");
+        env.set("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "0");
         let out = load_session_mint_caps(None, "any-session", None).await;
         assert!(out.is_none());
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-            std::env::remove_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
-            std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
-        }
     }
 
     #[test]
@@ -490,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_reopen_portfolio_auto_chain_when_id_present_without_env() {
-        let _env = TEST_ENV_LOCK.lock().await;
+        let mut env = EnvGuard::lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("lifecycle.jsonl");
         let chain_id = "chain-auto-1";
@@ -506,12 +496,9 @@ mod tests {
             }
         });
         std::fs::write(&path, line.to_string()).expect("write jsonl");
-        let path_s = path.to_string_lossy().to_string();
-        unsafe {
-            std::env::set_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
-            std::env::remove_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-        }
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path);
+        env.remove("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
+        env.remove("CLMM_REOPEN_USE_SESSION_CAPITAL");
         let loaded = load_reopen_portfolio_caps(None, None, Some(chain_id), None)
             .await
             .expect("auto chain caps");
@@ -522,28 +509,21 @@ mod tests {
                 .cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
             3_000
         );
-        unsafe {
-            std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
-        }
     }
 
     #[test]
     fn chain_portfolio_enabled_respects_explicit_off() {
-        let _env = TEST_ENV_LOCK.blocking_lock();
-        unsafe {
-            std::env::set_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "0");
-        }
+        let mut env = EnvGuard::blocking_lock();
+        env.set("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "0");
         assert!(!chain_portfolio_enabled(Some("some-chain-id")));
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
-        }
+        env.remove("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
         assert!(chain_portfolio_enabled(Some("some-chain-id")));
         assert!(!chain_portfolio_enabled(None));
     }
 
     #[tokio::test]
     async fn load_reopen_portfolio_prefers_chain_when_both_flags() {
-        let _env = TEST_ENV_LOCK.lock().await;
+        let mut env = EnvGuard::lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("lifecycle.jsonl");
         let chain_id = "chain-pref-1";
@@ -561,13 +541,10 @@ mod tests {
             }
         });
         std::fs::write(&path, line.to_string()).expect("write jsonl");
-        let path_s = path.to_string_lossy().to_string();
-        unsafe {
-            std::env::set_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
-            std::env::set_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "1");
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
-            std::env::remove_var("CLMM_REOPEN_CHAIN_STRICT_EMPTY");
-        }
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path);
+        env.set("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "1");
+        env.set("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
+        env.remove("CLMM_REOPEN_CHAIN_STRICT_EMPTY");
         let loaded = load_reopen_portfolio_caps(None, Some(rebalance_id), Some(chain_id), None)
             .await
             .expect("chain caps");
@@ -578,54 +555,37 @@ mod tests {
                 .cap_u64_for_mint(clmm_lp_data::wallet_session::WSOL_MINT),
             2_000
         );
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-            std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
-        }
     }
 
     #[tokio::test]
     async fn cap_rpc_with_portfolio_limits_without_session_flag() {
-        let _env = TEST_ENV_LOCK.lock().await;
+        let mut env = EnvGuard::lock().await;
         let mint = Pubkey::new_unique();
         let mut caps = SessionMintCaps::empty("chain-1");
         caps.caps_by_mint.insert(mint.to_string(), 42);
-        unsafe {
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "0");
-        }
+        env.set("CLMM_REOPEN_USE_SESSION_CAPITAL", "0");
         assert_eq!(cap_rpc_with_portfolio(100, &mint, Some(&caps)), 42);
         assert_eq!(cap_rpc_with_session(100, &mint, Some(&caps)), 100);
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-        }
     }
 
     #[tokio::test]
     async fn load_session_mint_caps_strict_empty_returns_empty_some() {
-        let _env = TEST_ENV_LOCK.lock().await;
+        let mut env = EnvGuard::lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path_s = write_empty_lifecycle_jsonl(&dir);
-        unsafe {
-            std::env::set_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
-            std::env::set_var("CLMM_REOPEN_SESSION_STRICT_EMPTY", "1");
-        }
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
+        env.set("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
+        env.set("CLMM_REOPEN_SESSION_STRICT_EMPTY", "1");
         let out = load_session_mint_caps(None, "sess-no-rows", None)
             .await
             .expect("strict empty returns Some");
         assert!(out.is_empty());
         assert_eq!(out.source, SessionCapsSource::Empty);
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-            std::env::remove_var("CLMM_REOPEN_SESSION_STRICT_EMPTY");
-            std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
-        }
     }
 
     #[tokio::test]
     async fn load_session_mint_caps_reads_jsonl_inventory() {
-        let _env = TEST_ENV_LOCK.lock().await;
+        let mut env = EnvGuard::lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("lifecycle.jsonl");
         let sid = "sess-load-1";
@@ -641,12 +601,9 @@ mod tests {
             }
         });
         std::fs::write(&path, line.to_string()).expect("write jsonl");
-        let path_s = path.to_string_lossy().to_string();
-        unsafe {
-            std::env::set_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
-            std::env::remove_var("CLMM_REOPEN_SESSION_STRICT_EMPTY");
-        }
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path);
+        env.set("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
+        env.remove("CLMM_REOPEN_SESSION_STRICT_EMPTY");
         let out = load_session_mint_caps(None, sid, None)
             .await
             .expect("inventory");
@@ -658,9 +615,5 @@ mod tests {
             out.cap_u64_for_mint(clmm_lp_data::wallet_session::USDC_MINT),
             250
         );
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-            std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
-        }
     }
 }

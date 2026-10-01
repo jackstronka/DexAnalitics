@@ -2636,20 +2636,14 @@ mod tests {
             }
         });
         std::fs::write(&path, line.to_string()).expect("write jsonl");
-        let path_s = path.to_string_lossy().to_string();
-        unsafe {
-            std::env::set_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path_s);
-            std::env::remove_var("CLMM_REOPEN_SESSION_REQUIRE_RECONCILE");
-        }
+        let mut env = crate::test_env::EnvGuard::lock().await;
+        env.set("CLMM_POSITION_LIFECYCLE_LEDGER_PATH", &path);
+        env.remove("CLMM_REOPEN_SESSION_REQUIRE_RECONCILE");
 
         let caps = resolve_session_mint_caps(None, sid, None).await;
         assert_eq!(caps.source, SessionCapsSource::LifecycleFile);
         assert_eq!(caps.cap_u64_for_mint(WSOL_MINT), 42);
         assert_eq!(caps.cap_u64_for_mint(USDC_MINT), 7);
-
-        unsafe {
-            std::env::remove_var("CLMM_POSITION_LIFECYCLE_LEDGER_PATH");
-        }
     }
 
     #[test]
