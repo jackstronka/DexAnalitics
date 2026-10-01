@@ -2440,10 +2440,18 @@ struct WalletEffectiveCacheFileEntry {
 }
 
 fn instant_from_wall_timestamp(updated_at_utc: &str, now: Instant) -> Instant {
+    instant_from_wall_timestamp_at(updated_at_utc, now, chrono::Utc::now())
+}
+
+fn instant_from_wall_timestamp_at(
+    updated_at_utc: &str,
+    now: Instant,
+    wall_now: chrono::DateTime<chrono::Utc>,
+) -> Instant {
     let Ok(ts) = chrono::DateTime::parse_from_rfc3339(updated_at_utc) else {
         return now;
     };
-    let age_ms = chrono::Utc::now()
+    let age_ms = wall_now
         .signed_duration_since(ts.with_timezone(&chrono::Utc))
         .num_milliseconds()
         .max(0) as u64;
@@ -3838,11 +3846,17 @@ mod tests {
 
     #[test]
     fn wallet_effective_hydrate_timestamp_preserves_stale_age() {
-        let ts = (chrono::Utc::now() - chrono::Duration::seconds(6)).to_rfc3339();
-        let hydrated_at = instant_from_wall_timestamp(&ts, Instant::now());
-        let age_ms = hydrated_at.elapsed().as_millis();
+        let wall_now = chrono::DateTime::parse_from_rfc3339("2026-05-12T20:00:06Z")
+            .expect("wall now")
+            .with_timezone(&chrono::Utc);
+        let now = Instant::now() + Duration::from_secs(60);
+        let hydrated_at = instant_from_wall_timestamp_at("2026-05-12T20:00:00Z", now, wall_now);
 
-        assert!((5_000..=7_500).contains(&age_ms));
+        assert_eq!(now.duration_since(hydrated_at), Duration::from_secs(6));
+        assert_eq!(
+            instant_from_wall_timestamp_at("not-a-timestamp", now, wall_now),
+            now
+        );
     }
 
     #[test]

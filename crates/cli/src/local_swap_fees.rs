@@ -7,11 +7,18 @@ use rust_decimal::prelude::FromPrimitive;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `data/` at runtime (cwd) or workspace `data/` during unit tests (stable paths, no `set_current_dir`).
+#[cfg(test)]
+thread_local! {
+    static TEST_DATA_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `data/` at runtime (cwd); in unit tests a per-thread temp dir (tests must never touch repo `data/`).
 fn repo_data_dir() -> PathBuf {
     #[cfg(test)]
     {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+        TEST_DATA_DIR
+            .with(|d| d.borrow().clone())
+            .expect("test must set TEST_DATA_DIR before reading local swaps")
     }
     #[cfg(not(test))]
     {
@@ -302,19 +309,14 @@ mod regression_tests {
 
     #[test]
     fn build_local_pool_fees_uses_decoded_swaps_when_strict_ok() {
-        let pool = format!(
-            "test_pool_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
-        );
-        write_synthetic_decoded_fixture("orca", &pool);
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        TEST_DATA_DIR.with(|d| *d.borrow_mut() = Some(data_dir.path().to_path_buf()));
+        let pool = "test_pool";
+        write_synthetic_decoded_fixture("orca", pool);
 
         let steps = synthetic_steps(48);
         let fee_rate = Decimal::new(3, 3);
-        let m = build_local_pool_fees_usd("orca", &pool, &steps, 3600, 9, 6, fee_rate, true)
+        let m = build_local_pool_fees_usd("orca", pool, &steps, 3600, 9, 6, fee_rate, true)
             .expect("expected non-empty local pool fees from fixture decoded_swaps.jsonl");
 
         let sum: Decimal = m.values().copied().sum();

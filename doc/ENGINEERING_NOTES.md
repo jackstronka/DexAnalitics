@@ -1,3 +1,10 @@
+## 2026-10-01 — A6–A7: `EnvGuard` w każdym crate, testy bez repo `data/`, CI testy bez sieci
+
+keywords: hermetic, EnvGuard, test_env, env-var-race, unshare, network-namespace, offline-tests, no-fail-fast, local_swap_fees, tempdir, wall-clock, RpcConfig-fallback, clmm-lp-api, clmm-lp-cli, clmm-lp-data, clmm-lp-execution, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-04
+
+- **What:** `crates/{api,cli,data,execution}/src/test_env.rs` — ten sam `EnvGuard` (`lock().await` / `blocking_lock()`, `set` / `remove`, restore w `Drop`). Zasada: test, który zmienia env procesu, trzyma `EnvGuard` przez cały czas trwania. `local_swap_fees` w testach czyta/zapisuje tylko per-wątkowy tempdir. `instant_from_wall_timestamp_at` (wstrzyknięty zegar ścienny) — zachowanie produkcyjne bez zmian. CI `rust`: testy w przestrzeni sieciowej z samym loopbackiem (`unshare -rn`), `--offline --no-fail-fast` — test, który potrzebuje sieci, pada w CI zamiast przechodzić przypadkiem. Testy z `RpcConfig { .. Default::default() }` muszą ustawić `fallback_urls: Vec::new()` (default dokłada publiczne RPC mainnet).
+- **paths:** `crates/*/src/test_env.rs`, `crates/execution/src/strategy/session_capital.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/cli/src/local_swap_fees.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/services/position_stream_lineage.rs`, `.github/workflows/ci.yml`
+
 ## 2026-10-01 — A3–A5: `ci.yml` (rust / web / db), Postgres w CI, cache
 
 keywords: ci, github-actions, rust-cache, concurrency, postgres-ci, CLMM_REQUIRE_DB_TESTS, session_gl_integration, web-ci, vitest, tsc, branch-protection, required-checks, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-04

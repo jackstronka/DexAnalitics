@@ -43,4 +43,5 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
+tempfile = "3.20"
 

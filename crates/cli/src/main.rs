@@ -9,6 +9,8 @@ mod orchestrator_gate;
 pub mod output;
 mod snapshots;
 mod swap_sync;
+#[cfg(test)]
+mod test_env;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};

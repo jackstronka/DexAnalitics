@@ -402,18 +402,15 @@ fn _read_last_events(limit: usize) -> ApiResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{LazyLock, Mutex};
+    use crate::test_env::EnvGuard;
     use tempfile::tempdir;
-
-    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn append_message_concurrent_keeps_all_rows() {
-        let _guard = TEST_ENV_LOCK.lock().expect("test env lock");
+        let mut env = EnvGuard::blocking_lock();
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("agent-data");
-        // SAFETY: guarded by TEST_ENV_LOCK to avoid concurrent env var mutation in tests.
-        unsafe { std::env::set_var("CLMM_AGENT_DATA_DIR", &path) };
+        env.set("CLMM_AGENT_DATA_DIR", &path);
 
         let position = "7Mxt4r3kquyMwxPjggwYV4XeY2vQyxuN8LwfbYQj1m8x";
         let threads = 24usize;
@@ -436,18 +433,14 @@ mod tests {
         for m in messages {
             assert!(uniq.insert(m.id), "message id collision detected");
         }
-
-        // SAFETY: guarded by TEST_ENV_LOCK to avoid concurrent env var mutation in tests.
-        unsafe { std::env::remove_var("CLMM_AGENT_DATA_DIR") };
     }
 
     #[test]
     fn get_or_create_session_concurrent_creates_single_session() {
-        let _guard = TEST_ENV_LOCK.lock().expect("test env lock");
+        let mut env = EnvGuard::blocking_lock();
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("agent-data");
-        // SAFETY: guarded by TEST_ENV_LOCK to avoid concurrent env var mutation in tests.
-        unsafe { std::env::set_var("CLMM_AGENT_DATA_DIR", &path) };
+        env.set("CLMM_AGENT_DATA_DIR", &path);
 
         let position = "6z4o9M1zN8vnM9x4fXkzQz3wN5sYj2Yy1W4Kx9Yq3FJ2";
         let threads = 20usize;
@@ -476,8 +469,5 @@ mod tests {
             .filter(|s| s.position_address == position)
             .count();
         assert_eq!(count, 1, "session should not be duplicated");
-
-        // SAFETY: guarded by TEST_ENV_LOCK to avoid concurrent env var mutation in tests.
-        unsafe { std::env::remove_var("CLMM_AGENT_DATA_DIR") };
     }
 }

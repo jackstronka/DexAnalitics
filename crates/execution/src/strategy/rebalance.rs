@@ -5029,19 +5029,13 @@ mod tests {
             caps: empty,
             scope: crate::strategy::session_capital::ReopenPortfolioScope::Chain,
         };
-        let _env = crate::strategy::session_capital::TEST_ENV_LOCK.blocking_lock();
-        unsafe {
-            std::env::set_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "1");
-            std::env::set_var("CLMM_REOPEN_CHAIN_STRICT_EMPTY", "1");
-        }
+        let mut env = crate::test_env::EnvGuard::blocking_lock();
+        env.set("CLMM_REOPEN_USE_CHAIN_PORTFOLIO", "1");
+        env.set("CLMM_REOPEN_CHAIN_STRICT_EMPTY", "1");
         let err = crate::strategy::session_capital::portfolio_capital_error_if_strict(&loaded)
             .expect("err");
         assert!(err.contains("portfolio_capital_unknown"));
         assert!(err.contains("chain-empty"));
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_CHAIN_PORTFOLIO");
-            std::env::remove_var("CLMM_REOPEN_CHAIN_STRICT_EMPTY");
-        }
     }
 
     #[test]
@@ -5049,17 +5043,13 @@ mod tests {
         let mint = Pubkey::new_unique();
         let mut caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-1");
         caps.caps_by_mint.insert(mint.to_string(), 40);
-        let _env = crate::strategy::session_capital::TEST_ENV_LOCK.blocking_lock();
-        unsafe {
-            std::env::set_var("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
-        }
+        let mut env = crate::test_env::EnvGuard::blocking_lock();
+        env.set("CLMM_REOPEN_USE_SESSION_CAPITAL", "1");
         assert_eq!(
             crate::strategy::session_capital::cap_rpc_with_session(100, &mint, Some(&caps)),
             40
         );
-        unsafe {
-            std::env::remove_var("CLMM_REOPEN_USE_SESSION_CAPITAL");
-        }
+        env.remove("CLMM_REOPEN_USE_SESSION_CAPITAL");
         assert_eq!(
             crate::strategy::session_capital::cap_rpc_with_session(100, &mint, Some(&caps)),
             100
@@ -5169,9 +5159,8 @@ mod tests {
 
     #[test]
     fn swap_mix_eps_scales_with_target_when_no_env_override() {
-        // Ensure unset override for this unit test.
-        // NOTE: env mutation is `unsafe` on Rust 2024 due to data race potential with other tests.
-        unsafe { std::env::remove_var("CLMM_SWAP_MIX_DEFICIT_USD_EPS") };
+        let mut env = crate::test_env::EnvGuard::blocking_lock();
+        env.remove("CLMM_SWAP_MIX_DEFICIT_USD_EPS");
         let small = swap_mix_deficit_usd_epsilon_for_target(10.0);
         let big = swap_mix_deficit_usd_epsilon_for_target(1000.0);
         assert!((0.05..=0.50).contains(&small));

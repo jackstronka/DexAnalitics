@@ -19,6 +19,9 @@ pub mod timeseries;
 /// Logical SESSION portfolio (lifecycle deltas, GL read, executor caps).
 pub mod wallet_session;
 
+#[cfg(test)]
+mod test_env;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use clmm_lp_domain::entities::price_candle::PriceCandle;

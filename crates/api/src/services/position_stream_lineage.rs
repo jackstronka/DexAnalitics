@@ -5787,6 +5787,7 @@ mod tests {
     fn test_state_no_db() -> AppState {
         let rpc_config = RpcConfig {
             primary_url: "http://127.0.0.1:1".to_string(),
+            fallback_urls: Vec::new(),
             ..Default::default()
         };
         AppState::new(rpc_config, ApiConfig::default(), None)
