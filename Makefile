@@ -60,6 +60,20 @@ clean:
 .PHONY: check
 check: test fmt-check lint
 
+# Same checks as CI; run by .githooks/pre-push (Windows: tools/verify.ps1)
+.PHONY: verify verify-rust verify-web hooks
+verify: verify-rust verify-web
+
+verify-rust: fmt-check lint
+	LOGLEVEL=WARN cargo test --workspace
+
+verify-web:
+	cd web && npx tsc --noEmit && npx vitest run
+
+# Enable repo git hooks for this clone
+hooks:
+	git config core.hooksPath .githooks
+
 # Run the project
 .PHONY: run
 run:

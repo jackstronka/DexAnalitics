@@ -1,3 +1,10 @@
+## 2026-10-01 — A2: `make verify` / `tools/verify.ps1` + hook pre-push
+
+keywords: make-verify, verify.ps1, pre-push, githooks, core.hooksPath, gitattributes, eol-lf, ci-parity, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Jedna komenda = to samo co CI: `make verify` (Linux) / `tools/verify.ps1` (Windows) — fmt-check, clippy `-D warnings`, `cargo test --workspace`, web `tsc` + `vitest`; tabela podsumowania. `.githooks/pre-push` uruchamia tylko części dotknięte pushem (docs-only = skip). Opt-in per klon: `git config core.hooksPath .githooks`; pominięcie raz: `git push --no-verify` (CI dalej egzekwuje). `.gitattributes` wymusza LF dla `*.sh` / `.githooks/*`.
+- **paths:** `Makefile`, `tools/verify.ps1`, `.githooks/pre-push`, `.gitattributes`, `tools/scripts-manifest.json`, `AGENTS.md`
+
 ## 2026-10-01 — A1/A10: `cargo fmt` egzekwowany w CI, branch protection `main`
 
 keywords: ci, rustfmt, fmt-check, format_check.yml, git-blame-ignore-revs, branch-protection, required-checks, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-03

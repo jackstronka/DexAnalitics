@@ -39,7 +39,8 @@ Standard build/test/lint commands are in the `Makefile`:
 | Test | `make test` or `LOGLEVEL=WARN cargo test` |
 | Lint (strict) | `make lint` (uses `-D warnings`; has pre-existing warnings) |
 | Format | `make fmt` |
-| Pre-push | `make pre-push` |
+| Verify (same as CI) | `make verify` (Windows: `tools/verify.ps1`); pre-push hook: `git config core.hooksPath .githooks` |
+| Pre-push (auto-fix) | `make pre-push` |
 
 ### Starting services
 
