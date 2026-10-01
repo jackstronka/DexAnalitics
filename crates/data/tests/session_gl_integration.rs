@@ -23,6 +23,10 @@ fn database_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// `migrate()` is not safe to run concurrently on a fresh database (BUG-20261001-01); tests in this
+/// file run in parallel, so migrate once per test process.
+static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
 fn db_tests_required() -> bool {
     std::env::var("CLMM_REQUIRE_DB_TESTS").is_ok_and(|v| v.trim() == "1")
 }
@@ -43,7 +47,7 @@ async fn test_db() -> Option<Database> {
             return None;
         }
     };
-    if let Err(e) = db.migrate().await {
+    if let Err(e) = MIGRATED.get_or_try_init(|| db.migrate()).await {
         assert!(!required, "CLMM_REQUIRE_DB_TESTS=1 but migrate failed: {e}");
         return None;
     }

@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20261001-01 — `Database::migrate()` nie jest bezpieczny przy równoległym uruchomieniu na świeżej bazie
+
+status: open  
+severity: low  
+reported_by: ai  
+first_seen: 2026-10-01  
+fixed_in:  
+keywords: migrate, migrations, postgres, concurrency, race, CREATE TABLE IF NOT EXISTS, pg_type_typname_nsp_index, duplicate key, pg_advisory_lock, session_gl_integration, CI db job
+
+- **Symptom:** Pierwszy run joba CI `db` (PR #5): 3 z 4 testów `session_gl_integration` padają na `migrate failed: error returned from database: duplicate key value violates unique constraint "pg_type_typname_nsp_index"`; czwarty (`chain_gl_lifecycle_posting_matches_pslr`) przechodzi.
+- **Root cause:** `crates/data/src/repositories/database.rs::migrate()` wykonuje instrukcje `CREATE … IF NOT EXISTS` na puli bez blokady. Postgres nie gwarantuje bezpieczeństwa `IF NOT EXISTS` przy współbieżnym tworzeniu tego samego obiektu (kolizja w katalogu `pg_type`). Testy uruchamiają `migrate()` równolegle na pustej bazie. W produkcji ten sam wyścig możliwy, gdy dwa procesy (API `server.rs:456`, CLI `main.rs:4378`) migrują **świeżą** bazę jednocześnie; na bazie z istniejącymi tabelami nie występuje.
+- **Fix:** testy — migracja raz na proces (`tokio::sync::OnceCell` w `session_gl_integration.rs`), PR #5. Produkt — brak (propozycja: `migrate()` na jednym połączeniu pod `pg_advisory_lock(<stała>)` … `pg_advisory_unlock`, wymaga GO).
+- **Guards/tests:** job CI `db` (Postgres 16, `CLMM_REQUIRE_DB_TESTS=1`). Po poprawce produktu: test dwóch równoległych `migrate()` na świeżej bazie w `session_gl_integration`.
+- **Paths:** `crates/data/src/repositories/database.rs`, `crates/data/tests/session_gl_integration.rs`, `crates/api/src/server.rs`, `crates/cli/src/main.rs`
+
+---
+
 ### BUG-20260930-04 — Testy niehermetyczne: sieć, repo `data/`, `set_current_dir`, env bez blokady, puste passy
 
 status: partially fixed (punkt 1 i `position_close_signer` z punktu 3 — faza 0.1; reszta A5/A6/A7)  
