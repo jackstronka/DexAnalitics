@@ -1,3 +1,10 @@
+## 2026-10-01 — A3–A5: `ci.yml` (rust / web / db), Postgres w CI, cache
+
+keywords: ci, github-actions, rust-cache, concurrency, postgres-ci, CLMM_REQUIRE_DB_TESTS, session_gl_integration, web-ci, vitest, tsc, branch-protection, required-checks, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE, BUG-20260930-04
+
+- **What:** Jeden workflow `ci.yml` z jobami `rust` (fmt / clippy / tests, cache), `web` (tsc / vitest), `db` (Postgres 16 service + `session_gl_integration`). `CLMM_REQUIRE_DB_TESTS=1` zamienia „brak bazy → cichy pass” na FAIL. Usunięte `tests.yml`, `lint.yml`, `build.yml`, `format_check.yml`; CI tylko na PR i `main` (bez podwójnych runów), `cancel-in-progress` na PR; coverage tylko na `main`. Wymagane checki: `rust`, `web`, `db`, `critical_area_requires_tests`. Lokalnie testy DB uruchamiać na osobnej bazie (wstawiają wiersze).
+- **paths:** `.github/workflows/ci.yml`, `.github/workflows/quality_gates.yml`, `.github/workflows/code_coverage.yml`, `crates/data/tests/session_gl_integration.rs`
+
 ## 2026-10-01 — A2: `make verify` / `tools/verify.ps1` + hook pre-push
 
 keywords: make-verify, verify.ps1, pre-push, githooks, core.hooksPath, gitattributes, eol-lf, ci-parity, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

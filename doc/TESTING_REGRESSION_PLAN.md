@@ -158,3 +158,11 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 ### A2 (2026-10-01) — `make verify` + hook pre-push
 
 `make verify` (= `verify-rust`: fmt-check, clippy `-D warnings`, `cargo test --workspace`; `verify-web`: `tsc --noEmit`, `vitest run`) i `tools/verify.ps1` (Windows; flagi `-SkipRust` / `-SkipWeb`; fail-fast + tabela krok / status / czas). `.githooks/pre-push` patrzy na pliki w pushowanym zakresie: tylko docs → pomija; tylko `web/` → same kroki web; Rust / `Cargo.*` / `Makefile` / `.github/` → kroki Rust. Włączenie: `git config core.hooksPath .githooks` (per klon). `.gitattributes`: `*.sh` i `.githooks/*` z LF. `npm run lint` poza verify (brak configu ESLint — C6). Sprawdzone: ścieżka FAIL (fmt) zatrzymuje się na 1. kroku; docs-only i delete → skip; web-only → 2 kroki web (~25 s); pełna ścieżka Rust — przy pushu tej gałęzi.
+
+### A3–A5 (2026-10-01) — jeden `ci.yml`: `rust` / `web` / `db`
+
+- **`rust`** (zastępuje `tests.yml`, `lint.yml`, `build.yml`, `format_check.yml`): fmt-check → clippy `-D warnings` → `cargo test --workspace`, jedna kompilacja, `Swatinem/rust-cache`. Osobny `cargo build` usunięty (clippy `--all-targets` kompiluje wszystkie cele; release build robią obrazy Docker). Matryca `ubuntu-22.04` usunięta.
+- **`web`**: `npm install` (lock gitignorowany) → `tsc --noEmit` → `vitest run`.
+- **`db`**: `postgres:16` jako service, `CLMM_REQUIRE_DB_TESTS=1` → `session_gl_integration` bez bazy = FAIL (wcześniej cichy pass). Lokalnie bez env dalej skip.
+- Triggery: PR do `main` / `release/**` + push na `main` (koniec podwójnych runów push+PR na gałęziach); `concurrency` anuluje stare runy PR. `quality_gates`: usunięty duplikat `lineage_shadow_diff` (golden jest w `cargo test --workspace`). `code_coverage`: tylko push `main` / ręcznie.
+- Branch protection: wymagane `rust`, `web`, `db`, `critical_area_requires_tests`.

@@ -1,10 +1,16 @@
 name: Quality Gates
 
+# lineage_shadow_diff golden runs inside `cargo test --workspace` (ci.yml, job rust).
+
 on:
   pull_request:
     branches:
       - main
       - "release/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   critical_area_requires_tests:
@@ -19,13 +25,3 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: bash scripts/ci/critical-area-test-gate.sh
-
-  lineage_shadow_diff:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - name: Run lineage shadow diff test
-        run: cargo test -p clmm-lp-api lineage_shadow_diff_matches_golden_fixture -- --nocapture

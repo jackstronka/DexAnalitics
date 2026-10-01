@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20261001-01 — `Database::migrate()` nie jest bezpieczny przy równoległym uruchomieniu na świeżej bazie
+
+status: open  
+severity: low  
+reported_by: ai  
+first_seen: 2026-10-01  
+fixed_in:  
+keywords: migrate, migrations, postgres, concurrency, race, CREATE TABLE IF NOT EXISTS, pg_type_typname_nsp_index, duplicate key, pg_advisory_lock, session_gl_integration, CI db job
+
+- **Symptom:** Pierwszy run joba CI `db` (PR #5): 3 z 4 testów `session_gl_integration` padają na `migrate failed: error returned from database: duplicate key value violates unique constraint "pg_type_typname_nsp_index"`; czwarty (`chain_gl_lifecycle_posting_matches_pslr`) przechodzi.
+- **Root cause:** `crates/data/src/repositories/database.rs::migrate()` wykonuje instrukcje `CREATE … IF NOT EXISTS` na puli bez blokady. Postgres nie gwarantuje bezpieczeństwa `IF NOT EXISTS` przy współbieżnym tworzeniu tego samego obiektu (kolizja w katalogu `pg_type`). Testy uruchamiają `migrate()` równolegle na pustej bazie. W produkcji ten sam wyścig możliwy, gdy dwa procesy (API `server.rs:456`, CLI `main.rs:4378`) migrują **świeżą** bazę jednocześnie; na bazie z istniejącymi tabelami nie występuje.
+- **Fix:** testy — migracja raz na proces (`tokio::sync::OnceCell` w `session_gl_integration.rs`), PR #5. Produkt — brak (propozycja: `migrate()` na jednym połączeniu pod `pg_advisory_lock(<stała>)` … `pg_advisory_unlock`, wymaga GO).
+- **Guards/tests:** job CI `db` (Postgres 16, `CLMM_REQUIRE_DB_TESTS=1`). Po poprawce produktu: test dwóch równoległych `migrate()` na świeżej bazie w `session_gl_integration`.
+- **Paths:** `crates/data/src/repositories/database.rs`, `crates/data/tests/session_gl_integration.rs`, `crates/api/src/server.rs`, `crates/cli/src/main.rs`
+
+---
+
 ### BUG-20260930-04 — Testy niehermetyczne: sieć, repo `data/`, `set_current_dir`, env bez blokady, puste passy
 
 status: partially fixed (punkt 1 i `position_close_signer` z punktu 3 — faza 0.1; reszta A5/A6/A7)  
@@ -40,7 +57,7 @@ keywords: hermetic, flaky, non_hermetic, mainnet rpc in test, set_current_dir, e
 - **Symptom:** `run_tests` czerwony w CI PR #2 (Linux), lokalnie zielony. Wynik testów zależy od maszyny, sieci i kolejności wątków.
 - **Root cause:** (audyt kodu 2026-09-30) (1) `registry_stale_reconcile::backfill_9vhky_orphan_close_when_lifecycle_missing` woła mainnet RPC, czyta/zapisuje gitignorowany ledger, zmienia `set_current_dir`; lokalnie bez danych robi `return` (pusty pass). (2) `cli/src/local_swap_fees.rs` test zapisuje do repo `data/swaps/orca/<pool>/decoded_swaps.jsonl`. (3) Env bez wspólnej blokady: `CLMM_POSITION_REGISTRY_PATH` (`api/position_close_signer.rs`, bez sprzątania), `ORCA_PUBLIC_API_BASE_URL` (`api/handlers/pools_tests.rs`), `CLMM_SWAP_MIX_DEFICIT_USD_EPS` (`execution/rebalance.rs` poza `TEST_ENV_LOCK`), `CLMM_POSITION_LIFECYCLE_LEDGER_PATH` / `CLMM_REOPEN_SESSION_REQUIRE_RECONCILE` (`data/wallet_session.rs`), `KEYPAIR_PATH` (`cli/orca_wallet.rs`). (4) 4× `session_gl_integration` cicho przechodzą bez `DATABASE_URL`. (5) `wallets.rs` `wallet_effective_hydrate_timestamp_preserves_stale_age` — okno zegara 5000–7500 ms.
 - **Uzupełnienie (weryfikacja 2026-09-30, luki L1–L3 w `IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md` §2):** (6) CI `run_tests` zatrzymał się na pierwszym padzie (`clmm-lp-api --lib`), bo `make test` nie ma `--no-fail-fast` — testy pozostałych crate'ów nie wykonały się w CI, lista przyczyn może być niepełna (plan 0.5). (7) Niejawne odczyty gitignorowanego `data/ledger/orca_position_lifecycle.jsonl` przez domyślne ścieżki (`data/wallet_session.rs:1217`, `protocols/ledger/tx_lifecycle.rs` `DEFAULT_REL_PATH`) — nie wiadomo jeszcze, czy trafia w nie aktywny test (plan A6). (8) `CLMM_AGENT_DATA_DIR` w `api/position_agent_service.rs` pod lokalnym lockiem zamiast `EnvGuard`, bez przywrócenia przy panice (plan A6).
-- **Fix:** (faza 0.1, 2026-09-30) `crates/api/src/test_env.rs::EnvGuard` — wspólna blokada env dla testów crate'u `clmm-lp-api` + przywracanie wartości w `Drop`. `registry_stale_reconcile`: 3 hermetyczne testy (tempdir registry + lifecycle przez `CLMM_POSITION_REGISTRY_PATH` / `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`, RPC na nieroutowalny `127.0.0.1:9` — wczesne wyjścia nie mogą dotknąć sieci); stary test mainnet → `#[ignore]` „manual repair”, bez `set_current_dir`, bez pustego `return` (assert zamiast). `position_close_signer` testy pod `EnvGuard`. Pozostałe (2)–(5): plan A5, A6, A7.
+- **Fix:** (faza 0.1, 2026-09-30) `crates/api/src/test_env.rs::EnvGuard` — wspólna blokada env dla testów crate'u `clmm-lp-api` + przywracanie wartości w `Drop`. `registry_stale_reconcile`: 3 hermetyczne testy (tempdir registry + lifecycle przez `CLMM_POSITION_REGISTRY_PATH` / `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`, RPC na nieroutowalny `127.0.0.1:9` — wczesne wyjścia nie mogą dotknąć sieci); stary test mainnet → `#[ignore]` „manual repair”, bez `set_current_dir`, bez pustego `return` (assert zamiast). `position_close_signer` testy pod `EnvGuard`. (2026-10-01, A5) punkt (4): `session_gl_integration::test_db()` przy `CLMM_REQUIRE_DB_TESTS=1` panikuje przy braku / błędzie bazy; job CI `db` (Postgres 16) ustawia to env. Pozostałe (2), (3) reszta, (5): plan A6, A7.
 - **Guards/tests:** `orphan_close_detected_only_for_registry_close_without_lifecycle_close`, `last_open_snapshot_takes_latest_open_row`, `backfill_skips_without_rpc_when_already_closed_or_no_open_snapshot`; `cargo test --workspace` 0 fail. Planowane: `EnvGuard` w pozostałych crate'ach; `CLMM_REQUIRE_DB_TESTS=1` w CI; testy Rust w CI pod `unshare -n` (brak sieci poza loopback).
 - **Paths:** `crates/api/src/services/registry_stale_reconcile.rs`, `crates/cli/src/local_swap_fees.rs`, `crates/api/src/services/position_close_signer.rs`, `crates/api/src/handlers/pools_tests.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/data/src/wallet_session.rs`, `crates/cli/src/orca_wallet.rs`, `crates/data/tests/session_gl_integration.rs`, `crates/api/src/handlers/wallets.rs`, `crates/api/src/services/position_agent_service.rs`, `crates/protocols/src/ledger/tx_lifecycle.rs`, `Makefile`
 
