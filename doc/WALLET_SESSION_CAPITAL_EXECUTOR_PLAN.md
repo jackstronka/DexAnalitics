@@ -323,6 +323,27 @@ Istniejące bez zmian: `CLMM_REOPEN_WALLET_REFRESH_*`, `CLMM_PENDING_OPEN_*`, `C
 3. Z flagą on: reopen nie używa tokenów **poza** SESSION (test: druga sesja zużyła globalny portfel — reopen sesji A **nie** otwiera na kapitał B).
 4. Pending-open po `session_below_target` — ponawianie gdy SESSION rośnie (np. po backfill).
 
+### 8.3 Testy i kryteria regresji (plan testów)
+
+Szablon: [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md).
+
+**Obszar testów (R1):** Ekonomia / GL (+ Execution / rebalance dla kapsów).  
+**Pozycja w mapie rozwoju:** F2.5 session capital default ([`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §7), powiązane F2.2 (sizing).
+
+| Co chronimy | Typ testu | Fixture / dane | Stan |
+| ----------- | --------- | -------------- | ---- |
+| Reopen/open respektuje `SessionMintCaps` przy fladze on/off | unit (`session_capital`, `rebalance`) pod `EnvGuard` | JSONL w tempdir | ✅ |
+| Agregaty lifecycle → SESSION (close + open, Δ mintów) | golden (B2) | syntetyczny lifecycle JSONL w repo | ❌ |
+| Saldo SESSION nigdy < 0 po dowolnej sekwencji zdarzeń | niezmiennik (proptest, C3(2)) | generowane sekwencje close/open/collect | ❌ |
+| Reopen ~$10 → ~$4: notional ≥ target × (1−ε) albo jawny `session_cap_*` | golden sizing (B3) | wiersz z BUG-20260512-03 | ❌ |
+| API resolve SESSION z Postgresa | db (`session_gl_integration`, job CI `db`) | migracje + wiersze testowe | 🟡 (GL read jest; resolve caps z PG — brak) |
+| `W_session < T` → błąd / pending, nie open na globalnym portfelu | unit na funkcji decyzji (bez RPC) | syntetyczne kapsy | ❌ |
+
+**Test exit gate:** B2 i B3 zielone w job `rust`; niezmiennik C3(2) zielony; resolve z PG w job `db`.  
+**Bugi powiązane:** BUG-20260512-03 (`regressed`) → B3 w `Guards/tests`.  
+**Golden delta:** wdrożenie P2 (§2.2 na `W_session`) zmienia sizing — oczekiwana delta w B3, opisana w PR.  
+**Poza automatem:** kryteria E2E operatora z §8.2.
+
 ---
 
 ## 9. Ryzyka i mitigacje

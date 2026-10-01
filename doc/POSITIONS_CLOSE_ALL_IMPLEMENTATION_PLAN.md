@@ -370,6 +370,26 @@ Statusy item: `queued` | `pending_on_chain` | `confirmed` | `failed` | `skipped_
 
 **Manual:** devnet / mały mainnet — porównaj wallet ledger + registry + lista `/positions` po batch.
 
+### 9.1 Testy i kryteria regresji (plan testów)
+
+Szablon: [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md).
+
+**Obszar testów (R1):** Execution / rebalance + API / kontrakt.  
+**Pozycja w mapie rozwoju:** F2.8 close-all persistence ([`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §7).
+
+| Co chronimy | Typ testu | Fixture / dane | Stan |
+| ----------- | --------- | -------------- | ---- |
+| Rozwiązanie signera (§4.3): registry owner wygrywa z active signer; brak registry → RPC owner | unit na resolverze (tabela przypadków z §9) | syntetyczne registry + fałszywy lookup owner | ❌ |
+| Grupowanie per portfel; pozycje spoza API → `skipped_unmanaged_signer` | unit | lista pozycji w teście | ❌ |
+| Dry-run nie wysyła tx | unit z fałszywym executorem (licznik wywołań = 0) | — | ❌ |
+| Job zapisany → „restart” (nowy store z tego samego tempdir / DB) → job odczytany ze statusem | unit + `db` | tempdir / Postgres w job `db` | ❌ |
+| Kontrakt `POST /positions/close-all` i `GET .../{batch_id}` | kontrakt OpenAPI ↔ TS (C1/C2) | snapshot OpenAPI | ❌ |
+
+**Test exit gate:** resolver + persistence zielone w `rust` / `db`; kontrakt w C1.  
+**Bugi powiązane:** brak otwartych — nowe wpisy w [`BUGS.md`](BUGS.md) dostają test w `Guards/tests`.  
+**Golden delta:** nie dotyczy (nie zmienia PnL / sald).  
+**Poza automatem:** wysyłka on-chain (devnet `#[ignore]`) i scenariusz restartu w trakcie realnego batcha — ręcznie, jak wyżej.
+
 ---
 
 ## 10. Ryzyka i poza zakresem

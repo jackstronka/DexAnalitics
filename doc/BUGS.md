@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20261001-02 — Bramka `critical_area_requires_tests` przepuszczała każdą zmianę pliku krytycznego
+
+status: fixed  
+severity: medium  
+reported_by: ai  
+first_seen: 2026-10-01  
+fixed_in: test/a8-a9-a11 (PR #7)  
+keywords: critical-area-test-gate, quality_gates, vacuous pass, mod tests, no-tests-needed, assertion_weakened
+
+- **Symptom:** PR zmieniający np. `rebalance.rs` / `position_stream_lineage.rs` bez żadnego nowego testu przechodził check `critical_area_requires_tests`.
+- **Root cause:** `scripts/ci/critical-area-test-gate.sh` uznawał za „zmianę testów” dowolny zmieniony plik `.rs`, który *zawiera* `#[test]` / `mod tests`; pliki krytyczne same mają moduły testów, więc warunek był zawsze spełniony.
+- **Fix:** liczy się plik testowy w PR albo dodane linie testowe w diffie (`#[test]`, `#[tokio::test]`, `assert*!`, `proptest!`, `insta::assert`); furtka tylko przez etykietę PR `no-tests-needed`. Lista plików rozszerzona (A8).
+- **Guards/tests:** ręcznie sprawdzone 4 scenariusze (docs-only pass, krytyczny bez testu FAIL, etykieta skip, dodany `#[test]` pass) — `doc/TESTING_REGRESSION_PLAN.md` §6 A8.
+- **Paths:** `scripts/ci/critical-area-test-gate.sh`, `.github/workflows/quality_gates.yml`
+
+---
+
 ### BUG-20261001-01 — `Database::migrate()` nie jest bezpieczny przy równoległym uruchomieniu na świeżej bazie
 
 status: open  

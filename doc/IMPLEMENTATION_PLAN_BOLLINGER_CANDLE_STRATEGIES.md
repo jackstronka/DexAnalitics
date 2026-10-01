@@ -121,6 +121,28 @@ flowchart LR
 
 ---
 
+## Testy i kryteria regresji
+
+Szablon: [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md).
+
+**Obszar testów (R1):** Backtest / strategie (+ Execution / rebalance w Fazie 4, API / kontrakt w Fazie 2).  
+**Pozycja w mapie rozwoju:** F5.2 Bollinger / last-candle ([`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) §7).
+
+| Co chronimy | Typ testu | Fixture / dane | Stan |
+| ----------- | --------- | -------------- | ---- |
+| SMA, ±K·σ (przyjęta konwencja σ), min. liczba punktów przed aktywacją | golden | wektor cen / świec w repo | ❌ |
+| Ostatnia **zamknięta** świeca (UTC), `T_rebal` > `T_candle` — kotwica zmienia się tylko przy zamknięciu świecy | unit z wstrzykniętym czasem | syntetyczne świece 15m | ❌ |
+| Brak ruchu ceny ⇒ brak rebalance; zerowa zmienność ⇒ min. szerokość, nie panika | niezmiennik | generowane serie stałe / prawie stałe | ❌ |
+| Nowa strategia dostaje wiersz w macierzy backtestu (B4) | golden | mini fixture backtestu | ❌ |
+| `StrategyType` / `StrategyParameters` w API = typy w `web/src/lib/api.ts` | kontrakt OpenAPI ↔ TS (C1) | snapshot OpenAPI | ❌ |
+
+**Test exit gate:** golden wskaźnika + niezmiennik przed Fazą 1; wiersz B4 przed merge Fazy 1; kontrakt przed Fazą 3.  
+**Bugi powiązane:** brak.  
+**Golden delta:** dodanie strategii nie może ruszyć istniejących wierszy B4 — tylko nowe wiersze.  
+**Poza automatem:** zachowanie na live OHLC (kompletność świec) — telemetria, nie asercja.
+
+---
+
 ## Zobacz też
 
 - [`BACKTEST_OPTIMIZE_STRATEGIES.md`](BACKTEST_OPTIMIZE_STRATEGIES.md) — katalog strategii optimize.

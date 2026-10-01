@@ -4,6 +4,7 @@ name: Quality Gates
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     branches:
       - main
       - "release/**"
@@ -19,9 +20,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Gate critical areas with tests
         env:
           BASE_REF: ${{ github.base_ref }}
+          SKIP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'no-tests-needed') && '1' || '0' }}
         run: bash scripts/ci/critical-area-test-gate.sh

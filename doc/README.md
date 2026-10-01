@@ -49,6 +49,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | **Base + Aerodrome Slipstream (CLMM) live:** oficjalne źródła, fazy 0–5, wielość deployów, bezpieczeństwo, Go-live checklist; fee-only unstaked; endpoint `GET /api/v1/evm/base/aerodrome-slipstream/pools/{pool}/slot0` + `BASE_RPC_URL` |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | **Append-only log of non-trivial code changes** — each entry has `keywords:` for grep / AI search |
 | [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | **Audyt testów 2026-09-30 + log wykonania** (backlog T-PR zastąpiony); plan: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) |
+| [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md) | **Szablon sekcji „Testy i kryteria regresji”** — obowiązkowy w każdym nowym planie (`IMPLEMENTATION_PLAN_*`, `ROADMAP_*`, `*_PLAN.md`) |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | Local-first MVP for an AI narrator / stream agent (YouTube) |
 
 ## Runbooks and operations
