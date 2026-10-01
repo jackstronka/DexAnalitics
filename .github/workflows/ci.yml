@@ -1,0 +1,103 @@
+name: CI
+
+# Required checks on main: rust, web, db (+ quality_gates / critical_area_requires_tests).
+# Local equivalent: make verify (Windows: tools/verify.ps1).
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  LOGLEVEL: WARN
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: tests
+        run: cargo test --workspace
+
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: clmm_user
+          POSTGRES_PASSWORD: clmm_password
+          POSTGRES_DB: clmm_lp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U clmm_user -d clmm_lp_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://clmm_user:clmm_password@localhost:5432/clmm_lp_test
+      CLMM_REQUIRE_DB_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Postgres GL integration tests
+        run: cargo test -p clmm-lp-data --test session_gl_integration -- --nocapture
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      # package-lock.json is gitignored, so `npm ci` is not available.
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: tsc
+        run: npx tsc --noEmit
+
+      - name: vitest
+        run: npx vitest run

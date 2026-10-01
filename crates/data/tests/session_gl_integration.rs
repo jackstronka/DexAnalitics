@@ -1,7 +1,8 @@
 //! Postgres integration: lifecycle → SESSION / CHAIN / WALLET GL → read / PSLR / idempotency.
 //!
-//! Skips when `DATABASE_URL` is unset. Run:
-//! `DATABASE_URL=postgres://clmm_user:clmm_password@localhost:5432/clmm_lp cargo test -p clmm-lp-data --test session_gl_integration`
+//! Skips when `DATABASE_URL` is unset, unless `CLMM_REQUIRE_DB_TESTS=1` (CI) — then a missing or
+//! unreachable database fails the test. Run against a disposable database (tests insert rows):
+//! `DATABASE_URL=postgres://clmm_user:clmm_password@localhost:5432/clmm_lp_test cargo test -p clmm-lp-data --test session_gl_integration`
 
 use clmm_lp_data::repositories::Database;
 use clmm_lp_data::wallet_session::{
@@ -22,10 +23,30 @@ fn database_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn db_tests_required() -> bool {
+    std::env::var("CLMM_REQUIRE_DB_TESTS").is_ok_and(|v| v.trim() == "1")
+}
+
 async fn test_db() -> Option<Database> {
-    let url = database_url()?;
-    let db = Database::connect(&url).await.ok()?;
-    db.migrate().await.ok()?;
+    let required = db_tests_required();
+    let Some(url) = database_url() else {
+        assert!(
+            !required,
+            "CLMM_REQUIRE_DB_TESTS=1 but DATABASE_URL is unset"
+        );
+        return None;
+    };
+    let db = match Database::connect(&url).await {
+        Ok(db) => db,
+        Err(e) => {
+            assert!(!required, "CLMM_REQUIRE_DB_TESTS=1 but connect failed: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = db.migrate().await {
+        assert!(!required, "CLMM_REQUIRE_DB_TESTS=1 but migrate failed: {e}");
+        return None;
+    }
     Some(db)
 }
 
