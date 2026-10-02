@@ -1,3 +1,10 @@
+## 2026-10-02 — B4: golden backtest mini (`run_single` ranking na wycinku SOL/USDC)
+
+keywords: golden, insta, backtest, run_single, StepData, StratConfig, vs_hodl, ranking, orca, Czfq3x, clmm-lp-cli, B4, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Golden `golden_backtest_mini_run_single_ranking` — 572 kroki 5m Orca SOL/USDC (1–2 kwietnia 2026) jako DTO + mapa fee_growth → `run_single` dla 8 strategii, ranking vs_hodl. Periodic 24h +89,73 vs HODL (1 rebalance); Static 0 rebalance +29,20; Bollinger/LastCandle 23 rebalance i strata. Bez CLI/RPC/`data/`. Nowa strategia = nowy wiersz w tym goldenie.
+- **paths:** `crates/cli/src/engine/golden_backtest.rs`, `crates/cli/tests/fixtures/backtest_mini/`, `crates/cli/src/engine/snapshots/`, `crates/cli/Cargo.toml`
+
 ## 2026-10-02 — B6: golden ledgera portfela łańcucha (start + eventy + stopka USD)
 
 keywords: golden, insta, chain_portfolio, ledger, ledger_start_event_from_open_start, aggregate_chain_collected_fees, chain_balance_usd_legs_from_balances, portfolio_start, collected_fees, clmm-lp-api, B6, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

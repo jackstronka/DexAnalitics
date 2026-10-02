@@ -1,0 +1,17 @@
+{
+  "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+  "protocol": "orca",
+  "pair": "SOL/USDC",
+  "window_start_utc": "2026-04-01T00:00:56Z",
+  "window_end_utc": "2026-04-02T23:59:38Z",
+  "step_count": 572,
+  "source": "data/pool-snapshots/orca/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/snapshots_5m.jsonl",
+  "capital_usd": "7000",
+  "width_pct": "0.10",
+  "tx_cost_usd": "0.10",
+  "fee_rate": "0.0004",
+  "token_a_decimals": 9,
+  "token_b_decimals": 6,
+  "quote_usd": "1",
+  "objective": "vs_hodl"
+}

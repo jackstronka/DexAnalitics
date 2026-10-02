@@ -1,4 +1,6 @@
 pub mod fees;
+#[cfg(test)]
+mod golden_backtest;
 pub mod hodl;
 pub mod indicators;
 pub mod liquidity;

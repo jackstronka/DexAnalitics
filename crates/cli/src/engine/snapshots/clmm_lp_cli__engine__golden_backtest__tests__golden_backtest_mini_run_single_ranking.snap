@@ -1,0 +1,85 @@
+---
+source: crates/cli/src/engine/golden_backtest.rs
+expression: snapshot
+---
+{
+  "objective": "vs_hodl",
+  "pool": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+  "ranking": [
+    {
+      "final_il_pct": "-0.006097",
+      "rank": 1,
+      "rebalance_count": 1,
+      "strategy": "periodic_24h",
+      "total_fees_usd": "132.510168",
+      "vs_hodl_usd": "89.734424",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.012626",
+      "rank": 2,
+      "rebalance_count": 4,
+      "strategy": "retouch_shift",
+      "total_fees_usd": "125.985042",
+      "vs_hodl_usd": "37.205921",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.013665",
+      "rank": 3,
+      "rebalance_count": 1,
+      "strategy": "il_limit_5%_grace_0",
+      "total_fees_usd": "132.79481",
+      "vs_hodl_usd": "37.039491",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.013665",
+      "rank": 4,
+      "rebalance_count": 1,
+      "strategy": "oor_recenter",
+      "total_fees_usd": "132.79481",
+      "vs_hodl_usd": "37.039491",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.013665",
+      "rank": 5,
+      "rebalance_count": 1,
+      "strategy": "threshold_5%",
+      "total_fees_usd": "132.79481",
+      "vs_hodl_usd": "37.039491",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.012455",
+      "rank": 6,
+      "rebalance_count": 0,
+      "strategy": "static",
+      "total_fees_usd": "116.38155",
+      "vs_hodl_usd": "29.196293",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.052818",
+      "rank": 7,
+      "rebalance_count": 23,
+      "strategy": "bollinger_w20_k2_r24",
+      "total_fees_usd": "299.993754",
+      "vs_hodl_usd": "-72.029529",
+      "width_pct": "0.10"
+    },
+    {
+      "final_il_pct": "-0.055716",
+      "rank": 8,
+      "rebalance_count": 23,
+      "strategy": "last_candle_c12_r24",
+      "total_fees_usd": "244.455483",
+      "vs_hodl_usd": "-147.858082",
+      "width_pct": "0.10"
+    }
+  ],
+  "steps": 572,
+  "window_end_utc": "2026-04-02T23:59:38Z",
+  "window_start_utc": "2026-04-01T00:00:56Z"
+}
