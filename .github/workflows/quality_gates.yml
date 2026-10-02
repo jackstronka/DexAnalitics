@@ -25,3 +25,23 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           SKIP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'no-tests-needed') && '1' || '0' }}
         run: bash scripts/ci/critical-area-test-gate.sh
+
+  golden_delta:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Unit test golden_delta.py
+        working-directory: tools
+        run: python3 test_golden_delta.py
+      - name: Publish golden delta table
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/ci/golden-delta.sh

@@ -91,6 +91,23 @@ Odpalane w zwykłym `cargo test`. Diff `.snap` = zmiana ekonomii; update **tylko
 
 Po `INSTA_UPDATE` zawsze: `git diff` na `*.snap` i opis „było / jest / dlaczego”. Nie edytuj `.snap` „żeby CI było zielone”.
 
+**Tabela liczb (R3)** — liście numeryczne stary vs nowy `.snap`, posortowane po |Δ|:
+
+```bash
+# vs origin/main (to samo co job CI golden_delta)
+python tools/golden_delta.py --git-base origin/main
+# Windows: py -3 tools/golden_delta.py --git-base origin/main
+make golden-delta
+
+# dwa pliki
+python tools/golden_delta.py --old old.snap --new new.snap --fixture b1
+
+# testy skryptu (hermetyczne)
+cd tools && python test_golden_delta.py
+```
+
+CI (`quality_gates` / job `golden_delta`) wkleja tabelę do Job Summary i komentarza PR. Wklej ten sam markdown do sekcji **Golden delta** w opisie PR. Job **nie pada** przy zmianie liczb (to `economic_regression` dla człowieka; bramka D1 przyjdzie później).
+
 Znane zamrożone niespójności: **BUG-20261002-01** (cashflow swapów jednostronny) — B1 i B2 celowo trzymają obecne liczby do osobnego GO na fix.
 
 ---

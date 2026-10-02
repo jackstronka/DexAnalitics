@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### R3 (2026-10-02) — golden delta po ludzku (tabela było / jest / Δ)
+
+- `tools/golden_delta.py`: liście numeryczne w JSON ciała `*.snap` (po nagłówku insta). `python tools/golden_delta.py --git-base origin/main` albo para `--old/--new`. Sort po |Δ|. Testy: `cd tools && python test_golden_delta.py` (bez gita/sieci). CI job `golden_delta` w `quality_gates.yml` → Job Summary + sticky komentarz PR. Nie failuje przy zmianie liczb (to decyzja człowieka / później D1).
+
 ### B4 (2026-10-02) — golden backtest mini (`run_single` × strategie, ranking vs_hodl)
 
 - Fixture `crates/cli/tests/fixtures/backtest_mini/`: 572 kroków 5m Orca SOL/USDC `Czfq3x…` (2026-04-01..02) wycięte z lokalnego `snapshots_5m.jsonl` do DTO (`steps.jsonl` + `fees_by_step.json` z `fee_growth`). Test `engine::golden_backtest::tests::golden_backtest_mini_run_single_ranking` (`clmm-lp-cli`, dev-dep `insta`): DTO → `StepData` → `run_single` dla Static / OorRecenter / Threshold 5% / Periodic 24h / IlLimit 5% / RetouchShift / Bollinger / LastCandle; ranking po vs_hodl (tie-break: fees, rebalance_count, nazwa). Snapshot: fees / IL / vs_hodl (6 dp) + `rebalance_count`. Bez RPC/DexScreener/`data/`. Periodic 24h wygrywa (~+89,73 USD vs HODL); wskaźniki 23 rebalance i na minusie.
