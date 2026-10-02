@@ -1,3 +1,10 @@
+## 2026-10-02 — B1: golden `insta` dla sum łańcucha 9vhKY (`refresh_lineage_totals_from_nodes`)
+
+keywords: golden, insta, snapshot, chain_economic_totals, refresh_lineage_totals_from_nodes, 9vhKY, chain_history, net_pnl, lineage-totals, clmm-lp-api, B1, BUG-20261002-01, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Pierwszy golden pieniędzy. `insta = { version = "1.43", features = ["json"] }` w `[workspace.dependencies]`, dev-dep `clmm-lp-api`. Dwa testy w `chain_economic_totals::tests` (z węzłów od zera / z zmaterializowanych totals) na fixture `chain_history_9vhKY.json` — snapshot headline + net per węzeł. Każda zmiana PnL / fees / NAV / IL tego łańcucha da czerwony test z diffem; update tylko lokalnie z „Golden delta” w PR. Golden ujawnił niespójność headline vs suma węzłów → BUG-20261002-01.
+- **paths:** `crates/api/src/services/chain_economic_totals.rs`, `crates/api/src/services/snapshots/`, `Cargo.toml`, `crates/api/Cargo.toml`, `.gitattributes`, `.gitignore`
+
 ## 2026-10-01 — A8/A9/A11: bramka plików krytycznych liczy dodane testy, reguła test-integrity, sekcja testów w planach
 
 keywords: critical-area-test-gate, quality_gates, no-tests-needed, pr-label, test-integrity, cursor-rules, golden-delta, AI_MERGE_CHECKLIST, TEST_SECTION, plan-template, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

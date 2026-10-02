@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20261002-01 — Łańcuch 9vhKY: headline net +3,04 USD vs suma węzłów 0,99 USD; cashflow ~4 USD na węzłach bez zmiany NAV
+
+status: open (do diagnozy — przyczyna nieznana)  
+severity: high  
+reported_by: ai  
+first_seen: 2026-10-02  
+fixed_in:  
+keywords: 9vhKY, chain_history, realized_cashflow_usd, net_pnl_usd, headline, chain_economic_totals, refresh_lineage_totals_from_nodes, open-close-principal, golden, B1, economic_regression
+
+- **Symptom:** Golden B1 (`chain_economic_totals::tests::golden_9vhky_*`) na fixture `crates/api/tests/fixtures/chain_history_9vhKY.json` (zrzut API 2026-05-26, 22 węzły): headline `net_pnl_usd` **3,039781** (+30%), `lp_vs_hodl_with_fees_usd` **−4,885302**, `end_nav_usd` 4,748487 (`live_current`), `realized_cashflow_usd` 8,317628 — a suma `net_pnl_usd` po węzłach **0,985345**. Węzły `5jhy1K…` i `2azZfM…` mają `realized_cashflow_usd` 4,201056 / 4,116572 przy NAV start→end prawie bez zmian (8,75→8,69; 8,37→8,17) → net węzła +4,13 / +3,91. Ostatni węzeł (`9vhKYH…`, wejście łańcucha) ma end NAV 0 → net −4,62; headline bierze NAV 4,748 z `CeUDqZ…`. Węzeł `5kzZDM…` 7,39→5,52 (wzorzec downsizingu z BUG-20260512-03).
+- **Root cause:** nieznany. Hipotezy (niezweryfikowane): (1) per-node cashflow w ścieżce materializacji chain-history nadal zawiera principal open/close (objaw identyczny jak BUG-20260422-02, który miał być naprawiony przed datą zrzutu); (2) headline end NAV i suma węzłów liczone z różnych węzłów końcowych (9vhKY z NAV 0 vs CeUDqZ); (3) połączenie z BUG-20260526-02 (close 9vhKY bez lifecycle → brak close NAV). Węzły w fixture mają **już policzony** cashflow — `refresh_lineage_totals_from_nodes` go tylko sumuje, więc źródło jest wcześniej (ścieżka DB / materializacja), której test nie obejmuje.
+- **Fix:** —. Golden celowo zamraża obecne liczby; poprawka ma dać deltę w snapshotach B1 opisaną w „Golden delta” PR.
+- **Guards/tests:** B1 golden (wykrywa każdą zmianę tych liczb). Brakuje: niezmiennika „headline net ≈ Σ net węzłów (w tym samym zakresie)” (C3(1)) — dodać po diagnozie.
+- **Paths:** `crates/api/src/services/chain_economic_totals.rs`, `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/tests/fixtures/chain_history_9vhKY.json`
+
+---
+
 ### BUG-20261001-02 — Bramka `critical_area_requires_tests` przepuszczała każdą zmianę pliku krytycznego
 
 status: fixed  

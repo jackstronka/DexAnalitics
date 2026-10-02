@@ -56,3 +56,7 @@ src/.DS_Store
 # Local logs (may contain secrets like RPC URLs)
 /tools/logs/
 *.log
+
+# insta: pending (unreviewed) snapshots
+*.snap.new
+*.pending-snap

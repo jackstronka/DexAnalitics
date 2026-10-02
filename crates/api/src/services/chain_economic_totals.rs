@@ -913,4 +913,76 @@ mod tests {
         );
         assert_eq!(totals.net_pnl_usd, Decimal::from_str("0.007").unwrap());
     }
+
+    fn usd(d: Decimal) -> String {
+        d.round_dp(6).normalize().to_string()
+    }
+
+    fn headline(t: &PositionStreamPnLResponse) -> serde_json::Value {
+        serde_json::json!({
+            "baseline_value_usd": usd(t.baseline_value_usd),
+            "end_nav_usd": usd(t.current_value_usd),
+            "end_nav_source": t.end_nav_source,
+            "economic_quality": t.economic_quality,
+            "hodl_value_usd": usd(t.hodl_value_usd),
+            "il_usd": usd(t.il_usd),
+            "clean_il_usd": usd(t.clean_il_usd),
+            "realized_lp_fees_usd": usd(t.realized_lp_fees_usd),
+            "uncollected_lp_fees_usd": usd(t.uncollected_lp_fees_usd),
+            "lp_fees_total_usd": usd(t.lp_fees_total_usd),
+            "lp_vs_hodl_with_fees_usd": usd(t.lp_vs_hodl_with_fees_usd),
+            "realized_cashflow_usd": usd(t.realized_cashflow_usd),
+            "tx_fees_usd": usd(t.tx_fees_usd),
+            "net_pnl_usd": usd(t.net_pnl_usd),
+            "net_pnl_pct": usd(t.net_pnl_pct),
+        })
+    }
+
+    fn golden_9vhky(use_materialized_totals: bool) -> serde_json::Value {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/chain_history_9vhKY.json"
+        ))
+        .expect("parse chain_history_9vhKY fixture");
+        let entry = fixture["position_address"].as_str().expect("entry");
+        let mut nodes: Vec<PositionStreamLineageNode> =
+            serde_json::from_value(fixture["nodes"].clone()).expect("nodes");
+        let mut totals: Option<PositionStreamPnLResponse> = if use_materialized_totals {
+            Some(serde_json::from_value(fixture["totals"].clone()).expect("totals"))
+        } else {
+            None
+        };
+        assert_eq!(nodes.len(), 22, "fixture shape changed");
+
+        refresh_lineage_totals_from_nodes(entry, &mut totals, &mut nodes);
+
+        let t = totals.as_ref().expect("totals after refresh");
+        let per_node: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "position": n.position_address,
+                    "baseline_usd": usd(n.baseline_value_usd),
+                    "end_nav_usd": usd(lineage_node_end_nav_usd(n)),
+                    "fees_collected_usd": usd(n.fees_collected_usd),
+                    "tx_fees_usd": usd(n.tx_fees_usd),
+                    "net_pnl_usd": usd(n.net_pnl_usd),
+                })
+            })
+            .collect();
+        serde_json::json!({ "headline": headline(t), "nodes": per_node })
+    }
+
+    /// B1 golden: chain 9vhKY (22 rotations, public on-chain data snapshot 2026-05-26).
+    /// A diff here is an `economic_regression` — review with `cargo insta review` and explain
+    /// it in the PR "Golden delta" section; never update just to get CI green.
+    #[test]
+    fn golden_9vhky_totals_computed_from_nodes() {
+        insta::assert_json_snapshot!(golden_9vhky(false));
+    }
+
+    /// Same chain, starting from the materialized `totals_json` in the fixture (chain-history read path).
+    #[test]
+    fn golden_9vhky_totals_refreshed_from_materialized() {
+        insta::assert_json_snapshot!(golden_9vhky(true));
+    }
 }
