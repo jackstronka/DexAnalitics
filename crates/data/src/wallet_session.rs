@@ -2684,4 +2684,51 @@ mod tests {
         assert!(mints.contains("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
         assert!(!mints.contains("phantom-meme"));
     }
+
+    fn lifecycle_9vhky_rows() -> Vec<(Value, Option<i64>, Option<i64>)> {
+        include_str!("../tests/fixtures/lifecycle_9vhKY.jsonl")
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).expect("fixture row");
+                (v, None, None)
+            })
+            .collect()
+    }
+
+    fn raw_map_json(sums: BTreeMap<String, i128>) -> Value {
+        Value::Object(
+            sums.into_iter()
+                .map(|(mint, raw)| (mint, Value::String(raw.to_string())))
+                .collect(),
+        )
+    }
+
+    /// B2 golden: SESSION and CHAIN logical balances (mint → raw) for chain 9vhKY
+    /// (53 open/close/swap rows from the lifecycle ledger, public on-chain data).
+    /// CHAIN uses a synthetic id: legacy rows have no `chain_session_id`, so the aggregator stamps it.
+    /// A diff here is an `economic_regression` — explain it in the PR "Golden delta" section.
+    #[test]
+    fn golden_9vhky_session_and_chain_sums() {
+        let rows = lifecycle_9vhky_rows();
+        assert_eq!(rows.len(), 53, "fixture shape changed");
+        let session_ids: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|(v, _, _)| v.get("rebalance_session_id")?.as_str().map(str::to_string))
+            .collect();
+        assert_eq!(session_ids.len(), 22, "fixture sessions changed");
+
+        let sessions: serde_json::Map<String, Value> = session_ids
+            .iter()
+            .map(|sid| {
+                let sums = aggregate_session_sums_from_lifecycle_rows(rows.clone(), sid);
+                (sid.clone(), raw_map_json(sums))
+            })
+            .collect();
+        let chain = raw_map_json(aggregate_chain_sums_from_lifecycle_rows(
+            rows.clone(),
+            "chain-9vhky-fixture",
+        ));
+        insta::assert_json_snapshot!(serde_json::json!({ "chain": chain, "sessions": sessions }));
+    }
 }
