@@ -1,3 +1,17 @@
+## 2026-10-02 — Reguła: nowy test → aktualizacja `doc/TESTS.md`
+
+keywords: tests, catalog, TESTS.md, test-integrity, AI_MERGE_CHECKLIST, agent-rule
+
+- **What:** Punkt 8 w `.cursor/rules/test-integrity.mdc` (always apply): nowy plik testowy / golden / harness / `#[ignore]` / web `*.test.ts` / nowa rodzina w module wymaga wpisu w `doc/TESTS.md` w tym samym PR. Kolejny unit w już opisanym module — nie. Checklista merge + szablon sekcji testów w planach.
+- **paths:** `.cursor/rules/test-integrity.mdc`, `doc/TESTS.md`, `doc/AI_MERGE_CHECKLIST.md`, `doc/templates/TEST_SECTION.md`
+
+## 2026-10-02 — Katalog testów (`doc/TESTS.md`)
+
+keywords: tests, catalog, TESTS.md, verify, golden, vitest, session_gl_integration, documentation
+
+- **What:** Żywy spis testów (jak odpalić, goldeny B1–B6, DB, web, `#[ignore]`). Plany zostają w `IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE` / `TESTING_REGRESSION_PLAN`; ten plik jest działem „co mamy dziś”.
+- **paths:** `doc/TESTS.md`, `doc/README.md`, `README.md`
+
 ## 2026-10-02 — B4: golden backtest mini (`run_single` ranking na wycinku SOL/USDC)
 
 keywords: golden, insta, backtest, run_single, StepData, StratConfig, vs_hodl, ranking, orca, Czfq3x, clmm-lp-cli, B4, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
