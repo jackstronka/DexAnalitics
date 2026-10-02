@@ -1,3 +1,10 @@
+## 2026-10-02 — B3: golden sizingu reopen (`target_usd_*` + guard half-leg)
+
+keywords: golden, insta, reopen, sizing, target_usd, session_cap, final_caps_cover_deposit_quote, BUG-20260512-03, F2.2, clmm-lp-execution, B3, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Golden `rebalance::tests::golden_reopen_sizing_table` zamraża target USD i kwoty: reopen nie idzie za mniejszym portfelem (9,76 vs wallet 4,06 → 9,7112, nie 4,04); quote z jedną nogą w połowie nie przechodzi guarda; session cap obcina USDC i odmawia pełnego quote. `target_usd_*` + `final_caps_cover_deposit_quote` są `pub(crate)`.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/snapshots/`, `crates/execution/Cargo.toml`
+
 ## 2026-10-02 — B2: golden sald SESSION / CHAIN z lifecycle (9vhKY)
 
 keywords: golden, insta, snapshot, wallet_session, session-balance, chain-balance, aggregate_session_sums_from_lifecycle_rows, aggregate_chain_sums_from_lifecycle_rows, cap_open_debits, lifecycle, 9vhKY, clmm-lp-data, B2, BUG-20261002-01, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

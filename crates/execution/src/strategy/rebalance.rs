@@ -236,7 +236,10 @@ fn prev_end_value_usd_from_close_amounts(
     a_ui * price_a_usd + b_ui * price_b_usd
 }
 
-fn target_usd_from_prev_end_clamped(prev_end_value_usd: f64, wallet_notional_usd: f64) -> f64 {
+pub(crate) fn target_usd_from_prev_end_clamped(
+    prev_end_value_usd: f64,
+    wallet_notional_usd: f64,
+) -> f64 {
     // Keep a small margin for rounding / dust; matches legacy wallet-notional logic.
     let wallet_cap = (wallet_notional_usd * 0.995).max(0.0);
     if !(prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0) {
@@ -253,14 +256,17 @@ fn target_usd_from_prev_end_clamped(prev_end_value_usd: f64, wallet_notional_usd
 ///
 /// When `prev_end_value_usd` is unknown/zero (e.g. missing lifecycle row), callers should fall back
 /// to [`target_usd_from_prev_end_clamped`] with `prev_end_value_usd = 0` (wallet-cap sizing).
-fn target_usd_for_reopen_sizing(prev_end_value_usd: f64) -> f64 {
+pub(crate) fn target_usd_for_reopen_sizing(prev_end_value_usd: f64) -> f64 {
     if !(prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0) {
         return 0.0;
     }
     (prev_end_value_usd * 0.995).max(0.0)
 }
 
-fn target_usd_for_swap_mix_and_open(prev_end_value_usd: f64, wallet_notional_usd: f64) -> f64 {
+pub(crate) fn target_usd_for_swap_mix_and_open(
+    prev_end_value_usd: f64,
+    wallet_notional_usd: f64,
+) -> f64 {
     if prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0 {
         target_usd_for_reopen_sizing(prev_end_value_usd)
     } else {
@@ -274,7 +280,7 @@ fn target_usd_for_swap_mix_and_open(prev_end_value_usd: f64, wallet_notional_usd
 /// successful close is approximately `wallet_notional + prev_end_value_usd` at the same synthetic
 /// prices. Do not use [`target_usd_from_prev_end_clamped`] here: it clamps `prev_end` to the
 /// (empty) wallet and yields `target_usd = 0`, blocking every close+reopen.
-fn target_usd_for_close_reopen_preflight(
+pub(crate) fn target_usd_for_close_reopen_preflight(
     prev_end_value_usd: f64,
     wallet_notional_before_close: f64,
 ) -> f64 {
@@ -582,7 +588,11 @@ fn balances_cover_deposit_quote(wa: u64, wb: u64, q: &DepositBudgetQuote) -> boo
     wa >= q.amount_a.saturating_sub(tol_a) && wb >= q.amount_b.saturating_sub(tol_b)
 }
 
-fn final_caps_cover_deposit_quote(cap_a: u64, cap_b: u64, q: &DepositBudgetQuote) -> bool {
+pub(crate) fn final_caps_cover_deposit_quote(
+    cap_a: u64,
+    cap_b: u64,
+    q: &DepositBudgetQuote,
+) -> bool {
     balances_cover_deposit_quote(cap_a, cap_b, q)
 }
 
@@ -5020,6 +5030,135 @@ mod tests {
         assert_eq!(wa, 50);
         assert_eq!(wb, 200);
         assert_eq!(spend, 50); // native capped to WSOL portfolio leg
+    }
+
+    fn usd6(v: f64) -> String {
+        format!("{v:.6}")
+    }
+
+    /// B3 golden: reopen sizing table (target USD + amounts + cover guard).
+    /// Row `must_not_follow_smaller_wallet` is F2.2 / BUG-20260512-03 (~$10 → ~$4):
+    /// reopen target stays on prev_end (dust only); a half-leg quote must not open.
+    /// A diff here is an `economic_regression` — explain it in the PR "Golden delta" section.
+    #[test]
+    fn golden_reopen_sizing_table() {
+        let wsol: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL");
+        let usdc: Pubkey = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            .parse()
+            .expect("USDC");
+
+        let quote_full = DepositBudgetQuote {
+            amount_a: 50_000_000,
+            amount_b: 5_000_000,
+            token_max_a: 50_250_000,
+            token_max_b: 5_025_000,
+            estimated_value_usd: 9.71,
+            liquidity: 1,
+        };
+        let half_usdc = quote_full.amount_b / 2;
+        let mut session_caps = clmm_lp_data::wallet_session::SessionMintCaps::empty("sess-b3");
+        session_caps
+            .caps_by_mint
+            .insert(wsol.to_string(), 50_000_000);
+        session_caps
+            .caps_by_mint
+            .insert(usdc.to_string(), 2_500_000);
+        let clamped = crate::strategy::session_capital::clamp_deposit_quote_to_portfolio(
+            &quote_full,
+            &session_caps,
+            &wsol,
+            &usdc,
+        );
+        let (cap_a, cap_b, spend) = apply_portfolio_caps_to_wallet_raw(
+            80_000_000,
+            8_000_000,
+            80_000_000,
+            &wsol,
+            &usdc,
+            &wsol,
+            Some(&session_caps),
+        );
+
+        let rows = serde_json::json!([
+            {
+                "id": "reopen_prev_end_10_dust_only",
+                "prev_end_usd": usd6(10.0),
+                "wallet_notional_usd": usd6(10.0),
+                "target_reopen_usd": usd6(target_usd_for_reopen_sizing(10.0)),
+                "target_swap_mix_usd": usd6(target_usd_for_swap_mix_and_open(10.0, 10.0)),
+                "target_preflight_usd": usd6(target_usd_for_close_reopen_preflight(10.0, 0.0)),
+                "legacy_wallet_clamp_usd": usd6(target_usd_from_prev_end_clamped(10.0, 10.0)),
+            },
+            {
+                "id": "must_not_follow_smaller_wallet",
+                "bug": "BUG-20260512-03",
+                "note": "reopen target is not min(prev_end, wallet); half-leg quote must not open",
+                "prev_end_usd": usd6(9.76),
+                "wallet_notional_usd": usd6(4.06),
+                "target_reopen_usd": usd6(target_usd_for_reopen_sizing(9.76)),
+                "target_swap_mix_usd": usd6(target_usd_for_swap_mix_and_open(9.76, 4.06)),
+                "legacy_wallet_clamp_usd": usd6(target_usd_from_prev_end_clamped(9.76, 4.06)),
+                "quote_estimated_usd": usd6(quote_full.estimated_value_usd),
+                "covers_quote_both_legs": final_caps_cover_deposit_quote(
+                    quote_full.amount_a,
+                    quote_full.amount_b,
+                    &quote_full
+                ),
+                "covers_quote_half_usdc_leg": final_caps_cover_deposit_quote(
+                    quote_full.amount_a,
+                    half_usdc,
+                    &quote_full
+                ),
+                "must_not_open_undersized": !final_caps_cover_deposit_quote(
+                    quote_full.amount_a,
+                    half_usdc,
+                    &quote_full
+                ),
+            },
+            {
+                "id": "prev_end_unknown_falls_back_to_wallet_cap",
+                "prev_end_usd": usd6(0.0),
+                "wallet_notional_usd": usd6(10.0),
+                "target_swap_mix_usd": usd6(target_usd_for_swap_mix_and_open(0.0, 10.0)),
+            },
+            {
+                "id": "session_cap_clamps_quote_and_wallet_raw",
+                "session_cap_applied": true,
+                "wallet_raw_after_caps": { "a": cap_a, "b": cap_b, "spendable": spend },
+                "quote_after_session_cap": {
+                    "amount_a": clamped.amount_a,
+                    "amount_b": clamped.amount_b,
+                    "token_max_a": clamped.token_max_a,
+                    "token_max_b": clamped.token_max_b,
+                },
+                "covers_clamped_quote_with_session_caps": final_caps_cover_deposit_quote(
+                    cap_a,
+                    cap_b,
+                    &clamped
+                ),
+                "covers_full_quote_with_session_caps": final_caps_cover_deposit_quote(
+                    cap_a,
+                    cap_b,
+                    &quote_full
+                ),
+            },
+            {
+                "id": "chain_wallet_notional_clamp",
+                "target_10_wallet_9": usd6(
+                    crate::strategy::session_capital::clamp_target_usd_to_chain_wallet_notional(
+                        10.0, 9.0
+                    )
+                ),
+                "target_5_wallet_20": usd6(
+                    crate::strategy::session_capital::clamp_target_usd_to_chain_wallet_notional(
+                        5.0, 20.0
+                    )
+                ),
+            }
+        ]);
+        insta::assert_json_snapshot!(rows);
     }
 
     #[test]

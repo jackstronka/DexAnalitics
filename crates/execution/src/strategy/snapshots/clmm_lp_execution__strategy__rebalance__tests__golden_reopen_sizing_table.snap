@@ -1,0 +1,57 @@
+---
+source: crates/execution/src/strategy/rebalance.rs
+expression: rows
+---
+[
+  {
+    "id": "reopen_prev_end_10_dust_only",
+    "legacy_wallet_clamp_usd": "9.950000",
+    "prev_end_usd": "10.000000",
+    "target_preflight_usd": "9.950000",
+    "target_reopen_usd": "9.950000",
+    "target_swap_mix_usd": "9.950000",
+    "wallet_notional_usd": "10.000000"
+  },
+  {
+    "bug": "BUG-20260512-03",
+    "covers_quote_both_legs": true,
+    "covers_quote_half_usdc_leg": false,
+    "id": "must_not_follow_smaller_wallet",
+    "legacy_wallet_clamp_usd": "4.039700",
+    "must_not_open_undersized": true,
+    "note": "reopen target is not min(prev_end, wallet); half-leg quote must not open",
+    "prev_end_usd": "9.760000",
+    "quote_estimated_usd": "9.710000",
+    "target_reopen_usd": "9.711200",
+    "target_swap_mix_usd": "9.711200",
+    "wallet_notional_usd": "4.060000"
+  },
+  {
+    "id": "prev_end_unknown_falls_back_to_wallet_cap",
+    "prev_end_usd": "0.000000",
+    "target_swap_mix_usd": "9.950000",
+    "wallet_notional_usd": "10.000000"
+  },
+  {
+    "covers_clamped_quote_with_session_caps": true,
+    "covers_full_quote_with_session_caps": false,
+    "id": "session_cap_clamps_quote_and_wallet_raw",
+    "quote_after_session_cap": {
+      "amount_a": 50000000,
+      "amount_b": 2500000,
+      "token_max_a": 50000000,
+      "token_max_b": 2500000
+    },
+    "session_cap_applied": true,
+    "wallet_raw_after_caps": {
+      "a": 50000000,
+      "b": 2500000,
+      "spendable": 50000000
+    }
+  },
+  {
+    "id": "chain_wallet_notional_clamp",
+    "target_10_wallet_9": "8.955000",
+    "target_5_wallet_20": "5.000000"
+  }
+]
