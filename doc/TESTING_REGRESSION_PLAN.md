@@ -194,6 +194,11 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### B6 (2026-10-02) — golden ledgera portfela łańcucha (start + eventy + stopka USD)
+
+- Test `chain_portfolio::tests::golden_chain_portfolio_ledger_events_and_footer`: syntetyczny cykl SOL/USDC ($150 / $1), bez RPC/DB. Wejście: `WalletSessionOpenStartSnapshot` (pre-open 0,1 SOL + 5 USDC) + trzy wiersze lifecycle (`open` / `collect` / `close` + 3× tx fee 5000 lamports) → `ledger_start_event_from_open_start`, `ledger_event_from_lifecycle_row`, `tx_fee_ledger_event`, `aggregate_chain_collected_fees`, `chain_balance_usd_legs_from_balances` / `portfolio_balance_usd_from_balances`. Snapshot: start 20,00; open 11,50 out; collect 2,15 in; close 10,775 in; fees 2,225 (collect + LP na close); stopka 8,50. README liczb: `crates/api/tests/fixtures/chain_portfolio_ledger_b6/README.md`. Mutacja +0,000001 w `footer_usd` → FAIL.
+- Aktualizacja: `INSTA_UPDATE=always cargo test -p clmm-lp-api golden_chain_portfolio_ledger` + `git diff` `.snap`; zawsze z sekcją „Golden delta” w PR.
+
 ### B5 (2026-10-02) — golden lineage multi-rotation (F2.3 / BUG-20260413-05)
 
 - `lineage_shadow_diff_matches_golden_fixture` na `insta` (usunięty `lineage_shadow_expected.json`). Nowy `golden_lineage_multi_rotation_continuity`: 4 rotacje bota (sesja zszywa baseline; rotC bez NAV close → end z baseline rotD) + ręczny `manualE` (`open_origin=operator_api`, własne 10,00 — bez false parent) + fork (`rotD` = A–B–C–D, `sibX` = A–X). `manual_open_stitch_suppressed=true`, bot `false`.
