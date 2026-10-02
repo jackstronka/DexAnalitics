@@ -1,3 +1,4 @@
 # Shell scripts and git hooks must keep LF in the working copy (sh fails on CRLF).
 *.sh text eol=lf
 .githooks/* text eol=lf
+*.snap text eol=lf

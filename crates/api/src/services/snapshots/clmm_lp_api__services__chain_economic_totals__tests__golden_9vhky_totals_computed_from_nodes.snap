@@ -1,0 +1,201 @@
+---
+source: crates/api/src/services/chain_economic_totals.rs
+expression: golden_9vhky(false)
+---
+{
+  "headline": {
+    "baseline_value_usd": "9.973205",
+    "clean_il_usd": "-5.224719",
+    "economic_quality": "mixed",
+    "end_nav_source": "live_current",
+    "end_nav_usd": "4.748487",
+    "hodl_value_usd": "9.973205",
+    "il_usd": "-5.224719",
+    "lp_fees_total_usd": "0.339417",
+    "lp_vs_hodl_with_fees_usd": "-4.885302",
+    "net_pnl_pct": "0.304795",
+    "net_pnl_usd": "3.039781",
+    "realized_cashflow_usd": "8.317628",
+    "realized_lp_fees_usd": "0.339417",
+    "tx_fees_usd": "0.053128",
+    "uncollected_lp_fees_usd": "0"
+  },
+  "nodes": [
+    {
+      "baseline_usd": "9.973205",
+      "end_nav_usd": "10.003062",
+      "fees_collected_usd": "0.032192",
+      "net_pnl_usd": "0.027749",
+      "position": "At6TYQc1G5UUJrP8oH1jMyPh2Eby4qT9cAv3rgJ11wEu",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "10.026582",
+      "end_nav_usd": "10.0565",
+      "fees_collected_usd": "0.018763",
+      "net_pnl_usd": "0.02781",
+      "position": "2u7StRh9Finudkc4YY3KAwaKvFdNhhsmmRCsAdrFXcsb",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "9.948261",
+      "end_nav_usd": "9.621208",
+      "fees_collected_usd": "0.034058",
+      "net_pnl_usd": "-0.329161",
+      "position": "HySRBC91a42iYD3phhudCHpnymbjxCcWhajEvyE3dNka",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "9.307825",
+      "end_nav_usd": "9.246153",
+      "fees_collected_usd": "0.066204",
+      "net_pnl_usd": "-0.06378",
+      "position": "J9JG1yzi7tk1oTzShacxskFgZ3YEEgunxMQTeSsC5LTT",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "8.840869",
+      "end_nav_usd": "8.773551",
+      "fees_collected_usd": "0.001768",
+      "net_pnl_usd": "-0.069426",
+      "position": "BsuYBp5BnMtvDcnuw59Em223dE4XdEZUnmbob3RQnD3H",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "8.750277",
+      "end_nav_usd": "8.687116",
+      "fees_collected_usd": "0.013184",
+      "net_pnl_usd": "4.130726",
+      "position": "5jhy1KAAcZzSJtfkgu2GLoAdo1dGMzZU51D8KiXnwccL",
+      "tx_fees_usd": "0.007168"
+    },
+    {
+      "baseline_usd": "8.559816",
+      "end_nav_usd": "8.568684",
+      "fees_collected_usd": "0.006291",
+      "net_pnl_usd": "0.00676",
+      "position": "xR6q3TFN3gETHAwDcEphdM8NBYXERHMBWNzMjDeAupc",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "8.490298",
+      "end_nav_usd": "8.418619",
+      "fees_collected_usd": "0.005447",
+      "net_pnl_usd": "-0.073786",
+      "position": "BugFHeQvEhHX3ibFLrtUC74YTAuq1XLLDsn2n4r1dDf3",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "8.37365",
+      "end_nav_usd": "8.174993",
+      "fees_collected_usd": "0.018821",
+      "net_pnl_usd": "3.913277",
+      "position": "2azZfMB93CJrqkhcM6cL2zzCatMB6eo8LiD5GdKFwR4N",
+      "tx_fees_usd": "0.004638"
+    },
+    {
+      "baseline_usd": "8.204648",
+      "end_nav_usd": "8.208617",
+      "fees_collected_usd": "0.01245",
+      "net_pnl_usd": "0.00186",
+      "position": "Dm2u91wajyF25FhqFmTjXMisfzqKuzpRci9hcoFSxSj",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "7.448772",
+      "end_nav_usd": "7.457359",
+      "fees_collected_usd": "0.00635",
+      "net_pnl_usd": "0.006479",
+      "position": "5YMsvtP26ZNqrxHcCiGJjzzw2AgferyXbgLwCASPCZrs",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "7.385622",
+      "end_nav_usd": "7.394762",
+      "fees_collected_usd": "0.01438",
+      "net_pnl_usd": "0.007032",
+      "position": "4hQujCAZkmrwimMk3k4jHUzMjQga16h1YZfdYxscywqA",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "7.394464",
+      "end_nav_usd": "7.419624",
+      "fees_collected_usd": "0.009302",
+      "net_pnl_usd": "0.023051",
+      "position": "5q4dSoAu83rdcxbjXSK6tbB55bVZbNYamznKT7ZaB7so",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "7.392738",
+      "end_nav_usd": "5.52096",
+      "fees_collected_usd": "0.01747",
+      "net_pnl_usd": "-1.873886",
+      "position": "5kzZDMDqgmjtvKJMsCnMdNymhsdBPy6YthgRthP7MYKB",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "5.474517",
+      "end_nav_usd": "5.483295",
+      "fees_collected_usd": "0.009888",
+      "net_pnl_usd": "0.006669",
+      "position": "GE98KSEJhSDSYHZrJc4zryWFtRmqEa7ag5qwdnbGJhhs",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "5.450896",
+      "end_nav_usd": "5.384265",
+      "fees_collected_usd": "0.01215",
+      "net_pnl_usd": "-0.06874",
+      "position": "2TYRmCsPT2gn6pXEGvEAbpfJJ71qxmCeTrSyQEXaGXxs",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "5.373298",
+      "end_nav_usd": "5.333551",
+      "fees_collected_usd": "0.013949",
+      "net_pnl_usd": "-0.041855",
+      "position": "DHs9CvVPZDHK8dJW73SYDgScRoKZR1tkJQEeZu7zsjRB",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "4.799039",
+      "end_nav_usd": "4.813151",
+      "fees_collected_usd": "0.010304",
+      "net_pnl_usd": "0.012004",
+      "position": "Ai1r9YWtrRVYrhvD4Vk1rHVRJaiyT6ZqwVCozCBNkpfc",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "4.751798",
+      "end_nav_usd": "4.757327",
+      "fees_collected_usd": "0.023023",
+      "net_pnl_usd": "0.003421",
+      "position": "CbbuJrqCYbymkoqnD3Vfk3TwbNftRK84sf5VYTw24Chb",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "4.777073",
+      "end_nav_usd": "4.743138",
+      "fees_collected_usd": "0.006898",
+      "net_pnl_usd": "-0.036043",
+      "position": "CCAR2wMmdiVjM2SwjaUuuAFBfN94GpHa5vBua6LaUhvA",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "4.748487",
+      "end_nav_usd": "4.748487",
+      "fees_collected_usd": "0.006525",
+      "net_pnl_usd": "-0.002108",
+      "position": "CeUDqZpRMk7NB5y8cnomF8yNaEtYcZaJLUCufw2gTVcT",
+      "tx_fees_usd": "0.002108"
+    },
+    {
+      "baseline_usd": "4.621443",
+      "end_nav_usd": "0",
+      "fees_collected_usd": "0",
+      "net_pnl_usd": "-4.622708",
+      "position": "9vhKYHAinJ8bpofhy8zwNMdgPDjoqSSXN43W9Rv2pKUH",
+      "tx_fees_usd": "0.001265"
+    }
+  ]
+}
