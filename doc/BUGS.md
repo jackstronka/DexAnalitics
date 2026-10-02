@@ -621,7 +621,7 @@ keywords: rebalance, reopen, silent-downsize, target_usd, open_position, token_c
 - **Related prior bug family:** Similar product invariant to `BUG-20260510-01` (avoid `target_usd=0` / wallet-clamped downsizing) and `BUG-20260504-04` (~half notional opens when caps/quote are stale or incomplete), but this appears in automated rebalance/reopen rather than manual `PositionCreate`.
 - **Root cause:** `open_new_range_with_wallet_mix` computes `target_usd` from previous close value, but before `open_position` it clamps each token cap independently to `min(wallet_cap, quote.token_max_*)` and did not re-check that the final caps still cover the quote. If swap-mix left one leg missing/stale, the open could proceed with only one quoted leg, producing an approximately half-sized position instead of failing into pending-open recovery.
 - **Fix:** Added a final pre-open invariant after cap calculation: when a quote exists, effective caps (including native SOL for WSOL legs) must cover `q.amount_a/q.amount_b` within existing tolerance. If not, executor appends `bot_reopen_final_caps_below_target`, skips `open_position`, retries short refresh attempts, then returns a hard error for pending-open/recovery instead of opening undersized.
-- **Guards/tests:** `cargo test -p clmm-lp-execution strategy::rebalance::tests::final_caps_guard_rejects_materially_undersized_quote_leg`
+- **Guards/tests:** `final_caps_guard_rejects_materially_undersized_quote_leg`; B3 golden `golden_reopen_sizing_table` (wiersz `must_not_follow_smaller_wallet`: prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`).
 - **Paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
 
 ---

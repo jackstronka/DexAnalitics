@@ -35,5 +35,6 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+insta = { workspace = true }
 rust_decimal_macros = { workspace = true }
 tempfile = "3.20"
