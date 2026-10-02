@@ -1,3 +1,10 @@
+## 2026-10-02 — B5: golden lineage multi-rotation (trio ciągłości + fork + ręczny open)
+
+keywords: golden, insta, lineage, multi-rotation, session-continuity, false-parent, fork, suppress_jsonl_rotation_stitch, BUG-20260413-05, F2.3, clmm-lp-api, B5, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Shadow 3-węzłowy na `insta`. Golden 5 węzłów: bot A→B→C→D zszywa się po `rebalance_session_id`; ręczny open na tym samym poolu zostaje samodzielny (10,00, stitch suppressed); fork z `sibX` nie wchodzi do łańcucha `rotD`.
+- **paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/services/snapshots/`, usunięty `crates/api/tests/fixtures/lineage_shadow_expected.json`
+
 ## 2026-10-02 — B3: golden sizingu reopen (`target_usd_*` + guard half-leg)
 
 keywords: golden, insta, reopen, sizing, target_usd, session_cap, final_caps_cover_deposit_quote, BUG-20260512-03, F2.2, clmm-lp-execution, B3, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
