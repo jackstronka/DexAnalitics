@@ -1,3 +1,10 @@
+## 2026-10-02 — R3: tabela golden delta (było / jest / Δ) z `*.snap`
+
+keywords: golden-delta, insta, snap, R3, quality_gates, tools/golden_delta.py, economic_regression, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `tools/golden_delta.py` porównuje liście liczbowe snapshotów insta; CI publikuje tabelę w Job Summary i komentarzu PR (sticky `<!-- golden-delta -->`). Job nie blokuje merge przy zmianie pieniędzy. Lokalnie: `make golden-delta` / `py -3 tools/golden_delta.py --git-base origin/main`. Testy: `tools/test_golden_delta.py`.
+- **paths:** `tools/golden_delta.py`, `tools/test_golden_delta.py`, `scripts/ci/golden-delta.sh`, `.github/workflows/quality_gates.yml`, `doc/TESTS.md`
+
 ## 2026-10-02 — Reguła: nowy test → aktualizacja `doc/TESTS.md`
 
 keywords: tests, catalog, TESTS.md, test-integrity, AI_MERGE_CHECKLIST, agent-rule

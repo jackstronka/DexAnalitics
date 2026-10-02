@@ -74,6 +74,11 @@ verify-web:
 hooks:
 	git config core.hooksPath .githooks
 
+# Human-readable golden .snap delta vs origin/main (R3)
+.PHONY: golden-delta
+golden-delta:
+	python3 tools/golden_delta.py --git-base origin/main
+
 # Run the project
 .PHONY: run
 run:

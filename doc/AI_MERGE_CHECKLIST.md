@@ -7,7 +7,7 @@ Use this checklist before merging bugfixes and feature PRs touching execution, l
 - [ ] **Bug -> test rule:** each `high`/`critical` bug has a regression or invariant test.
 - [ ] **Critical path test coverage:** if critical files changed (list in `scripts/ci/critical-area-test-gate.sh`), the diff adds/changes tests — a file merely containing `mod tests` does not count. Label `no-tests-needed` only for pure refactors, reason in PR body.
 - [ ] **Test integrity** (`.cursor/rules/test-integrity.mdc`): no deleted/weakened assertions, no `#[ignore]` or wider tolerances to get green; every failing test classified (`stale_test` / `non_hermetic` / `economic_regression` / `assertion_weakened` / `infra`).
-- [ ] **Golden delta:** if any snapshot / expected number changed, the PR description has a "Golden delta: what changed and why" section.
+- [ ] **Golden delta:** if any snapshot / expected number changed, the PR description has a "Golden delta: what changed and why" section (paste the table from `python tools/golden_delta.py --git-base origin/main` / CI job `golden_delta`).
 - [ ] **Hermetic tests:** new tests use no network, no repo `data/`, env only via `test_env::EnvGuard` (CI runs tests without network).
 - [ ] **Plan test section:** a new or changed plan document has "Testy i kryteria regresji" (`doc/templates/TEST_SECTION.md`).
 - [ ] **`doc/TESTS.md` catalog:** new test file / golden / integration harness / `#[ignore]` / web `*.test.ts` / new suite → same-PR update of the catalog (what it guards + how to run). Skip only when adding another unit test in an already-described module.
