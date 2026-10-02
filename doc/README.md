@@ -16,7 +16,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Plan implementacji (wykonawczy — backlog PR, harmonogram 2 tyg.):** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Szybkie budowanie + odporność na regresje** (verify/CI, goldeny, niezmienniki, self-heal pipeline — **nie** auto-update asercji): [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) (jedyny plan wykonawczy testów); audyt + log: [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md).
+**Testy (katalog: co jest, jak odpalić):** [`TESTS.md`](TESTS.md). Plan siatki: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md); audyt + log: [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md).
 
 **Wallet GL — wizja księgowa vs journal, §2.2 konto sesji, plan wdrożenia SESSION:** [`WALLET_GL.md`](WALLET_GL.md), [`WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md`](WALLET_SESSION_GL_IMPLEMENTATION_PLAN.md), [`WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md`](WALLET_SESSION_GL_INTEGRATION_ANALYSIS.md), [**executor / reopen na SESSION**](WALLET_SESSION_CAPITAL_EXECUTOR_PLAN.md). **Portfel łańcucha (jeden cykl od startu do close):** [`CHAIN_SESSION_PORTFOLIO.md`](CHAIN_SESSION_PORTFOLIO.md), [`IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md`](IMPLEMENTATION_PLAN_CHAIN_SESSION_PORTFOLIO.md).
 
@@ -48,6 +48,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | Solana indexing concepts (RPC vs WebSocket vs Geyser), “token” misconception, relation to swap sync |
 | [`AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md`](AERODROME_SLIPSTREAM_BASE_LIVE_PLAN.md) | **Base + Aerodrome Slipstream (CLMM) live:** oficjalne źródła, fazy 0–5, wielość deployów, bezpieczeństwo, Go-live checklist; fee-only unstaked; endpoint `GET /api/v1/evm/base/aerodrome-slipstream/pools/{pool}/slot0` + `BASE_RPC_URL` |
 | [`ENGINEERING_NOTES.md`](ENGINEERING_NOTES.md) | **Append-only log of non-trivial code changes** — each entry has `keywords:` for grep / AI search |
+| [`TESTS.md`](TESTS.md) | **Katalog testów:** co mamy, co robią, jak włączyć (`verify`, goldeny B1–B6, DB, web, `#[ignore]`) |
 | [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | **Audyt testów 2026-09-30 + log wykonania** (backlog T-PR zastąpiony); plan: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) |
 | [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md) | **Szablon sekcji „Testy i kryteria regresji”** — obowiązkowy w każdym nowym planie (`IMPLEMENTATION_PLAN_*`, `ROADMAP_*`, `*_PLAN.md`) |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | Local-first MVP for an AI narrator / stream agent (YouTube) |
@@ -175,6 +176,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | tools, powershell, snapshot-health, slack, monitoring, keywords |
 | [`README.md`](README.md) | *this file* — TOC + A–Z index |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | solana, indexing, RPC, Geyser, swaps-sync, misconceptions |
+| [`TESTS.md`](TESTS.md) | tests, catalog, cargo-test, vitest, make-verify, golden, insta, how-to-run |
 | [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | testing, regression, golden-fixture, make-verify, pre-push, ci, postgres-integration, vitest, tsc, api-contract, invariants |
 | [`TODO_CHART_AGENT_LAYER.md`](TODO_CHART_AGENT_LAYER.md) | agent_layer_profile, osobny tryb, chart screenshot, rules-as-training, consensus, eval harness, `AgentDecision`, P1–P13 |
 | [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) | roadmap, phases A–F, M1/M2 sprint, start-here queue |

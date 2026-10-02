@@ -55,7 +55,11 @@ Budowanie i testy:
 ```bash
 make build
 make test
+# pełny zestaw jak w CI (Windows: .\tools\verify.ps1)
+make verify
 ```
+
+Katalog: co testujemy i jak odpalić wycinek — [`doc/TESTS.md`](doc/TESTS.md).
 
 Uruchamianie CLI:
 

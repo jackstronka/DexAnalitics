@@ -21,4 +21,4 @@ Wklej do każdego nowego `IMPLEMENTATION_PLAN_*` / `ROADMAP_*` / `*_PLAN.md` (za
 
 **Poza automatem:** co zostaje ręczne (devnet `#[ignore]`, E2E operatora) i dlaczego.
 
-Zasady dla testów w tej sekcji: hermetyczne (bez sieci, bez repo `data/`, env przez `test_env::EnvGuard`), bez pustych passów — `.cursor/rules/test-integrity.mdc`.
+Zasady dla testów w tej sekcji: hermetyczne (bez sieci, bez repo `data/`, env przez `test_env::EnvGuard`), bez pustych passów — `.cursor/rules/test-integrity.mdc`. Po wdrożeniu testów zaktualizuj katalog [`TESTS.md`](../TESTS.md) (pkt 8 tej reguły).

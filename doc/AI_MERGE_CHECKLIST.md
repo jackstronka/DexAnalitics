@@ -10,6 +10,7 @@ Use this checklist before merging bugfixes and feature PRs touching execution, l
 - [ ] **Golden delta:** if any snapshot / expected number changed, the PR description has a "Golden delta: what changed and why" section.
 - [ ] **Hermetic tests:** new tests use no network, no repo `data/`, env only via `test_env::EnvGuard` (CI runs tests without network).
 - [ ] **Plan test section:** a new or changed plan document has "Testy i kryteria regresji" (`doc/templates/TEST_SECTION.md`).
+- [ ] **`doc/TESTS.md` catalog:** new test file / golden / integration harness / `#[ignore]` / web `*.test.ts` / new suite → same-PR update of the catalog (what it guards + how to run). Skip only when adding another unit test in an already-described module.
 - [ ] **Invariant checks:** lineage continuity sanity is preserved (close/open rotation, baseline/end logic).
 - [ ] **Error paths:** dry-run, unavailable executor/wallet, and partial-data paths are explicit in API/UI messages.
 - [ ] **Shadow/diff check:** for the same fixture/data slice compare old/new metrics and explain material deltas.

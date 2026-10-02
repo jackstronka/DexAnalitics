@@ -1,5 +1,7 @@
 # Plan: siatka testów chroniąca przed regresjami
 
+**Katalog (co jest + jak odpalić):** [`TESTS.md`](TESTS.md).
+
 **Status:** audyt 2026-09-30 + log wykonania (§6). T-PR1 zrobione (PR #2). **§3–§4 zastąpione** — jedyny plan wykonawczy: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) (fazy 0/A–E; mapowanie T-PR → nowe ID w kolumnie „stare ID”).  
 **Data:** 2026-09-30  
 **keywords:** testing, regression, golden-fixture, make-verify, pre-push, ci, postgres-integration, vitest, tsc, api-contract, openapi, invariants, wallet-gl, lineage, stream-pnl, chain-portfolio, backtest

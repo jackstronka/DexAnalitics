@@ -3,7 +3,7 @@
 **Status:** plan wykonawczy (2026-09-30), oparty na analizie repo + wyniku CI [PR #2](https://github.com/jackstronka/DexAnalitics/pull/2). Faza 0 i kolejne wymagają **GO**.  
 **keywords:** regression-resilience, testing-plan, hermetic-tests, golden-fixture, insta, proptest, invariants, openapi-contract, make-verify, ci, postgres-ci, branch-protection, self-heal-pipeline, agent-rules, cargo-mutants, verify-fast, test-report, test-areas, job-summary, golden-delta-table, roadmap-test-gates, master-plan-waves
 
-**Powiązane:** [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) (fale rozwoju F1–F5 — §7 tego planu mapuje je na testy), [`ROADMAP.md`](ROADMAP.md), [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) (audyt 2026-09-30 + log wykonania; **nie** backlog), [`AI_MERGE_CHECKLIST.md`](AI_MERGE_CHECKLIST.md), [`BUGS.md`](BUGS.md) (BUG-20260930-01…04), [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (backlog produktowy — ten plan go nie zastępuje)
+**Powiązane:** [`TESTS.md`](TESTS.md) (katalog: co jest i jak odpalić), [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) (fale rozwoju F1–F5 — §7 tego planu mapuje je na testy), [`ROADMAP.md`](ROADMAP.md), [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) (audyt 2026-09-30 + log wykonania; **nie** backlog), [`AI_MERGE_CHECKLIST.md`](AI_MERGE_CHECKLIST.md), [`BUGS.md`](BUGS.md) (BUG-20260930-01…04), [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) (backlog produktowy — ten plan go nie zastępuje)
 
 **Rola testów w projekcie:** testy mają (1) chronić to, co już działa, (2) **prowadzić rozwój** — każda fala z master planu ma testowe kryterium zamknięcia (§7), (3) dawać **czytelny, jednolity obraz jakości** per obszar projektu (faza R).
 
