@@ -1,3 +1,7 @@
+---
+source: crates/api/src/services/position_stream_lineage.rs
+expression: to_shadow(&nodes)
+---
 [
   {
     "position_address": "old",

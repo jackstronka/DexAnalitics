@@ -1,0 +1,51 @@
+---
+source: crates/api/src/services/position_stream_lineage.rs
+expression: "serde_json::json!({\n    \"continuity\": to_shadow(&nodes), \"fork_entry_rotD\":\n    build_lineage_chain_from_db_edges(&members, &edges, \"rotD\", 10),\n    \"fork_entry_sibX\":\n    build_lineage_chain_from_db_edges(&members, &edges, \"sibX\", 10),\n    \"bot_open_stitch_suppressed\":\n    suppress_jsonl_rotation_stitch(&rows, \"rotD\"),\n    \"manual_open_stitch_suppressed\":\n    suppress_jsonl_rotation_stitch(&rows, \"manualE\"),\n    \"manual_open_has_prior_close_same_session\":\n    lifecycle_open_has_prior_close_same_session(&rows, \"manualE\"),\n})"
+---
+{
+  "bot_open_stitch_suppressed": false,
+  "continuity": [
+    {
+      "baseline_value_usd": "10.00",
+      "current_value_usd": "9.80",
+      "note": null,
+      "position_address": "rotA"
+    },
+    {
+      "baseline_value_usd": "9.80",
+      "current_value_usd": "9.50",
+      "note": "baseline_from_rotation_session.",
+      "position_address": "rotB"
+    },
+    {
+      "baseline_value_usd": "9.50",
+      "current_value_usd": "8.90",
+      "note": "baseline_from_rotation_session. end value approximated from next node baseline (rotation close→open); close row lacked leg token deltas.",
+      "position_address": "rotC"
+    },
+    {
+      "baseline_value_usd": "8.90",
+      "current_value_usd": "9.00",
+      "note": null,
+      "position_address": "rotD"
+    },
+    {
+      "baseline_value_usd": "10.00",
+      "current_value_usd": "10.10",
+      "note": null,
+      "position_address": "manualE"
+    }
+  ],
+  "fork_entry_rotD": [
+    "rotA",
+    "rotB",
+    "rotC",
+    "rotD"
+  ],
+  "fork_entry_sibX": [
+    "rotA",
+    "sibX"
+  ],
+  "manual_open_has_prior_close_same_session": false,
+  "manual_open_stitch_suppressed": true
+}

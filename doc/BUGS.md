@@ -1892,7 +1892,7 @@ keywords: position-stream-lineage, rotation, registry.jsonl, lifecycle, rebalanc
 - **Fix (follow-up 4):** On successful pending-open recovery, executor now performs the same continuity steps as standard rebalance success: replace `managed_allowlist` entry `old->new` (without growth) and call `reopen_hook(old, new)` to update strategy links.
 - **Fix (follow-up 5):** `set_managed_allowlist` now keeps explicit empty list as restrictive (`Some(empty)`, target `0`) instead of unrestricted; added regression test `empty_managed_allowlist_stays_restrictive`.
 - **Guards/tests (2026-04-14):** Added `jsonl_stitch_allowed_when_rotation_parent_exists_without_session_match`; existing `jsonl_stitch_suppressed_when_open_session_not_on_prior_close` and `jsonl_stitch_allowed_when_session_matches_prior_close` still pass.
-- **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`.
+- **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`. B5 golden `golden_lineage_multi_rotation_continuity` (bot zszywa łańcuch; `manualE` operator_api nie jest dzieckiem; fork `sibX` poza łańcuchem `rotD`).
 - **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`
 
 ### BUG-20260413-04 — Open target USD looked too low after success

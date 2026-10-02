@@ -6746,42 +6746,40 @@ mod tests {
         assert_eq!(merged.get("mint-b").copied(), Some(8.25));
     }
 
+    fn lc(
+        ts: DateTime<Utc>,
+        event: &str,
+        pos: &str,
+        sid: Option<&str>,
+        details: Option<serde_json::Value>,
+    ) -> LifecycleRow {
+        LifecycleRow {
+            ts_utc: Some(ts),
+            event: Some(event.to_string()),
+            pool_address: Some("poolP".to_string()),
+            position_pubkey: Some(pos.to_string()),
+            fee_payer_pubkey: Some("payer".to_string()),
+            rebalance_session_id: sid.map(str::to_string),
+            details,
+            ..empty_lifecycle_row()
+        }
+    }
+
+    fn run_continuity_trio(rows: &[LifecycleRow], nodes: &mut [PositionStreamLineageNode]) {
+        apply_session_continuity_from_lifecycle_rows(rows, nodes);
+        apply_baseline_fallback_from_prev_end(nodes);
+        apply_end_value_fallback_from_next_baseline(nodes);
+    }
+
+    /// B5: existing 3-node shadow, now via insta (was `lineage_shadow_expected.json`).
     #[test]
     fn lineage_shadow_diff_matches_golden_fixture() {
-        let ts = chrono::Utc::now();
+        let ts = DateTime::parse_from_rfc3339("2026-04-10T00:00:00Z")
+            .expect("ts")
+            .with_timezone(&Utc);
         let rows = vec![
-            LifecycleRow {
-                ts_utc: Some(ts),
-                event: Some("bot_close_position".to_string()),
-                pool_address: Some("pool".to_string()),
-                position_pubkey: Some("old".to_string()),
-                fee_payer_pubkey: Some("payer".to_string()),
-                rebalance_session_id: Some("sid-1".to_string()),
-                tx_fee_lamports: None,
-                fee_payer_token_deltas: None,
-                fee_payer_token_a_delta_ui: None,
-                fee_payer_token_b_delta_ui: None,
-                lp_collected_token_a_raw: None,
-                lp_collected_token_b_raw: None,
-                details: None,
-                source: None,
-            },
-            LifecycleRow {
-                ts_utc: Some(ts),
-                event: Some("bot_open_position".to_string()),
-                pool_address: Some("pool".to_string()),
-                position_pubkey: Some("new".to_string()),
-                fee_payer_pubkey: Some("payer".to_string()),
-                rebalance_session_id: Some("sid-1".to_string()),
-                tx_fee_lamports: None,
-                fee_payer_token_deltas: None,
-                fee_payer_token_a_delta_ui: None,
-                fee_payer_token_b_delta_ui: None,
-                lp_collected_token_a_raw: None,
-                lp_collected_token_b_raw: None,
-                details: None,
-                source: None,
-            },
+            lc(ts, "bot_close_position", "old", Some("sid-1"), None),
+            lc(ts, "bot_open_position", "new", Some("sid-1"), None),
         ];
         let mut nodes = vec![
             mk_node("old", Decimal::new(200, 2), Decimal::new(180, 2)),
@@ -6789,13 +6787,72 @@ mod tests {
             mk_node("next", Decimal::ZERO, Decimal::new(160, 2)),
         ];
         nodes[0].closed_ts_utc = Some("2026-04-10T00:00:00Z".to_string());
-        apply_session_continuity_from_lifecycle_rows(&rows, &mut nodes);
-        apply_baseline_fallback_from_prev_end(&mut nodes);
-        apply_end_value_fallback_from_next_baseline(&mut nodes);
+        run_continuity_trio(&rows, &mut nodes);
+        insta::assert_json_snapshot!(to_shadow(&nodes));
+    }
 
-        let got = serde_json::to_string_pretty(&to_shadow(&nodes)).expect("serialize shadow");
-        let expected = include_str!("../../tests/fixtures/lineage_shadow_expected.json").trim();
-        assert_eq!(got.trim(), expected);
+    /// B5 golden: 4 bot rotations + manual open (F2.3 / BUG-20260413-05) + fork walk.
+    /// Bot sessions stitch the chain; a same-pool manual open must not become a false child.
+    /// A diff here is an `economic_regression` on lineage — explain it in the PR "Golden delta".
+    #[test]
+    fn golden_lineage_multi_rotation_continuity() {
+        let t0 = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
+            .expect("t0")
+            .with_timezone(&Utc);
+        let t = |mins: i64| t0 + chrono::Duration::minutes(mins);
+        let rows = vec![
+            lc(t(0), "bot_close_position", "rotA", Some("sid-1"), None),
+            lc(t(1), "bot_open_position", "rotB", Some("sid-1"), None),
+            lc(t(10), "bot_close_position", "rotB", Some("sid-2"), None),
+            lc(t(11), "bot_open_position", "rotC", Some("sid-2"), None),
+            lc(t(20), "bot_close_position", "rotC", Some("sid-3"), None),
+            lc(t(21), "bot_open_position", "rotD", Some("sid-3"), None),
+            lc(
+                t(40),
+                "bot_open_position",
+                "manualE",
+                Some("ui-cost-session"),
+                Some(serde_json::json!({"open_origin": "operator_api"})),
+            ),
+        ];
+
+        let mut nodes = vec![
+            mk_node("rotA", Decimal::new(1000, 2), Decimal::new(980, 2)),
+            mk_node("rotB", Decimal::ZERO, Decimal::new(950, 2)),
+            mk_node("rotC", Decimal::ZERO, Decimal::ZERO),
+            mk_node("rotD", Decimal::new(890, 2), Decimal::new(900, 2)),
+            mk_node("manualE", Decimal::new(1000, 2), Decimal::new(1010, 2)),
+        ];
+        nodes[0].closed_ts_utc = Some("2026-04-13T20:00:00Z".to_string());
+        nodes[1].closed_ts_utc = Some("2026-04-13T20:10:00Z".to_string());
+        nodes[2].closed_ts_utc = Some("2026-04-13T20:20:00Z".to_string());
+        run_continuity_trio(&rows, &mut nodes);
+
+        let edges = vec![
+            (Some(t(0)), "rotA".into(), "rotB".into(), String::new()),
+            (Some(t(10)), "rotB".into(), "rotC".into(), String::new()),
+            (Some(t(20)), "rotC".into(), "rotD".into(), String::new()),
+            (Some(t(2)), "rotA".into(), "sibX".into(), String::new()),
+        ];
+        let members = vec![
+            "rotA".into(),
+            "rotB".into(),
+            "rotC".into(),
+            "rotD".into(),
+            "sibX".into(),
+            "manualE".into(),
+        ];
+
+        let snapshot = serde_json::json!({
+            "continuity": to_shadow(&nodes),
+            "fork_entry_rotD": build_lineage_chain_from_db_edges(&members, &edges, "rotD", 10),
+            "fork_entry_sibX": build_lineage_chain_from_db_edges(&members, &edges, "sibX", 10),
+            "bot_open_stitch_suppressed": suppress_jsonl_rotation_stitch(&rows, "rotD"),
+            "manual_open_stitch_suppressed": suppress_jsonl_rotation_stitch(&rows, "manualE"),
+            "manual_open_has_prior_close_same_session":
+                lifecycle_open_has_prior_close_same_session(&rows, "manualE"),
+        });
+        insta::assert_json_snapshot!(snapshot);
     }
 
     #[test]
