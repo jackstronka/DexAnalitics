@@ -1,3 +1,10 @@
+## 2026-10-02 — B6: golden ledgera portfela łańcucha (start + eventy + stopka USD)
+
+keywords: golden, insta, chain_portfolio, ledger, ledger_start_event_from_open_start, aggregate_chain_collected_fees, chain_balance_usd_legs_from_balances, portfolio_start, collected_fees, clmm-lp-api, B6, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Golden `chain_portfolio::tests::golden_chain_portfolio_ledger_events_and_footer` zamraża syntetyczny cykl SOL/USDC: start 20,00 USD, open 11,50 out, collect 2,15, close 10,775, fees 2,225 (collect + LP na close), stopka 8,50. Bez RPC/DB. Diff snapshotu = `economic_regression`.
+- **paths:** `crates/api/src/services/chain_portfolio.rs`, `crates/api/src/services/snapshots/clmm_lp_api__services__chain_portfolio__tests__golden_chain_portfolio_ledger_events_and_footer.snap`, `crates/api/tests/fixtures/chain_portfolio_ledger_b6/README.md`
+
 ## 2026-10-02 — B5: golden lineage multi-rotation (trio ciągłości + fork + ręczny open)
 
 keywords: golden, insta, lineage, multi-rotation, session-continuity, false-parent, fork, suppress_jsonl_rotation_stitch, BUG-20260413-05, F2.3, clmm-lp-api, B5, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

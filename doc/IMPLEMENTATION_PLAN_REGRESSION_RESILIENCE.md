@@ -166,7 +166,7 @@ Narzędzie: **`insta`** (feature `json`) w `[workspace.dependencies]`, `cargo in
 | **B3** ✅ PR #10 | Sizing reopen | tabela przypadków (prev_end, wallet notional, raw balances, caps) → `target_usd_*` (`pub(crate)`), `apply_portfolio_caps_to_wallet_raw`, `clamp_deposit_quote_to_portfolio` | target_usd + amounts | S | T-PR6 |
 | **B4** | Backtest mini | nowy `crates/cli/tests/fixtures/backtest_mini/` (kilkaset kroków candles + swaps, wycięte z lokalnych danych) + DTO → `StepData` → `run_single` dla każdej strategii | fees, IL, vs_hodl, rebalance_count, ranking | L | T-PR7 |
 | **B5** ✅ PR #11 | Lineage multi-rotation | 4–5 rotacji (w tym fork i mismatch sesji) → trio ciągłości | shadow JSON (rozszerzenie istniejącego) | S | — |
-| **B6** | Ledger portfela łańcucha | lifecycle `Value` + open-start → `ledger_start_event_from_open_start`, `aggregate_chain_collected_fees`, `chain_balance_usd_legs_from_balances` | eventy + stopka USD | M | — |
+| **B6** ✅ PR #12 | Ledger portfela łańcucha | lifecycle `Value` + open-start → `ledger_start_event_from_open_start`, `aggregate_chain_collected_fees`, `chain_balance_usd_legs_from_balances` | eventy + stopka USD | M | — |
 
 Istniejący `lineage_shadow_expected.json` przeniesiony na `insta` (B5).
 

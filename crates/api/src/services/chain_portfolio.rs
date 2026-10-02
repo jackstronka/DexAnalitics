@@ -1293,4 +1293,149 @@ mod tests {
         let usd = portfolio_balance_usd_from_balances(&balances, &spot).expect("total");
         assert_eq!(usd, "150.00000000");
     }
+
+    const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    fn bal(mint: &str, raw: &str) -> crate::models::WalletSessionBalanceRow {
+        crate::models::WalletSessionBalanceRow {
+            mint: mint.to_string(),
+            amount_raw: raw.to_string(),
+            decimals: None,
+        }
+    }
+
+    /// B6 golden: CHAIN ledger start + lifecycle events + collected fees + wallet USD footer.
+    /// Synthetic SOL/USDC cycle (no RPC/DB). A diff here is an `economic_regression`.
+    #[test]
+    fn golden_chain_portfolio_ledger_events_and_footer() {
+        let spot = BTreeMap::from([(WSOL_MINT.to_string(), 150.0), (USDC.to_string(), 1.0)]);
+        let open_start = WalletSessionOpenStartSnapshot {
+            ts_utc: Some("2026-05-26T12:00:00Z".to_string()),
+            signature: "sig-open-1".to_string(),
+            position_pubkey: Some("posA".to_string()),
+            event: "bot_open_position".to_string(),
+            deployed_balances: vec![bal(WSOL_MINT, "50000000"), bal(USDC, "4000000")],
+            value_usd: Some("11.50000000".to_string()),
+            value_usd_source: "event_price".to_string(),
+            pre_open_balances: vec![bal(WSOL_MINT, "100000000"), bal(USDC, "5000000")],
+            pre_open_value_usd: Some("20.00000000".to_string()),
+            mint_resolution: "details".to_string(),
+            price_by_mint_usd: BTreeMap::from([
+                (WSOL_MINT.to_string(), "150".to_string()),
+                (USDC.to_string(), "1".to_string()),
+            ]),
+        };
+        let start = ledger_start_event_from_open_start(&open_start).expect("start");
+
+        let cid = "chain-b6-fixture";
+        let open = json!({
+            "event": "bot_open_position",
+            "chain_session_id": cid,
+            "signature": "sig-open-1",
+            "position_pubkey": "posA",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC,
+                "open_amount_a_raw": 50_000_000u64,
+                "open_amount_b_raw": 4_000_000u64
+            }
+        });
+        let collect = json!({
+            "event": "bot_collect_fees",
+            "chain_session_id": cid,
+            "signature": "sig-collect-1",
+            "position_pubkey": "posA",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC
+            }
+        });
+        let close = json!({
+            "event": "bot_close_position",
+            "chain_session_id": cid,
+            "signature": "sig-close-1",
+            "position_pubkey": "posA",
+            "details": {
+                "token_mint_a": WSOL_MINT,
+                "token_mint_b": USDC,
+                "close_amount_a_raw": 48_000_000u64,
+                "close_amount_b_raw": 3_500_000u64,
+                "lp_collected_token_a_raw": 500_000u64,
+                "lp_collected_token_b_raw": 0u64
+            }
+        });
+        let lifecycle = [
+            (
+                "2026-05-26T12:00:00Z",
+                "bot_open_position",
+                "sig-open-1",
+                open,
+                None,
+                None,
+                Some(5_000i64),
+            ),
+            (
+                "2026-05-26T13:00:00Z",
+                "bot_collect_fees",
+                "sig-collect-1",
+                collect.clone(),
+                Some(1_000_000i64),
+                Some(2_000_000i64),
+                Some(5_000i64),
+            ),
+            (
+                "2026-05-26T14:00:00Z",
+                "bot_close_position",
+                "sig-close-1",
+                close.clone(),
+                Some(500_000i64),
+                Some(0i64),
+                Some(5_000i64),
+            ),
+        ];
+        let mut events = vec![start];
+        for (ts, event, sig, raw, lp_a, lp_b, tx_fee) in lifecycle {
+            if let Some(evt) = ledger_event_from_lifecycle_row(
+                Some(ts.to_string()),
+                event,
+                Some(sig.to_string()),
+                Some("posA".to_string()),
+                &raw,
+                lp_a,
+                lp_b,
+                &spot,
+            ) {
+                events.push(evt);
+            }
+            if let Some(lamports) = tx_fee.filter(|n| *n > 0) {
+                events.push(tx_fee_ledger_event(
+                    Some(ts.to_string()),
+                    Some(sig.to_string()),
+                    Some("posA".to_string()),
+                    lamports,
+                    &spot,
+                ));
+            }
+        }
+
+        let fees = aggregate_chain_collected_fees(
+            &[
+                (collect, Some(1_000_000), Some(2_000_000)),
+                (close, Some(500_000), Some(0)),
+            ],
+            &spot,
+        );
+
+        let leftover = vec![bal(WSOL_MINT, "50000000"), bal(USDC, "1000000")];
+        let footer_legs = chain_balance_usd_legs_from_balances(&leftover, &spot);
+        let footer_usd = portfolio_balance_usd_from_balances(&leftover, &spot);
+
+        let snapshot = serde_json::json!({
+            "events": events,
+            "collected_fees": fees,
+            "footer_legs": footer_legs,
+            "footer_usd": footer_usd,
+        });
+        insta::assert_json_snapshot!(snapshot);
+    }
 }

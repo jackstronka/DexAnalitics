@@ -1,0 +1,183 @@
+---
+source: crates/api/src/services/chain_portfolio.rs
+expression: snapshot
+---
+{
+  "collected_fees": {
+    "collect_events": 1,
+    "legs": [
+      {
+        "amount_raw": "2000000",
+        "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "price_usd": "1.00000000",
+        "value_usd": "2.00000000"
+      },
+      {
+        "amount_raw": "1500000",
+        "mint": "So11111111111111111111111111111111111111112",
+        "price_usd": "150.00000000",
+        "value_usd": "0.22500000"
+      }
+    ],
+    "total_usd": "2.22500000"
+  },
+  "events": [
+    {
+      "event": "chain_portfolio_start",
+      "kind": "portfolio_start",
+      "legs": [
+        {
+          "amount_raw": "100000000",
+          "direction": "in",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "15.00000000"
+        },
+        {
+          "amount_raw": "5000000",
+          "direction": "in",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "value_usd": "5.00000000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-open-1",
+      "total_usd": "20.00000000",
+      "ts_utc": "2026-05-26T12:00:00Z"
+    },
+    {
+      "event": "bot_open_position",
+      "kind": "open_to_pool",
+      "legs": [
+        {
+          "amount_raw": "50000000",
+          "direction": "out",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "7.50000000"
+        },
+        {
+          "amount_raw": "4000000",
+          "direction": "out",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "value_usd": "4.00000000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-open-1",
+      "total_usd": "11.50000000",
+      "ts_utc": "2026-05-26T12:00:00Z"
+    },
+    {
+      "event": "tx_fee",
+      "kind": "tx_fee",
+      "legs": [
+        {
+          "amount_raw": "5000",
+          "direction": "out",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "0.00075000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-open-1",
+      "total_usd": "0.00075000",
+      "ts_utc": "2026-05-26T12:00:00Z"
+    },
+    {
+      "event": "bot_collect_fees",
+      "kind": "collect_fees",
+      "legs": [
+        {
+          "amount_raw": "1000000",
+          "direction": "in",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "0.15000000"
+        },
+        {
+          "amount_raw": "2000000",
+          "direction": "in",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "value_usd": "2.00000000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-collect-1",
+      "total_usd": "2.15000000",
+      "ts_utc": "2026-05-26T13:00:00Z"
+    },
+    {
+      "event": "tx_fee",
+      "kind": "tx_fee",
+      "legs": [
+        {
+          "amount_raw": "5000",
+          "direction": "out",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "0.00075000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-collect-1",
+      "total_usd": "0.00075000",
+      "ts_utc": "2026-05-26T13:00:00Z"
+    },
+    {
+      "event": "bot_close_position",
+      "kind": "close_from_pool",
+      "legs": [
+        {
+          "amount_raw": "48000000",
+          "direction": "in",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "7.20000000"
+        },
+        {
+          "amount_raw": "3500000",
+          "direction": "in",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "value_usd": "3.50000000"
+        },
+        {
+          "amount_raw": "500000",
+          "direction": "in",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "0.07500000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-close-1",
+      "total_usd": "10.77500000",
+      "ts_utc": "2026-05-26T14:00:00Z"
+    },
+    {
+      "event": "tx_fee",
+      "kind": "tx_fee",
+      "legs": [
+        {
+          "amount_raw": "5000",
+          "direction": "out",
+          "mint": "So11111111111111111111111111111111111111112",
+          "value_usd": "0.00075000"
+        }
+      ],
+      "position_pubkey": "posA",
+      "signature": "sig-close-1",
+      "total_usd": "0.00075000",
+      "ts_utc": "2026-05-26T14:00:00Z"
+    }
+  ],
+  "footer_legs": [
+    {
+      "amount_raw": "50000000",
+      "mint": "So11111111111111111111111111111111111111112",
+      "price_usd": "150.00000000",
+      "value_usd": "7.50000000"
+    },
+    {
+      "amount_raw": "1000000",
+      "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "price_usd": "1.00000000",
+      "value_usd": "1.00000000"
+    }
+  ],
+  "footer_usd": "8.50000000"
+}
