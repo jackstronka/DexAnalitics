@@ -1,3 +1,10 @@
+## 2026-10-02 — B2: golden sald SESSION / CHAIN z lifecycle (9vhKY)
+
+keywords: golden, insta, snapshot, wallet_session, session-balance, chain-balance, aggregate_session_sums_from_lifecycle_rows, aggregate_chain_sums_from_lifecycle_rows, cap_open_debits, lifecycle, 9vhKY, clmm-lp-data, B2, BUG-20261002-01, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Golden `wallet_session::tests::golden_9vhky_session_and_chain_sums` — salda mint → raw dla 22 sesji i CHAIN łańcucha 9vhKY z fixture'a `crates/data/tests/fixtures/lifecycle_9vhKY.jsonl` (53 wiersze open/close/swap z ledgera, minimalny zestaw pól). Każda zmiana księgowania SESSION/CHAIN z lifecycle da czerwony test. Zamraża jednostronne księgowanie swapów (CHAIN SOL +~0,0999 SOL, BUG-20261002-01); noga SOL jest w wierszu jako `fee_payer_net_lamports_delta`.
+- **paths:** `crates/data/src/wallet_session.rs`, `crates/data/src/snapshots/`, `crates/data/tests/fixtures/lifecycle_9vhKY.jsonl`, `crates/data/Cargo.toml`
+
 ## 2026-10-02 — B1: golden `insta` dla sum łańcucha 9vhKY (`refresh_lineage_totals_from_nodes`)
 
 keywords: golden, insta, snapshot, chain_economic_totals, refresh_lineage_totals_from_nodes, 9vhKY, chain_history, net_pnl, lineage-totals, clmm-lp-api, B1, BUG-20261002-01, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

@@ -184,3 +184,8 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 - Sprawdzone: obie ścieżki dają identyczny wynik, zgodny z `totals` zapisanymi przez API (net 3,039781) i z `chain_cost_summary` (fees 0,339417, tx 0,053128); mutacja +0,000001 w net PnL → FAIL z diffem było/jest.
 - **Znalezisko:** liczby są wewnętrznie niespójne (headline net 3,04 vs Σ węzłów 0,99; cashflow ~4 USD na dwóch węzłach bez zmiany NAV) → BUG-20261002-01 (`open`, do diagnozy). Golden zamraża obecne zachowanie; poprawka da deltę w B1.
 - Aktualizacja snapshotu: `cargo insta review` albo `INSTA_UPDATE=always cargo test -p clmm-lp-api golden_9vhky` + `git diff` `.snap`; zawsze z sekcją „Golden delta” w PR.
+
+### B2 (2026-10-02) — golden sald SESSION / CHAIN z lifecycle (9vhKY)
+
+- Fixture `crates/data/tests/fixtures/lifecycle_9vhKY.jsonl`: 53 wiersze open/close/swap łańcucha 9vhKY wycięte z lokalnego `data/ledger/orca_position_lifecycle.jsonl`, tylko pola czytane przez agregatory (bez `rpc_url`, `fee_payer_pubkey`, notatek). Test `wallet_session::tests::golden_9vhky_session_and_chain_sums` (`clmm-lp-data`, dev-dep `insta`): saldo mint → raw dla każdej z 22 sesji (`aggregate_session_sums_from_lifecycle_rows`) i CHAIN (`aggregate_chain_sums_from_lifecycle_rows`, syntetyczne id — stare wiersze nie mają `chain_session_id`); capowanie debetów open (`cap_open_debits_against_running_balance`) w środku. Mutacja +1 raw w jednym close → FAIL.
+- **Znalezisko:** CHAIN SOL zawyżony o ~0,0999 SOL (~8,3 USD) — swapy księgowane jednostronnie (BUG-20261002-01); golden zamraża obecne salda. Aktualizacja: `INSTA_UPDATE=always cargo test -p clmm-lp-data golden_9vhky` + `git diff`.
