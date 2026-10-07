@@ -106,7 +106,7 @@ python tools/golden_delta.py --old old.snap --new new.snap --fixture b1
 cd tools && python test_golden_delta.py
 ```
 
-CI (`quality_gates` / job `golden_delta`) wkleja tabelę do Job Summary i komentarza PR. Wklej ten sam markdown do sekcji **Golden delta** w opisie PR. Job **nie pada** przy zmianie liczb (to `economic_regression` dla człowieka; bramka D1 przyjdzie później).
+CI (`quality_gates` / job `golden_delta`) wkleja tabelę do Job Summary i komentarza PR. Wklej ten sam markdown do sekcji **Golden delta** w opisie PR. Job **nie pada** przy zmianie liczb (to `economic_regression` dla człowieka). **D1:** gdy w diffie jest `*.snap`, `**/tests/fixtures/**`, `**/snapshots/**` albo `openapi.json`, brak sekcji `Golden delta:` (nagłówek + uzasadnienie) = czerwony job. Edycja opisu PR odpala job ponownie (`edited`). Testy bramki: `cd tools && python test_golden_delta.py`.
 
 Znane zamrożone niespójności: **BUG-20261002-01** (cashflow swapów jednostronny) — B1 i B2 celowo trzymają obecne liczby do osobnego GO na fix.
 
@@ -233,6 +233,7 @@ Wymagane na `main` (branch protection):
 | `web` | `tsc` + `vitest` |
 | `db` | Postgres 16 + `CLMM_REQUIRE_DB_TESTS=1` + `session_gl_integration` |
 | `critical_area_requires_tests` | zmiana pliku krytycznego (GL, lineage, `chain_portfolio`, `wallet_session`, `session_capital`, migracje, …) wymaga dodanych linii testowych albo etykiety `no-tests-needed` |
+| `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |
 
 Docker / semver **nie** są wymagane do merge.
 

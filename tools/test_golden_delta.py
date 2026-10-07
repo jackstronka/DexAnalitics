@@ -9,8 +9,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from golden_delta import (
+    check_pr_golden_delta_section,
     diff_maps,
     fmt_dec,
+    has_golden_delta_section,
+    is_golden_gated_path,
     parse_snap_json,
     pct_change,
     render_table,
@@ -114,6 +117,99 @@ class DiffTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             self.assertIn("headline.net_pnl_usd", buf.getvalue())
+
+
+class D1SectionGateTests(unittest.TestCase):
+    def test_gated_paths(self) -> None:
+        self.assertTrue(
+            is_golden_gated_path(
+                "crates/api/src/services/snapshots/golden_9vhky.snap"
+            )
+        )
+        self.assertTrue(
+            is_golden_gated_path(
+                "crates/data/tests/fixtures/lifecycle_9vhKY.jsonl"
+            )
+        )
+        self.assertTrue(is_golden_gated_path("openapi.json"))
+        self.assertTrue(is_golden_gated_path("crates/api/openapi.json"))
+        self.assertTrue(
+            is_golden_gated_path(r"crates\cli\src\engine\snapshots\b4.snap")
+        )
+        self.assertFalse(is_golden_gated_path("crates/api/src/openapi.rs"))
+        self.assertFalse(is_golden_gated_path("doc/TESTS.md"))
+        self.assertFalse(
+            is_golden_gated_path("data/pool-snapshots/orca/x/snapshots_5m.jsonl")
+        )
+
+    def test_section_requires_heading_and_substance(self) -> None:
+        self.assertTrue(
+            has_golden_delta_section(
+                "## Golden delta\n\nB1 net 3.04 -> 1.00 because swap SOL leg.\n"
+            )
+        )
+        self.assertTrue(
+            has_golden_delta_section(
+                "Golden delta: B1 net changed after cashflow fix.\n"
+            )
+        )
+        self.assertTrue(
+            has_golden_delta_section("**Golden delta:**\n\n| Fixture | Delta |\n")
+        )
+        self.assertFalse(has_golden_delta_section(""))
+        self.assertFalse(has_golden_delta_section("## Golden delta\n\n"))
+        self.assertFalse(
+            has_golden_delta_section(
+                "- [x] **Golden delta:** if any snapshot changed, explain.\n"
+            )
+        )
+        self.assertFalse(
+            has_golden_delta_section("## Summary\n\nUpdated snaps.\n")
+        )
+
+    def test_check_skips_when_no_gated_files(self) -> None:
+        ok, msg = check_pr_golden_delta_section("", ["crates/api/src/openapi.rs"])
+        self.assertTrue(ok)
+        self.assertIn("not required", msg)
+
+    def test_check_fails_without_section(self) -> None:
+        ok, msg = check_pr_golden_delta_section(
+            "## Summary\nfix tests\n",
+            ["crates/api/src/services/snapshots/b1.snap"],
+        )
+        self.assertFalse(ok)
+        self.assertIn("b1.snap", msg)
+
+    def test_require_pr_section_cli(self) -> None:
+        from io import StringIO
+        from unittest.mock import patch
+
+        from golden_delta import main
+
+        with patch("sys.stdout", StringIO()) as buf:
+            rc = main(
+                [
+                    "--require-pr-section",
+                    "--changed-file",
+                    "openapi.json",
+                    "--pr-body",
+                    "Golden delta: freeze OpenAPI after adding field x.\n",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("has Golden delta", buf.getvalue())
+
+        with patch("sys.stdout", StringIO()):
+            rc = main(
+                [
+                    "--require-pr-section",
+                    "--changed-file",
+                    "crates/data/tests/fixtures/lifecycle_9vhKY.jsonl",
+                    "--pr-body",
+                    "## Summary\nnope\n",
+                ]
+            )
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":
