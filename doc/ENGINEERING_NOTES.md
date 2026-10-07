@@ -2,7 +2,7 @@
 
 keywords: golden-delta, D1, quality_gates, insta, snap, fixtures, openapi, economic_regression, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** Job `golden_delta` nadal publikuje tabelę R3 i **nie** pada na diffie liczb. Pada, gdy w PR ruszono `*.snap` / `tests/fixtures` / `snapshots/` / `openapi.json`, a opis nie ma sekcji `Golden delta:` z uzasadnieniem. Predykat i testy hermetyczne w `tools/golden_delta.py` (`--require-pr-section`). Edycja body PR (`edited`) ponawia check.
+- **What:** Job `golden_delta` nadal publikuje tabelę R3 i **nie** pada na diffie liczb. Pada, gdy w PR ruszono `*.snap` / `tests/fixtures` / `snapshots/` / `openapi.json`, a opis nie ma sekcji `Golden delta:` z uzasadnieniem. Predykat i testy hermetyczne w `tools/golden_delta.py` (`--require-pr-section`). Edycja body PR (`edited`) ponawia check. PR #16.
 - **paths:** `tools/golden_delta.py`, `tools/test_golden_delta.py`, `scripts/ci/golden-delta.sh`, `.github/workflows/quality_gates.yml`, `doc/TESTS.md`
 
 ## 2026-10-02 — R3: tabela golden delta (było / jest / Δ) z `*.snap`
