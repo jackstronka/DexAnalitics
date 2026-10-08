@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### C1 (2026-10-08) — zacommitowany snapshot OpenAPI
+
+- `crates/api/openapi.json` = pretty JSON z `ApiDoc::openapi()` (utoipa). Test `openapi::tests::openapi_matches_committed_snapshot` porównuje `serde_json::Value` (nie string), bez sieci. Update: `UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed` (albo `make openapi`). Zmiana pola = diff w PR + sekcja Golden delta (D1). Nie edytować JSON ręcznie.
+
 ### D1 (2026-10-07) — sekcja `Golden delta:` wymagana przy zmianie fixture / snap / OpenAPI
 
 - `tools/golden_delta.py --require-pr-section`: gdy w diffie vs `BASE_REF` jest `*.snap`, `**/tests/fixtures/**`, `**/snapshots/**` albo `openapi.json`, body PR musi mieć nagłówek `Golden delta` + przynajmniej jedną linię uzasadnienia. Sama zmiana liczb nadal nie failuje (klasa `economic_regression`). Checklistowy bullet `- [x] **Golden delta:** if any snapshot…` nie zalicza się. `scripts/ci/golden-delta.sh` pobiera body (`gh` / `PR_BODY` / `PR_BODY_FILE`) i kończy job kodem z tej bramki. Workflow `quality_gates` nasłuchuje też `edited`, żeby dopisanie sekcji odświeżyło check. Testy: `D1SectionGateTests` w `tools/test_golden_delta.py` (bez gita/sieci).

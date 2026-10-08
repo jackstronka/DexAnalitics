@@ -2,3 +2,4 @@
 *.sh text eol=lf
 .githooks/* text eol=lf
 *.snap text eol=lf
+**/openapi.json text eol=lf

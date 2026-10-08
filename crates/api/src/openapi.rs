@@ -468,6 +468,17 @@ pub fn openapi_yaml() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn committed_openapi_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("openapi.json")
+    }
+
+    fn live_openapi_pretty() -> String {
+        ApiDoc::openapi()
+            .to_pretty_json()
+            .expect("serialize OpenAPI spec")
+    }
 
     #[test]
     fn test_openapi_generation() {
@@ -481,5 +492,63 @@ mod tests {
         let yaml = openapi_yaml();
         assert!(!yaml.is_empty());
         assert!(yaml.contains("Bociarz LP API"));
+    }
+
+    /// C1: live `ApiDoc` must match the committed snapshot.
+    /// Update: `UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed`
+    #[test]
+    fn openapi_matches_committed_snapshot() {
+        let live_text = live_openapi_pretty();
+        let live: serde_json::Value =
+            serde_json::from_str(&live_text).expect("parse live OpenAPI JSON");
+        let path = committed_openapi_path();
+
+        let update = {
+            let _guard = crate::test_env::EnvGuard::blocking_lock();
+            matches!(std::env::var("UPDATE_OPENAPI"), Ok(v) if v == "1")
+        };
+        if update {
+            let mut body = live_text;
+            if !body.ends_with('\n') {
+                body.push('\n');
+            }
+            std::fs::write(&path, body).unwrap_or_else(|e| {
+                panic!("failed to write {}: {e}", path.display());
+            });
+        }
+
+        let committed_text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "missing committed OpenAPI snapshot at {}: {e}\n\
+                 Generate with UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed",
+                path.display()
+            );
+        });
+        let committed: serde_json::Value =
+            serde_json::from_str(&committed_text).unwrap_or_else(|e| {
+                panic!("committed {} is not JSON: {e}", path.display());
+            });
+        assert_eq!(
+            live, committed,
+            "OpenAPI spec drifted from crates/api/openapi.json.\n\
+             If intentional: UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed\n\
+             then add a Golden delta section to the PR (D1)."
+        );
+    }
+
+    #[test]
+    fn openapi_snapshot_detects_field_drift() {
+        let path = committed_openapi_path();
+        let committed_text =
+            std::fs::read_to_string(&path).expect("committed openapi.json must exist");
+        let mut tampered: serde_json::Value =
+            serde_json::from_str(&committed_text).expect("parse committed OpenAPI JSON");
+        tampered["info"]["title"] = serde_json::json!("tampered-title");
+        let live: serde_json::Value =
+            serde_json::from_str(&live_openapi_pretty()).expect("parse live OpenAPI JSON");
+        assert_ne!(
+            live, tampered,
+            "equality check would miss a title change — snapshot comparison is vacuous"
+        );
     }
 }

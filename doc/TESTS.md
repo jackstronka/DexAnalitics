@@ -68,6 +68,7 @@ cd web && npx vitest run src/lib/experimentCapital.test.ts
 | Unit Rust (`#[test]` / `#[tokio::test]`) | `crates/*/src/**` w `mod tests` | zmiana logiki w tym module |
 | Integracja Rust | `crates/*/tests/*.rs` | dekoder kont, readiness, **GL w Postgres** |
 | Golden `insta` | snapshot `*.snap` + fixture | zmiana **liczby pieniężnej** albo rankingu — to `economic_regression` |
+| Kontrakt OpenAPI (C1) | `crates/api/openapi.json` | zmiana pola / ścieżki API — diff w PR; update `UPDATE_OPENAPI=1` |
 | Web Vitest | `web/src/lib/*.test.ts` | zmiana czystej logiki TS (nie stron React) |
 | `tsc --noEmit` | cały `web/` | rozjazd typów |
 | Ignorowane (sieć / live) | `#[ignore]` | nie wchodzą w `verify`; tylko ręcznie `--ignored` |
@@ -92,6 +93,15 @@ Odpalane w zwykłym `cargo test`. Diff `.snap` = zmiana ekonomii; update **tylko
 Po `INSTA_UPDATE` zawsze: `git diff` na `*.snap` i opis „było / jest / dlaczego”. Nie edytuj `.snap` „żeby CI było zielone”.
 
 **Tabela liczb (R3)** — liście numeryczne stary vs nowy `.snap`, posortowane po |Δ|:
+
+**Kontrakt OpenAPI (C1)** — `crates/api/openapi.json` vs live `ApiDoc`:
+
+```bash
+cargo test -p clmm-lp-api --lib openapi_matches_committed
+# update (Windows): $env:UPDATE_OPENAPI='1'; cargo test -p clmm-lp-api --lib openapi_matches_committed
+# update (Unix):    UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed
+make openapi
+```
 
 ```bash
 # vs origin/main (to samo co job CI golden_delta)
@@ -147,6 +157,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `position_stream_lineage` | B5 golden + shadow; trio ciągłości sesji, fork, ręczny open |
 | `position_stream_pnl` / `position_chain_history` | PnL strumienia, historia łańcucha |
 | `wallet_gl_posting` / `wallet_ledger*` | księgowanie GL z lifecycle |
+| `openapi` | C1: `openapi_matches_committed_snapshot` — live `ApiDoc` (utoipa) = `crates/api/openapi.json`; update: `UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed` |
 | `handlers::endpoint_coverage_tests` | czy endpointy odpowiadają (404/walidacja), bez pełnego DB-happy-path |
 | `handlers::backtests` | readiness snapshotów, warianty okien |
 | `handlers::wallets` | merge sald, monotonic guard, fan-out RPC |

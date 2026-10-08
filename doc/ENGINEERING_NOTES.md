@@ -1,3 +1,10 @@
+## 2026-10-08 — C1: zacommitowany `openapi.json` + test równości z utoipa
+
+keywords: openapi, utoipa, C1, ApiDoc, UPDATE_OPENAPI, contract, clmm-lp-api, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Snapshot `crates/api/openapi.json` z `ApiDoc::openapi()`. Test `openapi_matches_committed_snapshot` pada, gdy spec się rozjedzie z plikiem. Update tylko przez `UPDATE_OPENAPI=1` / `make openapi`, z sekcją Golden delta w PR (D1). PR #17.
+- **paths:** `crates/api/src/openapi.rs`, `crates/api/openapi.json`, `Makefile`, `doc/TESTS.md`
+
 ## 2026-10-07 — D1: CI wymaga sekcji Golden delta przy zmianie fixture / snap / OpenAPI
 
 keywords: golden-delta, D1, quality_gates, insta, snap, fixtures, openapi, economic_regression, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
