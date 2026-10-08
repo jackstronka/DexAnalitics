@@ -179,7 +179,7 @@ Istniejący `lineage_shadow_expected.json` przeniesiony na `insta` (B5).
 | **C3** ✅ PR #18 | `proptest` (workspace dep) — niezmienniki: (1) `net_pnl = current + cashflow − baseline − tx_fees` po `refresh_lineage_totals_from_nodes`; (2) po dowolnej sekwencji open/close/collect saldo per mint ≥ 0 (`cap_open_debits_*`); (3) `price_to_tick(tick_to_price(t)) == t` — osobno dla `domain::math::price_tick` (`f64`, zakres ticków ograniczony do używanego w pulach, np. \|t\| ≤ 443636 z weryfikacją granicy) i `protocols::orca::pool_reader` (L4); (4) `clean_il = current − hodl`, `lp_vs_hodl = clean_il + fees`; (5) lineage: close_n end = baseline_{n+1} przy zgodnej sesji | 5 property tests zielone | M | T-PR8b |
 | **C4** ✅ PR #19 | Idempotencja GL w DB: ten sam wiersz lifecycle zastosowany 2× nie zmienia sald (job `db`) | test w `session_gl_integration` | S | — |
 | **C5** ✅ PR #21 | Skrypt CI: `BUGS.md` wpisy `high`/`critical` → nazwy testów z `Guards/tests` istnieją w kodzie (wyjątek: jawne `manual:`) | nowy critical bug bez testu nie przechodzi | S | T-PR9a |
-| **C6** ✅ | Web: testy dla `whirlpoolTicks`, `chainCapital`, `sessionCapital`, `openPositionSwapEstimates`, `lineageLedgerOpenQuote`, `chainEconomicQuality`; ESLint config (albo usunięcie skryptu) | logika liczbowa web pokryta | M | — |
+| **C6** ✅ PR #22 | Web: testy dla `whirlpoolTicks`, `chainCapital`, `sessionCapital`, `openPositionSwapEstimates`, `lineageLedgerOpenQuote`, `chainEconomicQuality`; ESLint config (albo usunięcie skryptu) | logika liczbowa web pokryta | M | — |
 
 ### Faza D — self-heal pipeline (G6) — po ≥ 2 goldenach z fazy B
 

@@ -2,7 +2,7 @@
 
 keywords: C6, vitest, whirlpoolTicks, chainCapital, sessionCapital, openPositionSwapEstimates, lineageLedgerOpenQuote, chainEconomicQuality, eslint, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** Vitest na tick/UI ratio, salda SESSION/CHAIN, ExactIn +5%, open-quote z ledgera, jakość ekonomiczna łańcucha. `.eslintrc.cjs` (ignore `api.gen.ts` / `api.ts` / pages — bez big-bang). Job `web` + `verify` odpalają `npm run lint`. Drobna `const` w `alignPriceRatioToTicks`.
+- **What:** Vitest na tick/UI ratio, salda SESSION/CHAIN, ExactIn +5%, open-quote z ledgera, jakość ekonomiczna łańcucha. `.eslintrc.cjs` (ignore `api.gen.ts` / `api.ts` / pages — bez big-bang). Job `web` + `verify` odpalają `npm run lint`. Drobna `const` w `alignPriceRatioToTicks`. PR #22.
 - **paths:** `web/src/lib/*.test.ts`, `web/.eslintrc.cjs`, `.github/workflows/ci.yml`
 
 ## 2026-10-08 — C5: `BUGS.md` high/critical muszą wskazywać istniejące testy
