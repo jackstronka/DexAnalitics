@@ -144,6 +144,7 @@ Plik: `crates/data/tests/session_gl_integration.rs`.
 | `session_gl_collect_row_accumulates` | collect dopisuje LP do SESSION |
 | `chain_gl_lifecycle_posting_matches_pslr` | to samo dla CHAIN |
 | `wallet_gl_opening_import_and_journal_postings` | import otwarcia + journal WALLET |
+| `session_and_chain_gl_lifecycle_row_replay_does_not_change_balances` | **C4:** ten sam wiersz 2× → `SkippedAlready`, salda SESSION/CHAIN i liczba postingów bez zmian (close, collect, CHAIN close) |
 
 ```bash
 # osobna baza — nigdy produkcyjna clmm_lp
