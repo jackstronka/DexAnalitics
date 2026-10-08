@@ -14,10 +14,10 @@
 
 | Środowisko | Komenda | Co robi |
 | ---------- | ------- | ------- |
-| Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo test --workspace` + web `check:api-gen` + `tsc` + `vitest run` |
+| Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo test --workspace` + web `check:api-gen` + `tsc` + `vitest` + `eslint` |
 | Windows | `.\tools\verify.ps1` | to samo; `-SkipWeb` / `-SkipRust` |
 | Szybko, tylko Rust | `make test` albo `LOGLEVEL=WARN cargo test --workspace` | bez fmt/clippy/web |
-| Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run` | C2 gen + typy + 51 testów `src/lib/*.test.ts` |
+| Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint` | C2 gen + typy + 73 testy `src/lib/*.test.ts` + ESLint (C6) |
 | Hook przed pushem | `git config core.hooksPath .githooks` | pre-push odpala `verify` (na Windows `verify.ps1`) |
 
 `make verify` **nie** odpala testów Postgres. Te są w jobie CI `db` albo ręcznie (§5).
@@ -248,13 +248,18 @@ Orca: tick↔price (C3(3) roundtrip `|t|≤443636`), deposit quote, wrap/unwrap,
 
 Tick/price (C3(3) roundtrip + granica 443636), IL, fee math, concentrated liquidity, constant product, price impact.
 
-### Web (`cd web && npx vitest run`) — 10 plików / 51 testów
+### Web (`cd web && npx vitest run`) — 16 plików / 73 testy
 
 Tylko `web/src/lib/*.test.ts` (logika liczbowa). **Brak** testów stron/komponentów.
 
 | Plik | Co robi |
 | ---- | ------- |
 | `api.gen.test.ts` | C2: `HealthResponse` z `api.contract` + `/health` w `api.gen.ts` / `openapi.json` |
+| `whirlpoolTicks.test.ts` | C6: tick↔price UI, spacing, expand in-range |
+| `chainCapital.test.ts` / `sessionCapital.test.ts` | C6: quote body, inventory raw→UI, spend cap ≥ 0 |
+| `openPositionSwapEstimates.test.ts` | C6: deficyt vs saldo, ExactIn +5%, cena puli |
+| `lineageLedgerOpenQuote.test.ts` | C6: latest open-quote USD per PDA |
+| `chainEconomicQuality.test.ts` | C6: end NAV fallback, banner estimated/degraded |
 | `experimentCapital.test.ts` | alokacja kapitału eksperymentu |
 | `experimentFundingPlan.test.ts` / `experimentBudgetPlan.test.ts` | plan finansowania / budżet |
 | `experimentLaunch.test.ts` / `experimentLaunchSpecs.test.ts` | start eksperymentu, specy |
@@ -273,7 +278,7 @@ Wymagane na `main` (branch protection):
 | Check | Co odpala |
 | ----- | --------- |
 | `rust` | fmt/clippy + testy w namespace bez sieci (`unshare -rn`, `--offline`) |
-| `web` | `check:api-gen` (C2) + `tsc` + `vitest` |
+| `web` | `check:api-gen` (C2) + `tsc` + `vitest` + `eslint` (C6) |
 | `db` | Postgres 16 + `CLMM_REQUIRE_DB_TESTS=1` + `session_gl_integration` |
 | `critical_area_requires_tests` | zmiana pliku krytycznego (GL, lineage, `chain_portfolio`, `wallet_session`, `session_capital`, migracje, …) wymaga dodanych linii testowych albo etykiety `no-tests-needed` |
 | `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |

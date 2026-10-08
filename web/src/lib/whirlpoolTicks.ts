@@ -109,7 +109,7 @@ export function alignPriceRatioToTicks(
     return null
   }
   const s = tickSpacing
-  let tickLower = Math.floor(rawLo / s) * s
+  const tickLower = Math.floor(rawLo / s) * s
   let tickUpper = Math.ceil(rawHi / s) * s
   if (tickLower >= tickUpper) {
     tickUpper = tickLower + s

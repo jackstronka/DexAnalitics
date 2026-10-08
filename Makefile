@@ -68,7 +68,7 @@ verify-rust: fmt-check lint
 	LOGLEVEL=WARN cargo test --workspace
 
 verify-web:
-	cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run
+	cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint
 
 # Enable repo git hooks for this clone
 hooks:
