@@ -89,6 +89,11 @@ openapi:
 openapi-ts:
 	cd web && npm run gen:api
 
+# C5: high/critical BUGS.md Guards/tests names exist in the repo
+.PHONY: bugs-test-guard
+bugs-test-guard:
+	python3 tools/bugs_test_guard.py
+
 # Run the project
 .PHONY: run
 run:

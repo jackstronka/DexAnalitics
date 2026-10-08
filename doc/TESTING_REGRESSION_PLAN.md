@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### C5 (2026-10-08) — `BUGS.md` high/critical → istniejące testy
+
+- `tools/bugs_test_guard.py`: wpisy `high`/`critical` muszą mieć w `Guards/tests` snake_case nazwę testu obecną w `crates/` / `web/src/` / `tools/` (`fn`, stem `tests/*.rs`, `mod *_tests`) albo `manual:`. Przynajmniej jedna nazwa musi istnieć. `cargo check` / `tsc` / `--lib` bez filtra = brak nazwy. Job `bugs_have_tests` w `quality_gates` (unit test skryptu + gate). Historyczne wpisy bez testu: `manual:` albo cytat prawdziwego `fn`.
+
 ### C2 (2026-10-08) — typy TS z OpenAPI (`api.gen.ts`)
 
 - `openapi-typescript` 7.13, skrypt `web/scripts/openapi-ts.mjs` (write / `--check` z normalizacją LF). Zacommitowany `web/src/lib/api.gen.ts`. Job `web`: `npm run check:api-gen` przed `tsc`. Nowe endpointy: `web/src/lib/api.contract.ts` (`OkJson` / `Schema`); `api.ts` bez migracji hurtowej. Test `api.gen.test.ts` (HealthResponse + `/health` w snapshotach). Update: `cd web && npm run gen:api`.

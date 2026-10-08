@@ -4,7 +4,7 @@
 **Nie** jest to plan budowy siatki — ten jest w [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md).  
 **Nie** jest to audyt z 2026-09-30 — ten (plus log PR) jest w [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md).
 
-**keywords:** tests, catalog, cargo-test, vitest, make-verify, golden, insta, session_gl_integration, hermetic
+**keywords:** tests, catalog, cargo-test, vitest, make-verify, golden, insta, session_gl_integration, hermetic, bugs-test-guard
 
 **Utrzymanie (obowiązkowe):** przy nowym pliku testowym, goldenie/`insta`, harnessie `crates/*/tests/`, `#[ignore]`, pliku `web/src/lib/*.test.ts` albo nowej rodzinie testów w module — **w tym samym commicie/PR** zaktualizuj ten katalog (wiersz + komenda). Sam kolejny `#[test]` obok istniejących w opisanym już module nie wymaga wpisu. Reguła: [`.cursor/rules/test-integrity.mdc`](../.cursor/rules/test-integrity.mdc) pkt 8; checklista: [`AI_MERGE_CHECKLIST.md`](AI_MERGE_CHECKLIST.md).
 
@@ -106,6 +106,15 @@ make openapi
 ```
 
 **Typy TS z OpenAPI (C2)** — `web/src/lib/api.gen.ts` vs committed `openapi.json`. Nowe endpointy w kliencie typować z `web/src/lib/api.contract.ts` (`OkJson` / `Schema`). Nie edytować `api.gen.ts` ręcznie. Po zmianie spec: `make openapi` i `make openapi-ts`.
+
+**BUGS.md → testy (C5)** — każdy wpis `high`/`critical` musi w `Guards/tests` cytować istniejącą nazwę testu (backtick `fn` / `cargo test --test foo` / `mod foo_tests`) albo mieć `manual:`. `cargo check` i `tsc` to nie test.
+
+```bash
+python tools/bugs_test_guard.py
+# Windows: py -3 tools/bugs_test_guard.py
+cd tools && python test_bugs_test_guard.py
+make bugs-test-guard
+```
 
 ```bash
 cd web && npm run check:api-gen
@@ -268,6 +277,7 @@ Wymagane na `main` (branch protection):
 | `db` | Postgres 16 + `CLMM_REQUIRE_DB_TESTS=1` + `session_gl_integration` |
 | `critical_area_requires_tests` | zmiana pliku krytycznego (GL, lineage, `chain_portfolio`, `wallet_session`, `session_capital`, migracje, …) wymaga dodanych linii testowych albo etykiety `no-tests-needed` |
 | `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |
+| `bugs_have_tests` | **C5:** `high`/`critical` w `BUGS.md` → nazwa testu z `Guards/tests` istnieje, albo `manual:` |
 
 Docker / semver **nie** są wymagane do merge.
 
