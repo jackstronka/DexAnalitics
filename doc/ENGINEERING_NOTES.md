@@ -2,7 +2,7 @@
 
 keywords: C5, BUGS.md, Guards/tests, bugs_have_tests, quality_gates, manual, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** Job `bugs_have_tests` (`quality_gates`) parsuje `high`/`critical` w `doc/BUGS.md` i wymaga, by `Guards/tests` miało nazwę istniejącego testu (`fn`, `tests/*.rs` / `*.test.ts` stem, `mod *_tests`) albo jawne `manual:`. `cargo check` / `tsc` się nie liczą. Historyczne wpisy bez testu dostały `manual:` albo prawdziwe nazwy. Lokalnie: `python tools/bugs_test_guard.py` / `make bugs-test-guard`. Testy: `tools/test_bugs_test_guard.py`.
+- **What:** Job `bugs_have_tests` (`quality_gates`) parsuje `high`/`critical` w `doc/BUGS.md` i wymaga, by `Guards/tests` miało nazwę istniejącego testu (`fn`, `tests/*.rs` / `*.test.ts` stem, `mod *_tests`) albo jawne `manual:`. `cargo check` / `tsc` się nie liczą. Historyczne wpisy bez testu dostały `manual:` albo prawdziwe nazwy. Lokalnie: `python tools/bugs_test_guard.py` / `make bugs-test-guard`. Testy: `tools/test_bugs_test_guard.py`. PR #21.
 - **paths:** `tools/bugs_test_guard.py`, `tools/test_bugs_test_guard.py`, `scripts/ci/bugs-test-guard.sh`, `.github/workflows/quality_gates.yml`, `doc/BUGS.md`
 
 ## 2026-10-08 — C2: typy TypeScript z OpenAPI (`api.gen.ts`)
