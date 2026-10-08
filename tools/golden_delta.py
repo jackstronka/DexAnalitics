@@ -7,6 +7,7 @@ Markdown table: fixture / metric / was / is / Δ / Δ%, sorted by |Δ|.
 Usage:
   python tools/golden_delta.py --old old.snap --new new.snap
   python tools/golden_delta.py --git-base origin/main
+  python tools/golden_delta.py --require-pr-section --changed-file path.snap --pr-body-file body.md
 """
 
 from __future__ import annotations
@@ -21,6 +22,21 @@ from pathlib import Path
 from typing import Any, Iterable
 
 NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+# D1: heading on its own line, optional colon / markdown emphasis (**Golden delta:**).
+_SECTION_HEADING = re.compile(
+    r"(?im)^\s*(?:#{1,6}\s+|\*\*)?golden[ \t]+delta\b(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$"
+)
+# Same heading with justification on the same line.
+_SECTION_INLINE = re.compile(
+    r"(?im)^\s*(?:#{1,6}\s+|\*\*)?golden[ \t]+delta\b(?:\*\*)?\s*:\s*(?:\*\*)?\s+\S"
+)
+GATED_PATHSPECS = (
+    "*.snap",
+    "**/tests/fixtures/**",
+    "**/snapshots/**",
+    "openapi.json",
+    "**/openapi.json",
+)
 
 
 def parse_snap_json(text: str) -> Any:
@@ -142,6 +158,87 @@ def snap_name(path: str) -> str:
     return Path(path).name.removesuffix(".snap")
 
 
+def normalize_repo_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("./")
+
+
+def is_golden_gated_path(path: str) -> bool:
+    """True when a PR path is in D1 scope (snap / fixtures / snapshots / openapi)."""
+    p = normalize_repo_path(path)
+    if not p:
+        return False
+    name = p.rsplit("/", 1)[-1]
+    if name.endswith(".snap"):
+        return True
+    if name == "openapi.json":
+        return True
+    wrapped = f"/{p}/"
+    if "/tests/fixtures/" in wrapped:
+        return True
+    if "/snapshots/" in wrapped:
+        return True
+    return False
+
+
+def gated_paths(paths: Iterable[str]) -> list[str]:
+    return [p for p in paths if is_golden_gated_path(p)]
+
+
+def has_golden_delta_section(body: str | None) -> bool:
+    """PR body has a Golden delta section with at least one line of substance."""
+    if not body or not str(body).strip():
+        return False
+    text = str(body).replace("\r\n", "\n")
+    if _SECTION_INLINE.search(text):
+        return True
+    match = _SECTION_HEADING.search(text)
+    if not match:
+        return False
+    rest = text[match.end() :]
+    next_heading = re.search(r"(?m)^#{1,6}\s+\S", rest)
+    block = rest[: next_heading.start()] if next_heading else rest
+    for line in block.splitlines():
+        stripped = line.strip().strip("*_-")
+        if stripped:
+            return True
+    return False
+
+
+def check_pr_golden_delta_section(
+    body: str | None, changed_paths: Iterable[str]
+) -> tuple[bool, str]:
+    gated = gated_paths(changed_paths)
+    if not gated:
+        return True, (
+            "golden-delta: no gated fixture/snap/openapi changes; "
+            "section not required"
+        )
+    if has_golden_delta_section(body):
+        return True, "golden-delta: PR has Golden delta section"
+    listed = "\n".join(f"  {p}" for p in gated)
+    return False, (
+        "golden-delta: gated files changed but PR body has no "
+        "'Golden delta:' section (heading plus why).\n"
+        f"Gated files:\n{listed}\n"
+        "Add a Golden delta section (paste output of "
+        "`python tools/golden_delta.py --git-base origin/main`).\n"
+        "Number diffs do not fail this job; missing justification does."
+    )
+
+
+def git_changed_gated_paths(base: str) -> list[str]:
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...HEAD", "--", *GATED_PATHSPECS],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(proc.stderr or f"git diff failed against {base}")
+    paths = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return gated_paths(paths)
+
+
 def git_show(ref: str, path: str) -> str | None:
     proc = subprocess.run(
         ["git", "show", f"{ref}:{path}"],
@@ -211,7 +308,37 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--git-base",
         help="Compare *.snap on HEAD against this ref (e.g. origin/main)",
     )
+    parser.add_argument(
+        "--require-pr-section",
+        action="store_true",
+        help="D1: fail if gated paths changed and PR body lacks Golden delta",
+    )
+    parser.add_argument("--pr-body", help="PR description text for --require-pr-section")
+    parser.add_argument(
+        "--pr-body-file",
+        help="Read PR description from this file (UTF-8)",
+    )
+    parser.add_argument(
+        "--changed-file",
+        action="append",
+        default=[],
+        help="Changed path for --require-pr-section (repeatable; skips git)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.require_pr_section:
+        body = args.pr_body
+        if args.pr_body_file:
+            body = Path(args.pr_body_file).read_text(encoding="utf-8")
+        if args.changed_file:
+            paths = args.changed_file
+        elif args.git_base:
+            paths = git_changed_gated_paths(args.git_base)
+        else:
+            parser.error("--require-pr-section needs --changed-file or --git-base")
+        ok, msg = check_pr_golden_delta_section(body, paths)
+        print(msg)
+        return 0 if ok else 1
 
     if args.git_base:
         rows, files = rows_from_git(args.git_base)
