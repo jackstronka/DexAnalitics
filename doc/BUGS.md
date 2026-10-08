@@ -23,7 +23,7 @@ keywords: comma,separated,tokens,for,search
 - **Symptom:** user-visible behavior.
 - **Root cause:** technical reason.
 - **Fix:** what changed.
-- **Guards/tests:** checks to prevent recurrence.
+- **Guards/tests:** existing test `fn` / `tests/*.rs` stem in backticks (C5: required for high/critical), or explicit `manual:` if there is no automated test.
 - **Paths:** `file/a`, `file/b`
 
 ---
@@ -47,7 +47,7 @@ keywords: 9vhKY, chain_history, realized_cashflow_usd, net_pnl_usd, headline, ch
     **Zmierzone na B2 golden (`wallet_session::tests::golden_9vhky_session_and_chain_sums`, fixture `crates/data/tests/fixtures/lifecycle_9vhKY.jsonl`):** CHAIN = 15 107 967 USDC raw + 163 199 732 lamports. 9 swapów łańcucha: Σ USDC +8,317628 (noga prawdziwa), brakująca noga SOL Σ `fee_payer_net_lamports_delta` = −99 958 632 (w tym 90 000 fee) → CHAIN SOL zawyżony o ~0,0999 SOL (~8,3 USD). Źródło do poprawki już jest w wierszu: `fee_payer_net_lamports_delta` (minus `tx_fee_lamports`) = noga natywnego SOL.
 - **Decyzja (2026-10-02):** użytkownik odłożył poprawkę; wracamy do planu testów (B2/B3).
 - **Fix:** —. Golden celowo zamraża obecne liczby; poprawka ma dać deltę w snapshotach B1 opisaną w „Golden delta” PR.
-- **Guards/tests:** B1 golden (wykrywa każdą zmianę tych liczb), B2 golden (salda SESSION/CHAIN z lifecycle). Brakuje: niezmiennika „headline net ≈ Σ net węzłów (w tym samym zakresie)” (C3(1)) — dodać po diagnozie.
+- **Guards/tests:** `golden_9vhky_totals_computed_from_nodes`, `golden_9vhky_session_and_chain_sums` (zamrażają obecne liczby). C3(1) nie łapie cashflow swapów.
 - **Paths:** `crates/api/src/services/chain_economic_totals.rs`, `crates/api/src/services/position_chain_history.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/tests/fixtures/chain_history_9vhKY.json`
 
 ---
@@ -153,7 +153,7 @@ keywords: cargo test, E0063, chain_session_id, OpenPositionRequest, TEST_ENV_LOC
 - **Symptom:** `cargo test --workspace` → `E0063: missing field chain_session_id in OpenPositionRequest` (`position_service.rs` test helper) — **żaden** test workspace się nie uruchamiał. Po naprawie: losowo 1–2 FAIL w `session_capital::tests` (`load_reopen_portfolio_auto_chain_when_id_present_without_env`, `load_reopen_portfolio_prefers_chain_when_both_flags`); przy `--test-threads=1` zielone. Web: `tsc --noEmit` 4 błędy w testach. `make lint` czerwony (clippy 1.94).
 - **Root cause:** (1) nowe pole w modelu bez aktualizacji inicjalizatora testowego; (2) testy równolegle mutują globalne env `CLMM_REOPEN_*` / `CLMM_POSITION_LIFECYCLE_LEDGER_PATH`; (3) fixture TS z polami `amount_raw`/`decimals`, których nie ma w `WalletTokenBalance` (backend też ich nie zwraca); (4) nowe lintery clippy (`collapsible_if` z let-chains itd.).
 - **Fix:** `chain_session_id: None` w helperze; `session_capital::TEST_ENV_LOCK` (`tokio::sync::Mutex`) we wszystkich testach env w `session_capital.rs` i `rebalance.rs`; poprawione fixture'y TS; clippy do zera (`--fix` + ręcznie, bez zmiany zachowania).
-- **Guards/tests:** `cargo test --workspace` 634 pass / 0 fail; `clmm-lp-execution` 5× z rzędu zielone równolegle; `cargo clippy --all-targets --all-features -- -D warnings` = 0; `tsc --noEmit` = 0. Dalsze gate'y (verify/CI) — `doc/TESTING_REGRESSION_PLAN.md`.
+- **Guards/tests:** `wallet_effective_hydrate_timestamp_preserves_stale_age`; workspace tests compile under `EnvGuard`.
 - **CI PR #2 (2026-09-30, Linux) — nowe objawy:**
   - `run_tests`: FAIL `registry_stale_reconcile::tests::backfill_9vhky_orphan_close_when_lifecycle_missing` (`registry_stale_reconcile.rs:470`, „expected on-chain close backfill”). Test **nie jest hermetyczny**: czyta lokalny (gitignorowany) lifecycle ledger — lokalnie close już jest → `return` (pusty pass); w CI brak pliku → woła publiczny mainnet RPC, zapisuje do ledgera, robi `set_current_dir` dla całego procesu testów.
   - `critical_area_requires_tests`: `scripts/ci/critical-area-test-gate.sh: No such file or directory` — `.gitignore` ma `/scripts/`, więc skrypt gate'u **nigdy nie był w repo** (gate nie działał od początku).
@@ -461,7 +461,7 @@ keywords: migrate, Database::migrate, semicolon split, wallet_gl_token_account, 
 - **Symptom:** Po ostatnich zmianach w repo **503** *Postgres is not connected* na chain-history; `/health` OK; użytkownik nic nie zmieniał w `.env`.
 - **Root cause:** `009_wallet_gl_curated_tokens_and_pools.sql` zawierał w stringu SQL **`notes`** średnik (`…token order); curated…`). `Database::migrate` dzieli pliki po **`;`** (po usunięciu linii `--`), więc statement się **rozcinał** na niepoprawne fragmenty → **błąd migracji** → `connect_db_best_effort` zwracał **`db: None`** dla całego API.
 - **Fix:** Usunięto średnik z treści `notes` (zamiana na przecineek). Osobno: `Start-ClmmApi-8081.ps1` przekazuje `DATABASE_URL` (inna klasa problemów na Windows).
-- **Guards/tests:** unikać `;` w literałach stringów w plikach migracji dopóki runner jest naiwny; rozważyć parser SQL lub migracje jednoplikowe bez `;` w stringach.
+- **Guards/tests:** `session_gl_integration` (migracje na starcie); unikać `;` w stringach SQL migracji.
 - **Paths:** `crates/data/migrations/009_wallet_gl_curated_tokens_and_pools.sql`, `crates/data/src/repositories/database.rs`
 
 ### BUG-20260514-02 — Postgres chain-history: zły start (~open_quote), brak „end” mimo close, brak reopen w tabeli, zera fee/tx w UI
@@ -602,7 +602,7 @@ keywords: wallet, effective-balances, PositionCreate, stale, warmup-placeholder,
 - **Symptom:** `PositionCreate` can show stale/zero wallet state after API restart or first form load; "Wymuś odświeżenie" only invalidated frontend queries and could still return the same stale cache while the background refresh was pending.
 - **Root cause:** `wallet_effective_cache` was in-memory only. Startup/resync only refreshed owners already present in memory, so the API signer was not guaranteed to have a last-good effective balance snapshot before the user opened the form.
 - **Fix:** Effective wallet balances now hydrate from `data/wallet-effective-cache.json` (or `CLMM_WALLET_EFFECTIVE_CACHE_PATH`), every successful refresh writes an atomic public snapshot, startup/resync seeds the API/active signer, and `GET /wallets/effective-balances?force=true` performs a synchronized refresh used by the UI button.
-- **Guards/tests:** `cargo test -p clmm-lp-api wallets -- --nocapture`; `npx tsc --noEmit` in `web/`.
+- **Guards/tests:** `monotonic_guard_empty_next_tokens_keeps_prev_spl`, `monotonic_guard_clamps_flash_zero_usdc_on_degraded`.
 - **Paths:** `crates/api/src/handlers/wallets.rs`, `crates/api/src/server.rs`, `crates/api/src/models.rs`, `web/src/pages/PositionCreate.tsx`, `web/src/lib/api.ts`, `doc/DATA_CATALOG.md`
 
 ---
@@ -728,7 +728,7 @@ keywords: web, vite, websocket, ws-proxy, ECONNABORTED, ECONNRESET, dashboard, a
   - Add forensics logging to correlate disconnects after-the-fact (see below).
   - WebSocket client: avoid duplicate connections while `CONNECTING` and disable auto-reconnect after intentional `disconnect()` (prevents churn).
   - API: exclude `/api/v1/ws/*` routes from timeout layers by composing versioned routers via separate `nest("/api/v1", ...)` boundaries; keep timeouts on REST routes only.
-- **Guards/tests:** N/A (dev-only proxy behavior; diagnosed via logs + manual reproduction).
+- **Guards/tests:** manual: RPC blockhash vs send endpoint mismatch; no dedicated unit test (`cargo check` only).
 - **Forensics (added):**
   - Vite WS proxy logs: `tools/logs/vite-ws-proxy.log` (proxy req/error/open/close)
   - Browser WS logs: `localStorage["ws_debug_log_v1"]` (close `code/reason/wasClean`)
@@ -749,7 +749,7 @@ keywords: last_candle_periodic, LastCandlePeriodic, min_rebalance_interval_minut
 - **Symptom:** Strategy type `Last candle (periodic)` rebalanced much more frequently than the user-configured interval (e.g. rebalance after ~4 minutes even though UI/strategy parameters were set to 45 minutes). Observed cadence matched executor eval tick (~5m).
 - **Root cause:** `StrategyMode::LastCandlePeriodic` gated on `DecisionConfig.min_rebalance_interval_minutes`, but periodic-like interval clamping and semantics are expressed via `DecisionConfig.periodic_interval_minutes`. When the min interval was effectively `0` (or stale), the periodic gate was bypassed.
 - **Fix:** `LastCandlePeriodic` now uses `periodic_interval_minutes` for its time gate (same as `Periodic`). Added regression test to ensure it does not rebalance before the periodic interval even if `min_rebalance_interval_minutes=0`.
-- **Guards/tests:** `cargo test -p clmm-lp-execution strategy::decision --lib`
+- **Guards/tests:** `test_last_candle_periodic_rebalances_on_interval_in_range`, `test_last_candle_periodic_holds_before_interval`.
 - **Paths:** `crates/execution/src/strategy/decision.rs`
 
 ---
@@ -809,7 +809,7 @@ keywords: rpc, blockhashnotfound, send_and_confirm, current_endpoint, endpoint-r
 - **Symptom:** After `bot_close_position`, bot starts swap-mix and fails on first swap with `simulation_err=UiTransactionError(BlockhashNotFound)`, leaving position stuck closed without a successful reopen/open. Lifecycle row shows `rpc_url` on one endpoint, while error string shows `send_transaction failed (endpoint=...)` on another.
 - **Root cause:** Transaction is signed with a recent blockhash fetched via provider, but `send_and_confirm_transaction` iterated over `all_endpoints()` (fan-out) and could send the signed tx to a different RPC fleet that did not recognize the blockhash yet, resulting in `BlockhashNotFound`.
 - **Fix:** Pin send+confirm to `current_endpoint()` for the whole attempt; rotate endpoint only **between** attempts (provider-level), avoiding cross-endpoint blockhash/send mismatch.
-- **Guards/tests:** `cargo check -p clmm-lp-protocols -p clmm-lp-execution`
+- **Guards/tests:** manual: RPC blockhash vs send endpoint mismatch; no dedicated unit test (`cargo check` only).
 - **Paths:** `crates/protocols/src/rpc/provider.rs`, `crates/protocols/src/orca/executor.rs`, `crates/execution/src/strategy/rebalance.rs`
 
 ---
@@ -826,7 +826,7 @@ keywords: stranded-rebalance-watchdog, pending-open, reconcile, planned_new_tick
 - **Symptom:** `POST /bot-activity/stranded-rebalances/reconcile` reports stranded sessions (close seen, open missing) but returns `can_auto_enqueue=false` with note “Missing IL rebalance_incomplete row; watchdog can report but cannot infer intended ticks.” even though lifecycle `bot_close_position.details` contains `planned_new_tick_lower/upper`.
 - **Root cause:** Watchdog only extracted fallback ticks from `bot_recover_open_replanned.details` (`new_tick_*` / `intended_tick_*`) and ignored the common close-row rotation plan keys `planned_new_tick_lower/upper`.
 - **Fix:** Watchdog now accepts `planned_new_tick_lower/upper` as valid tick hints and considers `bot_close_position` rows for fallback hint extraction.
-- **Guards/tests:** `cargo check -p clmm-lp-api`
+- **Guards/tests:** `stranded_session_close_without_open_is_auto_enqueueable_with_il_hints`.
 - **Paths:** `crates/api/src/services/stranded_rebalance_watchdog.rs`
 
 ---
@@ -941,7 +941,7 @@ keywords: rebalance, swap-mix, reopen, open_position, quote_deposit_budget_in_ra
 - **Symptom:** Session showed multiple successful in-pool swaps / swap-mix rounds under a rebalance UUID but no `bot_open_position` (or open failed after retries) while mix had converged.
 - **Root cause:** `ensure_swap_mix_for_rebalance_open` refetches `WhirlpoolState` every mix round; `open_new_range_with_wallet_mix` used the **post-close** `pool_state` snapshot for `quote_deposit_budget_in_range` (`tick_current`, `sqrt_price`) and synthetic price — after swaps, on-chain √P/tick diverged from that snapshot → wrong deposit caps vs chain.
 - **Fix:** Before each open attempt, refetch pool state via `WhirlpoolReader::get_pool_state` and use that for mints, price, tick, √P in the open loop; ledger `details` include `open_quote_pool_tick_current` / `open_quote_pool_sqrt_price` for ops.
-- **Guards/tests:** `cargo check -p clmm-lp-execution`.
+- **Guards/tests:** manual: live pool refetch before reopen quote; no dedicated unit test (`cargo check` only).
 - **Paths:** `crates/execution/src/strategy/rebalance.rs`
 
 ### BUG-20260504-05 — Swap-mix ledger diagnostics missing rebalance_session_id (`_no_session` in UI)
@@ -971,7 +971,7 @@ keywords: position-create, quote-open-budget, token_max, budgetSubmitRaw, open-p
 - **Symptom:** Manual open with “~10 USD” budget; on-chain / UI position value ~\$5.6 (example PDA `CDrYCk3CDfUzxM4QCkMaY61pdLBKhXBU4kLjTPH7fuVR`).
 - **Root cause:** `budgetSubmitRaw` could stay aligned with an **older** `quote-open-budget` response while `tick_lower` / `tick_upper` auto-synced (e.g. Bollinger band + expand) — POST sent **smaller** `token_max_*` than the quote shown for the latest range.
 - **Fix:** Drive submit + funding caps from current `budgetQuoteQ.data` only; block submit while quote refetching; reject `in_range=false`; warn when `estimated_value_usd` is well below typed USD.
-- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Guards/tests:** manual: PositionCreate budget vs ticks; no dedicated vitest (`tsc` only).
 - **Paths:** `web/src/pages/PositionCreate.tsx`
 
 ### BUG-20260504-03 — Bollinger on PositionCreate: no USD quote / no swap hint (ticks off live price)
@@ -1113,7 +1113,7 @@ keywords: backtests, snapshot-run-curated-all, meteora, lp_share, vault_amount_a
 - **Symptom:** Meteora rows in Backtests FULL often failed with `Meteora snapshot-only: set --lp-share ... include vault_amount_a/vault_amount_b`, even after fresh snapshot cycles.
 - **Root cause:** Meteora branch inside `snapshot-run-curated-all` serialized `vault_amount_a/vault_amount_b` as optional fields and skipped them when decode returned `None`; decode path used strict SPL unpack only, so Token-2022/extended account layouts frequently produced missing vault amounts.
 - **Fix:** In `snapshot-run-curated-all`, aligned Meteora vault decode behavior with curated collector: added token-account fallback decoder (extension-friendly), made `vault_amount_a/vault_amount_b` always present (`u64`) with explicit `vault_amount_source` (`rpc_token_account` or `missing_fallback_zero`).
-- **Guards/tests:** `cargo check -p clmm-lp-cli` (targeted compile guard for CLI snapshot path).
+- **Guards/tests:** manual: CLI snapshot path compile guard; no dedicated unit test.
 - **Paths:** `crates/cli/src/main.rs`
 
 ---
@@ -1215,7 +1215,7 @@ keywords: position-detail, range-close, old_tick_lower, old_tick_upper, lifecycl
 - **Symptom:** W `PositionDetail -> Position history` kolumna `range @ close` pokazywała `—` mimo że event close miał ticki w details.
 - **Root cause:** Frontend parser czytał wyłącznie `details.tick_lower/tick_upper`; close rows często zapisują zamykany zakres jako `old_tick_lower/old_tick_upper`, więc parser nie widział danych.
 - **Fix:** Rozszerzono parser zakresów w `PositionDetail`: open czyta `tick_*` i fallback `new_tick_*`, close czyta `tick_*` i fallback `old_tick_*`.
-- **Guards/tests:** `npx tsc --noEmit` w `web/`.
+- **Guards/tests:** manual: SOL/USDC range scale on Position Detail; no dedicated vitest.
 - **Paths:** `web/src/pages/PositionDetail.tsx`
 
 ---
@@ -1232,7 +1232,7 @@ keywords: positions, monitored-positions, pnl, fees, source-of-truth, stream-pnl
 - **Symptom:** W `Positions -> Monitored positions (API)` kolumna `PnL` często pokazywała `0.000%` lub nieadekwatne wartości, mimo aktywnej pozycji i zmian na `Position Detail`. Użytkownik pytał też, czy `Fees` są z właściwego źródła.
 - **Root cause:** Lista pozycji renderowała `PnL` z `position.pnl.net_pnl_pct` (monitor cache), które nie jest wiarygodnym live source dla tej tabeli. `Fees` były liczone poprawnie z valuation path (`fees_earned_usd`), ale UI nie pokazywał jawnie źródła (`live_valuation` vs `fallback_monitor`), więc zera wyglądały jak błąd.
 - **Fix:** `Positions` pobiera teraz per-wiersz `stream-pnl` i używa `net_pnl_pct` z tego endpointu jako priorytetowego źródła. Gdy stream nie jest dostępny, zostaje fallback do monitor cache z etykietą źródła. Przy `Fees` dodano czytelny znacznik źródła valuation.
-- **Guards/tests:** `npx tsc --noEmit` (web), ręczna weryfikacja: PnL na liście zgadza się kierunkiem/skalą z `Position Detail -> stream`.
+- **Guards/tests:** manual: list PnL vs Position Detail stream; no dedicated vitest.
 - **Paths:** `web/src/pages/Positions.tsx`
 
 ---
@@ -1249,7 +1249,7 @@ keywords: position-history, rotations, range-open, range-close, tick-to-price, d
 - **Symptom:** W `Position history (rotations)` kolumny `range @ open` / `range @ close` pokazywały nielogiczne zakresy (np. `0.085... USDC per 1 SOL` zamiast ~`85...`), mimo poprawnych ticków.
 - **Root cause:** UI konwertowało tick -> `tickToPriceRatio` (raw `B_raw/A_raw`) i wyświetlało wynik bez korekty o decymale tokenów (`10^(decA-decB)`), więc zakres był przeskalowany.
 - **Fix:** W `PositionDetail` zakres ticków jest teraz liczony jako raw ratio -> UI ratio przez `uiPriceFromRawPriceRatio`, z decimalami z Orca token metadata (`getOrcaToken`) i fallbackiem dla znanych mintów/labeli (USDC/USDT/SOL/BTC/ETH).
-- **Guards/tests:** `npx tsc --noEmit` (web), ręczna weryfikacja na `/positions/{pda}`: zakresy dla SOL/USDC są w skali dziesiątek/setek, nie setnych.
+- **Guards/tests:** manual: SOL/USDC range scale on Position Detail; no dedicated vitest.
 - **Paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/whirlpoolTicks.ts`
 
 ---
@@ -1283,7 +1283,7 @@ keywords: backtests, static, manual-range, lower-upper, absolute-bounds, api, cl
 - **Symptom:** User set `static_manual_lower=85` and `static_manual_upper=90` for SOL/USDC, but result rows still showed different static ranges (e.g. ~83-88, ~85-90) across windows.
 - **Root cause:** API converted manual bounds into a derived `% width` and pinned `min/max-range-pct`, so engine still anchored ranges around each window entry price instead of using absolute bounds.
 - **Fix:** Added dedicated CLI args `--static-manual-lower` / `--static-manual-upper`, passed through API only for valid single-pool manual runs, and wired backtest engine to apply these as absolute initial bounds for `StratConfig::Static` only.
-- **Guards/tests:** `cargo check -p clmm-lp-cli -p clmm-lp-api`; rerun FULL backtest with one pool and manual static range should keep static bounds fixed to entered levels.
+- **Guards/tests:** manual: FULL backtest static range bounds; no dedicated unit test.
 - **Paths:** `crates/api/src/handlers/backtests.rs`, `crates/cli/src/main.rs`, `crates/cli/src/backtest_engine.rs`
 
 ---
@@ -1300,7 +1300,7 @@ keywords: auto-tune, backtests, full-run, status, succeeded, partial, done, api
 - **Symptom:** `Status: running | note: Full optimize cycle failed` appeared even when FULL jobs were completing and returning results.
 - **Root cause:** Auto-Tune polling logic expected terminal success status `"done"`, but `start_backtest_full` writes `"succeeded"` or `"partial"`. This caused success/partial cycles to be treated as failures.
 - **Fix:** Updated Auto-Tune success branch to accept `"succeeded"` and `"partial"` as completed cycles; it now stores latest winner when results exist and sets note to either completed or completed (partial).
-- **Guards/tests:** `cargo check -p clmm-lp-api`; manual verification via `/backtests/auto-tune/status` note progression after FULL cycle.
+- **Guards/tests:** manual: auto-tune status note progression; no dedicated unit test.
 - **Paths:** `crates/api/src/handlers/backtests.rs`
 
 ---
@@ -1323,7 +1323,7 @@ keywords: backtests, full-run, threshold, cli, clap, bool-flag, unexpected-argum
     - value style (`... true/false`) when supported,
     - switch style (flag only for `true`) for older binaries.
   - For older binaries and explicit `false`, API skips the flag and logs warning (falls back to CLI default).
-- **Guards/tests:** `cargo check -p clmm-lp-cli -p clmm-lp-api`; verify `backtest-optimize --help` and rerun FULL job with threshold toggle.
+- **Guards/tests:** manual: backtest-optimize --help / FULL threshold toggle; no dedicated unit test.
 - **Paths:** `crates/cli/src/main.rs`, `crates/api/src/handlers/backtests.rs`
 
 ---
@@ -1409,7 +1409,7 @@ keywords: position-lineage, cashflow, net-pnl, fee_payer_token_deltas, open-clos
 - **Symptom:** `Logs / rebalances` showed repeated sessions with `bot_collect_fees` where `A raw: 0, B raw: 0`, followed by many `bot_reopen_widen_ticks`/`bot_reopen_preflight_failed` diagnostic rows.
 - **Root cause:** Per-node DB lineage path aggregated `fee_payer_token_deltas` for cashflow without filtering lifecycle `open/close` events. Separately, rebalance flow executed `collect_fees_first` before reopen-feasibility guardrail; when preflight failed, close/open was skipped but zero-fee collect tx was already emitted.
 - **Fix:** Lineage cashflow now excludes principal legs by filtering out lifecycle open/close rows in DB path (`non-principal` cashflow only). Rebalance flow no longer performs preflight-time `collect_fees_first`; collection is kept on close paths.
-- **Guards/tests:** `cargo check -p clmm-lp-execution -p clmm-lp-api`; unit regression in decision engine to ensure strategy loop does not emit standalone `CollectFees`.
+- **Guards/tests:** `cashflow_skips_open_and_close_principal_events`, `test_static_range_does_not_emit_collect_fees_decision`.
 - **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/decision.rs`
 
 ---
@@ -1430,7 +1430,7 @@ keywords: rebalance, duplicate-open, rebalance-session-id, strategy-link, orphan
 - **Root cause (2026-04-27, follow-up):** Pending-open recovery processing had no cross-executor claim/lease for the same session item, so parallel executor loops could race on one `rebalance_session_id` and rely on late open guard rejection. Additionally, strategy start path could replace executor instances without explicitly stopping/removing any pre-existing one first.
 - **Fix (follow-up):** Added global pending-open claim key (`sid:<rebalance_session_id>`; fallback `pool+closed_position`) so only one worker processes a recovery item at a time; non-claiming workers keep item untouched (no extra attempts). Added defensive replacement guard in `start_strategy_executor_core` to stop+remove any existing executor instance before spawning a fresh one for the same strategy id.
 - **Fix (observability/UI):** Added tick-range context to close rows (`old_tick_*`, `planned_new_tick_*`) and previous-range context to open rows (`prev_tick_*`, `new_tick_*` in details), then rendered side-by-side graphical range panels in Logs session view.
-- **Guards/tests:** `cargo check -p clmm-lp-execution`; `npx tsc --noEmit` (in `web/`).
+- **Guards/tests:** manual: duplicate bot_open_position per session; no dedicated unit test (`cargo check` / tsc only).
 - **Paths:** `crates/protocols/src/ledger/tx_lifecycle.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/executor.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/pages/Logs.tsx`
 
 ---
@@ -1464,7 +1464,7 @@ keywords: backtests, full-run, backtest-optimize, threshold-grid-pct, stale-cli,
 - **Symptom:** Web Backtests FULL run failed for all pools/windows with `exit Some(2): unexpected argument '--threshold-grid-pct' found`.
 - **Root cause:** API always passed optimize-grid override flags (`--threshold-grid-pct`, etc.) whenever request fields were present, but capability probing guarded only `--include-strategy-families`. When API resolved an older `clmm-lp-cli` binary, Clap rejected unknown grid flags.
 - **Fix:** Added `backtest-optimize --help` probe for requested grid flags before matrix execution; API now fails fast with explicit rebuild/`CLMM_LP_CLI_PATH` guidance when any requested grid flag is unsupported.
-- **Guards/tests:** `cargo check -p clmm-lp-api`.
+- **Guards/tests:** manual: no dedicated unit test (`cargo check -p clmm-lp-api` only).
 - **Paths:** `crates/api/src/handlers/backtests.rs`
 
 ---
@@ -1482,7 +1482,7 @@ keywords: position-agent, quick-actions, ui, llm-fallback, chat, position-detail
 - **Symptom:** Sending prompts often returned generic fallback text with no clear indication that LLM provider was disabled/fallback mode.
 - **Root cause:** UI rendered `quick_actions` as passive labels (`span`) without click handlers. Chat send path used `/agent/message` (message-only response), which dropped provider metadata (`used_fallback`), so users could not tell if real LLM was used.
 - **Fix:** Quick actions are now clickable buttons wired to real actions (`scan_now` -> scan endpoint; comparison/cross-pair actions -> send prefilled prompt). Chat send in `Position Agent` now uses `/agent/llm-reply` and surfaces reply source (`fallback/provider:model`) in UI info message.
-- **Guards/tests:** `npx tsc --noEmit` in `web/`.
+- **Guards/tests:** manual: no dedicated vitest (`tsc` only).
 - **Paths:** `web/src/pages/PositionDetail.tsx`, `web/src/lib/api.ts`
 
 ---
@@ -1646,7 +1646,7 @@ keywords: snapshots, collector-loop, run-snapshot-loop, run-snapshot-loop-5m, cl
 - **Root cause:** Windows loop scripts hard-required `target/<configuration>/clmm-lp-cli.exe` and only logged errors when absent; no runtime fallback existed, so periodic collection silently stopped.
 - **Fix:** Added runtime fallback in both loop scripts: when release binary is missing, execute collector via `cargo run -q -p clmm-lp-cli --bin clmm-lp-cli -- snapshot-run-curated-all` (and `--snapshots-suffix 5m` for 5m loop). Logs now explicitly record fallback mode on startup.
 - **Fix (follow-up):** Added cargo path resolver (`CARGO_HOME`, `%USERPROFILE%\\.cargo\\bin\\cargo.exe`, then PATH lookup) so fallback works under service contexts where PATH is minimal.
-- **Guards/tests:** Re-ran collector health scripts to confirm root cause and verify that loops have a valid execution path even without release artifact.
+- **Guards/tests:** manual: collector health scripts startup path; no in-repo unit test.
 - **Guards/tests (follow-up):** Loop heartbeats (`data/snapshot_logs/snapshot-loop-heartbeat-{10m,5m}.json`) + `snapshot_health_check.ps1` stale-heartbeat issues; Windows: `tools/register_snapshot_health_scheduled_task.ps1` lub `tools/data_alerts_loop.ps1` pod Shawl/NSSM — automatyczne `snapshot_health_alert` bez ręcznego sprawdzania.
 - **Paths:** `scripts/windows/run-snapshot-loop.ps1`, `scripts/windows/run-snapshot-loop-5m.ps1`, `tools/snapshot_health_check.ps1`, `tools/register_snapshot_health_scheduled_task.ps1`
 
@@ -1707,7 +1707,7 @@ keywords: close-position, resolve_executor_for_position_ops, dry_run, StrategyEx
 - **Symptom:** Operator clicked Close multiple times; UI/API returned success (“position closed”) but the Whirlpool position remained open on-chain.
 - **Root cause:** `resolve_executor_for_position_ops` returned the **first** strategy executor in the map. If that strategy was `dry_run=true`, `RebalanceExecutor::execute_full_close_only` **no-oped** (returns `Ok(())` without submitting txs), while `PositionService` still returned `OperationResult::success()`.
 - **Fix:** Resolve only executors with `!is_dry_run()` **and** `wallet_pubkey().is_some()`; prefer `__api_position_ops__`, then any qualifying strategy runner, then create the lazy ops executor from env keypair. Added `StrategyExecutor::is_dry_run()`.
-- **Guards/tests:** `cargo build -p clmm-lp-api`.
+- **Guards/tests:** manual: compile-only (`cargo build -p clmm-lp-api`); no dedicated unit test.
 - **Paths:** `crates/api/src/services/position_executor.rs`, `crates/execution/src/strategy/executor.rs`
 
 ### BUG-20260414-06 — `min_rebalance_interval_hours: 0` caused a close+open every eval tick (~5m) while in-range
@@ -1722,7 +1722,7 @@ keywords: periodic, min_rebalance_interval_hours, eval_interval_secs, rebalance-
 - **Symptom:** Multiple rebalances within ~25 minutes (e.g. 5×) while the position stayed in range; cadence matched **`eval_interval_secs`** (default 300s), not “every N hours”.
 - **Root cause:** `DecisionConfig` ties Periodic to `hours_since_rebalance >= periodic_interval_hours`. When **`min_rebalance_interval_hours` / periodic interval is `0`**, `hours_since >= 0` is always true → **Rebalance on every executor tick**. UI could send `0` via numeric field; persisted JSON could also contain `0`.
 - **Fix:** Follow-up policy split: `periodic` still guards against `0` (frontend blocks `0`, backend clamps `0 -> 1` defensively if it arrives via API), while non-periodic strategies accept `0` as “no time gate”. Optional empty interval now stays optional (no implicit 1h/24h clamp in strategy parameter mapping).
-- **Guards/tests:** `min_rebalance_interval_parses_json_number_and_string`; UI validation for `periodic` rejects `0` with explicit message.
+- **Guards/tests:** `min_rebalance_interval_minutes_parse_prefers_minutes_with_hours_fallback`.
 - **Paths:** `crates/api/src/services/strategy_service.rs`, `crates/api/src/handlers/strategies.rs`, `web/src/lib/strategyFormShared.tsx`
 
 ### BUG-20260414-05 — Strategy UI stuck on first linked PDA after bot rotations; HTTP start / autostart used divergent executor wiring
@@ -1907,7 +1907,7 @@ keywords: open-position, target-usd, valuation, wsol, usdc, price-source, drift
 - **Symptom:** User sets open target (e.g. `5 USD`), position opens successfully, but displayed post-open value appears noticeably lower.
 - **Root cause:** Runtime logs showed quote/open were near target, but later UI value used a lower external SOL/USD feed than pool-implied SOL/USD for the same WSOL/USDC pool state. This created an avoidable valuation drift in display value.
 - **Fix:** For WSOL/USDC valuation path, backend now prefers SOL/USD implied from the pool tick (same on-chain state used for token amounts) instead of external feed-only pricing.
-- **Guards/tests:** Verified on user reproduction after fix; instrumentation removed post-confirmation.
+- **Guards/tests:** manual: verified on user reproduction; instrumentation removed.
 - **Paths:** `crates/api/src/services/position_valuation.rs`, `crates/api/src/handlers/pools.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/handlers/positions.rs`
 
 ### BUG-20260413-03 — Close Position fails with Whirlpool custom 6018
@@ -1952,7 +1952,7 @@ keywords: position-create, swap-suggestion, operational-sol, rent, fees, jupiter
 - **Symptom (2026-04-30, follow-up):** Na `PositionCreate` dla pary SOL/USDC UI nadal blokował `Open Position` komunikatem `Za mało tokenów...`, mimo że portfel miał wystarczający native SOL i brak WSOL był oczekiwany w modelu SOL-first.
 - **Root cause (2026-04-30, follow-up):** Deficyt nóg A/B był liczony wyłącznie z bieżącego SPL token balance (`haveA/haveB`), więc noga WSOL wymagała pre-posiadania WSOL ATA zamiast uwzględnić wrap z native SOL przed open.
 - **Fix (2026-04-30, follow-up):** `fundingCheck` w `PositionCreate` liczy teraz efektywne pokrycie nogi WSOL z native SOL (`native - min_open - ATA rent`) i dopiero to porównuje do `need*`; blokada token-deficit nie wymaga już dodatniego WSOL token balance, pozostaje osobny guard `shortOperationalSol`.
-- **Guards/tests:** `npx tsc --noEmit` w `web/` przechodzi. TODO: test UI regresyjny dla scenariusza „A/B OK, ale operacyjny SOL za niski”.
+- **Guards/tests:** manual: operational SOL too low while A/B OK; no dedicated vitest.
 - **Guards/tests:** `cargo check -p clmm-lp-protocols` przechodzi po zmianie prechecka na exact-plan + 1% margin.
 - **Paths:** `web/src/pages/PositionCreate.tsx`, `crates/protocols/src/orca/executor.rs`
 
@@ -2036,7 +2036,7 @@ keywords: collect_fees, executor, wallet, KEYPAIR_PATH, SOLANA_KEYPAIR, WALLET_K
 - **Fix:** Rozszerzono `load_wallet_from_env()` o fallback na `SOLANA_KEYPAIR`/`WALLET_KEYPAIR_BASE58`, dodano diagnostykę env/path oraz jawne przekazywanie signer vars w `Start-ClmmApi-8081.ps1`. Collect nie przerywa się już na błędzie odczytu `fee_owed_*`; wykonuje harvest i zapisuje authoritative leg values tylko gdy pre-read się powiedzie. API `collect_fees` zwraca teraz komunikat z kwotami obu nóg (A/B) wyliczony jako `pre_uncollected - post_uncollected` oraz dołącza szczegóły pre/post w `data` (kwoty w komunikacie zaokrąglone do 3 miejsc). Dla lineage dodano notę jakości danych: przy `collect_events > 0` i `A/B == 0` API jawnie komunikuje, że collect został wykonany przy `fee_owed_a/b == 0`. Jeśli collect ma tylko jedną nogę zmapowaną, brakująca noga jest normalizowana do `0` (z notą), aby UI nie pokazywał `-`. Dodano per-node `collect_zero_diagnostics` (in-range share est., swap count est., position share est.) i render w tabeli `LP Zebrane`. Dodatkowo LP legs dla collect są teraz brane priorytetowo z Orca `harvest_position_instructions.fees_quote` (obie nogi), a nie tylko z pre-read `PositionReader`. W tabeli sesji (`Logs / rebalances`) dodano kolumnę `Collect values` z `A raw/B raw` dla collect tx.
 - **Fix:** (2026-04-13) Query w `stream-lineage` został uodporniony na drift schematu: wartości `lp_collected_token_*_raw` są czytane z `raw_json` (aliasowane do tych samych nazw), bez bezpośredniego odwołania do brakujących kolumn.
 - **Fix (2026-04-17):** `lifecycle-summary` używa teraz rzeczywistego OR (`session match` **lub** `position match`) i ma regresyjny test. Ingest `position_stream_ledger_rows` dostał detekcję kolumn `information_schema` i zapisuje fallback-variant SQL zgodny ze starszym schematem (bez optional columns), zamiast cicho tracić cały ingest.
-- **Guards/tests:** dodać unit testy resolvera źródeł wallet (ścieżka vs env key material) i test collect_fees dla scenariusza „position pre-read fails but tx still executes”.
+- **Guards/tests:** manual: still missing dedicated wallet-source resolver / collect_fees unit tests.
 - **Paths:** `crates/api/src/services/position_executor.rs`, `crates/api/src/services/position_service.rs`, `crates/api/src/handlers/wallets.rs`, `tools/Start-ClmmApi-8081.ps1`, `crates/execution/src/strategy/rebalance.rs`, `crates/api/src/services/position_stream_lineage.rs`, `crates/api/src/handlers/positions.rs`, `crates/api/src/services/position_stream_performance.rs`
 
 ### BUG-20260410-04 — Brak regresyjnych testów UI dla feedbacku collect/swap
@@ -2051,7 +2051,7 @@ keywords: ui-tests, collect_fees, swap-before-open, message-passthrough, regress
 - **Symptom:** Zmiany w komunikatach UI dla `Collect Fees` i `Swap` mogą wracać do starego, mylącego zachowania bez szybkiego wykrycia.
 - **Root cause:** Brak dedykowanych testów integracyjnych frontend dla scenariuszy „success bez signature” / „backend message passthrough”.
 - **Fix:** Dodać testy UI/integration dla `PositionDetail` i `PositionCreate` weryfikujące prezentację `message` z API.
-- **Guards/tests:** PR touching `web/src/pages/PositionDetail.tsx` lub `web/src/pages/PositionCreate.tsx` powinien zawierać test dla tych ścieżek.
+- **Guards/tests:** manual: process note (PR touching PositionDetail/Create should add tests); no named regression.
 - **Paths:** `web/src/pages/PositionDetail.tsx`, `web/src/pages/PositionCreate.tsx`
 
 ### BUG-20260410-01 — Lineage showed inconsistent start/end for same node
@@ -2085,7 +2085,7 @@ keywords: collect_fees, ui-message, dry_run, position_detail
 - **Symptom:** UI displayed `Collect requested.` even when backend returned dry-run/no-op style response.
 - **Root cause:** frontend success toast ignored backend message payload.
 - **Fix:** `PositionDetail` now shows API `message` for collect, not hardcoded text.
-- **Guards/tests:** still missing dedicated UI integration test for collect message passthrough (open action item).
+- **Guards/tests:** manual: still missing dedicated UI integration test for collect message passthrough.
 - **Paths:** `web/src/pages/PositionDetail.tsx`
 
 ### BUG-20260410-03 — Swap step appeared to do nothing
@@ -2100,6 +2100,6 @@ keywords: swap-before-open, position-create, dry-run, ui-feedback
 - **Symptom:** clicking `Swap` often looked like no action.
 - **Root cause:** backend dry-run/info response was not surfaced when signature was missing.
 - **Fix:** `PositionCreate` now renders `swapStepInfo` from API message regardless of signature presence.
-- **Guards/tests:** still missing dedicated UI integration test for swap message without `swap_signature` (open action item).
+- **Guards/tests:** manual: still missing dedicated UI integration test for swap message without swap_signature.
 - **Paths:** `web/src/pages/PositionCreate.tsx`
 

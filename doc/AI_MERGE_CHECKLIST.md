@@ -4,7 +4,7 @@ Use this checklist before merging bugfixes and feature PRs touching execution, l
 
 - [ ] **Spec drift:** implementation still matches the intended behavior and API contract.
 - [ ] **Data reuse first:** checked `doc/DATA_CATALOG.md` and reused existing tagged source before adding new snapshots/ingestion.
-- [ ] **Bug -> test rule:** each `high`/`critical` bug has a regression or invariant test.
+- [ ] **Bug -> test rule:** each `high`/`critical` bug has a regression or invariant test named in `Guards/tests` (C5 job `bugs_have_tests`). `cargo check` / `tsc` are not tests; use a real `fn` / file stem or explicit `manual:`.
 - [ ] **Critical path test coverage:** if critical files changed (list in `scripts/ci/critical-area-test-gate.sh`), the diff adds/changes tests — a file merely containing `mod tests` does not count. Label `no-tests-needed` only for pure refactors, reason in PR body.
 - [ ] **Test integrity** (`.cursor/rules/test-integrity.mdc`): no deleted/weakened assertions, no `#[ignore]` or wider tolerances to get green; every failing test classified (`stale_test` / `non_hermetic` / `economic_regression` / `assertion_weakened` / `infra`).
 - [ ] **Golden delta:** if any snapshot / fixture / `openapi.json` changed, the PR description has a "Golden delta: what changed and why" section (paste the table from `python tools/golden_delta.py --git-base origin/main` / CI job `golden_delta`). Job `golden_delta` fails without that section (D1); number diffs alone do not.
