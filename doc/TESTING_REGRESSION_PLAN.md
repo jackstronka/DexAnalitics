@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### C4 (2026-10-08) — idempotencja GL (replay lifecycle)
+
+- `session_and_chain_gl_lifecycle_row_replay_does_not_change_balances` w `crates/data/tests/session_gl_integration.rs`. Po pierwszym `Applied` snapshot sald + `COUNT(wallet_gl_posting)`; drugi apply tego samego wiersza = `SkippedAlready` i te same liczby (SESSION close, SESSION collect, CHAIN close). Istniejące testy sprawdzały tylko `SkippedAlready` / GL=PSLR na końcu.
+
 ### C3 (2026-10-08) — niezmienniki proptest (G5)
 
 - Workspace `proptest = "1.7"`. Testy: `net_pnl_identity_after_refresh_lineage_totals` (api), `cap_open_debits_keeps_running_balance_non_negative` (data), `tick_price_roundtrip` (domain + protocols/orca), `stream_il_identities` (api pnl), `session_continuity_stitches_close_end_to_next_baseline` (api lineage). Granica domain `|t|=443636` z tolerancją 1 tick. Bez sieci, bez `data/`. Nie zmienia snapshotów insta.

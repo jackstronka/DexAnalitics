@@ -8,10 +8,11 @@ use clmm_lp_data::repositories::Database;
 use clmm_lp_data::wallet_session::{
     SessionCapsSource, SessionLifecyclePostingOutcome, USDC_MINT, WSOL_MINT,
     apply_chain_postings_from_lifecycle_row, apply_session_postings_from_lifecycle_row,
-    apply_wallet_mint_postings, apply_wallet_opening_import, compute_chain_balances_from_pslr,
-    compute_session_balances_from_pslr, gl_pslr_match, lifecycle_posting_event_id, parse_raw_i128,
-    read_chain_balances, read_session_balances, read_wallet_balances, resolve_session_mint_caps,
-    session_lifecycle_posting_already_applied, wallet_opening_import_already_applied,
+    apply_wallet_mint_postings, apply_wallet_opening_import, chain_lifecycle_posting_event_id,
+    compute_chain_balances_from_pslr, compute_session_balances_from_pslr, gl_pslr_match,
+    lifecycle_posting_event_id, parse_raw_i128, read_chain_balances, read_session_balances,
+    read_wallet_balances, resolve_session_mint_caps, session_lifecycle_posting_already_applied,
+    wallet_opening_import_already_applied,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -372,4 +373,133 @@ async fn wallet_gl_opening_import_and_journal_postings() {
     let gl_map = balance_map(&gl);
     assert_eq!(gl_map.get(WSOL_MINT), Some(&2_500_000));
     assert_eq!(gl_map.get(USDC_MINT), Some(&900_000));
+}
+
+async fn gl_posting_count(db: &Database, event_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*)::bigint FROM wallet_gl_posting WHERE event_id = $1"#,
+    )
+    .bind(event_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count postings")
+}
+
+/// C4: replaying the same lifecycle row must not change SESSION/CHAIN balances or posting count.
+#[tokio::test]
+async fn session_and_chain_gl_lifecycle_row_replay_does_not_change_balances() {
+    let Some(db) = test_db().await else {
+        eprintln!("skip session_gl_integration: DATABASE_URL unset or connect/migrate failed");
+        return;
+    };
+
+    let owner = "Owner1111111111111111111111111111111111111111";
+
+    let session_id = format!("itest-c4-sess-{}", Uuid::new_v4());
+    let close_sig = format!("sig-c4-close-{}", Uuid::new_v4());
+    let close = close_lifecycle_json(&session_id, &close_sig);
+    let first = apply_session_postings_from_lifecycle_row(&db, &close, Some(50_000), Some(0))
+        .await
+        .expect("session close");
+    assert_eq!(first, SessionLifecyclePostingOutcome::Applied);
+    let session_after_first = balance_map(
+        &read_session_balances(&db, &session_id, Some(owner))
+            .await
+            .expect("read session after first"),
+    );
+    assert!(!session_after_first.is_empty());
+    let close_event_id = lifecycle_posting_event_id(&close_sig);
+    let session_posts_first = gl_posting_count(&db, &close_event_id).await;
+    assert!(session_posts_first > 0);
+
+    let again = apply_session_postings_from_lifecycle_row(&db, &close, Some(50_000), Some(0))
+        .await
+        .expect("session close replay");
+    assert_eq!(again, SessionLifecyclePostingOutcome::SkippedAlready);
+    let session_after_replay = balance_map(
+        &read_session_balances(&db, &session_id, Some(owner))
+            .await
+            .expect("read session after replay"),
+    );
+    assert_eq!(session_after_first, session_after_replay);
+    assert_eq!(
+        session_posts_first,
+        gl_posting_count(&db, &close_event_id).await
+    );
+
+    let collect_sig = format!("sig-c4-collect-{}", Uuid::new_v4());
+    let collect = json!({
+        "event": "bot_collect_fees",
+        "signature": collect_sig,
+        "rebalance_session_id": session_id,
+        "fee_payer_pubkey": owner,
+        "details": {
+            "token_mint_a": WSOL_MINT,
+            "token_mint_b": USDC_MINT
+        }
+    });
+    let collect_first =
+        apply_session_postings_from_lifecycle_row(&db, &collect, Some(10), Some(20))
+            .await
+            .expect("session collect");
+    assert_eq!(collect_first, SessionLifecyclePostingOutcome::Applied);
+    let collect_after_first = balance_map(
+        &read_session_balances(&db, &session_id, Some(owner))
+            .await
+            .expect("read session after collect"),
+    );
+    let collect_event_id = lifecycle_posting_event_id(&collect_sig);
+    let collect_posts_first = gl_posting_count(&db, &collect_event_id).await;
+
+    let collect_again =
+        apply_session_postings_from_lifecycle_row(&db, &collect, Some(10), Some(20))
+            .await
+            .expect("session collect replay");
+    assert_eq!(
+        collect_again,
+        SessionLifecyclePostingOutcome::SkippedAlready
+    );
+    let collect_after_replay = balance_map(
+        &read_session_balances(&db, &session_id, Some(owner))
+            .await
+            .expect("read session after collect replay"),
+    );
+    assert_eq!(collect_after_first, collect_after_replay);
+    assert_eq!(
+        collect_posts_first,
+        gl_posting_count(&db, &collect_event_id).await
+    );
+
+    let chain_session_id = format!("itest-c4-chain-{}", Uuid::new_v4());
+    let chain_sess = format!("itest-c4-chain-sess-{}", Uuid::new_v4());
+    let chain_sig = format!("sig-c4-chain-{}", Uuid::new_v4());
+    let chain = close_lifecycle_json_chain(&chain_session_id, &chain_sess, &chain_sig);
+    let chain_first = apply_chain_postings_from_lifecycle_row(&db, &chain, Some(25_000), Some(0))
+        .await
+        .expect("chain close");
+    assert_eq!(chain_first, SessionLifecyclePostingOutcome::Applied);
+    let chain_after_first = balance_map(
+        &read_chain_balances(&db, &chain_session_id, Some(owner))
+            .await
+            .expect("read chain after first"),
+    );
+    assert!(!chain_after_first.is_empty());
+    let chain_event_id = chain_lifecycle_posting_event_id(&chain_sig);
+    let chain_posts_first = gl_posting_count(&db, &chain_event_id).await;
+    assert!(chain_posts_first > 0);
+
+    let chain_again = apply_chain_postings_from_lifecycle_row(&db, &chain, Some(25_000), Some(0))
+        .await
+        .expect("chain close replay");
+    assert_eq!(chain_again, SessionLifecyclePostingOutcome::SkippedAlready);
+    let chain_after_replay = balance_map(
+        &read_chain_balances(&db, &chain_session_id, Some(owner))
+            .await
+            .expect("read chain after replay"),
+    );
+    assert_eq!(chain_after_first, chain_after_replay);
+    assert_eq!(
+        chain_posts_first,
+        gl_posting_count(&db, &chain_event_id).await
+    );
 }
