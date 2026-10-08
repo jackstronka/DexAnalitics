@@ -2,7 +2,7 @@
 
 keywords: C4, idempotency, wallet_gl_posting, session_gl_integration, SESSION, CHAIN, collect, clmm-lp-data, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** Test `session_and_chain_gl_lifecycle_row_replay_does_not_change_balances`: close SESSION, collect SESSION i close CHAIN — drugi apply tego samego JSON to `SkippedAlready`, mapa sald i liczba `wallet_gl_posting` bez zmian. Job `db`. Nie rusza żywej `clmm_lp`.
+- **What:** Test `session_and_chain_gl_lifecycle_row_replay_does_not_change_balances`: close SESSION, collect SESSION i close CHAIN — drugi apply tego samego JSON to `SkippedAlready`, mapa sald i liczba `wallet_gl_posting` bez zmian. Job `db`. Nie rusza żywej `clmm_lp`. PR #19.
 - **paths:** `crates/data/tests/session_gl_integration.rs`, `doc/TESTS.md`
 
 ## 2026-10-08 — C3: niezmienniki `proptest` (net PnL, GL cap, tick↔price, IL, lineage)
