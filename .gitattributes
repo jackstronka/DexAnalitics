@@ -3,3 +3,4 @@
 .githooks/* text eol=lf
 *.snap text eol=lf
 **/openapi.json text eol=lf
+web/src/lib/api.gen.ts text eol=lf

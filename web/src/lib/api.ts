@@ -1,4 +1,7 @@
-// API client for Bociarz LP backend
+// API client for Bociarz LP backend.
+// New endpoints: type request/response from `./api.contract` (generated OpenAPI).
+// Do not add handwritten interfaces for new routes; migrate api.ts types when touching an old call (C2).
+export type { OkJson, Schema } from './api.contract'
 
 const API_BASE = '/api/v1'
 const API_KEY = (import.meta as any).env?.VITE_API_KEY as string | undefined

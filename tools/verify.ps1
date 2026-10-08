@@ -28,6 +28,7 @@ if (-not $SkipWeb) {
         Write-Host "verify: web/node_modules missing - run 'cd web; npm install' first" -ForegroundColor Red
         exit 1
     }
+    $steps += @{ Name = 'web: api.gen'; Dir = 'web'; Cmd = 'npm.cmd'; Args = @('run', 'check:api-gen') }
     $steps += @{ Name = 'web: tsc';     Dir = 'web'; Cmd = 'npx.cmd'; Args = @('tsc', '--noEmit') }
     $steps += @{ Name = 'web: vitest';  Dir = 'web'; Cmd = 'npx.cmd'; Args = @('vitest', 'run') }
 }
