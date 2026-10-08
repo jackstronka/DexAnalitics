@@ -1,3 +1,10 @@
+## 2026-10-08 — C2: typy TypeScript z OpenAPI (`api.gen.ts`)
+
+keywords: C2, openapi-typescript, api.gen.ts, api.contract, G4, web, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `openapi-typescript` generuje `web/src/lib/api.gen.ts` z `crates/api/openapi.json`. Job `web` i `make verify` / `verify.ps1` odpalają `npm run check:api-gen` (LF-normalized). Nowe endpointy klienta typować z `web/src/lib/api.contract.ts`; `api.ts` bez big-bang. Update: `cd web && npm run gen:api` / `make openapi-ts`. Nie rusza `openapi.json`.
+- **paths:** `web/scripts/openapi-ts.mjs`, `web/src/lib/api.gen.ts`, `web/src/lib/api.contract.ts`, `web/src/lib/api.gen.test.ts`, `.github/workflows/ci.yml`
+
 ## 2026-10-08 — C4: replay wiersza lifecycle nie zmienia sald GL
 
 keywords: C4, idempotency, wallet_gl_posting, session_gl_integration, SESSION, CHAIN, collect, clmm-lp-data, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

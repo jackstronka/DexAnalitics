@@ -103,6 +103,9 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
 
+      - name: OpenAPI TypeScript snapshot (C2)
+        run: npm run check:api-gen
+
       - name: tsc
         run: npx tsc --noEmit
 

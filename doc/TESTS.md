@@ -14,10 +14,10 @@
 
 | Środowisko | Komenda | Co robi |
 | ---------- | ------- | ------- |
-| Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo test --workspace` + web `tsc` + `vitest run` |
+| Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo test --workspace` + web `check:api-gen` + `tsc` + `vitest run` |
 | Windows | `.\tools\verify.ps1` | to samo; `-SkipWeb` / `-SkipRust` |
 | Szybko, tylko Rust | `make test` albo `LOGLEVEL=WARN cargo test --workspace` | bez fmt/clippy/web |
-| Szybko, tylko web | `cd web && npx tsc --noEmit && npx vitest run` | typy + 49 testów `src/lib/*.test.ts` |
+| Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run` | C2 gen + typy + 51 testów `src/lib/*.test.ts` |
 | Hook przed pushem | `git config core.hooksPath .githooks` | pre-push odpala `verify` (na Windows `verify.ps1`) |
 
 `make verify` **nie** odpala testów Postgres. Te są w jobie CI `db` albo ręcznie (§5).
@@ -69,6 +69,7 @@ cd web && npx vitest run src/lib/experimentCapital.test.ts
 | Integracja Rust | `crates/*/tests/*.rs` | dekoder kont, readiness, **GL w Postgres** |
 | Golden `insta` | snapshot `*.snap` + fixture | zmiana **liczby pieniężnej** albo rankingu — to `economic_regression` |
 | Kontrakt OpenAPI (C1) | `crates/api/openapi.json` | zmiana pola / ścieżki API — diff w PR; update `UPDATE_OPENAPI=1` |
+| Typy TS z OpenAPI (C2) | `web/src/lib/api.gen.ts` | job `web` `check:api-gen`; update `cd web && npm run gen:api` |
 | Niezmienniki `proptest` (C3) | property tests w api/data/domain/protocols | złamany wzór ekonomii / tick / GL, nie rename pola |
 | Web Vitest | `web/src/lib/*.test.ts` | zmiana czystej logiki TS (nie stron React) |
 | `tsc --noEmit` | cały `web/` | rozjazd typów |
@@ -102,6 +103,14 @@ cargo test -p clmm-lp-api --lib openapi_matches_committed
 # update (Windows): $env:UPDATE_OPENAPI='1'; cargo test -p clmm-lp-api --lib openapi_matches_committed
 # update (Unix):    UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed
 make openapi
+```
+
+**Typy TS z OpenAPI (C2)** — `web/src/lib/api.gen.ts` vs committed `openapi.json`. Nowe endpointy w kliencie typować z `web/src/lib/api.contract.ts` (`OkJson` / `Schema`). Nie edytować `api.gen.ts` ręcznie. Po zmianie spec: `make openapi` i `make openapi-ts`.
+
+```bash
+cd web && npm run check:api-gen
+cd web && npm run gen:api
+make openapi-ts
 ```
 
 ```bash
@@ -230,12 +239,13 @@ Orca: tick↔price (C3(3) roundtrip `|t|≤443636`), deposit quote, wrap/unwrap,
 
 Tick/price (C3(3) roundtrip + granica 443636), IL, fee math, concentrated liquidity, constant product, price impact.
 
-### Web (`cd web && npx vitest run`) — 9 plików / 49 testów
+### Web (`cd web && npx vitest run`) — 10 plików / 51 testów
 
 Tylko `web/src/lib/*.test.ts` (logika liczbowa). **Brak** testów stron/komponentów.
 
 | Plik | Co robi |
 | ---- | ------- |
+| `api.gen.test.ts` | C2: `HealthResponse` z `api.contract` + `/health` w `api.gen.ts` / `openapi.json` |
 | `experimentCapital.test.ts` | alokacja kapitału eksperymentu |
 | `experimentFundingPlan.test.ts` / `experimentBudgetPlan.test.ts` | plan finansowania / budżet |
 | `experimentLaunch.test.ts` / `experimentLaunchSpecs.test.ts` | start eksperymentu, specy |
@@ -254,7 +264,7 @@ Wymagane na `main` (branch protection):
 | Check | Co odpala |
 | ----- | --------- |
 | `rust` | fmt/clippy + testy w namespace bez sieci (`unshare -rn`, `--offline`) |
-| `web` | `tsc` + `vitest` |
+| `web` | `check:api-gen` (C2) + `tsc` + `vitest` |
 | `db` | Postgres 16 + `CLMM_REQUIRE_DB_TESTS=1` + `session_gl_integration` |
 | `critical_area_requires_tests` | zmiana pliku krytycznego (GL, lineage, `chain_portfolio`, `wallet_session`, `session_capital`, migracje, …) wymaga dodanych linii testowych albo etykiety `no-tests-needed` |
 | `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |

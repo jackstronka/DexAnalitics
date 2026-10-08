@@ -68,7 +68,7 @@ verify-rust: fmt-check lint
 	LOGLEVEL=WARN cargo test --workspace
 
 verify-web:
-	cd web && npx tsc --noEmit && npx vitest run
+	cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run
 
 # Enable repo git hooks for this clone
 hooks:
@@ -83,6 +83,11 @@ golden-delta:
 .PHONY: openapi
 openapi:
 	UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed
+
+# Rewrite web/src/lib/api.gen.ts from committed OpenAPI snapshot (C2)
+.PHONY: openapi-ts
+openapi-ts:
+	cd web && npm run gen:api
 
 # Run the project
 .PHONY: run
