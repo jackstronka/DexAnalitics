@@ -186,7 +186,7 @@ Istniejący `lineage_shadow_expected.json` przeniesiony na `insta` (B5).
 | ID | Zakres | Done when | Rozm. | Stare ID |
 | -- | ------ | --------- | ----- | -------- |
 | **D1** ✅ PR #16 | CI check: zmiana w `**/tests/fixtures/**`, `**/snapshots/**`, `openapi.json` ⇒ opis PR musi mieć sekcję `Golden delta:` | brak uzasadnienia = fail | S | R-PR4 |
-| **D2** | `CODEOWNERS` na fixtures/snapshots | review właściciela wymagane | S | — |
+| **D2** ✅ PR #23 | `CODEOWNERS` na fixtures/snapshots | review właściciela wymagane | S | — |
 | **D3** | `.cursor/BUGBOT.md`: flaga przy osłabionej asercji, usuniętym snapshocie, nowym `#[ignore]`, `return` w teście | komentarz Bugbota na PR | S | R-PR4 |
 | **D4** | Szablon triage pada CI (klasy §3) dla agenta (`@cursor` / Cloud): wolno `stale_test`, `non_hermetic`, `infra`; `economic_regression` → tylko raport + BUGS.md | agent nie zmienia expected bez GO | S | R-PR3, R-PR5 |
 | **D5** | Jednorazowy `cargo-mutants` na `chain_economic_totals`, `wallet_session` (agregatory), sizing w `session_capital` → lista przeżytych mutantów → brakujące asercje dopisane do B/C; potem opcjonalnie nightly | przeżyte mutanty w module < 10% | M | — |
