@@ -1,3 +1,10 @@
+## 2026-10-08 — D2: CODEOWNERS na goldeny / fixture / OpenAPI
+
+keywords: D2, CODEOWNERS, G6, golden, fixtures, snapshots, openapi, branch-protection, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `.github/CODEOWNERS` przypisuje `@jackstronka` na tych samych ścieżkach co D1 (`*.snap`, `**/tests/fixtures/**`, `**/snapshots/**`, `openapi.json`). GitHub prosi o review właściciela. Merge-block tylko po włączeniu „Require review from Code Owners” (A10: 0 wymaganych review — residual).
+- **paths:** `.github/CODEOWNERS`
+
 ## 2026-10-08 — C6: testy liczb `web/src/lib` + ESLint
 
 keywords: C6, vitest, whirlpoolTicks, chainCapital, sessionCapital, openPositionSwapEstimates, lineageLedgerOpenQuote, chainEconomicQuality, eslint, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
