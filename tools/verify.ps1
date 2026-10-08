@@ -31,6 +31,7 @@ if (-not $SkipWeb) {
     $steps += @{ Name = 'web: api.gen'; Dir = 'web'; Cmd = 'npm.cmd'; Args = @('run', 'check:api-gen') }
     $steps += @{ Name = 'web: tsc';     Dir = 'web'; Cmd = 'npx.cmd'; Args = @('tsc', '--noEmit') }
     $steps += @{ Name = 'web: vitest';  Dir = 'web'; Cmd = 'npx.cmd'; Args = @('vitest', 'run') }
+    $steps += @{ Name = 'web: eslint';  Dir = 'web'; Cmd = 'npm.cmd'; Args = @('run', 'lint') }
 }
 
 $results = @()

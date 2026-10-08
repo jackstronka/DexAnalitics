@@ -111,3 +111,6 @@ jobs:
 
       - name: vitest
         run: npx vitest run
+
+      - name: eslint
+        run: npm run lint
