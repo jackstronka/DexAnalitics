@@ -68,6 +68,7 @@ base64 = "0.22"
 rand_distr = "0.5"
 rust_decimal_macros = "1.39"
 insta = { version = "1.43", features = ["json"] }
+proptest = "1.7"
 prettytable-rs = "0.10"
 futures = "0.3"
 num-traits = "0.2"

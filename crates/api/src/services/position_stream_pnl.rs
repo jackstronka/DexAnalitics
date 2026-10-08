@@ -1360,6 +1360,29 @@ mod tests {
         assert_eq!(c.lp_vs_hodl_with_fees_pct, Decimal::new(-1, 2));
     }
 
+    proptest::proptest! {
+        /// C3(4): clean_il = current − hodl; lp_vs_hodl = clean_il + fees.
+        #[test]
+        fn stream_il_identities(
+            current in -5_000_000i64..10_000_000,
+            hodl in 0i64..10_000_000,
+            realized in 0i64..1_000_000,
+            uncollected in 0i64..1_000_000,
+        ) {
+            let current = Decimal::new(current, 6);
+            let hodl = Decimal::new(hodl, 6);
+            let realized = Decimal::new(realized, 6);
+            let uncollected = Decimal::new(uncollected, 6);
+            let c = compute_stream_il_components(current, hodl, realized, uncollected);
+            proptest::prop_assert_eq!(c.clean_il_usd, current - hodl);
+            proptest::prop_assert_eq!(c.lp_fees_total_usd, realized + uncollected);
+            proptest::prop_assert_eq!(
+                c.lp_vs_hodl_with_fees_usd,
+                c.clean_il_usd + c.lp_fees_total_usd
+            );
+        }
+    }
+
     #[test]
     fn cashflow_skips_open_and_close_principal_events() {
         assert!(is_lifecycle_principal_event(Some("bot_open_position")));

@@ -985,4 +985,41 @@ mod tests {
     fn golden_9vhky_totals_refreshed_from_materialized() {
         insta::assert_json_snapshot!(golden_9vhky(true));
     }
+
+    fn usd_micros(v: i64) -> Decimal {
+        Decimal::new(v, 6)
+    }
+
+    proptest::proptest! {
+        /// C3(1): after refresh, headline net PnL is current + cashflow − baseline − tx fees.
+        #[test]
+        fn net_pnl_identity_after_refresh_lineage_totals(
+            parts in proptest::collection::vec(
+                (1i64..10_000_000, 0i64..10_000_000, -1_000_000i64..1_000_000, 0i64..100_000),
+                1..5,
+            )
+        ) {
+            let mut nodes: Vec<PositionStreamLineageNode> = parts
+                .iter()
+                .enumerate()
+                .map(|(i, (baseline, current, cashflow, tx))| {
+                    let mut n = mk_node(
+                        &format!("n{i}"),
+                        usd_micros(*baseline),
+                        usd_micros(*current),
+                    );
+                    n.realized_cashflow_usd = usd_micros(*cashflow);
+                    n.tx_fees_usd = usd_micros(*tx);
+                    n
+                })
+                .collect();
+            let mut totals = None;
+            refresh_lineage_totals_from_nodes("entry", &mut totals, &mut nodes);
+            let t = totals.expect("totals");
+            let expected = t.current_value_usd + t.realized_cashflow_usd
+                - t.baseline_value_usd
+                - t.tx_fees_usd;
+            proptest::prop_assert_eq!(t.net_pnl_usd, expected);
+        }
+    }
 }

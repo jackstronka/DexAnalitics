@@ -333,4 +333,15 @@ mod tests {
         assert_eq!(liquidity_amount_from_pct(1000, 100.0), 1000);
         assert_eq!(liquidity_amount_from_pct(1000, 0.0), 0);
     }
+
+    proptest::proptest! {
+        /// C3(3): Orca Decimal tick ↔ price roundtrip on the pool-used range.
+        #[test]
+        fn tick_price_roundtrip(tick in -443_636i32..=443_636) {
+            let price = tick_to_price(tick);
+            proptest::prop_assume!(price > Decimal::ZERO);
+            let back = price_to_tick(price);
+            proptest::prop_assert_eq!(back, tick);
+        }
+    }
 }
