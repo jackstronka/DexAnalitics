@@ -6855,6 +6855,39 @@ mod tests {
         insta::assert_json_snapshot!(snapshot);
     }
 
+    proptest::proptest! {
+        /// C3(5): at a matching rebalance session, close_n end NAV equals baseline of n+1
+        /// after the continuity trio fills the missing side.
+        #[test]
+        fn session_continuity_stitches_close_end_to_next_baseline(
+            filled_usd in 1i64..10_000_000,
+            other_usd in 0i64..10_000_000,
+            fill_next_baseline in proptest::bool::ANY,
+        ) {
+            let ts = DateTime::parse_from_rfc3339("2026-04-13T20:00:00Z")
+                .expect("ts")
+                .with_timezone(&Utc);
+            let rows = vec![
+                lc(ts, "bot_close_position", "rotA", Some("sid"), None),
+                lc(ts, "bot_open_position", "rotB", Some("sid"), None),
+            ];
+            let filled = Decimal::new(filled_usd, 6);
+            let other = Decimal::new(other_usd, 6);
+            let (a_cur, b_base) = if fill_next_baseline {
+                (Decimal::ZERO, filled)
+            } else {
+                (filled, Decimal::ZERO)
+            };
+            let mut nodes = vec![
+                mk_node("rotA", Decimal::new(1000, 2), a_cur),
+                mk_node("rotB", b_base, other),
+            ];
+            nodes[0].closed_ts_utc = Some("2026-04-13T20:00:00Z".to_string());
+            run_continuity_trio(&rows, &mut nodes);
+            proptest::prop_assert_eq!(nodes[0].current_value_usd, nodes[1].baseline_value_usd);
+        }
+    }
+
     #[test]
     fn event_spot_from_ledger_details_parses_prices_source_and_slot() {
         let d = serde_json::json!({

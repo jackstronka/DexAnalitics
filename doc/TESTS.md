@@ -69,6 +69,7 @@ cd web && npx vitest run src/lib/experimentCapital.test.ts
 | Integracja Rust | `crates/*/tests/*.rs` | dekoder kont, readiness, **GL w Postgres** |
 | Golden `insta` | snapshot `*.snap` + fixture | zmiana **liczby pieniężnej** albo rankingu — to `economic_regression` |
 | Kontrakt OpenAPI (C1) | `crates/api/openapi.json` | zmiana pola / ścieżki API — diff w PR; update `UPDATE_OPENAPI=1` |
+| Niezmienniki `proptest` (C3) | property tests w api/data/domain/protocols | złamany wzór ekonomii / tick / GL, nie rename pola |
 | Web Vitest | `web/src/lib/*.test.ts` | zmiana czystej logiki TS (nie stron React) |
 | `tsc --noEmit` | cały `web/` | rozjazd typów |
 | Ignorowane (sieć / live) | `#[ignore]` | nie wchodzą w `verify`; tylko ręcznie `--ignored` |
@@ -118,7 +119,18 @@ cd tools && python test_golden_delta.py
 
 CI (`quality_gates` / job `golden_delta`) wkleja tabelę do Job Summary i komentarza PR. Wklej ten sam markdown do sekcji **Golden delta** w opisie PR. Job **nie pada** przy zmianie liczb (to `economic_regression` dla człowieka). **D1:** gdy w diffie jest `*.snap`, `**/tests/fixtures/**`, `**/snapshots/**` albo `openapi.json`, brak sekcji `Golden delta:` (nagłówek + uzasadnienie) = czerwony job. Edycja opisu PR odpala job ponownie (`edited`). Testy bramki: `cd tools && python test_golden_delta.py`.
 
-Znane zamrożone niespójności: **BUG-20261002-01** (cashflow swapów jednostronny) — B1 i B2 celowo trzymają obecne liczby do osobnego GO na fix.
+**Niezmienniki C3** (`proptest`, dane syntetyczne — nie golden):
+
+```bash
+cargo test -p clmm-lp-api --lib net_pnl_identity_after_refresh
+cargo test -p clmm-lp-api --lib stream_il_identities
+cargo test -p clmm-lp-api --lib session_continuity_stitches
+cargo test -p clmm-lp-data cap_open_debits_keeps_running
+cargo test -p clmm-lp-domain tick_price_roundtrip
+cargo test -p clmm-lp-protocols tick_price_roundtrip
+```
+
+Znane zamrożone niespójności: **BUG-20261002-01** (cashflow swapów jednostronny) — B1 i B2 celowo trzymają obecne liczby do osobnego GO na fix. C3(1) tego nie łapie (tożsamość agregatora, nie wejście swapów).
 
 ---
 
@@ -152,10 +164,10 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 
 | Moduł / plik | Co robi |
 | ------------ | ------- |
-| `chain_economic_totals` | B1 golden; odświeżanie sum łańcucha z węzłów |
+| `chain_economic_totals` | B1 golden; C3(1) `net_pnl` identity po `refresh_lineage_totals_from_nodes` |
 | `chain_portfolio` | B6 golden; start ledgera, fees, nogi USD, filtry phantom mint |
-| `position_stream_lineage` | B5 golden + shadow; trio ciągłości sesji, fork, ręczny open |
-| `position_stream_pnl` / `position_chain_history` | PnL strumienia, historia łańcucha |
+| `position_stream_lineage` | B5 golden + shadow; C3(5) close end = next baseline przy wspólnej sesji |
+| `position_stream_pnl` / `position_chain_history` | PnL strumienia; C3(4) `clean_il` / `lp_vs_hodl` identities |
 | `wallet_gl_posting` / `wallet_ledger*` | księgowanie GL z lifecycle |
 | `openapi` | C1: `openapi_matches_committed_snapshot` — live `ApiDoc` (utoipa) = `crates/api/openapi.json`; update: `UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed` |
 | `handlers::endpoint_coverage_tests` | czy endpointy odpowiadają (404/walidacja), bez pełnego DB-happy-path |
@@ -172,7 +184,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 
 | Moduł | Co robi |
 | ----- | ------- |
-| `wallet_session` | B2 golden; agregacja SESSION/CHAIN, cap open, mint deltas |
+| `wallet_session` | B2 golden; C3(2) `cap_open_debits` saldo mint ≥ 0 |
 | `session_gl_integration` | Postgres, §5 |
 | cache / timeseries / providers | cache, CSV, Orca REST (hermetyczne) |
 
@@ -211,11 +223,11 @@ Cele (fees, PnL, Sharpe, IL), grid / analytical optimizer, parametry IL-limit / 
 
 ### `clmm-lp-protocols`
 
-Orca: tick↔price, deposit quote, wrap/unwrap, discriminators. RPC config (w testach `fallback_urls: Vec::new()`). Eventy Whirlpool / Raydium / Meteora (roundtrip). Aerodrome: stałe gauge.
+Orca: tick↔price (C3(3) roundtrip `|t|≤443636`), deposit quote, wrap/unwrap, discriminators. RPC config (w testach `fallback_urls: Vec::new()`). Eventy Whirlpool / Raydium / Meteora (roundtrip). Aerodrome: stałe gauge.
 
 ### `clmm-lp-domain`
 
-Tick/price, IL, fee math, concentrated liquidity, constant product, price impact.
+Tick/price (C3(3) roundtrip + granica 443636), IL, fee math, concentrated liquidity, constant product, price impact.
 
 ### Web (`cd web && npx vitest run`) — 9 plików / 49 testów
 

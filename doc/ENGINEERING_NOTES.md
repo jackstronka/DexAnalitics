@@ -1,3 +1,10 @@
+## 2026-10-08 — C3: niezmienniki `proptest` (net PnL, GL cap, tick↔price, IL, lineage)
+
+keywords: proptest, C3, invariants, net_pnl, cap_open_debits, tick_to_price, clean_il, lineage-continuity, clmm-lp-api, clmm-lp-data, clmm-lp-domain, clmm-lp-protocols, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Workspace dep `proptest`. Pięć niezmienników: (1) `net_pnl` po `refresh_lineage_totals_from_nodes`, (2) saldo mint ≥ 0 po `cap_open_debits_*` (generator scala postings per mint, jak jeden wiersz lifecycle), (3) tick↔price `|t|≤443636` w `domain` i Orca `pool_reader`, (4) `clean_il` / `lp_vs_hodl` w `compute_stream_il_components`, (5) trio ciągłości: close end = next baseline przy wspólnej sesji. Syntetyczne wejście — nie rusza goldenów B1–B6. Nie naprawia BUG-20261002-01 (wejście cashflow). PR #18.
+- **paths:** `crates/api/src/services/{chain_economic_totals,position_stream_pnl,position_stream_lineage}.rs`, `crates/data/src/wallet_session.rs`, `crates/domain/src/math/price_tick.rs`, `crates/protocols/src/orca/pool_reader.rs`, `Cargo.toml`
+
 ## 2026-10-08 — C1: zacommitowany `openapi.json` + test równości z utoipa
 
 keywords: openapi, utoipa, C1, ApiDoc, UPDATE_OPENAPI, contract, clmm-lp-api, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

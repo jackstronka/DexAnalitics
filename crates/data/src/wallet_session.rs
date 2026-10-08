@@ -2731,4 +2731,52 @@ mod tests {
         ));
         insta::assert_json_snapshot!(serde_json::json!({ "chain": chain, "sessions": sessions }));
     }
+
+    fn coalesce_mint_postings(postings: Vec<(String, i128)>) -> Vec<(String, i128)> {
+        let mut by_mint: BTreeMap<String, i128> = BTreeMap::new();
+        for (mint, amt) in postings {
+            *by_mint.entry(mint).or_insert(0) += amt;
+        }
+        by_mint.into_iter().filter(|(_, amt)| *amt != 0).collect()
+    }
+
+    fn lifecycle_step_strategy()
+    -> impl proptest::strategy::Strategy<Value = (String, Vec<(String, i128)>)> {
+        use proptest::prelude::*;
+        let mint = prop_oneof![Just("mintA".to_string()), Just("mintB".to_string())];
+        let postings = proptest::collection::vec((mint, 1i128..1_000_000i128), 1..3);
+        prop_oneof![
+            postings.clone().prop_map(|p| {
+                (
+                    "bot_open_position".to_string(),
+                    coalesce_mint_postings(p.into_iter().map(|(m, a)| (m, -a)).collect()),
+                )
+            }),
+            postings
+                .clone()
+                .prop_map(|p| { ("bot_close_position".to_string(), coalesce_mint_postings(p)) }),
+            postings.prop_map(|p| ("bot_collect_fees".to_string(), coalesce_mint_postings(p))),
+        ]
+    }
+
+    proptest::proptest! {
+        /// C3(2): after any open/close/collect sequence, capped SESSION balance per mint is ≥ 0.
+        #[test]
+        fn cap_open_debits_keeps_running_balance_non_negative(
+            steps in proptest::collection::vec(lifecycle_step_strategy(), 1..12)
+        ) {
+            let mut running: BTreeMap<String, i128> = BTreeMap::new();
+            for (event, postings) in steps {
+                let mut batch = postings;
+                cap_open_debits_against_running_balance(&event, &running, &mut batch);
+                for (mint, delta) in batch {
+                    let e = running.entry(mint).or_insert(0);
+                    *e = e.saturating_add(delta);
+                }
+                for bal in running.values() {
+                    proptest::prop_assert!(*bal >= 0);
+                }
+            }
+        }
+    }
 }

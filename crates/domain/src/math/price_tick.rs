@@ -80,4 +80,30 @@ mod tests {
         let t2 = price_to_tick(Decimal::from_f64(1.01004966).unwrap()).unwrap();
         assert_eq!(t2, 100);
     }
+
+    /// C3(3) boundary: |tick| = 443636 (half of typical CLMM max). f64 may be off by 1 tick.
+    #[test]
+    fn tick_price_roundtrip_at_pool_bound() {
+        for tick in [-443_636i32, 443_636] {
+            let p = tick_to_price(tick).expect("price at bound");
+            let back = price_to_tick(p).expect("tick at bound");
+            assert!(
+                (back - tick).abs() <= 1,
+                "bound tick={tick} roundtrip={back}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        /// C3(3): domain f64 tick ↔ price roundtrip on the pool-used range.
+        #[test]
+        fn tick_price_roundtrip(tick in -443_636i32..=443_636) {
+            let Ok(price) = tick_to_price(tick) else {
+                return Ok(());
+            };
+            proptest::prop_assume!(price > Decimal::ZERO);
+            let back = price_to_tick(price).expect("price_to_tick");
+            proptest::prop_assert_eq!(back, tick);
+        }
+    }
 }
