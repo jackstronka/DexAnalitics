@@ -79,6 +79,11 @@ hooks:
 golden-delta:
 	python3 tools/golden_delta.py --git-base origin/main
 
+# Rewrite crates/api/openapi.json from live utoipa spec (C1)
+.PHONY: openapi
+openapi:
+	UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed
+
 # Run the project
 .PHONY: run
 run:
