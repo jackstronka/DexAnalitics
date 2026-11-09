@@ -39,6 +39,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: fmt
         run: cargo fmt --all --check
 
@@ -46,14 +49,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: build tests
-        run: cargo test --workspace --no-run
+        run: cargo nextest run --workspace --no-run
 
       # Unit/integration tests must be hermetic: run them in a network namespace with only loopback
       # (local mock servers work, public RPC / HTTP APIs fail fast instead of passing by luck).
+      # E2: cargo-nextest (process-per-test); EnvGuard uses a cross-process file lock.
       - name: tests (no network)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          unshare -rn sh -c 'ip link set lo up && cargo test --workspace --offline --no-fail-fast'
+          unshare -rn sh -c 'ip link set lo up && cargo nextest run --workspace --offline --profile ci'
 
   db:
     runs-on: ubuntu-latest
@@ -84,8 +88,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Postgres GL integration tests
-        run: cargo test -p clmm-lp-data --test session_gl_integration -- --nocapture
+        run: cargo nextest run -p clmm-lp-data --test session_gl_integration --profile ci --no-capture
 
   web:
     runs-on: ubuntu-latest

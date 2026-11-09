@@ -1,0 +1,10 @@
+# cargo-nextest config (E2). Retries forbidden — flakes must be fixed (test-integrity).
+# https://nexte.st/docs/configuration/config-file/
+
+[profile.default]
+retries = 0
+
+[profile.ci]
+retries = 0
+fail-fast = false
+# Inherited by `cargo nextest run --profile ci` in GitHub Actions.

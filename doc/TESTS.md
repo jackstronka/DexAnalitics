@@ -4,7 +4,7 @@
 **Nie** jest to plan budowy siatki — ten jest w [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md).  
 **Nie** jest to audyt z 2026-09-30 — ten (plus log PR) jest w [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md).
 
-**keywords:** tests, catalog, cargo-test, vitest, make-verify, golden, insta, session_gl_integration, hermetic, bugs-test-guard
+**keywords:** tests, catalog, cargo-test, cargo-nextest, nextest, vitest, make-verify, golden, insta, session_gl_integration, hermetic, bugs-test-guard
 
 **Utrzymanie (obowiązkowe):** przy nowym pliku testowym, goldenie/`insta`, harnessie `crates/*/tests/`, `#[ignore]`, pliku `web/src/lib/*.test.ts` albo nowej rodzinie testów w module — **w tym samym commicie/PR** zaktualizuj ten katalog (wiersz + komenda). Sam kolejny `#[test]` obok istniejących w opisanym już module nie wymaga wpisu. Reguła: [`.cursor/rules/test-integrity.mdc`](../.cursor/rules/test-integrity.mdc) pkt 8; checklista: [`AI_MERGE_CHECKLIST.md`](AI_MERGE_CHECKLIST.md).
 
@@ -14,13 +14,15 @@
 
 | Środowisko | Komenda | Co robi |
 | ---------- | ------- | ------- |
-| Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo test --workspace` + web `check:api-gen` + `tsc` + `vitest` + `eslint` |
+| Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo nextest run --workspace` + web `check:api-gen` + `tsc` + `vitest` + `eslint` |
 | Windows | `.\tools\verify.ps1` | to samo; `-SkipWeb` / `-SkipRust` |
-| Szybko, tylko Rust | `make test` albo `LOGLEVEL=WARN cargo test --workspace` | bez fmt/clippy/web |
+| Szybko, tylko Rust | `make test` albo `LOGLEVEL=WARN cargo nextest run --workspace` | bez fmt/clippy/web; wymaga `cargo-nextest` (**E2**) |
 | Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint` | C2 gen + typy + 73 testy `src/lib/*.test.ts` + ESLint (C6) |
 | Hook przed pushem | `git config core.hooksPath .githooks` | pre-push odpala `verify` (na Windows `verify.ps1`) |
 
 `make verify` **nie** odpala testów Postgres. Te są w jobie CI `db` albo ręcznie (§5).
+
+**E2 — cargo-nextest:** zainstaluj raz `cargo install --locked cargo-nextest`. Konfig: [`.config/nextest.toml`](../.config/nextest.toml) (`retries=0`; profil `ci` w Actions). Pojedynczy filtr jak dawniej: `cargo nextest run -p clmm-lp-api golden_9vhky`. `cargo test` nadal działa do diagnostyki jednego testu / doctestów.
 
 Czas lokalnie: zwykle **2,5–6 min** (pełny verify).
 

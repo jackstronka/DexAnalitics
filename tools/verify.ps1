@@ -19,9 +19,14 @@ $env:LOGLEVEL = 'WARN'
 
 $steps = @()
 if (-not $SkipRust) {
+    cargo nextest --version 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "E2: install cargo-nextest: cargo install --locked cargo-nextest" -ForegroundColor Red
+        exit 1
+    }
     $steps += @{ Name = 'rust: fmt';    Dir = '.';   Cmd = 'cargo'; Args = @('fmt', '--all', '--check') }
     $steps += @{ Name = 'rust: clippy'; Dir = '.';   Cmd = 'cargo'; Args = @('clippy', '--workspace', '--all-targets', '--all-features', '--', '-D', 'warnings') }
-    $steps += @{ Name = 'rust: tests';  Dir = '.';   Cmd = 'cargo'; Args = @('test', '--workspace') }
+    $steps += @{ Name = 'rust: nextest'; Dir = '.';   Cmd = 'cargo'; Args = @('nextest', 'run', '--workspace') }
 }
 if (-not $SkipWeb) {
     if (-not (Test-Path (Join-Path $repoRoot 'web/node_modules'))) {
