@@ -62,8 +62,12 @@ clean:
 check: test fmt-check lint
 
 # Same checks as CI; run by .githooks/pre-push (Windows: tools/verify.ps1)
-.PHONY: verify verify-rust verify-web test-report hooks
+.PHONY: verify verify-fast verify-rust verify-web test-report hooks
 verify: verify-rust verify-web test-report
+
+# E1: only packages/web touched vs BASE (default origin/main)
+verify-fast:
+	python3 tools/verify_fast.py --base $${BASE:-origin/main}
 
 verify-rust: fmt-check lint
 	@cargo nextest --version >/dev/null 2>&1 || (echo "E2: install cargo-nextest: cargo install --locked cargo-nextest" >&2; exit 1)
