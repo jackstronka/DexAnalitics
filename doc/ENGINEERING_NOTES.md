@@ -2,7 +2,7 @@
 
 keywords: R2, test_report, junit, nextest, vitest, G9, Job-Summary, test-areas, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** `tools/test_report.py` czyta JUnit z nextest + vitest, mapuje na obszary R1, liczy golden/niezm. z nazwy, klasyfikuje pady (§3 wstępnie), pisze `report.md`/`report.json`. Lokalnie: `make verify` / `verify.ps1` na końcu. CI: artefakty `junit-rust`/`junit-web` → job `test_report` + Job Summary + artefakt `test-report`. Profil nextest `*.junit.path=junit.xml`.
+- **What:** `tools/test_report.py` czyta JUnit z nextest + vitest, mapuje na obszary R1, liczy golden/niezm. z nazwy, klasyfikuje pady (§3 wstępnie), pisze `report.md`/`report.json`. Lokalnie: `make verify` / `verify.ps1` na końcu. CI: artefakty `junit-rust`/`junit-web` → job `test_report` + Job Summary + artefakt `test-report`. Profil nextest `*.junit.path=junit.xml`. PR #28.
 - **paths:** `tools/test_report.py`, `scripts/ci/test-report.sh`, `.github/workflows/ci.yml`, `.config/nextest.toml`
 
 ## 2026-11-09 — R1: mapa test → obszar (`ci/test-areas.toml`)
