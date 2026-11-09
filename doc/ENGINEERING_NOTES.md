@@ -26,6 +26,13 @@ keywords: dip-agent, UI, Faza D, U1, /dip, dip/snapshot, DipSnapshotResponse, we
 - **What:** Strona `/dip` (strefa SOL A/B/C + open Buy-the-Dip z `GET /dip/snapshot`), nav + i18n; `getDipSnapshot` typowany z OpenAPI; helpery `dipSnapshotDisplay` + vitest. Bez Trigger create/cancel (E) i bez drabinki (U1b).
 - **paths:** `web/src/pages/Dip.tsx`, `web/src/lib/dipSnapshotDisplay.ts`, `web/src/lib/api.ts`, `web/src/App.tsx`, `web/src/components/Layout.tsx`
 
+## 2026-11-09 — D5 follow-up: kill chain_economic_totals NAV survivors
+
+keywords: D5, cargo-mutants, chain_economic_totals, close_nav, CloseEstimate, survivors, clmm-lp-api
+
+- **What:** Unit tests with exact NAV / source tags for `close_nav_usd_from_raw_amounts_and_prices` (two-leg + one-price legs + both-zero → None), `lineage_node_end_nav_with_source` CloseEstimate formula, `chain_headline_end_nav_usd` backward scan. Target: mutants that survived weak range asserts on local/CI D5 runs.
+- **paths:** `crates/api/src/services/chain_economic_totals.rs`
+
 ## 2026-11-09 — A10: required check `quality_gates` + branch protection G1
 
 keywords: A10, G1, branch-protection, quality_gates, CI, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

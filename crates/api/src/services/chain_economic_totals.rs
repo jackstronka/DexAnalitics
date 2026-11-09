@@ -751,6 +751,56 @@ mod tests {
         assert!(nav < Decimal::from_str("9.94").unwrap());
     }
 
+    /// D5: kill survivors on price gates and both-leg multiply (exact NAV).
+    #[test]
+    fn close_nav_usd_from_raw_amounts_exact_two_leg_and_zero_prices() {
+        assert!(
+            close_nav_usd_from_raw_amounts_and_prices(
+                1_000_000_000,
+                5_000_000,
+                9,
+                6,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .is_none(),
+            "both prices <= 0 → None"
+        );
+        // 1 SOL @ $100 + 5 USDC @ $1 = $105 (exact; kills *→+/ / ).
+        let nav = close_nav_usd_from_raw_amounts_and_prices(
+            1_000_000_000,
+            5_000_000,
+            9,
+            6,
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .expect("nav");
+        assert_eq!(nav, Decimal::from(105));
+        // price_b only — kills second `<=` → `>` (would early-None).
+        let only_b = close_nav_usd_from_raw_amounts_and_prices(
+            1_000_000_000,
+            5_000_000,
+            9,
+            6,
+            Decimal::ZERO,
+            Decimal::from(1),
+        )
+        .expect("nav");
+        assert_eq!(only_b, Decimal::from(5));
+        // price_a only — kills first `<=` → `>` (would early-None when b==0).
+        let only_a = close_nav_usd_from_raw_amounts_and_prices(
+            1_000_000_000,
+            5_000_000,
+            9,
+            6,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .expect("nav");
+        assert_eq!(only_a, Decimal::from(100));
+    }
+
     #[test]
     fn chain_headline_end_nav_uses_close_estimate_when_current_zero() {
         let mut n = mk_node("PDA", Decimal::from_str("9.901").unwrap(), Decimal::ZERO);
@@ -762,6 +812,38 @@ mod tests {
             chain_headline_end_nav_usd(std::slice::from_ref(&n)),
             lineage_node_end_nav_usd(&n)
         );
+    }
+
+    /// D5: exact CloseEstimate formula + source (kills +/- and >/>= on est path).
+    #[test]
+    fn lineage_node_end_nav_close_estimate_exact_formula_and_source() {
+        let mut n = mk_node("PDA", Decimal::from_str("10").unwrap(), Decimal::ZERO);
+        n.closed_ts_utc = Some("2026-05-21T20:00:00Z".to_string());
+        n.fees_collected_usd = Decimal::from_str("0.5").unwrap();
+        n.realized_cashflow_usd = Decimal::from_str("0.25").unwrap();
+        n.tx_fees_usd = Decimal::from_str("0.1").unwrap();
+        let (nav, src) = lineage_node_end_nav_with_source(&n);
+        assert_eq!(src, ChainEndNavSource::CloseEstimate);
+        assert_eq!(nav, Decimal::from_str("10.65").unwrap()); // 10 + 0.5 + 0.25 - 0.1
+        // Non-positive estimate → Missing (strict > 0 on est).
+        n.baseline_value_usd = Decimal::from_str("0.05").unwrap();
+        n.fees_collected_usd = Decimal::ZERO;
+        n.realized_cashflow_usd = Decimal::ZERO;
+        n.tx_fees_usd = Decimal::from_str("0.05").unwrap();
+        let (nav0, src0) = lineage_node_end_nav_with_source(&n);
+        assert_eq!(src0, ChainEndNavSource::Missing);
+        assert_eq!(nav0, Decimal::ZERO);
+    }
+
+    #[test]
+    fn chain_headline_end_nav_scans_backward_skipping_zero_tail() {
+        let zero = mk_node("Z", Decimal::from(1), Decimal::ZERO);
+        let live = mk_node("L", Decimal::from(1), Decimal::from(42));
+        assert_eq!(
+            chain_headline_end_nav_usd(&[live.clone(), zero]),
+            Decimal::from(42)
+        );
+        assert_eq!(chain_headline_end_nav_usd(&[]), Decimal::ZERO);
     }
 
     #[test]
