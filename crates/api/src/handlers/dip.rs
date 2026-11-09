@@ -5,7 +5,8 @@ use crate::handlers::wallets::load_wallet_keypair_for_id;
 use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
     DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
-    DipTriggerSessionStatusDto, DipZoneBandDto, DipZonesDto,
+    DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse, DipTriggerSessionStatusDto,
+    DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
@@ -21,7 +22,8 @@ use clmm_lp_data::dip::{
     resolve_runtime_path, resolve_trigger_session_dir, save_trigger_session,
 };
 use clmm_lp_data::providers::{
-    JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, filter_open_buy_dips,
+    JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDepositCraftRequest,
+    filter_open_buy_dips,
 };
 use serde::Deserialize;
 use solana_sdk::signer::Signer;
@@ -479,6 +481,161 @@ fn ladder_dto(l: &DipLadderDefaults) -> DipLadderDefaultsDto {
         take_profit_pct: l.take_profit_pct,
         min_order_usd: l.min_order_usd,
     }
+}
+
+fn require_attached_session(wallet_id: &str) -> ApiResult<DipTriggerSession> {
+    let wid = wallet_id.trim();
+    if wid.is_empty() {
+        return Err(ApiError::bad_request("wallet_id required"));
+    }
+    let dir = resolve_trigger_session_dir(None);
+    load_trigger_session(&dir, wid)
+        .map_err(|e| ApiError::internal(format!("load trigger session: {e}")))?
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "no Trigger session for wallet_id={wid} — POST /dip/trigger/attach first"
+            ))
+        })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DipTriggerVaultQuery {
+    pub wallet_id: String,
+    /// When true, call `GET /vault/register` if `GET /vault` fails (T5).
+    #[serde(default)]
+    pub register_if_missing: bool,
+}
+
+/// `GET /dip/trigger/vault` — T4 vault read (+ optional T5 register).
+#[utoipa::path(
+    get,
+    path = "/dip/trigger/vault",
+    tag = "Dip",
+    params(
+        ("wallet_id" = String, Query, description = "Host wallet id with attached Trigger session"),
+        ("register_if_missing" = Option<bool>, Query, description = "Register vault if GET /vault fails")
+    ),
+    responses(
+        (status = 200, description = "Trigger vault", body = DipTriggerVaultResponse)
+    )
+)]
+pub async fn get_dip_trigger_vault(
+    Query(q): Query<DipTriggerVaultQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<DipTriggerVaultResponse>> {
+    let session = require_attached_session(&q.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let mut notes = vec!["no create/cancel — vault read only (E1)".into()];
+    let mut registered_now = false;
+
+    let vault = if q.register_if_missing {
+        match client.get_vault(&session.tokens.access_token).await {
+            Ok(v) => v,
+            Err(e) => {
+                notes.push(format!("GET /vault failed ({e}); trying /vault/register"));
+                registered_now = true;
+                client
+                    .register_vault(&session.tokens.access_token)
+                    .await
+                    .map_err(|reg| ApiError::bad_request(format!("vault/register failed: {reg}")))?
+            }
+        }
+    } else {
+        client
+            .get_vault(&session.tokens.access_token)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("vault failed: {e}")))?
+    };
+
+    Ok(Json(DipTriggerVaultResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        vault_pubkey: vault.vault_pubkey,
+        user_pubkey: vault.user_pubkey,
+        privy_vault_id: vault.privy_vault_id,
+        registered_now,
+        notes,
+    }))
+}
+
+/// `POST /dip/trigger/deposit/craft` — T6 propose unsigned deposit (no order create).
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/deposit/craft",
+    tag = "Dip",
+    request_body = DipTriggerDepositCraftRequest,
+    responses(
+        (status = 200, description = "Unsigned deposit craft", body = DipTriggerDepositCraftResponse)
+    )
+)]
+pub async fn post_dip_trigger_deposit_craft(
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerDepositCraftRequest>,
+) -> ApiResult<Json<DipTriggerDepositCraftResponse>> {
+    let session = require_attached_session(&req.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+
+    let order_type = req.order_type.trim();
+    if order_type.is_empty() {
+        return Err(ApiError::bad_request("order_type required"));
+    }
+    let order_sub_type = if order_type.eq_ignore_ascii_case("price") {
+        Some(
+            req.order_sub_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("single")
+                .to_string(),
+        )
+    } else {
+        req.order_sub_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+
+    if req.input_mint.trim().is_empty() || req.output_mint.trim().is_empty() {
+        return Err(ApiError::bad_request("input_mint and output_mint required"));
+    }
+    if req.amount.trim().is_empty() {
+        return Err(ApiError::bad_request("amount required (smallest units)"));
+    }
+
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let body = TriggerDepositCraftRequest {
+        input_mint: req.input_mint.trim().to_string(),
+        output_mint: req.output_mint.trim().to_string(),
+        user_address: session.wallet_pubkey.clone(),
+        amount: req.amount.trim().to_string(),
+        order_type: order_type.to_string(),
+        order_sub_type,
+    };
+    let craft = client
+        .craft_deposit(&session.tokens.access_token, &body)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("deposit/craft failed: {e}")))?;
+
+    Ok(Json(DipTriggerDepositCraftResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        request_id: craft.request_id,
+        transaction_base64: craft.transaction,
+        receiver_address: craft.receiver_address,
+        mint: craft.mint,
+        amount: craft.amount,
+        token_decimals: craft.token_decimals,
+        notes: vec![
+            "propose-only: unsigned deposit; sign + create order = later E step".into(),
+            "request_id is single-use as depositRequestId on create".into(),
+        ],
+    }))
 }
 
 /// `POST /dip/propose` — append `kind=dip_propose` row to `agent_decisions.jsonl` (no Trigger write).

@@ -1,3 +1,10 @@
+## 2026-11-09 — Dip E1: Trigger vault + deposit/craft (propose)
+
+keywords: dip-agent, Jupiter Trigger, vault, deposit/craft, T4, T5, T6, /dip/trigger/vault, E1, clmm-lp-data, clmm-lp-api
+
+- **What:** `JupiterTriggerClient` + `GET /dip/trigger/vault` (opcjonalny register) + `POST /dip/trigger/deposit/craft` zwraca unsigned tx + `request_id` dla attached `wallet_id`. **Bez** create order / broadcast. Hermetic httpmock vault+craft.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/api/src/handlers/dip.rs`
+
 ## 2026-11-09 — Dip E0: Trigger auth attach do host `wallet_id`
 
 keywords: dip-agent, Jupiter Trigger, wallet attach, JWT session, /dip/trigger/attach, active signer, Faza E prep, clmm-lp-data, clmm-lp-api

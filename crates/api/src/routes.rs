@@ -321,6 +321,11 @@ fn create_base_http_router(state: AppState) -> Router {
             "/dip/trigger/session",
             get(handlers::get_dip_trigger_session).delete(handlers::delete_dip_trigger_session),
         )
+        .route("/dip/trigger/vault", get(handlers::get_dip_trigger_vault))
+        .route(
+            "/dip/trigger/deposit/craft",
+            post(handlers::post_dip_trigger_deposit_craft),
+        )
         .route("/dip/propose", post(handlers::post_dip_propose))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
         .route(

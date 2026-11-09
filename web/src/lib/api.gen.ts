@@ -531,6 +531,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/trigger/deposit/craft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/trigger/deposit/craft` — T6 propose unsigned deposit (no order create). */
+        post: operations["post_dip_trigger_deposit_craft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/trigger/session": {
         parameters: {
             query?: never;
@@ -544,6 +561,23 @@ export interface paths {
         post?: never;
         /** `DELETE /dip/trigger/session` — detach Trigger session for wallet. */
         delete: operations["delete_dip_trigger_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dip/trigger/vault": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /dip/trigger/vault` — T4 vault read (+ optional T5 register). */
+        get: operations["get_dip_trigger_vault"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3149,11 +3183,48 @@ export interface components {
             notes: string[];
             session: components["schemas"]["DipTriggerSessionStatusDto"];
         };
+        /** @description `POST /dip/trigger/deposit/craft` — unsigned deposit for a future price/DCA order (T6 propose). */
+        DipTriggerDepositCraftRequest: {
+            /** @description Amount in input mint smallest units (string to avoid JS precision issues). */
+            amount: string;
+            input_mint: string;
+            /** @description Default `single` when `order_type=price`. */
+            order_sub_type?: string | null;
+            /** @description Default `price`. */
+            order_type?: string;
+            output_mint: string;
+            wallet_id: string;
+        };
+        /** @description Propose-only craft response (no order create). Carry `request_id` into a later create. */
+        DipTriggerDepositCraftResponse: {
+            amount?: string | null;
+            mint?: string | null;
+            notes: string[];
+            receiver_address?: string | null;
+            request_id: string;
+            /** Format: int32 */
+            token_decimals?: number | null;
+            /** @description Base64 unsigned transaction — sign before create; not broadcast here. */
+            transaction_base64: string;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
         /** @description Public Trigger session status (no access/refresh tokens). */
         DipTriggerSessionStatusDto: {
             attached: boolean;
             attached_at?: string | null;
             expires_at?: string | null;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `GET /dip/trigger/vault` — vault status for attached wallet (T4; optional T5 register). */
+        DipTriggerVaultResponse: {
+            notes: string[];
+            privy_vault_id?: string | null;
+            /** @description True when this call registered a new vault. */
+            registered_now: boolean;
+            user_pubkey?: string | null;
+            vault_pubkey: string;
             wallet_id: string;
             wallet_pubkey: string;
         };
@@ -6079,6 +6150,30 @@ export interface operations {
             };
         };
     };
+    post_dip_trigger_deposit_craft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerDepositCraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Unsigned deposit craft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerDepositCraftResponse"];
+                };
+            };
+        };
+    };
     get_dip_trigger_session: {
         parameters: {
             query: {
@@ -6121,6 +6216,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipTriggerSessionStatusDto"];
+                };
+            };
+        };
+    };
+    get_dip_trigger_vault: {
+        parameters: {
+            query: {
+                /** @description Host wallet id with attached Trigger session */
+                wallet_id: string;
+                /** @description Register vault if GET /vault fails */
+                register_if_missing?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trigger vault */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerVaultResponse"];
                 };
             };
         };
