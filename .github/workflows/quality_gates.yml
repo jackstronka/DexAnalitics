@@ -100,3 +100,35 @@ jobs:
       - name: E1 verify_fast.py unit tests
         working-directory: tools
         run: python3 test_verify_fast.py
+
+  # A10 / G1: single required check name for branch protection (`quality_gates`).
+  # if: always() so a failed upstream still runs this job (skipped required checks do not block merge).
+  quality_gates:
+    name: quality_gates
+    if: always()
+    needs:
+      - critical_area_requires_tests
+      - bugs_have_tests
+      - golden_delta
+      - test_areas
+      - test_report_unit
+      - test_trend_unit
+      - test_protection_unit
+      - mutants_d5_summary_unit
+      - verify_fast_unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: All quality-gate jobs succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          echo "upstream results: ${RESULTS}"
+          IFS=',' read -r -a parts <<< "${RESULTS}"
+          for r in "${parts[@]}"; do
+            if [ "$r" != "success" ]; then
+              echo "::error::quality_gates failed: upstream result='$r' (need all success)"
+              exit 1
+            fi
+          done
+          echo "All ${#parts[@]} quality-gate jobs succeeded."

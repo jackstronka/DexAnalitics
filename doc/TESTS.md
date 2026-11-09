@@ -296,20 +296,26 @@ Nowa liczba w UI → funkcja w `web/src/lib/*.ts` + test tutaj, nie w komponenci
 
 ## 7. CI (GitHub Actions)
 
-Wymagane na `main` (branch protection):
+Wymagane na `main` (branch protection, A10 / G1):
 
 | Check | Co odpala |
 | ----- | --------- |
 | `rust` | fmt/clippy + testy w namespace bez sieci (`unshare -rn`, `--offline`) |
 | `web` | `check:api-gen` (C2) + `tsc` + `vitest` + `eslint` (C6) |
 | `db` | Postgres 16 + `CLMM_REQUIRE_DB_TESTS=1` + `session_gl_integration` |
-| `critical_area_requires_tests` | zmiana pliku krytycznego (GL, lineage, `chain_portfolio`, `wallet_session`, `session_capital`, migracje, …) wymaga dodanych linii testowych albo etykiety `no-tests-needed` |
-| `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |
-| `test_protection_unit` (R5) | `tools/test_protection.py` + fixture → poziomy ochrony; `--check-master` vs `MASTER_IMPLEMENTATION_PLAN.md` §2.2 |
-| `mutants_d5_summary_unit` (D5) | parser outcomes.json; pełny `make mutants-d5` / workflow `Mutants D5` osobno (wolne) |
-| `verify_fast_unit` (E1) | selekcja pakietów/web z diffu dla `verify_fast.py` |
-| CODEOWNERS (D2) | GitHub prosi `@jackstronka` o review przy zmianie golden/fixture/`openapi.json`; merge-block tylko po „Require review from Code Owners” |
-| `bugs_have_tests` | **C5:** `high`/`critical` w `BUGS.md` → nazwa testu z `Guards/tests` istnieje, albo `manual:` |
+| `quality_gates` | agregat workflow Quality Gates: `critical_area_requires_tests`, `bugs_have_tests`, `golden_delta`, `test_areas`, `test_report_unit`, `test_trend_unit`, `test_protection_unit`, `mutants_d5_summary_unit`, `verify_fast_unit` |
+
+Joby wewnątrz Quality Gates (nie osobno w protection — pokryte przez `quality_gates`):
+
+| Job | Rola |
+| --- | ---- |
+| `critical_area_requires_tests` | zmiana pliku krytycznego wymaga linii testowych albo etykiety `no-tests-needed` |
+| `golden_delta` | tabela było/jest/Δ + **D1** sekcja `Golden delta:` przy fixture/snap/`openapi.json` |
+| `bugs_have_tests` | **C5:** `high`/`critical` w `BUGS.md` → istniejący test albo `manual:` |
+| `test_protection_unit` (R5) | poziomy ochrony vs MASTER §2.2 |
+| `mutants_d5_summary_unit` (D5) / `verify_fast_unit` (E1) | unit parserów tooling |
+
+CODEOWNERS (D2): GitHub prosi `@jackstronka` o review przy golden/fixture/`openapi.json`; merge-block tylko po „Require review from Code Owners” (obecnie off — residual A10 / solo).
 
 Docker / semver **nie** są wymagane do merge.
 
