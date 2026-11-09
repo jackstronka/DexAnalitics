@@ -4,6 +4,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+# Git Bash / WSL often lack cargo on PATH when launched from Windows shells.
+if ! command -v cargo >/dev/null 2>&1; then
+  if [[ -x "${HOME}/.cargo/bin/cargo" ]]; then
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+  elif [[ -x "/c/Users/${USERNAME:-}/.cargo/bin/cargo.exe" ]]; then
+    export PATH="/c/Users/${USERNAME}/.cargo/bin:${PATH}"
+  fi
+fi
 OUT="${MUTANTS_OUT:-target/mutants-d5}"
 mkdir -p "$OUT"
 
