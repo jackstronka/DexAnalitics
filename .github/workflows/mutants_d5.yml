@@ -1,0 +1,48 @@
+# D5: optional / manual cargo-mutants on economic aggregators (slow).
+# Not a required PR check — run via workflow_dispatch or weekly schedule.
+name: Mutants D5
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 06:00 UTC — after weekly test trend
+    - cron: "0 6 * * 1"
+
+jobs:
+  mutants_d5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mutants-d5
+      - name: Install cargo-nextest + cargo-mutants
+        run: |
+          cargo install --locked cargo-nextest
+          cargo install --locked cargo-mutants
+      - name: Run D5 mutants (scoped)
+        env:
+          MUTANTS_JOBS: "2"
+          MUTANTS_TIMEOUT: "180"
+          MUTANTS_OUT: target/mutants-d5
+        run: bash scripts/ci/mutants-d5.sh
+      - name: Upload mutants-d5 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-d5
+          path: |
+            target/mutants-d5/**/outcomes.json
+            target/mutants-d5/summary.md
+            target/mutants-d5/summary.json
+          if-no-files-found: warn
+      - name: Job Summary
+        if: always()
+        run: |
+          if [ -f target/mutants-d5/summary.md ]; then
+            cat target/mutants-d5/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary.md produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
