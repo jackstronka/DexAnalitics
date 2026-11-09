@@ -9,7 +9,7 @@ keywords: D5, cargo-mutants, mutants, wallet_session, chain_economic_totals, ses
 
 keywords: E1, verify-fast, G7, nextest, clippy, web, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** `tools/verify_fast.py` (+ `make verify-fast` / `tools/verify-fast.ps1`) wybiera pakiety z `git diff base...HEAD` (plus reverse dependents), odpala fmt/clippy/nextest tylko dla nich; web tylko przy `web/` lub `openapi.json`. Pełny workspace przy root CI/toolchain. Unit: `tools/test_verify_fast.py`.
+- **What:** `tools/verify_fast.py` (+ `make verify-fast` / `tools/verify-fast.ps1`) wybiera pakiety z `git diff base...HEAD` (plus reverse dependents), odpala fmt/clippy/nextest tylko dla nich; web tylko przy `web/` lub `openapi.json`. Pełny workspace przy root CI/toolchain. Unit: `tools/test_verify_fast.py`. PR #35.
 - **paths:** `tools/verify_fast.py`, `Makefile`, `tools/verify-fast.ps1`
 
 ## 2026-11-09 — API HTTP contract tests (typed happy-path)
