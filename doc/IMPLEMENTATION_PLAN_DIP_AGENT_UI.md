@@ -264,6 +264,49 @@ Mapowanie z [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md):
 
 ---
 
+## 3b. Reuse inventory — co już jest w Dex (nie budować od zera)
+
+Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, zamiast drugiego stacku.
+
+| Building block (już w repo) | Ścieżki / API | Użycie pod Jupiter / Dip |
+|-----------------------------|---------------|---------------------------|
+| **Jupiter Price** | `crates/data/src/providers/jupiter.rs`; `GET /api/v1/prices/jupiter`; `web` `getJupiterPrices` | P1, preview drabinki (U1b), strefy |
+| **Trigger read (Faza B)** | `jupiter_trigger.rs`; `GET /dip/snapshot`; CLI `dip-snapshot` | U1 open limits; T12/T13 |
+| **Zones** | `config/dip/zones.json`; `clmm_lp_data::dip` | D3, widget strefy |
+| **Audyt decyzji** | `GET`/`POST /api/v1/data/agent/decisions` → `agent_decisions.jsonl` | D1 / AH4 / AH5 — Faza C dopina `kind` dip, nie nowy magazyn |
+| **Position Agent UI** | `PositionDetail` tab Agent; `/positions/{addr}/agent/*` | Wzorzec UX (status, chat, confirm) — **nie** logika create Trigger |
+| **Strategies start/stop** | `Strategies.tsx`; API strategy run | Wzorzec Bot Control BC1–BC2 (LP); dip bot ≠ ten sam executor |
+| **BotActivity ledgers** | `BotActivity.tsx`; bot JSONL API | Wzorzec audytu aktywności; osobny ledger Trigger później |
+| **Settings shell** | `Settings.tsx` (localStorage) | Rozszerzyć o S-JUP / S-JWT / S-DIP-MODE (U2) — nie nowa app |
+| **Tx build / submit** | `txBuildUnsigned`, `txSubmitSigned` (`web` + API `/tx/…`) | Wzorzec podpisu pod deposit/cancel (E); **policy signer Jupiter ≠ Orca** bez jawnej flagi |
+| **OpenAPI → TS** | `crates/api/openapi.json`; `npm run gen:api` → `api.gen.ts` | Każdy nowy endpoint dip |
+| **Kapitał UI** | Session / Chain capital panels | Inspiracja „Available” w Summary; vault Trigger (T4) to **osobne** saldo |
+| **LP position / OOR** | `PositionDetail`, [`LP-HYGIENE.md`](dip-agent/LP-HYGIENE.md) | AH7 alert → `adjust_lp` |
+| **Health / port** | `/api/v1/health`; workspace API **8081** | S-API; diagnostyka |
+| **Config dip** | `config/dip/*` (runtime, mints, universe, context seed) | S-LADDER defaults; propose refs |
+
+### Świadomie NIE reuse 1:1
+
+| Istniejące | Dlaczego nie mapować na ślepo |
+|------------|-------------------------------|
+| `AgentDecision` / apply-optimize | `deny_unknown_fields` — tylko optimize LP; dip = osobny wiersz JSONL |
+| Orca `swap-before-open` / Whirlpool ExactIn | To nie Jupiter Swap V2 (S1–S2) |
+| `DecisionEngine` live | Policy LP rebalance; drabinka Trigger to osobny executor / Portfolio path |
+| Birdeye / płatne feedy | Preferuj Price Jupiter + on-chain (workspace free-data rule) |
+
+### Reuse → kroki planu
+
+| Krok | Preferowany reuse |
+|------|-------------------|
+| U1 | `/dip/snapshot` + Layout nav jak inne strony |
+| U1b | Cena z `/prices/jupiter` + czysta matematyka w `web/src/lib/` |
+| U3 / AH5 | Istniejące `…/data/agent/decisions` |
+| U4 / C | POST decisions + refs do `config/dip/context/` |
+| U6 / E | Rozszerzyć `JupiterTriggerClient` write; podpis wzorowany na tx pipeline, osobny mode/signer |
+| U5 | Strategies + Settings patterns |
+
+---
+
 ## 4. Kolejność wdrożenia UI (zalecana)
 
 | Krok | Zakres | Zależność |
@@ -326,5 +369,6 @@ Po wdrożeniu testów: wpis w [`TESTS.md`](TESTS.md).
 
 | Data | Zmiana |
 |------|--------|
+| 2026-11-09 | v1.2: §3b Reuse inventory (Price, Trigger read, decisions API, tx pipeline, Strategies/Settings, Position Agent UX) |
 | 2026-11-09 | v1.1: inspiracja 3Commas DCA (tabela drabinki, Summary, pola); model A ladder vs B native Jupiter DCA; U1b/U8; linki help.3commas.io |
 | 2026-11-09 | v1 plan: Jupiter UI features, Bot Control + Settings, Agent Hub checklist, kolejność U0–U7 |

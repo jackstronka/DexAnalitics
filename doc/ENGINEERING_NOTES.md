@@ -1,3 +1,10 @@
+## 2026-11-09 — Plan UI: Reuse inventory Dex → Jupiter/Dip
+
+keywords: dip-agent, reuse, JupiterProvider, dip/snapshot, agent_decisions, txBuildUnsigned, Strategies, Position Agent, IMPLEMENTATION_PLAN_DIP_AGENT_UI
+
+- **What:** §3b w planie UI — mapa istniejących klocków Dex (Price, Trigger read, decisions JSONL, tx sign, Strategies/Settings, capital UI) na kroki U1–U6/C/E oraz jawne non-reuse (`AgentDecision`, Orca swap, DecisionEngine).
+- **paths:** `doc/IMPLEMENTATION_PLAN_DIP_AGENT_UI.md` §3b
+
 ## 2026-11-09 — Plan UI: 3Commas-like ladder + Dip/Jupiter + bot/agent
 
 keywords: dip-agent, UI, 3Commas, DCA, safety orders, ladder preview, Summary box, Jupiter Trigger, IMPLEMENTATION_PLAN_DIP_AGENT_UI, propose-only, Faza D
