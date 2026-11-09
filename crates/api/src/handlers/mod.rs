@@ -21,6 +21,8 @@ pub mod tx;
 pub mod wallets;
 
 #[cfg(test)]
+mod api_http_contract_tests;
+#[cfg(test)]
 mod devnet_e2e_tests;
 #[cfg(test)]
 mod devnet_test_harness;
