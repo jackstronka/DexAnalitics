@@ -332,5 +332,7 @@ Docker / semver **nie** są wymagane do merge.
 | [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) | plan faz A–E / R (co jeszcze zbudować) |
 | [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | audyt + log wykonania PR |
 | [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md) | obowiązkowa sekcja w nowym planie |
+| [`templates/AGENT_TICKET.md`](templates/AGENT_TICKET.md) | E3: ticket dla agenta (ID, zakazy, verify, characterization) |
+| [`templates/CI_TRIAGE.md`](templates/CI_TRIAGE.md) | D4: triage pada CI |
 | [`AI_MERGE_CHECKLIST.md`](AI_MERGE_CHECKLIST.md) | checklista przed merge |
 | [`BUGS.md`](BUGS.md) | `Guards/tests` przy bugach |

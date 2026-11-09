@@ -1,4 +1,12 @@
+## 2026-11-09 — E3: szablon ticketu dla agenta
+
+keywords: E3, AGENT_TICKET, G7, characterization, golden, verify, agent, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `doc/templates/AGENT_TICKET.md` — wypełnialny ticket: Plan ID, obszar R1, done/out-of-scope, zakazane pliki (snap/fixtures/openapi ręczne/`.env`/assertion_weakened), komenda verify, characterization-first dla PnL/GL/backtest/sizing/lineage, prompt do wklejenia. Linki z `AGENTS.md` + `AI_MERGE_CHECKLIST.md`.
+- **paths:** `doc/templates/AGENT_TICKET.md`
+
 ## 2026-11-09 — D5: cargo-mutants na agregatorach ekonomicznych
+
 
 keywords: D5, cargo-mutants, mutants, wallet_session, chain_economic_totals, session_capital, target_usd, survivors, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
