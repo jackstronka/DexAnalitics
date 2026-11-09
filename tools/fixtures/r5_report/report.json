@@ -1,0 +1,24 @@
+{
+  "title": "Test report — fixture R5",
+  "git_ref": "main",
+  "commit": "r5fixture",
+  "generated_at": "2026-11-09 12:00 UTC",
+  "pass_n": 700,
+  "fail_n": 0,
+  "ignored_n": 20,
+  "time_s": 180.0,
+  "areas": [
+    {"label": "Ekonomia / GL", "tests": 118, "fails": 0, "ignored": 0, "golden": 2, "niezm": 2, "time_s": 14.0},
+    {"label": "Lineage / PnL", "tests": 96, "fails": 0, "ignored": 0, "golden": 3, "niezm": 2, "time_s": 11.0},
+    {"label": "Execution / rebalance", "tests": 107, "fails": 0, "ignored": 0, "golden": 1, "niezm": 0, "time_s": 22.0},
+    {"label": "Dane / decode", "tests": 80, "fails": 0, "ignored": 0, "golden": 0, "niezm": 0, "time_s": 30.0},
+    {"label": "Backtest / strategie", "tests": 40, "fails": 0, "ignored": 0, "golden": 1, "niezm": 0, "time_s": 45.0},
+    {"label": "Decision layer / agent", "tests": 25, "fails": 0, "ignored": 0, "golden": 0, "niezm": 0, "time_s": 8.0},
+    {"label": "Domain math", "tests": 30, "fails": 0, "ignored": 0, "golden": 0, "niezm": 2, "time_s": 5.0},
+    {"label": "API / kontrakt", "tests": 50, "fails": 0, "ignored": 0, "golden": 0, "niezm": 0, "time_s": 12.0},
+    {"label": "Web", "tests": 20, "fails": 0, "ignored": 0, "golden": 0, "niezm": 0, "time_s": 6.0},
+    {"label": "Inne", "tests": 10, "fails": 0, "ignored": 0, "golden": 0, "niezm": 0, "time_s": 3.0}
+  ],
+  "failures": [],
+  "fallback_n": 0
+}

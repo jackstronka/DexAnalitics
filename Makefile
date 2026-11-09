@@ -132,6 +132,16 @@ test-trend:
 	python3 tools/test_trend.py --reports-dir tools/fixtures/r4_reports --out-dir target/test-trend
 	@echo ""; echo "=== test trend (R4) ==="; cat target/test-trend/trend.md
 
+# R5: MASTER §2.2 Ochrona testami from report.json (+ unit / --check-master)
+.PHONY: test-protection test-protection-unit
+REPORT ?= tools/fixtures/r5_report/report.json
+test-protection-unit:
+	cd tools && python3 test_test_protection.py
+
+test-protection:
+	python3 tools/test_protection.py --report $(REPORT)
+	python3 tools/test_protection.py --report $(REPORT) --check-master
+
 # Run the project
 .PHONY: run
 run:
