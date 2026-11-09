@@ -123,6 +123,15 @@ test-areas:
 test-report-unit:
 	cd tools && python3 test_test_report.py
 
+# R4: weekly trend from local report.json dir (or unit fixtures)
+.PHONY: test-trend test-trend-unit
+test-trend-unit:
+	cd tools && python3 test_test_trend.py
+
+test-trend:
+	python3 tools/test_trend.py --reports-dir tools/fixtures/r4_reports --out-dir target/test-trend
+	@echo ""; echo "=== test trend (R4) ==="; cat target/test-trend/trend.md
+
 # Run the project
 .PHONY: run
 run:

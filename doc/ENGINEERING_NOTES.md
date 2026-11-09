@@ -1,3 +1,10 @@
+## 2026-11-09 — R4: tygodniowy trend testów (artefakty report.json)
+
+keywords: R4, test_trend, weekly, G9, artifacts, flake, Job-Summary, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `tools/test_trend.py` agreguje R2 `report.json` (lokalny katalog albo `--fetch-github` artefaktów `test-report`). Tabela per obszar + flake candidates (fail w części snapshotów) + średni czas testów/CI. Workflow `weekly_test_trend.yml` (poniedziałek + `workflow_dispatch`), Job Summary + artefakt `weekly-test-trend`. Unit: `tools/test_test_trend.py`.
+- **paths:** `tools/test_trend.py`, `.github/workflows/weekly_test_trend.yml`, `scripts/ci/test-trend.sh`
+
 ## 2026-11-09 — R2: raport testów per obszar (JUnit → MD/JSON)
 
 keywords: R2, test_report, junit, nextest, vitest, G9, Job-Summary, test-areas, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

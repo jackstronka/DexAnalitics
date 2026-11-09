@@ -70,3 +70,10 @@ jobs:
       - name: R2 test_report.py unit tests
         working-directory: tools
         run: python3 test_test_report.py
+
+  test_trend_unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: R4 test_trend.py unit tests
+        run: bash scripts/ci/test-trend.sh
