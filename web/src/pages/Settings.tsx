@@ -1,10 +1,14 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
-import { getDipRuntime } from '@/lib/api'
+import {
+  deleteDipTriggerSession,
+  getDipRuntime,
+  postDipTriggerAttach,
+} from '@/lib/api'
 import {
   dipLiveArmed,
   formatLadderDefaultsLine,
@@ -14,6 +18,8 @@ import { getMetricsMode, type MetricsMode } from '@/lib/metricsMode'
 import { useI18n } from '@/lib/i18n'
 import { APP_VERSION } from '@/lib/version'
 
+const LS_SELECTED_WALLET_ID = 'clmm.selected_wallet_id'
+
 function presenceClass(set: boolean): string {
   return set
     ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
@@ -22,24 +28,48 @@ function presenceClass(set: boolean): string {
 
 export default function Settings() {
   const { locale, t } = useI18n()
+  const qc = useQueryClient()
   const [metricsMode, setMetricsMode] = useState<MetricsMode>(() => getMetricsMode())
   const [apiKey, setApiKey] = useState('')
   const [rpcUrl, setRpcUrl] = useState('https://api.mainnet-beta.solana.com')
   const [dryRun, setDryRun] = useState(true)
+  const [walletId, setWalletId] = useState(
+    () => localStorage.getItem(LS_SELECTED_WALLET_ID)?.trim() || '',
+  )
 
+  const walletIdTrim = walletId.trim()
   const runtimeQ = useQuery({
-    queryKey: ['dip-runtime'],
-    queryFn: getDipRuntime,
+    queryKey: ['dip-runtime', walletIdTrim || null],
+    queryFn: () => getDipRuntime(walletIdTrim || undefined),
     refetchInterval: 60_000,
     retry: 1,
   })
   const rt = runtimeQ.data
+
+  const attachM = useMutation({
+    mutationFn: () => postDipTriggerAttach(walletIdTrim),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['dip-runtime'] })
+    },
+  })
+  const detachM = useMutation({
+    mutationFn: () => deleteDipTriggerSession(walletIdTrim),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['dip-runtime'] })
+    },
+  })
+
+  const sessionAttached = useMemo(
+    () => rt?.trigger_session?.attached === true,
+    [rt?.trigger_session?.attached],
+  )
 
   const handleSave = () => {
     localStorage.setItem(
       'clmm-settings',
       JSON.stringify({ apiKey, rpcUrl, dryRun, pnl_mode: metricsMode }),
     )
+    if (walletIdTrim) localStorage.setItem(LS_SELECTED_WALLET_ID, walletIdTrim)
     alert(locale === 'pl' ? 'Ustawienia zapisane!' : 'Settings saved!')
   }
 
@@ -95,6 +125,58 @@ export default function Settings() {
               {runtimeQ.error instanceof Error ? runtimeQ.error.message : String(runtimeQ.error)}
             </ErrorBanner>
           ) : null}
+          {attachM.isError ? (
+            <ErrorBanner>
+              {attachM.error instanceof Error ? attachM.error.message : String(attachM.error)}
+            </ErrorBanner>
+          ) : null}
+          {detachM.isError ? (
+            <ErrorBanner>
+              {detachM.error instanceof Error ? detachM.error.message : String(detachM.error)}
+            </ErrorBanner>
+          ) : null}
+
+          <div className="space-y-2 rounded-md border p-3">
+            <label className="text-xs font-medium">{t('settings.triggerWalletId')}</label>
+            <input
+              className="w-full rounded-md border bg-background px-2 py-1.5"
+              value={walletId}
+              onChange={(e) => setWalletId(e.target.value)}
+              placeholder={t('settings.triggerWalletPlaceholder')}
+            />
+            <p className="text-xs text-muted-foreground">{t('settings.triggerAttachHint')}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={!walletIdTrim || attachM.isPending}
+                onClick={() => attachM.mutate()}
+              >
+                {attachM.isPending ? t('settings.triggerAttaching') : t('settings.triggerAttach')}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!walletIdTrim || detachM.isPending || !sessionAttached}
+                onClick={() => detachM.mutate()}
+              >
+                {t('settings.triggerDetach')}
+              </Button>
+            </div>
+            {rt?.trigger_session?.attached ? (
+              <p className="text-xs">
+                {t('settings.triggerSessionOk')}:{' '}
+                <code className="break-all">{rt.trigger_session.wallet_pubkey}</code>
+                {rt.trigger_session.expires_at
+                  ? ` · exp ${rt.trigger_session.expires_at}`
+                  : ''}
+              </p>
+            ) : walletIdTrim ? (
+              <p className="text-xs text-muted-foreground">{t('settings.triggerSessionNone')}</p>
+            ) : null}
+          </div>
+
           {runtimeQ.isLoading && !rt ? (
             <p className="text-muted-foreground">{t('dip.loading')}</p>
           ) : rt ? (

@@ -313,6 +313,14 @@ fn create_base_http_router(state: AppState) -> Router {
         // Dip Agent (Jupiter Trigger read + zones; propose-only — no create)
         .route("/dip/snapshot", get(handlers::get_dip_snapshot))
         .route("/dip/runtime", get(handlers::get_dip_runtime))
+        .route(
+            "/dip/trigger/attach",
+            post(handlers::post_dip_trigger_attach),
+        )
+        .route(
+            "/dip/trigger/session",
+            get(handlers::get_dip_trigger_session).delete(handlers::delete_dip_trigger_session),
+        )
         .route("/dip/propose", post(handlers::post_dip_propose))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
         .route(

@@ -61,15 +61,19 @@ export default function Dip() {
   const { locale, t } = useI18n()
   const [ladderForm, setLadderForm] = useState<LadderForm>(DEFAULT_LADDER)
   const [ladderSeeded, setLadderSeeded] = useState(false)
+  const selectedWalletId =
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('clmm.selected_wallet_id')?.trim() || undefined
+      : undefined
   const q = useQuery({
-    queryKey: ['dip-snapshot'],
-    queryFn: getDipSnapshot,
+    queryKey: ['dip-snapshot', selectedWalletId ?? null],
+    queryFn: () => getDipSnapshot(selectedWalletId),
     refetchInterval: 60_000,
     retry: 1,
   })
   const runtimeQ = useQuery({
-    queryKey: ['dip-runtime'],
-    queryFn: getDipRuntime,
+    queryKey: ['dip-runtime', selectedWalletId ?? null],
+    queryFn: () => getDipRuntime(selectedWalletId),
     staleTime: 60_000,
     retry: 1,
   })

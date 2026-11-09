@@ -224,12 +224,14 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
 | `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
 | `dip::runtime` | parse `runtime.yaml` mode + ladder defaults (U2) |
+| `dip::trigger_session` | per-wallet Trigger JWT store (E0 attach; no secrets in status) |
 
 ```bash
 cargo test -p clmm-lp-data jupiter_trigger
 cargo test -p clmm-lp-data dip::zones
 cargo test -p clmm-lp-data dip::propose
 cargo test -p clmm-lp-data dip::runtime
+cargo test -p clmm-lp-data dip::trigger_session
 ```
 
 ### `clmm-lp-execution`

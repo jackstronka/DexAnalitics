@@ -35,6 +35,7 @@ Tryby:
 | T1 | Auth challenge | `POST /auth/challenge` | read/setup | B | ✅ |
 | T2 | Auth verify → JWT | `POST /auth/verify` | read/setup | B | ✅ |
 | T3 | Auth refresh | `POST /auth/refresh` | read/setup | B | ✅ |
+| T2b | **Attach host wallet** → per-`wallet_id` session (no create) | Dex `POST /dip/trigger/attach` (+ session GET/DELETE) | setup | E0 | ✅ |
 | T4 | Status vault | `GET /vault` | read | E prep | ⬜ |
 | T5 | Rejestracja vault | `GET /vault/register` | live (raz) | E | ⬜ |
 | T6 | Craft deposit (fund order) | `POST /deposit/craft` | propose → live | E | ⬜ |

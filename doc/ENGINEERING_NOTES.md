@@ -1,3 +1,10 @@
+## 2026-11-09 — Dip E0: Trigger auth attach do host `wallet_id`
+
+keywords: dip-agent, Jupiter Trigger, wallet attach, JWT session, /dip/trigger/attach, active signer, Faza E prep, clmm-lp-data, clmm-lp-api
+
+- **What:** Per-wallet Trigger session store (`data/dip/trigger_sessions/{wallet_id}.json`); `POST /dip/trigger/attach` ładuje host keypair, `auth/challenge`+`verify`, zapisuje JWT **bez** zwracania sekretu; `GET/DELETE /dip/trigger/session`; snapshot/runtime respektują `wallet_id`. Settings: Attach/Detach. **Bez** create/cancel/deposit.
+- **paths:** `crates/data/src/dip/trigger_session.rs`, `crates/api/src/handlers/dip.rs`, `web/src/pages/Settings.tsx`
+
 ## 2026-11-09 — Dip Faza D U2: Settings + GET /dip/runtime
 
 keywords: dip-agent, UI, Faza D, U2, /dip/runtime, Settings, S-JUP, S-JWT, S-DIP-MODE, S-LADDER, runtime.yaml, serde_yaml, clmm-lp-data, clmm-lp-api

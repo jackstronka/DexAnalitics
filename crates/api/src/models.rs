@@ -3383,9 +3383,38 @@ pub struct DipRuntimeResponse {
     pub dca_allowed: bool,
     /// `JUPITER_API_KEY` (or request header) present on API host — never the value.
     pub jupiter_api_key_set: bool,
-    /// `CLMM_JUPITER_TRIGGER_JWT` (or Authorization) present — never the value.
+    /// Bearer env JWT **or** per-wallet Trigger session present — never the value.
     pub trigger_jwt_set: bool,
+    /// Optional: session status for `wallet_id` query (no JWT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_session: Option<DipTriggerSessionStatusDto>,
     pub ladder: DipLadderDefaultsDto,
+    pub notes: Vec<String>,
+}
+
+/// Public Trigger session status (no access/refresh tokens).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerSessionStatusDto {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub attached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_at: Option<String>,
+}
+
+/// `POST /dip/trigger/attach` — host keypair signs Jupiter Trigger auth challenge for `wallet_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerAttachRequest {
+    /// Local wallet id (keypair file stem on API host).
+    pub wallet_id: String,
+}
+
+/// Response after attach (tokens stored server-side; not returned).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerAttachResponse {
+    pub session: DipTriggerSessionStatusDto,
     pub notes: Vec<String>,
 }
 

@@ -46,6 +46,15 @@ const pl: Dictionary = {
   'settings.ladderEditHint':
     'Edytuj ladder: w config/dip/runtime.yaml (sekcja ladder). UI nie zapisuje YAML.',
   'settings.openDip': 'Otwórz /dip',
+  'settings.triggerWalletId': 'Wallet id (host keypair) dla Jupiter Trigger',
+  'settings.triggerWalletPlaceholder': 'np. id z listy /wallets',
+  'settings.triggerAttachHint':
+    'Attach: API ładuje keypair z hosta, podpisuje challenge Jupiter i zapisuje JWT per wallet (bez create/cancel). Wymaga JUPITER_API_KEY.',
+  'settings.triggerAttach': 'Attach Jupiter Trigger',
+  'settings.triggerAttaching': 'Attach…',
+  'settings.triggerDetach': 'Detach',
+  'settings.triggerSessionOk': 'Sesja Trigger',
+  'settings.triggerSessionNone': 'Brak sesji Trigger dla tego wallet_id.',
   'settings.execTitle': 'Wykonanie (local)',
   'settings.execHint': 'Dry-run w localStorage — nie zastępuje mode w runtime.yaml.',
   'settings.dryRun': 'Tryb Dry Run',
@@ -905,6 +914,15 @@ const en: Dictionary = {
   'settings.ladderEditHint':
     'Edit ladder in config/dip/runtime.yaml (ladder section). UI does not write YAML.',
   'settings.openDip': 'Open /dip',
+  'settings.triggerWalletId': 'Wallet id (host keypair) for Jupiter Trigger',
+  'settings.triggerWalletPlaceholder': 'e.g. id from /wallets list',
+  'settings.triggerAttachHint':
+    'Attach: API loads host keypair, signs Jupiter challenge, stores per-wallet JWT (no create/cancel). Requires JUPITER_API_KEY.',
+  'settings.triggerAttach': 'Attach Jupiter Trigger',
+  'settings.triggerAttaching': 'Attaching…',
+  'settings.triggerDetach': 'Detach',
+  'settings.triggerSessionOk': 'Trigger session',
+  'settings.triggerSessionNone': 'No Trigger session for this wallet_id.',
   'settings.execTitle': 'Execution (local)',
   'settings.execHint': 'Dry-run in localStorage — does not override runtime.yaml mode.',
   'settings.dryRun': 'Dry Run Mode',

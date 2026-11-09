@@ -514,6 +514,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/trigger/attach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/trigger/attach` — sign Trigger auth challenge with host keypair for `wallet_id`. */
+        post: operations["post_dip_trigger_attach"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dip/trigger/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /dip/trigger/session` — public status for a wallet (no JWT). */
+        get: operations["get_dip_trigger_session"];
+        put?: never;
+        post?: never;
+        /** `DELETE /dip/trigger/session` — detach Trigger session for wallet. */
+        delete: operations["delete_dip_trigger_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/evm/base/aerodrome-slipstream/pools/{pool}/slot0": {
         parameters: {
             query?: never;
@@ -3084,8 +3119,9 @@ export interface components {
             notes: string[];
             /** @description Path that was read (or attempted). */
             path: string;
-            /** @description `CLMM_JUPITER_TRIGGER_JWT` (or Authorization) present — never the value. */
+            /** @description Bearer env JWT **or** per-wallet Trigger session present — never the value. */
             trigger_jwt_set: boolean;
+            trigger_session?: null | components["schemas"]["DipTriggerSessionStatusDto"];
         };
         /** @description `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders. */
         DipSnapshotResponse: {
@@ -3102,6 +3138,24 @@ export interface components {
             /** @description `A` | `B` | `C` | `none` */
             zone: string;
             zones: components["schemas"]["DipZonesDto"];
+        };
+        /** @description `POST /dip/trigger/attach` — host keypair signs Jupiter Trigger auth challenge for `wallet_id`. */
+        DipTriggerAttachRequest: {
+            /** @description Local wallet id (keypair file stem on API host). */
+            wallet_id: string;
+        };
+        /** @description Response after attach (tokens stored server-side; not returned). */
+        DipTriggerAttachResponse: {
+            notes: string[];
+            session: components["schemas"]["DipTriggerSessionStatusDto"];
+        };
+        /** @description Public Trigger session status (no access/refresh tokens). */
+        DipTriggerSessionStatusDto: {
+            attached: boolean;
+            attached_at?: string | null;
+            expires_at?: string | null;
+            wallet_id: string;
+            wallet_pubkey: string;
         };
         /** @description Inclusive USD band for Dip Agent zones. */
         DipZoneBandDto: {
@@ -5954,6 +6008,8 @@ export interface operations {
             query?: {
                 /** @description Override path to runtime.yaml */
                 runtime_path?: string;
+                /** @description Include Trigger session status for this wallet */
+                wallet_id?: string;
             };
             header?: never;
             path?: never;
@@ -5979,6 +6035,8 @@ export interface operations {
                 include_orders?: boolean;
                 /** @description Override path to zones.json */
                 zones_path?: string;
+                /** @description Use Trigger session for this host wallet id */
+                wallet_id?: string;
             };
             header?: never;
             path?: never;
@@ -5993,6 +6051,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipSnapshotResponse"];
+                };
+            };
+        };
+    };
+    post_dip_trigger_attach: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerAttachRequest"];
+            };
+        };
+        responses: {
+            /** @description Trigger session attached (tokens stored server-side) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerAttachResponse"];
+                };
+            };
+        };
+    };
+    get_dip_trigger_session: {
+        parameters: {
+            query: {
+                /** @description Host wallet id */
+                wallet_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trigger session status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerSessionStatusDto"];
+                };
+            };
+        };
+    };
+    delete_dip_trigger_session: {
+        parameters: {
+            query: {
+                /** @description Host wallet id */
+                wallet_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Detach result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerSessionStatusDto"];
                 };
             };
         };
