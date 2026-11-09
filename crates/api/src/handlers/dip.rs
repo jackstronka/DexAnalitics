@@ -269,8 +269,7 @@ pub async fn post_dip_propose(
             .filter(|s| !s.is_empty()),
         decision,
     };
-    let written =
-        append_dip_propose(&path, row).map_err(|e| ApiError::internal(e.to_string()))?;
+    let written = append_dip_propose(&path, row).map_err(|e| ApiError::internal(e.to_string()))?;
 
     let api_row = AgentDecisionRow {
         ts_utc: written.ts_utc.clone(),
