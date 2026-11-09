@@ -9,6 +9,8 @@ Bociarz LP — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScri
 **AI / „agent” in this repo:** see `doc/AI_AGENT_LAYER.md` (`AgentDecision` + apply-optimize, Position Agent, live `DecisionEngine`, audit JSONL — not a single generic chatbot).  
 **Decision / orchestration layer (vision, phases, §1b capability registry / NO-GO, §11 audit, implementation plan):** `doc/DECISION_LAYER.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`.
 
+**Red CI on a PR:** classify and act per [`doc/templates/CI_TRIAGE.md`](doc/templates/CI_TRIAGE.md) (D4). Do **not** update goldens / expected money without explicit GO (`economic_regression`).
+
 ### Required system dependencies
 
 Installed once by the VM snapshot (not in the update script):

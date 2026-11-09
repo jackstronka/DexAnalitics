@@ -1,3 +1,10 @@
+## 2026-11-09 — D4: szablon triage pada CI dla agenta
+
+keywords: D4, CI_TRIAGE, triage, economic_regression, stale_test, non_hermetic, infra, G6, agent, Cloud, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `doc/templates/CI_TRIAGE.md` — klasyfikacja padu §3, dozwolone akcje, format raportu, STOP przy `economic_regression` (tylko było/jest/Δ + opcjonalnie `BUGS.md` bez update expected). Wskaźniki w `test-integrity.mdc`, `AGENTS.md`, `AI_MERGE_CHECKLIST.md`. PR #25.
+- **paths:** `doc/templates/CI_TRIAGE.md`
+
 ## 2026-11-09 — D3: Bugbot flaguje osłabianie testów
 
 keywords: D3, BUGBOT, Bugbot, G6, assertion_weakened, ignore, golden, snapshot, test-integrity, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

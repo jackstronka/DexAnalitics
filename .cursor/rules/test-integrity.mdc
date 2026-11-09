@@ -19,6 +19,8 @@ Full rationale: `doc/IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md` §3–§4.
 
 State the class in your message when you touch a failing test.
 
+**CI / Cloud triage (D4):** when a PR check is red, follow [`doc/templates/CI_TRIAGE.md`](doc/templates/CI_TRIAGE.md) before editing. Allowed without GO: `stale_test`, `non_hermetic` / `flake`, `infra`. For `economic_regression`: report (było/jest/Δ) + optional `BUGS.md` only — **do not** update snapshots/expected until explicit user GO. `assertion_weakened` is never an allowed fix path.
+
 ## Rules
 
 1. **Hermetic:** active tests use no network (except localhost mocks), no repo `data/`, no `set_current_dir`; env mutation only through the crate's `test_env::EnvGuard`. `RpcConfig { .. Default::default() }` in tests needs `fallback_urls: Vec::new()`. Repair jobs on real data = `#[ignore = "manual: ..."]`.

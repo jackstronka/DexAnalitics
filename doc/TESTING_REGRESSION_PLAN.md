@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### D4 (2026-11-09) — szablon triage CI dla agenta
+
+- `doc/templates/CI_TRIAGE.md`: przy czerwonym checku agent klasyfikuje pad (§3), wolno naprawiać `stale_test` / `non_hermetic` / `infra`; przy `economic_regression` tylko raport + opcjonalnie `BUGS.md` i STOP do GO. Wskaźniki: `.cursor/rules/test-integrity.mdc`, `AGENTS.md`, `AI_MERGE_CHECKLIST.md`.
+
 ### D3 (2026-11-09) — Bugbot na integralność testów
 
 - `.cursor/BUGBOT.md`: reguły PR review (Bugbot nie ładuje `.cursor/rules/*.mdc`) — flaguj osłabioną asercję, usunięty/opróżniony snapshot/fixture bez Golden delta, nowy/rozszerzony `#[ignore]`/skip, wczesny `return` w teście. Done when: Bugbot komentuje takie hunki na PR (wymaga włączonego Bugbot na repo).
