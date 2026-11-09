@@ -1,12 +1,19 @@
-//! Dip Agent read endpoints (Faza B): zones + optional Jupiter Trigger order history.
+//! Dip Agent endpoints: snapshot (Faza B) + propose-only decision envelope (Faza C).
 
-use crate::error::ApiResult;
-use crate::models::{DipBuyDipOrder, DipSnapshotResponse, DipZoneBandDto, DipZonesDto};
+use crate::error::{ApiError, ApiResult};
+use crate::models::{
+    AgentDecisionRow, DipBuyDipOrder, DipProposeRequest, DipProposeResponse, DipSnapshotResponse,
+    DipZoneBandDto, DipZonesDto,
+};
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use axum::Json;
 use axum::extract::Query;
 use axum::http::HeaderMap;
-use clmm_lp_data::dip::{DipZoneLabel, classify_zone, default_zones_file, load_dip_zones_file};
+use clmm_lp_data::dip::{
+    DipAuditDecisionRow, DipProposeAction, DipProposeDecision, DipProposeMode, DipZoneLabel,
+    append_dip_propose, classify_zone, default_agent_decisions_path, default_zones_file,
+    load_dip_zones_file,
+};
 use clmm_lp_data::providers::{JupiterTriggerClient, OrderHistoryQuery, filter_open_buy_dips};
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -204,5 +211,81 @@ pub async fn get_dip_snapshot(
         buy_dip_orders,
         orders_source,
         notes,
+    }))
+}
+
+/// `POST /dip/propose` — append `kind=dip_propose` row to `agent_decisions.jsonl` (no Trigger write).
+#[utoipa::path(
+    post,
+    path = "/dip/propose",
+    tag = "Dip",
+    request_body = DipProposeRequest,
+    responses(
+        (status = 200, description = "Dip propose appended", body = DipProposeResponse)
+    )
+)]
+pub async fn post_dip_propose(
+    Json(req): Json<DipProposeRequest>,
+) -> ApiResult<Json<DipProposeResponse>> {
+    let action =
+        DipProposeAction::parse(&req.action).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let mode =
+        DipProposeMode::parse(&req.mode).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let mut decision = DipProposeDecision::new(action, mode, req.rationale, req.refs)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    decision.zone = req
+        .zone
+        .map(|z| z.trim().to_string())
+        .filter(|s| !s.is_empty());
+    decision.sol_usd = req.sol_usd;
+    decision.proposed_orders = req.proposed_orders;
+    decision
+        .validate()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let path = req
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_agent_decisions_path);
+
+    let row = DipAuditDecisionRow {
+        ts_utc: String::new(),
+        source: clmm_lp_data::dip::DIP_PROPOSE_SOURCE.to_string(),
+        strategy_id: req
+            .strategy_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        position_id: req
+            .position_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        chain_id: None,
+        session_id: req
+            .session_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        decision,
+    };
+    let written =
+        append_dip_propose(&path, row).map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let api_row = AgentDecisionRow {
+        ts_utc: written.ts_utc.clone(),
+        source: written.source.clone(),
+        strategy_id: written.strategy_id.clone(),
+        position_id: written.position_id.clone(),
+        chain_id: written.chain_id.clone(),
+        session_id: written.session_id.clone(),
+        decision: serde_json::to_value(&written.decision)
+            .map_err(|e| ApiError::internal(format!("serialize dip decision: {e}")))?,
+    };
+
+    Ok(Json(DipProposeResponse {
+        path: path.to_string_lossy().to_string(),
+        written: true,
+        row: api_row,
     }))
 }

@@ -1,4 +1,11 @@
 
+## 2026-11-09 — Dip Faza C: propose envelope → agent_decisions.jsonl
+
+keywords: dip-agent, dip_propose, agent_decisions, propose-only, POST /dip/propose, dip-propose, clmm-lp-data, clmm-lp-api, clmm-lp-cli
+
+- **What:** `DipProposeDecision` (`kind=dip_propose`) + `append_dip_propose` do wspólnego JSONL; `POST /api/v1/dip/propose`; CLI `dip-propose`. Nie rozszerza `AgentDecision` optimize; bez Trigger create/cancel.
+- **paths:** `crates/data/src/dip/propose.rs`, `crates/api/src/handlers/dip.rs`, `crates/cli/src/commands/dip_propose.rs`
+
 ## 2026-11-09 — Plan UI: Reuse inventory Dex → Jupiter/Dip
 
 keywords: dip-agent, reuse, JupiterProvider, dip/snapshot, agent_decisions, txBuildUnsigned, Strategies, Position Agent, IMPLEMENTATION_PLAN_DIP_AGENT_UI

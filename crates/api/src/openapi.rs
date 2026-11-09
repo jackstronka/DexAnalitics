@@ -20,7 +20,8 @@ use crate::models::{
     CloseAllPositionsStartResponse, CloseAllSkippedPreview, CloseAllWalletGroup,
     ClosedPositionEntry, ClosedPositionsResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateStrategyRequest, CreateWalletRequest, CreateWalletResponse,
-    DecreaseLiquidityRequest, DipBuyDipOrder, DipSnapshotResponse, DipZoneBandDto, DipZonesDto,
+    DecreaseLiquidityRequest, DipBuyDipOrder, DipProposeRequest, DipProposeResponse,
+    DipSnapshotResponse, DipZoneBandDto, DipZonesDto,
     EventBusMetricsResponse, HealthResponse, JupiterPricesResponse, LineageChainCostSummary,
     LinkPositionStrategyRequest, ListPoolsResponse, ListPositionsResponse, ListStrategiesResponse,
     MarketDataQuery, MarketSnapshotRow, MarketSnapshotsResponse, MarketSwapRow,
@@ -234,6 +235,7 @@ use utoipa::OpenApi;
         handlers::get_jupiter_prices,
         // Dip Agent
         handlers::get_dip_snapshot,
+        handlers::post_dip_propose,
         handlers::get_aerodrome_slipstream_pool_slot0,
     ),
     components(
@@ -426,6 +428,8 @@ use utoipa::OpenApi;
             DipZonesDto,
             DipBuyDipOrder,
             DipSnapshotResponse,
+            DipProposeRequest,
+            DipProposeResponse,
             // Base EVM / Slipstream
             SlipstreamSlot0Response,
         )

@@ -854,6 +854,31 @@ enum Commands {
         #[arg(long)]
         jwt: Option<String>,
     },
+    /// Dip Agent Faza C: append propose-only decision (`kind=dip_propose`) to agent_decisions.jsonl.
+    #[command(name = "dip-propose")]
+    DipPropose {
+        /// buy_dip | sell | hold | cancel_order | adjust_lp | skip
+        #[arg(long)]
+        action: String,
+        /// propose-only | paper | live (default propose-only)
+        #[arg(long, default_value = "propose-only")]
+        mode: String,
+        /// Human rationale (required).
+        #[arg(long)]
+        rationale: String,
+        /// Markdown / config refs (repeatable).
+        #[arg(long = "ref")]
+        refs: Vec<String>,
+        /// Optional zone label at propose time.
+        #[arg(long)]
+        zone: Option<String>,
+        /// Optional SOL USD at propose time.
+        #[arg(long)]
+        sol_usd: Option<f64>,
+        /// Override JSONL path (default data/agent/agent_decisions.jsonl).
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
     /// Health check for snapshots/swaps pipelines with staleness + decode quality alerts.
     DataHealthCheck {
         /// Alert if file age is above this threshold.
@@ -5665,6 +5690,25 @@ async fn main() -> Result<()> {
             jwt,
         } => {
             commands::run_dip_snapshot(zones_path.clone(), !*skip_orders, jwt.clone()).await?;
+        }
+        Commands::DipPropose {
+            action,
+            mode,
+            rationale,
+            refs,
+            zone,
+            sol_usd,
+            path,
+        } => {
+            commands::run_dip_propose(
+                action.clone(),
+                mode.clone(),
+                rationale.clone(),
+                refs.clone(),
+                zone.clone(),
+                *sol_usd,
+                path.clone(),
+            )?;
         }
         Commands::DataHealthCheck {
             max_age_minutes,

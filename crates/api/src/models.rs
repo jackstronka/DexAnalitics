@@ -3317,6 +3317,48 @@ pub struct DipSnapshotResponse {
     pub notes: Vec<String>,
 }
 
+/// `POST /dip/propose` — append propose-only dip decision (`kind=dip_propose`) to JSONL.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipProposeRequest {
+    /// `buy_dip` | `sell` | `hold` | `cancel_order` | `adjust_lp` | `skip`
+    pub action: String,
+    /// Default `propose-only`. Also: `paper`, `live`.
+    #[serde(default = "default_dip_propose_mode")]
+    pub mode: String,
+    pub rationale: String,
+    #[serde(default)]
+    pub refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sol_usd: Option<f64>,
+    /// Optional Trigger body stubs (never executed in Faza C).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub proposed_orders: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Override JSONL path (tests); default `data/agent/agent_decisions.jsonl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+fn default_dip_propose_mode() -> String {
+    "propose-only".into()
+}
+
+/// Response for `POST /dip/propose`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipProposeResponse {
+    pub path: String,
+    pub written: bool,
+    pub row: AgentDecisionRow,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

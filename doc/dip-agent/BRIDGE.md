@@ -45,21 +45,31 @@ Auth challenge/verify/refresh w kliencie; **create/cancel NO-GO** (Faza E).
 
 ---
 
-## Faza C — Propose-only Decision envelope
+## Faza C — Propose-only Decision envelope (DONE 2026-11-09)
 
 Nie rozszerzaj [`AgentDecision`](../../crates/domain/src/agent_decision.rs) (`deny_unknown_fields`) — to tylko apply-optimize.
 
-Dip zapisuje do `data/agent/agent_decisions.jsonl` wiersz z osobnym `decision.kind`, np.:
+Dip zapisuje do `data/agent/agent_decisions.jsonl` wiersz z `decision.kind = "dip_propose"`:
+
+| Surface | Path |
+|---------|------|
+| Envelope | `clmm_lp_data::dip::{DipProposeDecision, append_dip_propose}` |
+| API | `POST /api/v1/dip/propose` |
+| CLI | `cargo run -p clmm-lp-cli -- dip-propose --action hold --rationale "..."` |
+| Readback | istniejące `GET /api/v1/data/agent/decisions` (`source=dip_agent`) |
 
 ```json
 {
-  "action": "buy_dip|sell|hold|adjust_lp|skip",
+  "kind": "dip_propose",
+  "action": "buy_dip|sell|hold|cancel_order|adjust_lp|skip",
   "mode": "propose-only|paper|live",
   "requires_user_confirm": true,
   "rationale": "...",
   "refs": ["config/dip/context/news-digest.md", "config/dip/context/assets/SOL/news.md"]
 }
 ```
+
+**Bez** Trigger create/cancel (Faza E).
 
 ---
 

@@ -41,7 +41,7 @@ Live Trigger create/cancel = Faza E (osobny GO + osobna policy signera). Nie ł�
 
 - **A:** docs + config + seed — DONE  
 - **B:** Trigger read + zones — DONE (`GET /dip/snapshot`, `dip-snapshot` CLI)  
-- **C:** propose `buy_dip|hold|…` → `agent_decisions.jsonl` (osobny `kind`, nie mutate `AgentDecision` optimize)  
+- **C:** propose `buy_dip|hold|…` → `agent_decisions.jsonl` — DONE (`POST /dip/propose`, CLI `dip-propose`, `kind=dip_propose`)  
 - **D:** UI limity + OOR LP  
 - **E:** live create/cancel za flagą  
 
