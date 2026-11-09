@@ -69,10 +69,10 @@ fn resolve_zones_path(override_path: Option<&str>) -> PathBuf {
     if let Some(p) = override_path {
         return PathBuf::from(p);
     }
-    if let Ok(p) = std::env::var("CLMM_DIP_ZONES_PATH") {
-        if !p.trim().is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Ok(p) = std::env::var("CLMM_DIP_ZONES_PATH")
+        && !p.trim().is_empty()
+    {
+        return PathBuf::from(p);
     }
     PathBuf::from("config/dip/zones.json")
 }
