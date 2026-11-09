@@ -5,10 +5,10 @@ pub mod prelude;
 
 /// Caching layer for market data.
 pub mod cache;
-/// Historical pool state structures.
-pub mod pool_state;
 /// Dip Agent helpers (zones; Trigger client lives under `providers`).
 pub mod dip;
+/// Historical pool state structures.
+pub mod pool_state;
 /// Data providers.
 pub mod providers;
 /// Database repositories.

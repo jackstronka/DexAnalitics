@@ -14,7 +14,9 @@ pub async fn run_dip_snapshot(
     jwt: Option<String>,
 ) -> Result<()> {
     let zones = load_dip_zones_file(&zones_path)?;
-    let api_key = std::env::var("JUPITER_API_KEY").ok().filter(|s| !s.is_empty());
+    let api_key = std::env::var("JUPITER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
     let price_provider = match &api_key {
         Some(k) => JupiterProvider::with_api_key(k.clone()),
         None => JupiterProvider::new(),
@@ -76,6 +78,9 @@ pub async fn run_dip_snapshot(
         "notes": notes,
         "mode": "propose-only-read",
     });
-    println!("{}", serde_json::to_string_pretty(&out).context("serialize")?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&out).context("serialize")?
+    );
     Ok(())
 }

@@ -387,7 +387,8 @@ mod tests {
             }));
         });
 
-        let client = JupiterTriggerClient::new(Some("test-key".into())).with_base_url(server.base_url());
+        let client =
+            JupiterTriggerClient::new(Some("test-key".into())).with_base_url(server.base_url());
         let hist = client
             .get_order_history(
                 "jwt-1",

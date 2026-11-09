@@ -6,9 +6,7 @@ use crate::services::price_fetch::fetch_mint_prices_usd;
 use axum::Json;
 use axum::extract::Query;
 use axum::http::HeaderMap;
-use clmm_lp_data::dip::{
-    DipZoneLabel, classify_zone, default_zones_file, load_dip_zones_file,
-};
+use clmm_lp_data::dip::{DipZoneLabel, classify_zone, default_zones_file, load_dip_zones_file};
 use clmm_lp_data::providers::{JupiterTriggerClient, OrderHistoryQuery, filter_open_buy_dips};
 use serde::Deserialize;
 use std::collections::BTreeSet;

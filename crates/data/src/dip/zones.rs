@@ -84,8 +84,8 @@ pub fn load_dip_zones_file(path: &Path) -> Result<DipZonesFile> {
     if !path.exists() {
         return Ok(default_zones_file());
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read dip zones {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("read dip zones {}", path.display()))?;
     let file: DipZonesFile = serde_json::from_str(&raw)
         .with_context(|| format!("parse dip zones {}", path.display()))?;
     Ok(file)
