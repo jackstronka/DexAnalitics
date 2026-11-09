@@ -81,7 +81,7 @@ Markdown (`candidates.md`, journals) wystarczy do czasu stabilnego Trigger histo
 | Krok | Status |
 |------|--------|
 | **U1** `/dip` read-only (`GET /dip/snapshot` + nav) | DONE 2026-11-09 |
-| **U1b** drabinka preview | ⬜ |
+| **U1b** drabinka preview + Summary | DONE 2026-11-09 |
 | U2+ Settings / Agent hub / live | ⬜ |
 
 **Plan szczegółowy (funkcje Jupiter UI + bot settings + agent + UX 3Commas DCA / drabinka + reuse Dex):**  

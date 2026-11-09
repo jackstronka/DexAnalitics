@@ -1,3 +1,10 @@
+## 2026-11-09 — Dip Faza D U1b: ladder preview + Summary (local math)
+
+keywords: dip-agent, UI, Faza D, U1b, dipLadder, 3Commas, safety orders, DipLadderPreviewTable, DipLadderSummary, web
+
+- **What:** Czysta matematyka drabinki BO+SO+TP w `web/src/lib/dipLadder.ts` (scale=1 i ≠1) + vitest; UI formularz + `DipLadderPreviewTable` / `DipLadderSummary` na `/dip`. Propose zablokowane gdy Required>Available lub size&lt;min; bez Trigger create (E) i bez POST propose z drabinki (U4).
+- **paths:** `web/src/lib/dipLadder.ts`, `web/src/components/dip/*`, `web/src/pages/Dip.tsx`
+
 ## 2026-11-09 — Dip Faza D U1: `/dip` read-only snapshot UI
 
 keywords: dip-agent, UI, Faza D, U1, /dip, dip/snapshot, DipSnapshotResponse, web, api.contract
