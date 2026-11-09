@@ -1,0 +1,43 @@
+# Runtime — NO SECRETS in this file
+mode: propose-only # propose-only | paper | live
+
+limits:
+  max_single_entry_usd: 1500
+  max_total_deployed_pct: 75 # of liquid portfolio
+  min_cash_buffer_usd: 500
+  max_open_limit_orders: 5
+  default_limit_expiry: 7d
+
+venues:
+  primary: jupiter
+  lp_allowed: orca
+  hyperliquid: false
+
+jupiter:
+  preferred_entry: limit_buy_the_dip
+  preferred_exit: limit_take_profit # or market if strategy says so
+  dca_allowed: true
+  lend_for_idle_cash: false # enable later
+  stocks_allowed: true # watchlist only
+  commodities_allowed: true # watchlist only
+  perps_allowed: false
+  yolo_allowed: false
+  card_spend_for_trading_capital: false
+
+notifications:
+  log_path: config/dip/context/trade-log.md # local working copy: data/dip/context/trade-log.md
+
+monitor:
+  enabled: true
+  universe_interval_ms: 900000   # 15 min
+  news_interval_ms: 21600000     # 6 h
+  heartbeat_ms: 60000            # 1 min
+  min_liquidity_usd: 500000
+  max_candidates: 15
+  max_active_assets: 5
+  candidate_score_min: 55
+  active_score_min: 70
+
+daemon:
+  propose_decision_each_universe_tick: false  # true later when Decision loop wired
+  write_candidates_md: true

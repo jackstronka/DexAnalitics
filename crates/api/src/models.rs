@@ -3266,6 +3266,57 @@ pub struct JupiterPricesResponse {
     pub prices: std::collections::BTreeMap<String, f64>,
 }
 
+/// Inclusive USD band for Dip Agent zones.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipZoneBandDto {
+    pub min: f64,
+    pub max: f64,
+}
+
+/// SOL (or symbol) A/B/C bands.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipZonesDto {
+    pub a: DipZoneBandDto,
+    pub b: DipZoneBandDto,
+    pub c: DipZoneBandDto,
+}
+
+/// One open Buy-the-Dip style Trigger order (read summary).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipBuyDipOrder {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_price_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_input_amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+/// `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipSnapshotResponse {
+    pub fetched_at: String,
+    pub symbol: String,
+    pub mint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_usd: Option<f64>,
+    pub price_source: String,
+    /// `A` | `B` | `C` | `none`
+    pub zone: String,
+    pub zones: DipZonesDto,
+    pub buy_dip_orders: Vec<DipBuyDipOrder>,
+    /// How orders were resolved (`trigger_v2_orders_history`, `no_jwt`, …).
+    pub orders_source: String,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

@@ -1,3 +1,10 @@
+## 2026-11-09 — Merge Faza B: Jupiter Trigger read + dip snapshot
+
+keywords: dip-agent, jupiter-trigger, Trigger V2, orders/history, dip-snapshot, zones, propose-only, clmm-lp-data, clmm-lp-api, clmm-lp-cli
+
+- **What:** Read-only Trigger V2 client (`JupiterTriggerClient`), zones A/B/C (`config/dip/zones.json`), `GET /api/v1/dip/snapshot`, CLI `dip-snapshot`. Faza A docs/config w `doc/dip-agent/` + `config/dip/`. Bez create/cancel. Hermetic httpmock + zone unit tests.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/data/src/dip/`, `crates/api/src/handlers/dip.rs`, `crates/cli/src/commands/dip_snapshot.rs`, `doc/dip-agent/`, `config/dip/`
+
 ## 2026-11-09 — R1: mapa test → obszar (`ci/test-areas.toml`)
 
 keywords: R1, test-areas, G9, nextest, areas, test_areas.py, quality_gates, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE

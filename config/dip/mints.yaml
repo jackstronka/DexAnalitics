@@ -1,0 +1,57 @@
+# Minty Solana używane przez Portfolio / Decision
+# Nowe assety Tier B dodawaj TYLKO razem z wpisem w config/dip/context/watchlist.md
+
+version: 1
+updated: "2026-11-04"
+
+tokens:
+  SOL:
+    symbol: SOL
+    name: Solana (wrapped)
+    mint: So11111111111111111111111111111111111111112
+    decimals: 9
+    tier: A
+    role: [base, gas]
+    jupiter_trigger_ok: true
+
+  USDC:
+    symbol: USDC
+    name: USD Coin
+    mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+    decimals: 6
+    tier: A
+    role: [quote, cash]
+    jupiter_trigger_ok: true
+
+  # Tier B placeholders — włącz dopiero po research + watchlist
+  # WBTC:
+  #   symbol: WBTC
+  #   mint: "..."   # potwierdź aktualny mint na Solanie
+  #   decimals: 8
+  #   tier: B
+  #   role: [base]
+  #   jupiter_trigger_ok: true
+
+pairs:
+  # Preferowane pary Trigger / Swap
+  - id: SOL-USDC
+    base: SOL
+    quote: USDC
+    primary: true
+    buy_dip:
+      input: USDC
+      output: SOL
+      trigger_mint: SOL
+      trigger_condition: below
+    take_profit:
+      input: SOL
+      output: USDC
+      trigger_mint: SOL
+      trigger_condition: above
+
+zones:
+  # Baseline ze strategii (SOL USD) — Decision może nadpisać z portfolio-state
+  SOL:
+    A: { min: 91.5, max: 93.5 }
+    B: { min: 88.0, max: 90.5 }
+    C: { min: 84.0, max: 87.0 }

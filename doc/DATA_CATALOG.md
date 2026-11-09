@@ -143,6 +143,21 @@ tags: domain=backtest,strategy; source=jsonl-local; freshness=near-realtime; qua
 - Produced by API collector endpoint: `POST /api/v1/pools/orca/volume-history/collect`.
 - Designed for easy joins by `pool_address` and `ts_utc` with local snapshot/backtest datasets.
 
+### `config/dip/context/` (tracked seed)
+
+tags: domain=intel,dip; source=json-local; freshness=historical; quality=best-effort; cost=free
+
+- Seed markdown for Dip Agent (WORLD, portfolio-state, watchlist, news-digest, `assets/SOL/`).
+- Docs: [`doc/dip-agent/README.md`](dip-agent/README.md). Config: [`config/dip/`](../config/dip/).
+- Optional local overlay: `data/dip/context/` (`/data/` gitignored). No API keys/JWT here.
+
+### `config/dip/*.yaml` + `zones.json`
+
+tags: domain=strategy,dip; source=json-local; freshness=static(curated); quality=authoritative(config); cost=free
+
+- `runtime.yaml` (propose-only), `mints.yaml`, `universe.yaml`, `zones.json` (Rust/API A/B/C bands).
+- Consumers: Dip checklist, `GET /dip/snapshot`, CLI `dip-snapshot`.
+
 ## Usage rule
 
 Before adding new data collection paths:

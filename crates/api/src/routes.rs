@@ -310,6 +310,8 @@ fn create_base_http_router(state: AppState) -> Router {
         // chain-portfolio routes live in [`create_chain_portfolio_router`] (longer HTTP timeout)
         // Prices (free external sources; server-side fetch)
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
+        // Dip Agent (Jupiter Trigger read + zones; propose-only — no create)
+        .route("/dip/snapshot", get(handlers::get_dip_snapshot))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
         .route(
             "/evm/base/aerodrome-slipstream/pools/{pool}/slot0",

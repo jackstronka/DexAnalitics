@@ -7,6 +7,8 @@ pub mod prelude;
 pub mod cache;
 /// Historical pool state structures.
 pub mod pool_state;
+/// Dip Agent helpers (zones; Trigger client lives under `providers`).
+pub mod dip;
 /// Data providers.
 pub mod providers;
 /// Database repositories.

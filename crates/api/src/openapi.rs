@@ -20,7 +20,8 @@ use crate::models::{
     CloseAllPositionsStartResponse, CloseAllSkippedPreview, CloseAllWalletGroup,
     ClosedPositionEntry, ClosedPositionsResponse, ConvertSolDirection, ConvertSolRequest,
     ConvertSolResponse, CreateStrategyRequest, CreateWalletRequest, CreateWalletResponse,
-    DecreaseLiquidityRequest, EventBusMetricsResponse, HealthResponse, JupiterPricesResponse,
+    DecreaseLiquidityRequest, DipBuyDipOrder, DipSnapshotResponse, DipZoneBandDto, DipZonesDto,
+    EventBusMetricsResponse, HealthResponse, JupiterPricesResponse,
     LineageChainCostSummary, LinkPositionStrategyRequest, ListPoolsResponse, ListPositionsResponse,
     ListStrategiesResponse, MarketDataQuery, MarketSnapshotRow, MarketSnapshotsResponse,
     MarketSwapRow, MarketSwapsResponse, MaterializeChainHistoryResponse, MessageResponse,
@@ -231,6 +232,8 @@ use utoipa::OpenApi;
         handlers::reconcile_wallet_stores,
         // Prices
         handlers::get_jupiter_prices,
+        // Dip Agent
+        handlers::get_dip_snapshot,
         handlers::get_aerodrome_slipstream_pool_slot0,
     ),
     components(
@@ -418,6 +421,11 @@ use utoipa::OpenApi;
             WalletReconciliationStatus,
             // Prices
             JupiterPricesResponse,
+            // Dip Agent
+            DipZoneBandDto,
+            DipZonesDto,
+            DipBuyDipOrder,
+            DipSnapshotResponse,
             // Base EVM / Slipstream
             SlipstreamSlot0Response,
         )

@@ -463,6 +463,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only). */
+        get: operations["get_dip_snapshot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/evm/base/aerodrome-slipstream/pools/{pool}/slot0": {
         parameters: {
             query?: never;
@@ -2964,6 +2981,47 @@ export interface components {
         DecreaseLiquidityRequest: {
             /** @description Liquidity amount to remove (base units as decimal string; supports full u128 range in JSON). */
             liquidity_amount: string;
+        };
+        /** @description One open Buy-the-Dip style Trigger order (read summary). */
+        DipBuyDipOrder: {
+            /** Format: int64 */
+            expires_at?: number | null;
+            id: string;
+            input_mint?: string | null;
+            order_state?: string | null;
+            output_mint?: string | null;
+            remaining_input_amount?: string | null;
+            /** Format: double */
+            trigger_price_usd?: number | null;
+        };
+        /** @description `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders. */
+        DipSnapshotResponse: {
+            buy_dip_orders: components["schemas"]["DipBuyDipOrder"][];
+            fetched_at: string;
+            mint: string;
+            notes: string[];
+            /** @description How orders were resolved (`trigger_v2_orders_history`, `no_jwt`, …). */
+            orders_source: string;
+            price_source: string;
+            /** Format: double */
+            price_usd?: number | null;
+            symbol: string;
+            /** @description `A` | `B` | `C` | `none` */
+            zone: string;
+            zones: components["schemas"]["DipZonesDto"];
+        };
+        /** @description Inclusive USD band for Dip Agent zones. */
+        DipZoneBandDto: {
+            /** Format: double */
+            max: number;
+            /** Format: double */
+            min: number;
+        };
+        /** @description SOL (or symbol) A/B/C bands. */
+        DipZonesDto: {
+            a: components["schemas"]["DipZoneBandDto"];
+            b: components["schemas"]["DipZoneBandDto"];
+            c: components["schemas"]["DipZoneBandDto"];
         };
         /** @description Event bus operational metrics. */
         EventBusMetricsResponse: {
@@ -5770,6 +5828,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarketSwapsResponse"];
+                };
+            };
+        };
+    };
+    get_dip_snapshot: {
+        parameters: {
+            query?: {
+                /** @description Fetch Trigger active orders when JWT present */
+                include_orders?: boolean;
+                /** @description Override path to zones.json */
+                zones_path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dip snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipSnapshotResponse"];
                 };
             };
         };

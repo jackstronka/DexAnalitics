@@ -6,15 +6,16 @@
 
 ---
 
-## 1. Trzy różne rzeczy, które ludzie nazywają „agentem”
+## 1. Cztery różne rzeczy, które ludzie nazywają „agentem”
 
 | Powierzchnia | Co to jest | Gdzie w kodzie / API |
 | ------------ | ---------- | -------------------- |
 | **A. Envelope optymalizacji (`AgentDecision`)** | Zewnętrzny byt (cron, skrypt, ewentualnie LLM) wysyła **ustrukturyzowaną zgodę** na zastosowanie wyniku siatki `backtest-optimize` albo **odmowę** (`approved: false`). To **nie** jest model trenowany w repo — to **kontrakt JSON**. | Typ: [`crates/domain/src/agent_decision.rs`](../crates/domain/src/agent_decision.rs). Endpoint: `POST /api/v1/strategies/{id}/apply-optimize-result` (ciało: surowy `OptimizeResultFile` **albo** `{ "decision": AgentDecision, "baseline_optimize_result": ... }`). Walidacja: `clmm-lp-execution::agent_decision`. |
 | **B. Position Agent (nadzór nad pozycją)** | **UI + API** pod jedną otwartą pozycję: czat, skan, snapshot „superwizora”, opcjonalnie odpowiedź z **zewnętrznego LLM** (OpenAI-compatible) lub fallback heurystyczny. Służy do **wyjaśniania / sugestii** przy nadzorze operatora, nie zastępuje samodzielnie executora bez dalszej integracji. | Trasy: `/api/v1/positions/{address}/agent/*`, `/api/v1/agent/worker/*`. Stan lokalny: m.in. `data/agent/position_agent_state.json`, `data/agent/position_agent_events.jsonl`. Tryb LLM: env `CLMM_AGENT_LLM_*` (patrz `ENGINEERING_NOTES`, wpisy *position agent*). |
 | **C. Silnik decyzji live (`DecisionEngine`)** | **Reguły deterministyczne** w pętli bota: hold vs rebalance wg `StrategyMode` (progi, okresowość, IL, świeca, Bollinger itd.). To **nie** jest „AI” w sensie ML/LLM — to warstwa **policy** wbudowana w execution. | [`crates/execution/src/strategy/decision.rs`](../crates/execution/src/strategy/decision.rs), użycie w [`executor.rs`](../crates/execution/src/strategy/executor.rs). |
+| **D. Dip Agent (Jupiter Trigger)** | Noga **spot Buy the Dip** obok LP Orca. Docs + config (Faza A); Trigger **read** + strefy (Faza B: `GET /dip/snapshot`, CLI `dip-snapshot`). **Nie** rozszerza `AgentDecision` optimize; create/cancel = Faza E. Nie mylić z [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md). | [`doc/dip-agent/README.md`](dip-agent/README.md); [`config/dip/`](../config/dip/); `JupiterTriggerClient` w `clmm-lp-data`. |
 
-**Świadomie brakuje** dziś jednego centralnego **orkiestratora**, który łączyłby wszystkie sygnały (zdrowie danych, wiele pooli, reżim rynku) w jedną spójną „meta-decyzję” — patrz sekcja 4.
+**Świadomie brakuje** dziś jednego centralnego **orkiestratora**, który łączyłby wszystkie sygnały (zdrowie danych, wiele pooli, reżim rynku, dip limity) w jedną spójną „meta-decyzję” — patrz sekcja 4.
 
 ---
 
@@ -52,7 +53,7 @@ To jest pod **orchestrację zewnętrzną** i przyszłe agregaty — same endpoin
 
 ## 5. Słownik (keywords pod grep / AI)
 
-`AgentDecision`, `apply-optimize-result`, `optimize_apply_policy`, `optimization_busy`, `agent_max_width_pct_delta`, Position Agent, `CLMM_AGENT_LLM_MODE`, `agent_decisions.jsonl`, `DecisionEngine`, `StrategyMode`, orchestration, chart agent (planned)
+`AgentDecision`, `apply-optimize-result`, `optimize_apply_policy`, `optimization_busy`, `agent_max_width_pct_delta`, Position Agent, `CLMM_AGENT_LLM_MODE`, `agent_decisions.jsonl`, `DecisionEngine`, `StrategyMode`, orchestration, chart agent (planned), dip-agent, Jupiter Trigger, Buy the Dip, `config/dip`, `dip/snapshot`, propose-only
 
 ---
 

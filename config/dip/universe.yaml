@@ -1,0 +1,35 @@
+# Seed uniwersum monitora (warstwa Universe)
+# Rozszerzaj świadomie; Discover Jupiter może dokładać kandydatów później.
+
+version: 1
+updated: "2026-11-04"
+
+crypto:
+  - id: SOL
+    mint_ref: SOL
+    priority: always_active
+  - id: USDC
+    mint_ref: USDC
+    priority: cash
+  # - id: WBTC
+  #   mint_ref: WBTC
+  #   priority: universe
+
+# Tokenizowane (Jupiter Stocks/Commodities) — seed puste do researchu mintów
+equity_tokens: []
+  # - id: TSLAx
+  #   mint: "..."
+  #   underlying: TSLA
+  #   issuer: xStocks
+
+commodity_tokens: []
+  # - id: GLDx
+  #   mint: "..."
+  #   underlying: GLD
+
+# Auto-discover (włącz gdy damy connector Discover)
+discover:
+  enabled: false
+  max_new_per_day: 5
+  min_liquidity_usd: 500000
+  exclude_tags: [meme_unverified, leverage_token]
