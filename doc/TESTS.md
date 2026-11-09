@@ -200,6 +200,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `wallet_gl_posting` / `wallet_ledger*` | księgowanie GL z lifecycle |
 | `openapi` | C1: `openapi_matches_committed_snapshot` — live `ApiDoc` (utoipa) = `crates/api/openapi.json`; update: `UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed` |
 | `handlers::endpoint_coverage_tests` | czy endpointy odpowiadają (404/walidacja), bez pełnego DB-happy-path |
+| `handlers::api_http_contract_tests` | HTTP→JSON→modele OpenAPI: health/metrics/positions/strategies/wallets + close-all 404; hermetyczny RPC `127.0.0.1:1` |
 | `handlers::backtests` | readiness snapshotów, warianty okien |
 | `handlers::wallets` | merge sald, monotonic guard, fan-out RPC |
 | `handlers::orca_tests` | proxy REST Orca (mock) |
