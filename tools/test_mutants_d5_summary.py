@@ -20,6 +20,27 @@ class SummaryUnit(unittest.TestCase):
         self.assertEqual(t["missed"], 1)
         self.assertAlmostEqual(survive_pct(t) or -1, 10.0)
 
+    def test_top_level_counts_and_caught_mutant_label(self) -> None:
+        # Real cargo-mutants outcomes.json shape (Actions D5 run).
+        t = count_outcomes(
+            {
+                "total_mutants": 82,
+                "caught": 40,
+                "missed": 40,
+                "timeout": 0,
+                "unviable": 2,
+                "outcomes": [
+                    {"summary": "Success"},
+                    {"summary": "CaughtMutant"},
+                    {"summary": "MissedMutant"},
+                ],
+            }
+        )
+        self.assertEqual(t["caught"], 40)
+        self.assertEqual(t["missed"], 40)
+        self.assertEqual(t["unviable"], 2)
+        self.assertAlmostEqual(survive_pct(t) or -1, 50.0)
+
     def test_fixture_cli_ok(self) -> None:
         root = Path(__file__).resolve().parent / "fixtures" / "d5_outcomes"
         with tempfile.TemporaryDirectory() as td:

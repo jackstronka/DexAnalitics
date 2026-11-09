@@ -36,13 +36,18 @@ run_one() {
   local dest="$OUT/$name"
   mkdir -p "$dest"
   echo "=== mutants D5: $name ==="
+  # cargo-mutants exits 2 when any mutant is missed — continue other scopes;
+  # `mutants_d5_summary.py` enforces the <10% survive gate at the end.
+  set +e
   cargo mutants \
     --output "$dest" \
     --timeout "${MUTANTS_TIMEOUT:-180}" \
     "${JOBS_ARGS[@]}" \
     "${EXTRA_FLAGS[@]}" \
     "$@"
-  echo "=== done $name → $dest ==="
+  local rc=$?
+  set -e
+  echo "=== done $name → $dest (cargo-mutants exit=$rc) ==="
 }
 
 # Aggregators in wallet_session (B2 / C3).

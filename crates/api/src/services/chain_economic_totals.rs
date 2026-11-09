@@ -799,6 +799,19 @@ mod tests {
         )
         .expect("nav");
         assert_eq!(only_a, Decimal::from(100));
+        // Zero amounts @ positive prices → nav==0 → None (kills `>`→`>=` on then_some).
+        assert!(
+            close_nav_usd_from_raw_amounts_and_prices(
+                0,
+                0,
+                9,
+                6,
+                Decimal::from(100),
+                Decimal::from(1),
+            )
+            .is_none(),
+            "zero raw amounts → None, not Some(0)"
+        );
     }
 
     #[test]
@@ -833,6 +846,13 @@ mod tests {
         let (nav0, src0) = lineage_node_end_nav_with_source(&n);
         assert_eq!(src0, ChainEndNavSource::Missing);
         assert_eq!(nav0, Decimal::ZERO);
+        // baseline == 0 must not take CloseEstimate (kills `>`→`>=` on baseline gate).
+        let mut n_zero_base = mk_node("PDA", Decimal::ZERO, Decimal::ZERO);
+        n_zero_base.closed_ts_utc = Some("2026-05-21T20:00:00Z".to_string());
+        n_zero_base.fees_collected_usd = Decimal::from(1);
+        let (nav_zb, src_zb) = lineage_node_end_nav_with_source(&n_zero_base);
+        assert_eq!(src_zb, ChainEndNavSource::Missing);
+        assert_eq!(nav_zb, Decimal::ZERO);
     }
 
     #[test]
