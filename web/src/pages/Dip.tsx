@@ -1,10 +1,14 @@
+import { useMemo, useState, type ChangeEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { RefreshCw, TrendingDown } from 'lucide-react'
+import { DipLadderPreviewTable } from '@/components/dip/DipLadderPreviewTable'
+import { DipLadderSummary } from '@/components/dip/DipLadderSummary'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
 import { getDipSnapshot } from '@/lib/api'
+import { buildDipLadderPreview } from '@/lib/dipLadder'
 import {
   dipOrdersEmptyKind,
   formatDipUsd,
@@ -26,8 +30,36 @@ function zoneBadgeClass(zone: string): string {
   }
 }
 
+type LadderForm = {
+  baseOrderUsd: string
+  safetyOrderUsd: string
+  deviationPct: string
+  deviationStepScale: string
+  volumeScale: string
+  maxSafetyOrders: string
+  takeProfitPct: string
+  availableUsd: string
+}
+
+const DEFAULT_LADDER: LadderForm = {
+  baseOrderUsd: '50',
+  safetyOrderUsd: '50',
+  deviationPct: '1',
+  deviationStepScale: '1',
+  volumeScale: '1.5',
+  maxSafetyOrders: '5',
+  takeProfitPct: '1.5',
+  availableUsd: '',
+}
+
+function num(s: string, fallback = 0): number {
+  const n = Number(s)
+  return Number.isFinite(n) ? n : fallback
+}
+
 export default function Dip() {
   const { locale, t } = useI18n()
+  const [ladderForm, setLadderForm] = useState<LadderForm>(DEFAULT_LADDER)
   const q = useQuery({
     queryKey: ['dip-snapshot'],
     queryFn: getDipSnapshot,
@@ -42,6 +74,26 @@ export default function Dip() {
     : null
   const fmtTs = (ts?: string) =>
     ts ? new Date(ts).toLocaleString(locale === 'pl' ? 'pl-PL' : 'en-US') : '—'
+
+  const entryPrice = data?.price_usd ?? null
+  const ladderPreview = useMemo(() => {
+    const availableRaw = ladderForm.availableUsd.trim()
+    const availableUsd = availableRaw === '' ? null : num(availableRaw, NaN)
+    return buildDipLadderPreview(entryPrice ?? NaN, {
+      baseOrderUsd: num(ladderForm.baseOrderUsd),
+      safetyOrderUsd: num(ladderForm.safetyOrderUsd),
+      deviationPct: num(ladderForm.deviationPct),
+      deviationStepScale: num(ladderForm.deviationStepScale, 1),
+      volumeScale: num(ladderForm.volumeScale, 1),
+      maxSafetyOrders: Math.floor(num(ladderForm.maxSafetyOrders)),
+      takeProfitPct: num(ladderForm.takeProfitPct),
+      availableUsd: availableUsd != null && Number.isFinite(availableUsd) ? availableUsd : null,
+    })
+  }, [entryPrice, ladderForm])
+
+  const setField = (key: keyof LadderForm) => (e: ChangeEvent<HTMLInputElement>) => {
+    setLadderForm((prev) => ({ ...prev, [key]: e.target.value }))
+  }
 
   return (
     <div className="space-y-6">
@@ -200,6 +252,45 @@ export default function Dip() {
               </table>
             </div>
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('dip.ladderTitle')}</CardTitle>
+          <CardDescription>{t('dip.ladderHint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            {t('dip.ladderEntry')}: {formatDipUsd(entryPrice)} ({t('dip.ladderEntrySource')})
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
+            {(
+              [
+                ['baseOrderUsd', 'dip.ladderBase'],
+                ['safetyOrderUsd', 'dip.ladderSafety'],
+                ['deviationPct', 'dip.ladderDeviation'],
+                ['deviationStepScale', 'dip.ladderDevScale'],
+                ['volumeScale', 'dip.ladderVolScale'],
+                ['maxSafetyOrders', 'dip.ladderMaxSo'],
+                ['takeProfitPct', 'dip.ladderTp'],
+                ['availableUsd', 'dip.ladderAvailableInput'],
+              ] as const
+            ).map(([key, labelKey]) => (
+              <label key={key} className="flex flex-col gap-1">
+                <span className="text-xs text-muted-foreground">{t(labelKey)}</span>
+                <input
+                  className="rounded-md border bg-background px-2 py-1.5"
+                  type="number"
+                  step="any"
+                  value={ladderForm[key]}
+                  onChange={setField(key)}
+                />
+              </label>
+            ))}
+          </div>
+          <DipLadderSummary summary={ladderPreview.summary} />
+          <DipLadderPreviewTable rows={ladderPreview.rows} />
         </CardContent>
       </Card>
     </div>
