@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### R5 (2026-11-09) — Ochrona testami w MASTER §2.2
+
+- Kolumna **Ochrona testami** w tabeli dojrzałości: `brak` / `unit` / `golden` / `golden+niezmiennik`. Mapa `ci/subsystem-protection.toml` + `tools/test_protection.py` (z R2/R4 JSON). CI: `test_protection_unit`. Lokalnie: `make test-protection`.
+
 ### R4 (2026-11-09) — tygodniowy trend
 
 - `tools/test_trend.py` + `weekly_test_trend.yml` (cron poniedziałek / `workflow_dispatch`): zbiera artefakty `test-report` z `main` (14 dni), tabela trendu + flake candidates. Lokalnie: `make test-trend` (fixture). Unit: `tools/test_test_trend.py` / job `test_trend_unit`.

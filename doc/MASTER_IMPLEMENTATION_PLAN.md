@@ -50,19 +50,21 @@
 
 ### 2.2 Dojrzałość produktowa (subsystemy)
 
-| Subsystem | Ocena | Uwaga |
-| --------- | ----- | ----- |
-| Live bot Orca | **9/10** | Pełny executor + StrategyExecutor + CLI `orca-bot-run` |
-| Backtest / optimize | **8/10** | CLI + API `/backtests/full`; zależy od jakości ingest |
-| Dashboard (web) | **7/10** | 22 trasy; experiment/close-all/session GL świeże; WebSocket bez subskrypcji |
-| Stream lineage / PnL | **6/10** | Bogaty kod + testy; **aktywne bugi regresji** (BUG-20260413-05, BUG-20260512-03) |
-| Wallet GL + SESSION | **7/10** | Journal + PG; session capital **flag-gated** (`CLMM_REOPEN_USE_SESSION_CAPITAL`) |
-| Close-all | **6/10** | API działa; joby **in-memory** (restart = utrata batch) |
-| Decision layer / orkiestrator | **4/10** | Gate + FULL MVP; brak rankingu/raportu/UI alert |
-| Position Agent + LLM | **4/10** | Czat/supervisor live; LLM stateless; brak rolling memory |
-| Multi-venue live LP | **3/10** | Raydium/Meteora: snapshot/decode, bez executora |
-| Shadow strategies (ROADMAP) | **1/10** | Tylko dokumentacja |
-| Event parsing / fee truth | **3/10** | Placeholdery w `protocols/events` |
+**Ochrona testami** (R5): `brak` / `unit` / `golden` / `golden+niezmiennik` — z raportu R2/R4 + mapa [`ci/subsystem-protection.toml`](../ci/subsystem-protection.toml); odśwież przy zamknięciu fali (`make test-protection` / `--write-master`).
+
+| Subsystem | Ocena | Ochrona testami | Uwaga |
+| --------- | ----- | --------------- | ----- |
+| Live bot Orca | **9/10** | **golden** | Pełny executor + StrategyExecutor + CLI `orca-bot-run` |
+| Backtest / optimize | **8/10** | **golden** | CLI + API `/backtests/full`; zależy od jakości ingest |
+| Dashboard (web) | **7/10** | **unit** | 22 trasy; experiment/close-all/session GL świeże; WebSocket bez subskrypcji |
+| Stream lineage / PnL | **6/10** | **golden+niezmiennik** | Bogaty kod + testy; **aktywne bugi regresji** (BUG-20260413-05, BUG-20260512-03) |
+| Wallet GL + SESSION | **7/10** | **golden+niezmiennik** | Journal + PG; session capital **flag-gated** (`CLMM_REOPEN_USE_SESSION_CAPITAL`) |
+| Close-all | **6/10** | **unit** | API działa; joby **in-memory** (restart = utrata batch) |
+| Decision layer / orkiestrator | **4/10** | **unit** | Gate + FULL MVP; brak rankingu/raportu/UI alert |
+| Position Agent + LLM | **4/10** | **unit** | Czat/supervisor live; LLM stateless; brak rolling memory |
+| Multi-venue live LP | **3/10** | **unit** | Raydium/Meteora: snapshot/decode, bez executora |
+| Shadow strategies (ROADMAP) | **1/10** | **brak** | Tylko dokumentacja |
+| Event parsing / fee truth | **3/10** | **unit** | Placeholdery w `protocols/events` |
 
 ### 2.3 Frontend — kluczowe obserwacje
 

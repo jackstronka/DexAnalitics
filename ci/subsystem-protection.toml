@@ -1,0 +1,58 @@
+# R5 — map MASTER_IMPLEMENTATION_PLAN.md §2.2 subsystems → R1 area labels.
+# Protection level is derived from R2/R4 report area rows (golden / niezm / tests),
+# unless ``force`` is set (subsystem without a clean 1:1 area, e.g. Close-all).
+#
+# Levels (ascending): brak < unit < golden < golden+niezmiennik
+# Refresh at wave close:
+#   make test-protection REPORT=target/test-report/report.json
+#   # or write column:
+#   python tools/test_protection.py --report … --write-master
+
+version = 1
+
+[[subsystem]]
+name = "Live bot Orca"
+areas = ["Execution / rebalance"]
+
+[[subsystem]]
+name = "Backtest / optimize"
+areas = ["Backtest / strategie"]
+
+[[subsystem]]
+name = "Dashboard (web)"
+areas = ["Web", "API / kontrakt"]
+
+[[subsystem]]
+name = "Stream lineage / PnL"
+areas = ["Lineage / PnL"]
+
+[[subsystem]]
+name = "Wallet GL + SESSION"
+areas = ["Ekonomia / GL"]
+
+# Shares Execution / rebalance with Live bot (B3 golden) — do not inherit golden.
+[[subsystem]]
+name = "Close-all"
+areas = []
+force = "unit"
+
+[[subsystem]]
+name = "Decision layer / orkiestrator"
+areas = ["Decision layer / agent"]
+
+[[subsystem]]
+name = "Position Agent + LLM"
+areas = ["Decision layer / agent"]
+
+[[subsystem]]
+name = "Multi-venue live LP"
+areas = ["Dane / decode"]
+
+[[subsystem]]
+name = "Shadow strategies (ROADMAP)"
+areas = []
+force = "brak"
+
+[[subsystem]]
+name = "Event parsing / fee truth"
+areas = ["Dane / decode"]
