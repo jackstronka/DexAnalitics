@@ -2,7 +2,7 @@
 
 keywords: R5, ochrona-testami, MASTER_IMPLEMENTATION_PLAN, subsystem-protection, G9, test_protection, golden, niezmiennik, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** `ci/subsystem-protection.toml` mapuje subsystemy §2.2 → obszary R1; `tools/test_protection.py` wylicza `brak`/`unit`/`golden`/`golden+niezmiennik` z R2 `report.json` (lub R4 trend), `--check-master` / `--write-master`. Fixture `tools/fixtures/r5_report/`. Job `test_protection_unit`. Odświeżanie przy zamknięciu fali: `make test-protection REPORT=target/test-report/report.json`.
+- **What:** `ci/subsystem-protection.toml` mapuje subsystemy §2.2 → obszary R1; `tools/test_protection.py` wylicza `brak`/`unit`/`golden`/`golden+niezmiennik` z R2 `report.json` (lub R4 trend), `--check-master` / `--write-master`. Fixture `tools/fixtures/r5_report/`. Job `test_protection_unit`. Odświeżanie przy zamknięciu fali: `make test-protection REPORT=target/test-report/report.json`. PR #30.
 - **paths:** `ci/subsystem-protection.toml`, `tools/test_protection.py`, `doc/MASTER_IMPLEMENTATION_PLAN.md`
 
 ## 2026-11-09 — R4: tygodniowy trend testów (artefakty report.json)

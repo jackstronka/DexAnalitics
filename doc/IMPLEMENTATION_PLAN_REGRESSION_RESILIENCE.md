@@ -223,7 +223,7 @@ Zasada: **jeden format, jedno słownictwo, te same obszary** co w master planie 
 | **R2** ✅ PR #28 | Raport testów: `cargo nextest` (E2) z JUnit + `vitest --reporter=junit` → skrypt `tools/test_report` → **Markdown + JSON** o tym samym układzie. `make verify` drukuje tabelę na końcu; CI wkleja ją do **Job Summary** i zapisuje JSON jako artefakt | ten sam raport lokalnie i w CI | M |
 | **R3** ✅ | **Golden delta po ludzku:** przy zmianie snapshotów skrypt porównuje stary/nowy `.snap` (liście liczbowe) i publikuje komentarz PR / sekcję summary: tabela „fixture / metryka / było / jest / Δ / Δ%”, posortowana po |Δ USD|; ten sam tekst wklejany do sekcji „Golden delta” (D1) | recenzent widzi zmianę pieniędzy bez czytania JSON | M |
 | **R4** ✅ PR #29 | **Trend:** workflow tygodniowy (`schedule`) zbiera JSON z ostatnich runów na `main` (artefakty GitHub) → summary: liczba testów per obszar, pady, testy niestabilne (pad na `main` bez zmiany kodu w obszarze), czas CI, liczba goldenów / niezmienników per obszar | tygodniowy obraz jakości w jednym miejscu | M |
-| **R5** ✅ PR TBD | Kolumna **„Ochrona testami”** w tabeli dojrzałości `MASTER_IMPLEMENTATION_PLAN.md` §2.2 (brak / unit / golden / golden+niezmiennik), aktualizowana z raportu R4 przy zamknięciu fali | status rozwoju i status ochrony w jednej tabeli | S |
+| **R5** ✅ PR #30 | Kolumna **„Ochrona testami”** w tabeli dojrzałości `MASTER_IMPLEMENTATION_PLAN.md` §2.2 (brak / unit / golden / golden+niezmiennik), aktualizowana z raportu R4 przy zamknięciu fali | status rozwoju i status ochrony w jednej tabeli | S |
 
 **Format raportu (wzór, identyczny lokalnie i w CI):**
 
