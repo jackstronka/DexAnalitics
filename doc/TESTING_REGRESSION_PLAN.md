@@ -149,9 +149,9 @@ Wynik CI PR #2 (`b5d73ba`): zielone `run_tests` (2 runy), `lint`, `build`, `semv
 
 PR #2 zmergowany do `main` 2026-10-01 (`f823d0f`, merge commit).
 
-### A10 (2026-10-01) — branch protection `main`
+### A10 (2026-10-01, domknięte 2026-11-09) — branch protection `main`
 
-Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / usuwania. Wymagane checki: `run_tests`, `lint`, `build (ubuntu-latest)`, `build (ubuntu-22.04)`, `critical_area_requires_tests`, `lineage_shadow_diff`, od A1 także `format_check`. Coverage i Docker — niewymagane. Po A3–A5 (job `rust`, `web`, `db`) zaktualizować listę.
+Tylko przez PR (0 wymaganych review), obowiązuje też admina (`enforce_admins`), bez force push / usuwania. **Wymagane checki (G1):** `rust`, `web`, `db`, `quality_gates`. Job `quality_gates` = agregat wszystkich jobów workflow Quality Gates (`critical_area_requires_tests`, `bugs_have_tests`, `golden_delta`, `test_areas`, unit R2/R4/R5/D5/E1, …) z `if: always()` żeby pad upstream nie dawał skip (skip required ≠ block). Coverage / Docker / semver — niewymagane. **Residual:** „Require review from Code Owners” off (solo-maintainer; D2 nadal requestuje review).
 
 ### A1 (2026-10-01) — format egzekwowany w CI
 
@@ -238,7 +238,7 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 ### D2 (2026-10-08) — CODEOWNERS na goldeny / fixture / OpenAPI
 
-- `.github/CODEOWNERS`: `@jackstronka` na `*.snap`, `**/tests/fixtures/**`, `**/snapshots/**`, `openapi.json` (te same globy co D1) oraz na sam plik CODEOWNERS. GitHub przypisuje recenzenta. **Residual A10:** 0 wymaganych review; „Require review from Code Owners” nie jest włączone — bez tego CODEOWNERS nie blokuje merge. Włączenie na solo-maintainerze bez drugiego recenzenta / bypass admina zablokuje PR-y autora.
+- `.github/CODEOWNERS`: `@jackstronka` na `*.snap`, `**/tests/fixtures/**`, `**/snapshots/**`, `openapi.json` (te same globy co D1) oraz na sam plik CODEOWNERS. GitHub przypisuje recenzenta. **Residual (A10):** 0 wymaganych review; „Require review from Code Owners” off — CODEOWNERS nie blokuje merge. Włączenie na solo bez bypass admina zablokuje PR-y autora.
 
 ### C6 (2026-10-08) — testy liczb web + ESLint
 

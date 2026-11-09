@@ -1,3 +1,10 @@
+## 2026-11-09 — A10: required check `quality_gates` + branch protection G1
+
+keywords: A10, G1, branch-protection, quality_gates, CI, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Job agregujący `quality_gates` w `.github/workflows/quality_gates.yml` (`needs` wszystkie bramki, `if: always()`, fail gdy którykolwiek upstream ≠ success). Branch protection `main`: wymagane `rust`, `web`, `db`, `quality_gates` (zamiast osobnego `critical_area_requires_tests` w liście required — nadal w agregacie). PR-only + `enforce_admins`; Code Owners review **off** (solo; D2 residual).
+- **paths:** `.github/workflows/quality_gates.yml`, `doc/TESTS.md` §7
+
 ## 2026-11-09 — E3: szablon ticketu dla agenta
 
 keywords: E3, AGENT_TICKET, G7, characterization, golden, verify, agent, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
