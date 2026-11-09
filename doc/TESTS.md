@@ -222,10 +222,12 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | cache / timeseries / providers | cache, CSV, Orca REST (hermetyczne) |
 | `providers::jupiter_trigger` | Trigger V2 read: filter Buy-the-Dip, mock `orders/history` + `auth/verify` |
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
+| `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
 
 ```bash
 cargo test -p clmm-lp-data jupiter_trigger
 cargo test -p clmm-lp-data dip::zones
+cargo test -p clmm-lp-data dip::propose
 ```
 
 ### `clmm-lp-execution`

@@ -98,7 +98,7 @@ Włączane tylko gdy `runtime.jupiter.dca_allowed: true`.
 
 | ID | Funkcja | Artefakt | Faza | Status |
 |----|---------|----------|------|--------|
-| D1 | Propose `buy_dip\|sell\|hold\|cancel_order\|adjust_lp\|skip` → JSONL | `data/agent/agent_decisions.jsonl` (osobny `kind`; **nie** mutate `AgentDecision` optimize) | C | ⬜ |
+| D1 | Propose `buy_dip\|sell\|hold\|cancel_order\|adjust_lp\|skip` → JSONL | `POST /dip/propose` + CLI `dip-propose` → `agent_decisions.jsonl` (`kind=dip_propose`) | C | ✅ |
 | D2 | UI open limits + alert LP OOR (+ bot settings + agent surfaces) | dashboard — szczegóły: [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](../IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) | D | ⬜ |
 | D2b | UI **drabinka 3Commas-like** (preview table + Summary; N× Buy-the-Dip) | `web` lib + `/dip` — model A w planie UI §1b | D (U1b) | ⬜ |
 | D2c | UI native Jupiter DCA (time/band) | osobna karta; T17–T19 | E opcjonalnie (U8) | ⬜ |

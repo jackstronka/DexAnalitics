@@ -73,6 +73,7 @@ Poniżej: odniesienie **Twojej wypowiedzi** (cel, orkiestrator, what-if, wolumen
 | **Dokumentacja + changelog** | Semantyka produktu, słowa kluczowe pod wyszukiwanie | `doc/DECISION_LAYER.md`, `doc/PROJECT_OVERVIEW.md`, `doc/FUNCTIONAL_SPECIFICATION.md`, `doc/ENGINEERING_NOTES.md` | Dla LLM: kontekst z **wersji** pliku / daty; bez tego halucynacja „starego” API |
 | **Dip Agent docs + config** | Buy the Dip (Jupiter Trigger) obok LP; propose-only | [`doc/dip-agent/`](dip-agent/README.md); [`config/dip/`](../config/dip/) | **NO-GO live** create/cancel do Fazy E; nie mutate `AgentDecision` optimize; nie mylić z [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) |
 | **Dip snapshot (Trigger read)** | Strefa SOL + open Buy-the-Dip | `GET /api/v1/dip/snapshot`; CLI `dip-snapshot`; `JupiterTriggerClient` | JWT opcjonalny (bez JWT = zones/price); **nie** create/cancel |
+| **Dip propose (Faza C)** | Propose `buy_dip\|hold\|…` → audyt JSONL | `POST /api/v1/dip/propose`; CLI `dip-propose`; `kind=dip_propose` | Reuse `agent_decisions.jsonl`; **nie** mutate `AgentDecision` optimize; **nie** Trigger write |
 
 **keywords (dla grep):** capability-registry, kopalnia-wiedzy, NO-GO, ops-ingest-cycle, data-health-check, orchestrator-gate, gate_health, orchestrator-backtests-full, api_backtests_full, dip-agent, jupiter-trigger
 

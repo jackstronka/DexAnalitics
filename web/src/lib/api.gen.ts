@@ -463,6 +463,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/propose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/propose` — append `kind=dip_propose` row to `agent_decisions.jsonl` (no Trigger write). */
+        post: operations["post_dip_propose"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/snapshot": {
         parameters: {
             query?: never;
@@ -2993,6 +3010,31 @@ export interface components {
             remaining_input_amount?: string | null;
             /** Format: double */
             trigger_price_usd?: number | null;
+        };
+        /** @description `POST /dip/propose` — append propose-only dip decision (`kind=dip_propose`) to JSONL. */
+        DipProposeRequest: {
+            /** @description `buy_dip` | `sell` | `hold` | `cancel_order` | `adjust_lp` | `skip` */
+            action: string;
+            /** @description Default `propose-only`. Also: `paper`, `live`. */
+            mode?: string;
+            /** @description Override JSONL path (tests); default `data/agent/agent_decisions.jsonl`. */
+            path?: string | null;
+            position_id?: string | null;
+            /** @description Optional Trigger body stubs (never executed in Faza C). */
+            proposed_orders?: Record<string, never> | null;
+            rationale: string;
+            refs?: string[];
+            session_id?: string | null;
+            /** Format: double */
+            sol_usd?: number | null;
+            strategy_id?: string | null;
+            zone?: string | null;
+        };
+        /** @description Response for `POST /dip/propose`. */
+        DipProposeResponse: {
+            path: string;
+            row: components["schemas"]["AgentDecisionRow"];
+            written: boolean;
         };
         /** @description `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders. */
         DipSnapshotResponse: {
@@ -5828,6 +5870,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarketSwapsResponse"];
+                };
+            };
+        };
+    };
+    post_dip_propose: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipProposeRequest"];
+            };
+        };
+        responses: {
+            /** @description Dip propose appended */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipProposeResponse"];
                 };
             };
         };

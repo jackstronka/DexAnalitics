@@ -20,12 +20,20 @@ keywords: E1, verify-fast, G7, nextest, clippy, web, IMPLEMENTATION_PLAN_REGRESS
 - **What:** `tools/verify_fast.py` (+ `make verify-fast` / `tools/verify-fast.ps1`) wybiera pakiety z `git diff base...HEAD` (plus reverse dependents), odpala fmt/clippy/nextest tylko dla nich; web tylko przy `web/` lub `openapi.json`. Pełny workspace przy root CI/toolchain. Unit: `tools/test_verify_fast.py`. PR #35.
 - **paths:** `tools/verify_fast.py`, `Makefile`, `tools/verify-fast.ps1`
 
+## 2026-11-09 — Dip Faza C: propose envelope → agent_decisions.jsonl
+
+keywords: dip-agent, dip_propose, agent_decisions, propose-only, POST /dip/propose, dip-propose, clmm-lp-data, clmm-lp-api, clmm-lp-cli
+
+- **What:** `DipProposeDecision` (`kind=dip_propose`) + `append_dip_propose` do wspólnego JSONL; `POST /api/v1/dip/propose`; CLI `dip-propose`. Nie rozszerza `AgentDecision` optimize; bez Trigger create/cancel.
+- **paths:** `crates/data/src/dip/propose.rs`, `crates/api/src/handlers/dip.rs`, `crates/cli/src/commands/dip_propose.rs`
+
 ## 2026-11-09 — API HTTP contract tests (typed happy-path)
 
 keywords: api, http-contract, axum, oneshot, HealthResponse, ListPositionsResponse, handlers, clmm-lp-api, TESTS
 
 - **What:** `handlers::api_http_contract_tests` — beyond status-code smoke (`endpoint_coverage_tests`): `oneshot` → deserialize into OpenAPI models for `/health`, `/metrics`, `/positions`, `/strategies` (seeded), `/wallets`, and close-all 404 JSON. Hermetic `RpcConfig` (no public fallbacks). PR #33.
 - **paths:** `crates/api/src/handlers/api_http_contract_tests.rs`
+
 
 ## 2026-11-09 — Plan UI: Reuse inventory Dex → Jupiter/Dip
 
