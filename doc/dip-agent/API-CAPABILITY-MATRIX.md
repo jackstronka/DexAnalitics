@@ -99,7 +99,7 @@ Włączane tylko gdy `runtime.jupiter.dca_allowed: true`.
 | ID | Funkcja | Artefakt | Faza | Status |
 |----|---------|----------|------|--------|
 | D1 | Propose `buy_dip\|sell\|hold\|cancel_order\|adjust_lp\|skip` → JSONL | `data/agent/agent_decisions.jsonl` (osobny `kind`; **nie** mutate `AgentDecision` optimize) | C | ⬜ |
-| D2 | UI open limits + alert LP OOR | dashboard | D | ⬜ |
+| D2 | UI open limits + alert LP OOR (+ bot settings + agent surfaces) | dashboard — szczegóły: [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](../IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) | D | ⬜ |
 | D3 | Strefy SOL A/B/C | `config/dip/zones.json` + `clmm_lp_data::dip` | B | ✅ |
 
 ---

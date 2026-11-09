@@ -37,6 +37,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
 | [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | **Canonical:** „agent / AI” w repo — `AgentDecision` + apply-optimize, Position Agent, `DecisionEngine` live, Dip Agent (Jupiter Trigger), `agent_decisions.jsonl` |
 | [`dip-agent/README.md`](dip-agent/README.md) | **Dip / Buy the Dip:** docs + `config/dip`; Trigger read Faza B; LP hygiene; BRIDGE fazy C–E |
+| [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) | **UI plan:** Jupiter/Dip, bot settings, agent surfaces (U0–U7) |
 | [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md) | **Plan:** rolling memory (global + pozycja + później strategia), event log, LLM context pack; fazy O1/M1/M2/M3; restart-safe pamięć poza modelem |
 | [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | **Fazy 0–6+:** kontrakt logu, gate runner, multi-backtest, raport real vs symulacja, apply z review, poza zakresem; kryteria sukcesu; kolejność PR |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | **Plan wykonawczy:** backlog PR-01–PR-30, fale F1–F5, kryteria done, najbliższe 2 tygodnie |

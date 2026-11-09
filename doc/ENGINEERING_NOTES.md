@@ -1,3 +1,10 @@
+## 2026-11-09 — Plan UI: Dip/Jupiter + bot settings + agent
+
+keywords: dip-agent, UI, IMPLEMENTATION_PLAN_DIP_AGENT_UI, Jupiter, BotActivity, Settings, Position Agent, propose-only, Faza D
+
+- **What:** Plan produktowy UI: sekcja Jupiter/Dip (mapowanie na P/T/S/D), Bot Control + Settings (BC*/S-*), Agent Hub (AH1–AH7), kolejność U0–U7. Docs only — bez ekranów.
+- **paths:** `doc/IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`, linki w `doc/dip-agent/BRIDGE.md` / `README.md` / `API-CAPABILITY-MATRIX.md`
+
 ## 2026-11-09 — Dip: matryca capability Jupiter API (P/T/S/D)
 
 keywords: dip-agent, jupiter-trigger, API-CAPABILITY-MATRIX, Trigger V2, Swap V2, propose-only, allowlista

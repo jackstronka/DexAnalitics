@@ -68,6 +68,9 @@ Dip zapisuje do `data/agent/agent_decisions.jsonl` wiersz z osobnym `decision.ki
 Panel open Jupiter limits + alert gdy LP OOR (patrz [`LP-HYGIENE.md`](LP-HYGIENE.md)).  
 Markdown (`candidates.md`, journals) wystarczy do czasu stabilnego Trigger history.
 
+**Plan szczegółowy (funkcje Jupiter UI + bot settings + agent):**  
+[`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](../IMPLEMENTATION_PLAN_DIP_AGENT_UI.md).
+
 ---
 
 ## Faza E — Live (osobny GO)
