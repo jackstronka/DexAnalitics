@@ -25,6 +25,8 @@ mod devnet_e2e_tests;
 #[cfg(test)]
 mod devnet_test_harness;
 #[cfg(test)]
+mod api_http_contract_tests;
+#[cfg(test)]
 mod endpoint_coverage_tests;
 #[cfg(test)]
 mod orca_tests;
