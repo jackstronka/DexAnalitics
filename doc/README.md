@@ -28,12 +28,16 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 
 **Roadmap strategii (Jupiter / multi-venue / CLMM):** [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) — hipoteza routingu i fee; przenoszenie zakresów pod wolumen skierowany przez agregator; co zweryfikować danymi.
 
+**Dip Agent (Jupiter Buy the Dip):** [`dip-agent/README.md`](dip-agent/README.md) — docs + Trigger read (`/dip/snapshot`); nie mylić z roadmapą multi-venue fee.
+
 ## Architecture and product
 
 | Document | Purpose |
 | -------- | ------- |
 | [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) | Crate layout, fee pipeline (mermaid), CLI command names, data paths, terminology |
-| [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | **Canonical:** „agent / AI” w repo — `AgentDecision` + apply-optimize, Position Agent (LLM opcjonalny), `DecisionEngine` live, `agent_decisions.jsonl`, linki do roadmap |
+| [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md) | **Canonical:** „agent / AI” w repo — `AgentDecision` + apply-optimize, Position Agent, `DecisionEngine` live, Dip Agent (Jupiter Trigger), `agent_decisions.jsonl` |
+| [`dip-agent/README.md`](dip-agent/README.md) | **Dip / Buy the Dip:** docs + `config/dip`; Trigger read Faza B; LP hygiene; BRIDGE fazy C–E |
+| [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) | **UI plan:** Jupiter/Dip, bot settings, agent surfaces (U0–U7) |
 | [`AGENT_ROLLING_MEMORY_PLAN.md`](AGENT_ROLLING_MEMORY_PLAN.md) | **Plan:** rolling memory (global + pozycja + później strategia), event log, LLM context pack; fazy O1/M1/M2/M3; restart-safe pamięć poza modelem |
 | [`IMPLEMENTATION_PLAN_DECISION_LAYER.md`](IMPLEMENTATION_PLAN_DECISION_LAYER.md) | **Fazy 0–6+:** kontrakt logu, gate runner, multi-backtest, raport real vs symulacja, apply z review, poza zakresem; kryteria sukcesu; kolejność PR |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | **Plan wykonawczy:** backlog PR-01–PR-30, fale F1–F5, kryteria done, najbliższe 2 tygodnie |
@@ -150,6 +154,8 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`BOT_RESEARCH_DECISION_2026-03-23.md`](BOT_RESEARCH_DECISION_2026-03-23.md) | research, matrix, direction (snapshot) |
 | [`BOT_WORKLOG_2026-03-23.md`](BOT_WORKLOG_2026-03-23.md) | worklog, rationale (snapshot) |
 | [`DECISION_LAYER.md`](DECISION_LAYER.md) | decision-layer, orchestrator, shadow, counterfactual, simulation, backtest, data-quality, phases, capital allocation, implementation-audit, operator-goals, capability-registry, NO-GO, ops-ingest-cycle |
+| [`dip-agent/README.md`](dip-agent/README.md) | dip-agent, Jupiter Trigger, Buy the Dip, propose-only, dip-snapshot |
+| [`dip-agent/BRIDGE.md`](dip-agent/BRIDGE.md) | dip merge phases, Trigger read, NO-GO live signer |
 | [`DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md`](DEVNET_WALLET_BOT_LAUNCH_RUNBOOK_V1.md) | devnet, wallet, runbook, dry-run, limited-live, preflight |
 | [`DEVNET_BOT_PRODUCTION_READINESS.md`](DEVNET_BOT_PRODUCTION_READINESS.md) | devnet, bot, production readiness, checklist, go/no-go |
 | [`DOCKER.md`](DOCKER.md) | docker compose, web+api, API_UPSTREAM, Docker Desktop, Windows pipe |

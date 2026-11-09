@@ -71,8 +71,10 @@ Poniżej: odniesienie **Twojej wypowiedzi** (cel, orkiestrator, what-if, wolumen
 | **`GET`/`POST …/data/agent/decisions`** | Append / odczyt decyzji pod audyt orchestracji | `GET`/`POST /api/v1/data/agent/decisions`; plik `data/agent/agent_decisions.jsonl` | Pole `decision` jest ogólne JSON; dla runów bramki patrz schema **`gate_health`** w [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §8 i [`doc/examples/orchestrator-run-v1.example.json`](examples/orchestrator-run-v1.example.json) |
 | **Position Agent** (czat, skan, LLM) | Wyjaśnianie, sugestie przy pozycji | `/api/v1/positions/{address}/agent/…` ([`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md)) | Skan startowy = **szablony tekstowe** ([`DECISION_LAYER.md`](DECISION_LAYER.md) §11.2); nie zastępuje backtestu |
 | **Dokumentacja + changelog** | Semantyka produktu, słowa kluczowe pod wyszukiwanie | `doc/DECISION_LAYER.md`, `doc/PROJECT_OVERVIEW.md`, `doc/FUNCTIONAL_SPECIFICATION.md`, `doc/ENGINEERING_NOTES.md` | Dla LLM: kontekst z **wersji** pliku / daty; bez tego halucynacja „starego” API |
+| **Dip Agent docs + config** | Buy the Dip (Jupiter Trigger) obok LP; propose-only | [`doc/dip-agent/`](dip-agent/README.md); [`config/dip/`](../config/dip/) | **NO-GO live** create/cancel do Fazy E; nie mutate `AgentDecision` optimize; nie mylić z [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) |
+| **Dip snapshot (Trigger read)** | Strefa SOL + open Buy-the-Dip | `GET /api/v1/dip/snapshot`; CLI `dip-snapshot`; `JupiterTriggerClient` | JWT opcjonalny (bez JWT = zones/price); **nie** create/cancel |
 
-**keywords (dla grep):** capability-registry, kopalnia-wiedzy, NO-GO, ops-ingest-cycle, data-health-check, orchestrator-gate, gate_health, orchestrator-backtests-full, api_backtests_full
+**keywords (dla grep):** capability-registry, kopalnia-wiedzy, NO-GO, ops-ingest-cycle, data-health-check, orchestrator-gate, gate_health, orchestrator-backtests-full, api_backtests_full, dip-agent, jupiter-trigger
 
 ---
 

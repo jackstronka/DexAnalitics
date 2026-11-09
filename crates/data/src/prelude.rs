@@ -21,7 +21,9 @@ pub use crate::pool_state::{PoolStateHistory, PoolStateSnapshot};
 
 // Providers
 pub use crate::providers::csv_provider::write_candles_to_csv;
-pub use crate::providers::{BirdeyeProvider, CsvProvider, JupiterProvider, MockMarketDataProvider};
+pub use crate::providers::{
+    BirdeyeProvider, CsvProvider, JupiterProvider, JupiterTriggerClient, MockMarketDataProvider,
+};
 
 // Database repositories
 pub use crate::repositories::{

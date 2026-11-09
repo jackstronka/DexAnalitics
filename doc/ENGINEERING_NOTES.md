@@ -1,3 +1,39 @@
+
+## 2026-11-09 — Plan UI: Reuse inventory Dex → Jupiter/Dip
+
+keywords: dip-agent, reuse, JupiterProvider, dip/snapshot, agent_decisions, txBuildUnsigned, Strategies, Position Agent, IMPLEMENTATION_PLAN_DIP_AGENT_UI
+
+- **What:** §3b w planie UI — mapa istniejących klocków Dex (Price, Trigger read, decisions JSONL, tx sign, Strategies/Settings, capital UI) na kroki U1–U6/C/E oraz jawne non-reuse (`AgentDecision`, Orca swap, DecisionEngine).
+- **paths:** `doc/IMPLEMENTATION_PLAN_DIP_AGENT_UI.md` §3b
+
+## 2026-11-09 — Plan UI: 3Commas-like ladder + Dip/Jupiter + bot/agent
+
+keywords: dip-agent, UI, 3Commas, DCA, safety orders, ladder preview, Summary box, Jupiter Trigger, IMPLEMENTATION_PLAN_DIP_AGENT_UI, propose-only, Faza D
+
+- **What:** Rozszerzenie planu UI o wzorce 3Commas (formularz SO, tabela drabinki, Summary: max drop / avg / Required). Model A = N× Buy-the-Dip (orkiestracja); model B = native `POST /orders/dca`. 3Commas = CEX API, nie DEX. U1b/U8 w rollout.
+- **paths:** `doc/IMPLEMENTATION_PLAN_DIP_AGENT_UI.md` §1b, `doc/dip-agent/API-CAPABILITY-MATRIX.md` (D2b/D2c), `BRIDGE.md`
+
+## 2026-11-09 — Plan UI: Dip/Jupiter + bot settings + agent
+
+keywords: dip-agent, UI, IMPLEMENTATION_PLAN_DIP_AGENT_UI, Jupiter, BotActivity, Settings, Position Agent, propose-only, Faza D
+
+- **What:** Plan produktowy UI: sekcja Jupiter/Dip (mapowanie na P/T/S/D), Bot Control + Settings (BC*/S-*), Agent Hub (AH1–AH7), kolejność U0–U7. Docs only — bez ekranów.
+- **paths:** `doc/IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`, linki w `doc/dip-agent/BRIDGE.md` / `README.md` / `API-CAPABILITY-MATRIX.md`
+
+## 2026-11-09 — Dip: matryca capability Jupiter API (P/T/S/D)
+
+keywords: dip-agent, jupiter-trigger, API-CAPABILITY-MATRIX, Trigger V2, Swap V2, propose-only, allowlista
+
+- **What:** Katalog funkcji pokrywający allowlistę tradingu przez API (Price, Trigger auth/vault/orders/DCA, Swap exit, Decision JSONL) ze statusem ✅/⬜/🚫 i DoD Fazy E. Nie dodaje write path.
+- **paths:** `doc/dip-agent/API-CAPABILITY-MATRIX.md`, linki w `README.md` / `BRIDGE.md` / `jupiter-API.md`
+
+## 2026-11-09 — Merge Faza B: Jupiter Trigger read + dip snapshot
+
+keywords: dip-agent, jupiter-trigger, Trigger V2, orders/history, dip-snapshot, zones, propose-only, clmm-lp-data, clmm-lp-api, clmm-lp-cli
+
+- **What:** Read-only Trigger V2 client (`JupiterTriggerClient`), zones A/B/C (`config/dip/zones.json`), `GET /api/v1/dip/snapshot`, CLI `dip-snapshot`. Faza A docs/config w `doc/dip-agent/` + `config/dip/`. Bez create/cancel. Hermetic httpmock + zone unit tests.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/data/src/dip/`, `crates/api/src/handlers/dip.rs`, `crates/cli/src/commands/dip_snapshot.rs`, `doc/dip-agent/`, `config/dip/`
+
 ## 2026-11-09 — R5: kolumna Ochrona testami w MASTER §2.2
 
 keywords: R5, ochrona-testami, MASTER_IMPLEMENTATION_PLAN, subsystem-protection, G9, test_protection, golden, niezmiennik, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
@@ -18,6 +54,7 @@ keywords: R2, test_report, junit, nextest, vitest, G9, Job-Summary, test-areas, 
 
 - **What:** `tools/test_report.py` czyta JUnit z nextest + vitest, mapuje na obszary R1, liczy golden/niezm. z nazwy, klasyfikuje pady (§3 wstępnie), pisze `report.md`/`report.json`. Lokalnie: `make verify` / `verify.ps1` na końcu. CI: artefakty `junit-rust`/`junit-web` → job `test_report` + Job Summary + artefakt `test-report`. Profil nextest `*.junit.path=junit.xml`. PR #28.
 - **paths:** `tools/test_report.py`, `scripts/ci/test-report.sh`, `.github/workflows/ci.yml`, `.config/nextest.toml`
+
 
 ## 2026-11-09 — R1: mapa test → obszar (`ci/test-areas.toml`)
 

@@ -12,6 +12,8 @@ mod dexscreener;
 pub mod dune;
 /// Jupiter Price API provider.
 pub mod jupiter;
+/// Jupiter Trigger Order API V2 (read + auth helpers).
+pub mod jupiter_trigger;
 mod mock;
 mod orca_rest;
 pub mod pool_info;
@@ -22,6 +24,10 @@ pub use defillama::{DailyTvlPoint, DefiLlamaChartPoint, DefiLlamaClient, DefiLla
 pub use dexscreener::{DexChain, DexPair, DexscreenerClient};
 pub use dune::{DuneClient, TvlPoint, VolumePoint};
 pub use jupiter::JupiterProvider;
+pub use jupiter_trigger::{
+    JupiterTriggerClient, OrderHistoryQuery, TriggerAuthTokens, TriggerChallenge,
+    TriggerOrderHistoryItem, TriggerOrderHistoryResponse, filter_open_buy_dips,
+};
 pub use mock::MockMarketDataProvider;
 pub use orca_rest::{
     ListPoolsQuery as OrcaListPoolsQuery, ListTokensQuery as OrcaListTokensQuery, OrcaLockInfo,

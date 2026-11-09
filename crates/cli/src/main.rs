@@ -841,6 +841,19 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         save_report: bool,
     },
+    /// Dip Agent read: SOL zone (config/dip/zones.json) + optional Jupiter Trigger Buy-the-Dip orders.
+    #[command(name = "dip-snapshot")]
+    DipSnapshot {
+        /// Path to zones JSON (default: config/dip/zones.json).
+        #[arg(long, default_value = "config/dip/zones.json")]
+        zones_path: std::path::PathBuf,
+        /// Do not call Trigger orders/history (zones + price only).
+        #[arg(long, default_value_t = false)]
+        skip_orders: bool,
+        /// Trigger JWT (else env `CLMM_JUPITER_TRIGGER_JWT`).
+        #[arg(long)]
+        jwt: Option<String>,
+    },
     /// Health check for snapshots/swaps pipelines with staleness + decode quality alerts.
     DataHealthCheck {
         /// Alert if file age is above this threshold.
@@ -5645,6 +5658,13 @@ async fn main() -> Result<()> {
         }
         Commands::SwapsDecodeAudit { limit, save_report } => {
             crate::swap_sync::decode_audit_curated_all(*limit, *save_report)?;
+        }
+        Commands::DipSnapshot {
+            zones_path,
+            skip_orders,
+            jwt,
+        } => {
+            commands::run_dip_snapshot(zones_path.clone(), !*skip_orders, jwt.clone()).await?;
         }
         Commands::DataHealthCheck {
             max_age_minutes,

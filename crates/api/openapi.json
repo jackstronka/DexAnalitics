@@ -1004,6 +1004,47 @@
         }
       }
     },
+    "/dip/snapshot": {
+      "get": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only).",
+        "operationId": "get_dip_snapshot",
+        "parameters": [
+          {
+            "name": "include_orders",
+            "in": "query",
+            "description": "Fetch Trigger active orders when JWT present",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "zones_path",
+            "in": "query",
+            "description": "Override path to zones.json",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dip snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipSnapshotResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/evm/base/aerodrome-slipstream/pools/{pool}/slot0": {
       "get": {
         "tags": [
@@ -7284,6 +7325,153 @@
           "liquidity_amount": {
             "type": "string",
             "description": "Liquidity amount to remove (base units as decimal string; supports full u128 range in JSON)."
+          }
+        }
+      },
+      "DipBuyDipOrder": {
+        "type": "object",
+        "description": "One open Buy-the-Dip style Trigger order (read summary).",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remaining_input_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger_price_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "DipSnapshotResponse": {
+        "type": "object",
+        "description": "`GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders.",
+        "required": [
+          "fetched_at",
+          "symbol",
+          "mint",
+          "price_source",
+          "zone",
+          "zones",
+          "buy_dip_orders",
+          "orders_source",
+          "notes"
+        ],
+        "properties": {
+          "buy_dip_orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DipBuyDipOrder"
+            }
+          },
+          "fetched_at": {
+            "type": "string"
+          },
+          "mint": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "orders_source": {
+            "type": "string",
+            "description": "How orders were resolved (`trigger_v2_orders_history`, `no_jwt`, …)."
+          },
+          "price_source": {
+            "type": "string"
+          },
+          "price_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "zone": {
+            "type": "string",
+            "description": "`A` | `B` | `C` | `none`"
+          },
+          "zones": {
+            "$ref": "#/components/schemas/DipZonesDto"
+          }
+        }
+      },
+      "DipZoneBandDto": {
+        "type": "object",
+        "description": "Inclusive USD band for Dip Agent zones.",
+        "required": [
+          "min",
+          "max"
+        ],
+        "properties": {
+          "max": {
+            "type": "number",
+            "format": "double"
+          },
+          "min": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "DipZonesDto": {
+        "type": "object",
+        "description": "SOL (or symbol) A/B/C bands.",
+        "required": [
+          "a",
+          "b",
+          "c"
+        ],
+        "properties": {
+          "a": {
+            "$ref": "#/components/schemas/DipZoneBandDto"
+          },
+          "b": {
+            "$ref": "#/components/schemas/DipZoneBandDto"
+          },
+          "c": {
+            "$ref": "#/components/schemas/DipZoneBandDto"
           }
         }
       },

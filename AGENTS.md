@@ -6,8 +6,9 @@
 
 Bociarz LP — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScript web dashboard. See `README.md` and `STARTUP.md` for full details.
 
-**AI / „agent” in this repo:** see `doc/AI_AGENT_LAYER.md` (`AgentDecision` + apply-optimize, Position Agent, live `DecisionEngine`, audit JSONL — not a single generic chatbot).  
-**Decision / orchestration layer (vision, phases, §1b capability registry / NO-GO, §11 audit, implementation plan):** `doc/DECISION_LAYER.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`.
+**AI / „agent” in this repo:** see `doc/AI_AGENT_LAYER.md` (`AgentDecision` + apply-optimize, Position Agent, live `DecisionEngine`, Dip Agent Jupiter Trigger, audit JSONL — not a single generic chatbot).  
+**Decision / orchestration layer (vision, phases, §1b capability registry / NO-GO, §11 audit, implementation plan):** `doc/DECISION_LAYER.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`.  
+**Dip / Buy the Dip (propose-only + Trigger read):** [`doc/dip-agent/README.md`](doc/dip-agent/README.md), [`config/dip/`](config/dip/), `GET /api/v1/dip/snapshot`, CLI `dip-snapshot`.
 
 **Red CI on a PR:** classify and act per [`doc/templates/CI_TRIAGE.md`](doc/templates/CI_TRIAGE.md) (D4). Do **not** update goldens / expected money without explicit GO (`economic_regression`).
 
