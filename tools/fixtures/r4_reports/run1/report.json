@@ -1,0 +1,18 @@
+{
+  "title": "Test report — main @ aaa1111",
+  "git_ref": "main",
+  "commit": "aaa1111",
+  "generated_at": "2026-11-01 10:00 UTC",
+  "pass_n": 100,
+  "fail_n": 1,
+  "ignored_n": 0,
+  "time_s": 120.0,
+  "areas": [
+    {"label": "Lineage / PnL", "tests": 40, "fails": 1, "ignored": 0, "golden": 2, "niezm": 1, "time_s": 50.0},
+    {"label": "Domain math", "tests": 60, "fails": 0, "ignored": 0, "golden": 0, "niezm": 2, "time_s": 70.0}
+  ],
+  "failures": [
+    {"area": "Lineage / PnL", "id": "clmm-lp-api::services::chain_economic_totals::tests::flaky_example", "class": "economic_regression", "message": "assert"}
+  ],
+  "fallback_n": 0
+}

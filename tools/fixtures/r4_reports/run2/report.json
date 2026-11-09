@@ -1,0 +1,16 @@
+{
+  "title": "Test report — main @ bbb2222",
+  "git_ref": "main",
+  "commit": "bbb2222",
+  "generated_at": "2026-11-05 10:00 UTC",
+  "pass_n": 101,
+  "fail_n": 0,
+  "ignored_n": 0,
+  "time_s": 118.0,
+  "areas": [
+    {"label": "Lineage / PnL", "tests": 40, "fails": 0, "ignored": 0, "golden": 2, "niezm": 1, "time_s": 48.0},
+    {"label": "Domain math", "tests": 61, "fails": 0, "ignored": 0, "golden": 0, "niezm": 2, "time_s": 70.0}
+  ],
+  "failures": [],
+  "fallback_n": 0
+}

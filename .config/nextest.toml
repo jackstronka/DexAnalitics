@@ -4,7 +4,13 @@
 [profile.default]
 retries = 0
 
+[profile.default.junit]
+path = "junit.xml"
+
 [profile.ci]
 retries = 0
 fail-fast = false
 # Inherited by `cargo nextest run --profile ci` in GitHub Actions.
+
+[profile.ci.junit]
+path = "junit.xml"

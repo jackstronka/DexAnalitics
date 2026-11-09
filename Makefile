@@ -62,15 +62,31 @@ clean:
 check: test fmt-check lint
 
 # Same checks as CI; run by .githooks/pre-push (Windows: tools/verify.ps1)
-.PHONY: verify verify-rust verify-web hooks
-verify: verify-rust verify-web
+.PHONY: verify verify-rust verify-web test-report hooks
+verify: verify-rust verify-web test-report
 
 verify-rust: fmt-check lint
 	@cargo nextest --version >/dev/null 2>&1 || (echo "E2: install cargo-nextest: cargo install --locked cargo-nextest" >&2; exit 1)
+	mkdir -p target/test-report
 	LOGLEVEL=WARN cargo nextest run --workspace
 
 verify-web:
-	cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint
+	mkdir -p target/test-report
+	cd web && npm run check:api-gen && npx tsc --noEmit \
+		&& npx vitest run --reporter=default --reporter=junit --outputFile=../target/test-report/vitest-junit.xml \
+		&& npm run lint
+
+# R2: per-area table from nextest + vitest JUnit (printed after verify steps)
+test-report:
+	@mkdir -p target/test-report
+	@set -e; \
+	args=""; \
+	if [ -f target/nextest/default/junit.xml ]; then args="$$args --junit target/nextest/default/junit.xml"; fi; \
+	if [ -f target/nextest/ci/junit.xml ]; then args="$$args --junit target/nextest/ci/junit.xml"; fi; \
+	if [ -f target/test-report/vitest-junit.xml ]; then args="$$args --junit target/test-report/vitest-junit.xml"; fi; \
+	if [ -z "$$args" ]; then echo "test-report: no junit xml (run verify-rust / verify-web first)"; exit 0; fi; \
+	python3 tools/test_report.py $$args --out-dir target/test-report; \
+	echo ""; echo "=== test report (R2) ==="; cat target/test-report/report.md
 
 # Enable repo git hooks for this clone
 hooks:
@@ -101,6 +117,30 @@ bugs-test-guard:
 test-areas:
 	python3 tools/test_areas.py --check-map
 	cd tools && python3 test_test_areas.py
+
+# R2 unit tests (hermetic fixtures)
+.PHONY: test-report-unit
+test-report-unit:
+	cd tools && python3 test_test_report.py
+
+# R4: weekly trend from local report.json dir (or unit fixtures)
+.PHONY: test-trend test-trend-unit
+test-trend-unit:
+	cd tools && python3 test_test_trend.py
+
+test-trend:
+	python3 tools/test_trend.py --reports-dir tools/fixtures/r4_reports --out-dir target/test-trend
+	@echo ""; echo "=== test trend (R4) ==="; cat target/test-trend/trend.md
+
+# R5: MASTER §2.2 Ochrona testami from report.json (+ unit / --check-master)
+.PHONY: test-protection test-protection-unit
+REPORT ?= tools/fixtures/r5_report/report.json
+test-protection-unit:
+	cd tools && python3 test_test_protection.py
+
+test-protection:
+	python3 tools/test_protection.py --report $(REPORT)
+	python3 tools/test_protection.py --report $(REPORT) --check-master
 
 # Run the project
 .PHONY: run

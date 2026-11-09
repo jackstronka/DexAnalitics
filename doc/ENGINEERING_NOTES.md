@@ -1,3 +1,4 @@
+
 ## 2026-11-09 — Plan UI: Reuse inventory Dex → Jupiter/Dip
 
 keywords: dip-agent, reuse, JupiterProvider, dip/snapshot, agent_decisions, txBuildUnsigned, Strategies, Position Agent, IMPLEMENTATION_PLAN_DIP_AGENT_UI
@@ -32,6 +33,28 @@ keywords: dip-agent, jupiter-trigger, Trigger V2, orders/history, dip-snapshot, 
 
 - **What:** Read-only Trigger V2 client (`JupiterTriggerClient`), zones A/B/C (`config/dip/zones.json`), `GET /api/v1/dip/snapshot`, CLI `dip-snapshot`. Faza A docs/config w `doc/dip-agent/` + `config/dip/`. Bez create/cancel. Hermetic httpmock + zone unit tests.
 - **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/data/src/dip/`, `crates/api/src/handlers/dip.rs`, `crates/cli/src/commands/dip_snapshot.rs`, `doc/dip-agent/`, `config/dip/`
+
+## 2026-11-09 — R5: kolumna Ochrona testami w MASTER §2.2
+
+keywords: R5, ochrona-testami, MASTER_IMPLEMENTATION_PLAN, subsystem-protection, G9, test_protection, golden, niezmiennik, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `ci/subsystem-protection.toml` mapuje subsystemy §2.2 → obszary R1; `tools/test_protection.py` wylicza `brak`/`unit`/`golden`/`golden+niezmiennik` z R2 `report.json` (lub R4 trend), `--check-master` / `--write-master`. Fixture `tools/fixtures/r5_report/`. Job `test_protection_unit`. Odświeżanie przy zamknięciu fali: `make test-protection REPORT=target/test-report/report.json`. PR #30.
+- **paths:** `ci/subsystem-protection.toml`, `tools/test_protection.py`, `doc/MASTER_IMPLEMENTATION_PLAN.md`
+
+## 2026-11-09 — R4: tygodniowy trend testów (artefakty report.json)
+
+keywords: R4, test_trend, weekly, G9, artifacts, flake, Job-Summary, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `tools/test_trend.py` agreguje R2 `report.json` (lokalny katalog albo `--fetch-github` artefaktów `test-report`). Tabela per obszar + flake candidates (fail w części snapshotów) + średni czas testów/CI. Workflow `weekly_test_trend.yml` (poniedziałek + `workflow_dispatch`), Job Summary + artefakt `weekly-test-trend`. Unit: `tools/test_test_trend.py`. PR #29.
+- **paths:** `tools/test_trend.py`, `.github/workflows/weekly_test_trend.yml`, `scripts/ci/test-trend.sh`
+
+## 2026-11-09 — R2: raport testów per obszar (JUnit → MD/JSON)
+
+keywords: R2, test_report, junit, nextest, vitest, G9, Job-Summary, test-areas, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `tools/test_report.py` czyta JUnit z nextest + vitest, mapuje na obszary R1, liczy golden/niezm. z nazwy, klasyfikuje pady (§3 wstępnie), pisze `report.md`/`report.json`. Lokalnie: `make verify` / `verify.ps1` na końcu. CI: artefakty `junit-rust`/`junit-web` → job `test_report` + Job Summary + artefakt `test-report`. Profil nextest `*.junit.path=junit.xml`. PR #28.
+- **paths:** `tools/test_report.py`, `scripts/ci/test-report.sh`, `.github/workflows/ci.yml`, `.config/nextest.toml`
+
 
 ## 2026-11-09 — R1: mapa test → obszar (`ci/test-areas.toml`)
 
