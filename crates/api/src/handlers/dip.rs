@@ -2,17 +2,18 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    AgentDecisionRow, DipBuyDipOrder, DipProposeRequest, DipProposeResponse, DipSnapshotResponse,
-    DipZoneBandDto, DipZonesDto,
+    AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
+    DipRuntimeResponse, DipSnapshotResponse, DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use axum::Json;
 use axum::extract::Query;
 use axum::http::HeaderMap;
 use clmm_lp_data::dip::{
-    DipAuditDecisionRow, DipProposeAction, DipProposeDecision, DipProposeMode, DipZoneLabel,
-    append_dip_propose, classify_zone, default_agent_decisions_path, default_zones_file,
-    load_dip_zones_file,
+    DipAuditDecisionRow, DipLadderDefaults, DipProposeAction, DipProposeDecision, DipProposeMode,
+    DipRuntimeFile, DipZoneLabel, append_dip_propose, classify_zone, default_agent_decisions_path,
+    default_zones_file, load_dip_runtime_file, load_dip_zones_file, normalize_dip_mode,
+    resolve_runtime_path,
 };
 use clmm_lp_data::providers::{JupiterTriggerClient, OrderHistoryQuery, filter_open_buy_dips};
 use serde::Deserialize;
@@ -212,6 +213,64 @@ pub async fn get_dip_snapshot(
         orders_source,
         notes,
     }))
+}
+
+/// `GET /dip/runtime` — mode + ladder defaults + whether Jupiter key / Trigger JWT are set (no secrets).
+#[utoipa::path(
+    get,
+    path = "/dip/runtime",
+    tag = "Dip",
+    params(
+        ("runtime_path" = Option<String>, Query, description = "Override path to runtime.yaml")
+    ),
+    responses(
+        (status = 200, description = "Dip runtime (public)", body = DipRuntimeResponse)
+    )
+)]
+pub async fn get_dip_runtime(
+    Query(q): Query<DipRuntimeQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<DipRuntimeResponse>> {
+    let path = resolve_runtime_path(q.runtime_path.as_deref());
+    let mut notes = Vec::new();
+    let (file, file_missing) = match load_dip_runtime_file(&path) {
+        Ok(f) => (f, false),
+        Err(e) => {
+            notes.push(format!("runtime load failed ({e}); using defaults"));
+            (DipRuntimeFile::default(), !path.exists())
+        }
+    };
+
+    let ladder = ladder_dto(&file.ladder);
+    Ok(Json(DipRuntimeResponse {
+        path: path.to_string_lossy().to_string(),
+        file_missing,
+        mode: normalize_dip_mode(&file.mode),
+        dca_allowed: file.jupiter.dca_allowed,
+        jupiter_api_key_set: jupiter_api_key(&headers).is_some(),
+        trigger_jwt_set: trigger_jwt(&headers).is_some(),
+        ladder,
+        notes,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DipRuntimeQuery {
+    #[serde(default)]
+    pub runtime_path: Option<String>,
+}
+
+fn ladder_dto(l: &DipLadderDefaults) -> DipLadderDefaultsDto {
+    DipLadderDefaultsDto {
+        base_order_usd: l.base_order_usd,
+        safety_order_usd: l.safety_order_usd,
+        deviation_pct: l.deviation_pct,
+        deviation_step_scale: l.deviation_step_scale,
+        volume_scale: l.volume_scale,
+        max_safety_orders: l.max_safety_orders,
+        take_profit_pct: l.take_profit_pct,
+        min_order_usd: l.min_order_usd,
+    }
 }
 
 /// `POST /dip/propose` — append `kind=dip_propose` row to `agent_decisions.jsonl` (no Trigger write).

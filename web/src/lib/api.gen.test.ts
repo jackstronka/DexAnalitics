@@ -89,4 +89,15 @@ describe('api.gen OpenAPI types (C2)', () => {
     expect(gen).toContain('"/dip/snapshot"')
     expect(gen).toContain('DipSnapshotResponse')
   })
+
+  it('committed gen file lists /dip/runtime and DipRuntimeResponse', () => {
+    const gen = readFileSync(path.join(here, 'api.gen.ts'), 'utf8')
+    const spec = JSON.parse(
+      readFileSync(path.resolve(here, '../../../crates/api/openapi.json'), 'utf8'),
+    ) as { paths: Record<string, unknown>; components: { schemas: Record<string, unknown> } }
+    expect(spec.paths['/dip/runtime']).toBeTruthy()
+    expect(spec.components.schemas.DipRuntimeResponse).toBeTruthy()
+    expect(gen).toContain('"/dip/runtime"')
+    expect(gen).toContain('DipRuntimeResponse')
+  })
 })

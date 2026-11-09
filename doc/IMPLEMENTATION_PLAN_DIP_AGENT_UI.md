@@ -314,7 +314,7 @@ Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, za
 | **U0** | Ten dokument + linki + sekcja 3Commas (§1b) | — |
 | **U1** | `/dip` read-only: strefa + open orders (`/dip/snapshot`) | Faza B ✅ · **DONE 2026-11-09** |
 | **U1b** | **`DipLadderPreviewTable` + `DipLadderSummary`** (lokalna matematyka drabinki, bez create) | tylko web lib + cena P1 · **DONE 2026-11-09** |
-| **U2** | Settings: S-API, S-JUP, S-JWT, S-DIP-MODE, **S-LADDER** defaults (read) | B + runtime/yaml |
+| **U2** | Settings: S-API, S-JUP, S-JWT, S-DIP-MODE, **S-LADDER** defaults (read) | B + runtime/yaml · **DONE 2026-11-09** (`GET /dip/runtime`) |
 | **U3** | AH5 decisions browser + AH7 OOR alert | API decisions ✅ |
 | **U4** | AH4 propose queue — body N× Buy-the-Dip z drabinki + TP | Faza C |
 | **U5** | Bot Control BC1–BC3 hardening (dry-run bound to server) | LP API |
@@ -349,7 +349,7 @@ Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, za
 | **Ladder preview:** deviation / avg / required zgodne z formułami (scale=1 i scale≠1) | unit web `dipLadder*.ts` | syntetyczne ceny | ✅ U1b |
 | Summary: Required &gt; Available → propose disabled | unit web | mock balances | ✅ U1b |
 | Propose card nie woła create bez confirm | unit web | mock decision row | ❌ (C/D) |
-| Settings nie serializuje secretów do git paths | manual / unit | — | ❌ |
+| Settings nie serializuje secretów do git paths | manual / unit `dipRuntimeDisplay` + API presence flags | — | ✅ U2 (presence only) |
 | OOR alert nie false-positive gdy in-range | unit / integr. | fixture pozycji | ❌ |
 | Position Agent tab nadal start/scan | manual / istniejące | PositionDetail | ✅ bazowo |
 

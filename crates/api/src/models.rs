@@ -3359,6 +3359,36 @@ pub struct DipProposeResponse {
     pub row: AgentDecisionRow,
 }
 
+/// Ladder defaults from `config/dip/runtime.yaml` (`ladder:`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipLadderDefaultsDto {
+    pub base_order_usd: f64,
+    pub safety_order_usd: f64,
+    pub deviation_pct: f64,
+    pub deviation_step_scale: f64,
+    pub volume_scale: f64,
+    pub max_safety_orders: u32,
+    pub take_profit_pct: f64,
+    pub min_order_usd: f64,
+}
+
+/// `GET /dip/runtime` — mode + ladder defaults + secret *presence* flags (no secret values).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipRuntimeResponse {
+    /// Path that was read (or attempted).
+    pub path: String,
+    pub file_missing: bool,
+    /// `propose-only` | `paper` | `live` (normalized when recognized).
+    pub mode: String,
+    pub dca_allowed: bool,
+    /// `JUPITER_API_KEY` (or request header) present on API host — never the value.
+    pub jupiter_api_key_set: bool,
+    /// `CLMM_JUPITER_TRIGGER_JWT` (or Authorization) present — never the value.
+    pub trigger_jwt_set: bool,
+    pub ladder: DipLadderDefaultsDto,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

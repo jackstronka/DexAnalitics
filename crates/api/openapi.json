@@ -1035,6 +1035,38 @@
         }
       }
     },
+    "/dip/runtime": {
+      "get": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`GET /dip/runtime` — mode + ladder defaults + whether Jupiter key / Trigger JWT are set (no secrets).",
+        "operationId": "get_dip_runtime",
+        "parameters": [
+          {
+            "name": "runtime_path",
+            "in": "query",
+            "description": "Override path to runtime.yaml",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dip runtime (public)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipRuntimeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/snapshot": {
       "get": {
         "tags": [
@@ -7409,6 +7441,55 @@
           }
         }
       },
+      "DipLadderDefaultsDto": {
+        "type": "object",
+        "description": "Ladder defaults from `config/dip/runtime.yaml` (`ladder:`).",
+        "required": [
+          "base_order_usd",
+          "safety_order_usd",
+          "deviation_pct",
+          "deviation_step_scale",
+          "volume_scale",
+          "max_safety_orders",
+          "take_profit_pct",
+          "min_order_usd"
+        ],
+        "properties": {
+          "base_order_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "deviation_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "deviation_step_scale": {
+            "type": "number",
+            "format": "double"
+          },
+          "max_safety_orders": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "min_order_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "safety_order_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "take_profit_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "volume_scale": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "DipProposeRequest": {
         "type": "object",
         "description": "`POST /dip/propose` — append propose-only dip decision (`kind=dip_propose`) to JSONL.",
@@ -7498,6 +7579,53 @@
           },
           "written": {
             "type": "boolean"
+          }
+        }
+      },
+      "DipRuntimeResponse": {
+        "type": "object",
+        "description": "`GET /dip/runtime` — mode + ladder defaults + secret *presence* flags (no secret values).",
+        "required": [
+          "path",
+          "file_missing",
+          "mode",
+          "dca_allowed",
+          "jupiter_api_key_set",
+          "trigger_jwt_set",
+          "ladder",
+          "notes"
+        ],
+        "properties": {
+          "dca_allowed": {
+            "type": "boolean"
+          },
+          "file_missing": {
+            "type": "boolean"
+          },
+          "jupiter_api_key_set": {
+            "type": "boolean",
+            "description": "`JUPITER_API_KEY` (or request header) present on API host — never the value."
+          },
+          "ladder": {
+            "$ref": "#/components/schemas/DipLadderDefaultsDto"
+          },
+          "mode": {
+            "type": "string",
+            "description": "`propose-only` | `paper` | `live` (normalized when recognized)."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path": {
+            "type": "string",
+            "description": "Path that was read (or attempted)."
+          },
+          "trigger_jwt_set": {
+            "type": "boolean",
+            "description": "`CLMM_JUPITER_TRIGGER_JWT` (or Authorization) present — never the value."
           }
         }
       },

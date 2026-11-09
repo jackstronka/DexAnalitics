@@ -1,4 +1,4 @@
-import { useMemo, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { RefreshCw, TrendingDown } from 'lucide-react'
@@ -7,7 +7,7 @@ import { DipLadderSummary } from '@/components/dip/DipLadderSummary'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
-import { getDipSnapshot } from '@/lib/api'
+import { getDipRuntime, getDipSnapshot } from '@/lib/api'
 import { buildDipLadderPreview } from '@/lib/dipLadder'
 import {
   dipOrdersEmptyKind,
@@ -60,12 +60,35 @@ function num(s: string, fallback = 0): number {
 export default function Dip() {
   const { locale, t } = useI18n()
   const [ladderForm, setLadderForm] = useState<LadderForm>(DEFAULT_LADDER)
+  const [ladderSeeded, setLadderSeeded] = useState(false)
   const q = useQuery({
     queryKey: ['dip-snapshot'],
     queryFn: getDipSnapshot,
     refetchInterval: 60_000,
     retry: 1,
   })
+  const runtimeQ = useQuery({
+    queryKey: ['dip-runtime'],
+    queryFn: getDipRuntime,
+    staleTime: 60_000,
+    retry: 1,
+  })
+
+  useEffect(() => {
+    if (ladderSeeded || !runtimeQ.data) return
+    const l = runtimeQ.data.ladder
+    setLadderForm((prev) => ({
+      ...prev,
+      baseOrderUsd: String(l.base_order_usd),
+      safetyOrderUsd: String(l.safety_order_usd),
+      deviationPct: String(l.deviation_pct),
+      deviationStepScale: String(l.deviation_step_scale),
+      volumeScale: String(l.volume_scale),
+      maxSafetyOrders: String(l.max_safety_orders),
+      takeProfitPct: String(l.take_profit_pct),
+    }))
+    setLadderSeeded(true)
+  }, [ladderSeeded, runtimeQ.data])
 
   const data = q.data
   const zone = data ? normalizeDipZone(data.zone) : '—'
