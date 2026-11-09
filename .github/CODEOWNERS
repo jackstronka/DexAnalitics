@@ -1,0 +1,17 @@
+# D2 / G6 — te same ścieżki co D1 (`GATED_PATHSPECS` w tools/golden_delta.py).
+# GitHub prosi @jackstronka o review, gdy PR rusza goldeny / fixture / OpenAPI.
+# Blokada merge: Settings → Branch protection → Require review from Code Owners.
+# A10 ma 0 wymaganych review; bez tego przełącznika CODEOWNERS tylko przypisuje recenzenta.
+# Solo: włączanie code-owner approval bez drugiego recenzenta albo bypass admina
+# zablokuje PR-y otwarte przez @jackstronka (autor nie zatwierdza własnego PR).
+
+.github/CODEOWNERS @jackstronka
+
+*.snap @jackstronka
+**/*.snap @jackstronka
+**/tests/fixtures/ @jackstronka
+**/tests/fixtures/** @jackstronka
+**/snapshots/ @jackstronka
+**/snapshots/** @jackstronka
+openapi.json @jackstronka
+**/openapi.json @jackstronka
