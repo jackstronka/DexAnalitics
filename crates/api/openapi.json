@@ -1004,6 +1004,37 @@
         }
       }
     },
+    "/dip/propose": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/propose` — append `kind=dip_propose` row to `agent_decisions.jsonl` (no Trigger write).",
+        "operationId": "post_dip_propose",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipProposeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dip propose appended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipProposeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/snapshot": {
       "get": {
         "tags": [
@@ -7375,6 +7406,98 @@
               "null"
             ],
             "format": "double"
+          }
+        }
+      },
+      "DipProposeRequest": {
+        "type": "object",
+        "description": "`POST /dip/propose` — append propose-only dip decision (`kind=dip_propose`) to JSONL.",
+        "required": [
+          "action",
+          "rationale"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`buy_dip` | `sell` | `hold` | `cancel_order` | `adjust_lp` | `skip`"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Default `propose-only`. Also: `paper`, `live`."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override JSONL path (tests); default `data/agent/agent_decisions.jsonl`."
+          },
+          "position_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "proposed_orders": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional Trigger body stubs (never executed in Faza C)."
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sol_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "strategy_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "zone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DipProposeResponse": {
+        "type": "object",
+        "description": "Response for `POST /dip/propose`.",
+        "required": [
+          "path",
+          "written",
+          "row"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "row": {
+            "$ref": "#/components/schemas/AgentDecisionRow"
+          },
+          "written": {
+            "type": "boolean"
           }
         }
       },
