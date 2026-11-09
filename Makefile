@@ -27,10 +27,11 @@ cli-release:
 enrich-lifecycle-ledger:
 	cargo run -p clmm-lp-cli --bin enrich_lifecycle_ledger --release
 
-# Run tests
+# Run tests (E2: cargo-nextest; install: cargo install --locked cargo-nextest)
 .PHONY: test
 test:
-	LOGLEVEL=WARN cargo test
+	@cargo nextest --version >/dev/null 2>&1 || (echo "E2: install cargo-nextest: cargo install --locked cargo-nextest" >&2; exit 1)
+	LOGLEVEL=WARN cargo nextest run --workspace
 
 # Format the code
 .PHONY: fmt
@@ -65,7 +66,8 @@ check: test fmt-check lint
 verify: verify-rust verify-web
 
 verify-rust: fmt-check lint
-	LOGLEVEL=WARN cargo test --workspace
+	@cargo nextest --version >/dev/null 2>&1 || (echo "E2: install cargo-nextest: cargo install --locked cargo-nextest" >&2; exit 1)
+	LOGLEVEL=WARN cargo nextest run --workspace
 
 verify-web:
 	cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint

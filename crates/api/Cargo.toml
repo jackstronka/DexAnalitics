@@ -66,3 +66,4 @@ httpmock = "0.8.3"
 insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3"
+fslock = { workspace = true }

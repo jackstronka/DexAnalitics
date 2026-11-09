@@ -38,3 +38,4 @@ reqwest = { workspace = true }
 insta = { workspace = true }
 rust_decimal_macros = { workspace = true }
 tempfile = "3.20"
+fslock = { workspace = true }

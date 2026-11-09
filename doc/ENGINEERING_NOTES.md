@@ -1,3 +1,10 @@
+## 2026-11-09 — E2: cargo-nextest lokalnie i w CI
+
+keywords: E2, nextest, cargo-nextest, G7, EnvGuard, fslock, verify, ci, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `make test` / `verify-rust` / `tools/verify.ps1` i joby `rust`/`db` używają `cargo nextest run` (profil `ci` w Actions, `retries=0`). `.config/nextest.toml`. `EnvGuard` dostał cross-process `fslock` (temp `clmm_lp_test_env.lock`), żeby process-per-test nextest nie gryzł się z mutacją env. Instalacja lokalna: `cargo install --locked cargo-nextest`.
+- **paths:** `.config/nextest.toml`, `.github/workflows/ci.yml`, `Makefile`, `tools/verify.ps1`, `crates/*/src/test_env.rs`
+
 ## 2026-11-09 — D4: szablon triage pada CI dla agenta
 
 keywords: D4, CI_TRIAGE, triage, economic_regression, stale_test, non_hermetic, infra, G6, agent, Cloud, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
