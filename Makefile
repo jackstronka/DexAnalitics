@@ -96,6 +96,12 @@ openapi-ts:
 bugs-test-guard:
 	python3 tools/bugs_test_guard.py
 
+# R1: test id → area map (ci/test-areas.toml) + classifier unit tests
+.PHONY: test-areas
+test-areas:
+	python3 tools/test_areas.py --check-map
+	cd tools && python3 test_test_areas.py
+
 # Run the project
 .PHONY: run
 run:
