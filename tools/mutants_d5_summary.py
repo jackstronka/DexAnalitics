@@ -35,9 +35,21 @@ def count_outcomes(doc: dict[str, Any]) -> dict[str, int]:
         "other": 0,
         "total_tested": 0,
     }
-    # Newer cargo-mutants: top-level summary + outcomes list
+    # cargo-mutants ≥0.18: top-level caught/missed/… counts (preferred).
+    if any(k in doc for k in ("caught", "missed", "timeout", "unviable")):
+        for key in ("caught", "missed", "unviable", "timeout"):
+            if key in doc:
+                tallies[key] = int(doc[key])
+        tallies["total_tested"] = (
+            tallies["caught"] + tallies["missed"] + tallies["timeout"]
+        )
+        return tallies
+
+    # Nested summary object (older / fixture shape).
     summary = doc.get("summary") or {}
-    if summary:
+    if isinstance(summary, dict) and any(
+        k in summary for k in ("caught", "missed", "timeout", "unviable")
+    ):
         for key in ("caught", "missed", "unviable", "timeout"):
             if key in summary:
                 tallies[key] = int(summary[key])
@@ -52,7 +64,7 @@ def count_outcomes(doc: dict[str, Any]) -> dict[str, int]:
     for row in outcomes:
         if not isinstance(row, dict):
             continue
-        # Formats vary: {"summary": "caught"} or {"outcome": "Caught"}
+        # Formats: "caught", "Caught", "CaughtMutant", "MissedMutant", …
         raw = (
             row.get("summary")
             or row.get("outcome")
@@ -60,17 +72,20 @@ def count_outcomes(doc: dict[str, Any]) -> dict[str, int]:
             or ""
         )
         name = str(raw).strip().lower()
-        if name in ("caught", "killed"):
+        if "caught" in name or name in ("killed",):
             tallies["caught"] += 1
             tallies["total_tested"] += 1
-        elif name in ("missed", "survived", "alive"):
+        elif "missed" in name or name in ("survived", "alive"):
             tallies["missed"] += 1
             tallies["total_tested"] += 1
-        elif name in ("timeout", "timedout", "timed_out"):
+        elif "timeout" in name or name in ("timedout", "timed_out"):
             tallies["timeout"] += 1
             tallies["total_tested"] += 1
-        elif name in ("unviable", "unbuildable"):
+        elif "unviable" in name or name in ("unbuildable",):
             tallies["unviable"] += 1
+        elif name in ("success",) or "baseline" in name:
+            # Unmutated baseline row — ignore.
+            pass
         else:
             tallies["other"] += 1
     return tallies
