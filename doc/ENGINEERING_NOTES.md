@@ -1,3 +1,10 @@
+## 2026-11-09 — Dip: matryca capability Jupiter API (P/T/S/D)
+
+keywords: dip-agent, jupiter-trigger, API-CAPABILITY-MATRIX, Trigger V2, Swap V2, propose-only, allowlista
+
+- **What:** Katalog funkcji pokrywający allowlistę tradingu przez API (Price, Trigger auth/vault/orders/DCA, Swap exit, Decision JSONL) ze statusem ✅/⬜/🚫 i DoD Fazy E. Nie dodaje write path.
+- **paths:** `doc/dip-agent/API-CAPABILITY-MATRIX.md`, linki w `README.md` / `BRIDGE.md` / `jupiter-API.md`
+
 ## 2026-11-09 — Merge Faza B: Jupiter Trigger read + dip snapshot
 
 keywords: dip-agent, jupiter-trigger, Trigger V2, orders/history, dip-snapshot, zones, propose-only, clmm-lp-data, clmm-lp-api, clmm-lp-cli

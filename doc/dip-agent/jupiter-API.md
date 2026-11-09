@@ -3,6 +3,8 @@
 Źródło prawdy: [developers.jup.ag](https://developers.jup.ag/)  
 Portal kluczy: [developers.jup.ag/portal](https://developers.jup.ag/portal)
 
+**Implementacja / status pokrycia:** [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md) (ID P/T/S/D).
+
 Agent **nie zgaduje** endpointów. Używa tylko tabel poniżej.  
 UI jup.ag jest fallbackiem gdy API niedostępne lub mode = wyłącznie manual.
 

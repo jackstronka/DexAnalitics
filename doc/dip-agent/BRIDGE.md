@@ -74,6 +74,8 @@ Markdown (`candidates.md`, journals) wystarczy do czasu stabilnego Trigger histo
 
 Trigger create/cancel za flagą + osobny signer. Nadal: nie jeden shared keypair z Orca bez policy.
 
+Katalog funkcji do pokrycia (T4–T16, S1–S2, DoD): [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md).
+
 ---
 
 ## Jawne NO-GO
