@@ -28,6 +28,8 @@
 
 **R2 — raport:** po `make verify` / `.\tools\verify.ps1` tabela w `target/test-report/report.md` (JUnit nextest + vitest). Sam skrypt: `python tools/test_report.py --junit … --out-dir target/test-report`. CI: job `test_report` + Job Summary.
 
+**R4 — trend:** `make test-trend` (fixture) albo `python tools/test_trend.py --fetch-github --branch main --days 14`. Workflow: `.github/workflows/weekly_test_trend.yml`.
+
 Czas lokalnie: zwykle **2,5–6 min** (pełny verify).
 
 ---

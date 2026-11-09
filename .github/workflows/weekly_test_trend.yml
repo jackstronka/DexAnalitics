@@ -1,0 +1,48 @@
+name: Weekly Test Trend
+
+# R4: aggregate R2 report.json artifacts from main into a weekly quality picture.
+
+on:
+  schedule:
+    # Mondays 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: weekly-test-trend
+  cancel-in-progress: true
+
+jobs:
+  trend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Unit test test_trend.py
+        working-directory: tools
+        run: python3 test_test_trend.py
+
+      - name: Build weekly trend from test-report artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 tools/test_trend.py \
+            --fetch-github \
+            --branch main \
+            --days 14 \
+            --out-dir target/test-trend
+
+      - name: Upload trend artifact
+        if: always() && hashFiles('target/test-trend/trend.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-test-trend
+          path: |
+            target/test-trend/trend.json
+            target/test-trend/trend.md
+          if-no-files-found: ignore
