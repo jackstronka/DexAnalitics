@@ -227,6 +227,15 @@ fn create_wallet_entry(
     })
 }
 
+/// Load a host keypair by wallet id (primary/secondary stores). Used by Dip Trigger attach.
+pub(crate) fn load_wallet_keypair_for_id(
+    state: &AppState,
+    wallet_id: &str,
+) -> Result<Keypair, ApiError> {
+    let stores = resolve_wallet_stores(state);
+    load_wallet_keypair_from_stores(&stores, wallet_id)
+}
+
 fn load_wallet_keypair_from_stores(
     stores: &WalletStores,
     wallet_id: &str,

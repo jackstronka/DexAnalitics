@@ -4,6 +4,7 @@
 
 mod propose;
 mod runtime;
+mod trigger_session;
 mod zones;
 
 pub use propose::{
@@ -13,6 +14,11 @@ pub use propose::{
 pub use runtime::{
     DipLadderDefaults, DipRuntimeFile, default_runtime_path, load_dip_runtime_file,
     normalize_dip_mode, resolve_runtime_path,
+};
+pub use trigger_session::{
+    DipTriggerSession, DipTriggerSessionStatus, default_trigger_session_dir,
+    delete_trigger_session, load_trigger_session, resolve_trigger_session_dir,
+    save_trigger_session,
 };
 pub use zones::{
     DipZoneBand, DipZoneLabel, DipZonesFile, SymbolZones, classify_zone, default_sol_zones,

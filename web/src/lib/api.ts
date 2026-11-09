@@ -2609,9 +2609,39 @@ export const runScript = (id: string, triggeredBy?: string) =>
 /** `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only). */
 export type DipSnapshotResponse = OkJson<'/dip/snapshot', 'get'>
 
-export const getDipSnapshot = () => fetchJson<DipSnapshotResponse>('/dip/snapshot')
+export const getDipSnapshot = (walletId?: string) => {
+  const q = walletId?.trim()
+    ? `?${new URLSearchParams({ wallet_id: walletId.trim() })}`
+    : ''
+  return fetchJson<DipSnapshotResponse>(`/dip/snapshot${q}`)
+}
 
 /** `GET /dip/runtime` — mode + ladder defaults + secret presence flags (no secret values). */
 export type DipRuntimeResponse = OkJson<'/dip/runtime', 'get'>
 
-export const getDipRuntime = () => fetchJson<DipRuntimeResponse>('/dip/runtime')
+export const getDipRuntime = (walletId?: string) => {
+  const q = walletId?.trim()
+    ? `?${new URLSearchParams({ wallet_id: walletId.trim() })}`
+    : ''
+  return fetchJson<DipRuntimeResponse>(`/dip/runtime${q}`)
+}
+
+export type DipTriggerAttachResponse = OkJson<'/dip/trigger/attach', 'post'>
+export type DipTriggerSessionStatus = OkJson<'/dip/trigger/session', 'get'>
+
+export const postDipTriggerAttach = (walletId: string) =>
+  fetchJson<DipTriggerAttachResponse>('/dip/trigger/attach', {
+    method: 'POST',
+    body: JSON.stringify({ wallet_id: walletId }),
+  })
+
+export const getDipTriggerSession = (walletId: string) =>
+  fetchJson<DipTriggerSessionStatus>(
+    `/dip/trigger/session?${new URLSearchParams({ wallet_id: walletId.trim() })}`,
+  )
+
+export const deleteDipTriggerSession = (walletId: string) =>
+  fetchJson<DipTriggerSessionStatus>(
+    `/dip/trigger/session?${new URLSearchParams({ wallet_id: walletId.trim() })}`,
+    { method: 'DELETE' },
+  )

@@ -94,6 +94,11 @@ Markdown (`candidates.md`, journals) wystarczy do czasu stabilnego Trigger histo
 
 Trigger create/cancel za flagą + osobny signer. Nadal: nie jeden shared keypair z Orca bez policy.
 
+| Krok | Status |
+|------|--------|
+| **E0** Attach: host `wallet_id` → Trigger JWT session (`POST /dip/trigger/attach`) | DONE 2026-11-09 |
+| E1+ vault/deposit/create/cancel | ⬜ |
+
 Katalog funkcji do pokrycia (T4–T16, S1–S2, DoD): [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md).
 
 ---

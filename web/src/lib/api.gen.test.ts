@@ -100,4 +100,14 @@ describe('api.gen OpenAPI types (C2)', () => {
     expect(gen).toContain('"/dip/runtime"')
     expect(gen).toContain('DipRuntimeResponse')
   })
+
+  it('committed gen file lists /dip/trigger/attach', () => {
+    const gen = readFileSync(path.join(here, 'api.gen.ts'), 'utf8')
+    const spec = JSON.parse(
+      readFileSync(path.resolve(here, '../../../crates/api/openapi.json'), 'utf8'),
+    ) as { paths: Record<string, unknown>; components: { schemas: Record<string, unknown> } }
+    expect(spec.paths['/dip/trigger/attach']).toBeTruthy()
+    expect(spec.components.schemas.DipTriggerAttachResponse).toBeTruthy()
+    expect(gen).toContain('"/dip/trigger/attach"')
+  })
 })

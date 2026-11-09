@@ -1,22 +1,30 @@
-//! Dip Agent endpoints: snapshot (Faza B) + propose-only decision envelope (Faza C).
+//! Dip Agent endpoints: snapshot (B) + propose (C) + runtime (U2) + Trigger wallet attach (E0).
 
 use crate::error::{ApiError, ApiResult};
+use crate::handlers::wallets::load_wallet_keypair_for_id;
 use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
-    DipRuntimeResponse, DipSnapshotResponse, DipZoneBandDto, DipZonesDto,
+    DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
+    DipTriggerSessionStatusDto, DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
+use crate::state::AppState;
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
+use chrono::Utc;
 use clmm_lp_data::dip::{
     DipAuditDecisionRow, DipLadderDefaults, DipProposeAction, DipProposeDecision, DipProposeMode,
-    DipRuntimeFile, DipZoneLabel, append_dip_propose, classify_zone, default_agent_decisions_path,
-    default_zones_file, load_dip_runtime_file, load_dip_zones_file, normalize_dip_mode,
-    resolve_runtime_path,
+    DipRuntimeFile, DipTriggerSession, DipZoneLabel, append_dip_propose, classify_zone,
+    default_agent_decisions_path, default_zones_file, delete_trigger_session,
+    load_dip_runtime_file, load_dip_zones_file, load_trigger_session, normalize_dip_mode,
+    resolve_runtime_path, resolve_trigger_session_dir, save_trigger_session,
 };
-use clmm_lp_data::providers::{JupiterTriggerClient, OrderHistoryQuery, filter_open_buy_dips};
+use clmm_lp_data::providers::{
+    JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, filter_open_buy_dips,
+};
 use serde::Deserialize;
+use solana_sdk::signer::Signer;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -30,6 +38,9 @@ pub struct DipSnapshotQuery {
     /// Override path to `config/dip/zones.json`.
     #[serde(default)]
     pub zones_path: Option<String>,
+    /// Prefer Trigger session JWT bound to this host `wallet_id` (after `/dip/trigger/attach`).
+    #[serde(default)]
+    pub wallet_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -52,12 +63,49 @@ fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-fn trigger_jwt(headers: &HeaderMap) -> Option<String> {
-    bearer_from_headers(headers).or_else(|| {
-        std::env::var("CLMM_JUPITER_TRIGGER_JWT")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    })
+fn env_trigger_jwt() -> Option<String> {
+    std::env::var("CLMM_JUPITER_TRIGGER_JWT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Resolve Trigger access token: Authorization → per-wallet session → env.
+/// Returns `(jwt, source_label)`.
+fn resolve_trigger_jwt(
+    headers: &HeaderMap,
+    wallet_id: Option<&str>,
+) -> (Option<String>, &'static str) {
+    if let Some(j) = bearer_from_headers(headers) {
+        return (Some(j), "authorization_header");
+    }
+    if let Some(wid) = wallet_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let dir = resolve_trigger_session_dir(None);
+        if let Ok(Some(session)) = load_trigger_session(&dir, wid) {
+            return (Some(session.tokens.access_token), "wallet_session");
+        }
+    }
+    if let Some(j) = env_trigger_jwt() {
+        return (Some(j), "env_CLMM_JUPITER_TRIGGER_JWT");
+    }
+    (None, "none")
+}
+
+fn session_status_dto(wallet_id: &str) -> Option<DipTriggerSessionStatusDto> {
+    let dir = resolve_trigger_session_dir(None);
+    match load_trigger_session(&dir, wallet_id) {
+        Ok(Some(s)) => Some(DipTriggerSessionStatusDto {
+            wallet_id: s.wallet_id,
+            wallet_pubkey: s.wallet_pubkey,
+            attached: true,
+            expires_at: s.tokens.expires_at,
+            attached_at: Some(s.attached_at),
+        }),
+        _ => None,
+    }
+}
+
+fn trigger_jwt_present(headers: &HeaderMap, wallet_id: Option<&str>) -> bool {
+    resolve_trigger_jwt(headers, wallet_id).0.is_some()
 }
 
 fn jupiter_api_key(headers: &HeaderMap) -> Option<String> {
@@ -92,7 +140,8 @@ fn resolve_zones_path(override_path: Option<&str>) -> PathBuf {
     tag = "Dip",
     params(
         ("include_orders" = Option<bool>, Query, description = "Fetch Trigger active orders when JWT present"),
-        ("zones_path" = Option<String>, Query, description = "Override path to zones.json")
+        ("zones_path" = Option<String>, Query, description = "Override path to zones.json"),
+        ("wallet_id" = Option<String>, Query, description = "Use Trigger session for this host wallet id")
     ),
     responses(
         (status = 200, description = "Dip snapshot", body = DipSnapshotResponse)
@@ -129,8 +178,11 @@ pub async fn get_dip_snapshot(
     let mut orders_source = "skipped".to_string();
 
     if q.include_orders {
-        match (jupiter_api_key(&headers), trigger_jwt(&headers)) {
+        let wallet_id = q.wallet_id.as_deref();
+        let (jwt, jwt_source) = resolve_trigger_jwt(&headers, wallet_id);
+        match (jupiter_api_key(&headers), jwt) {
             (Some(api_key), Some(jwt)) => {
+                notes.push(format!("trigger_jwt_source={jwt_source}"));
                 let client = JupiterTriggerClient::new(Some(api_key));
                 match client
                     .get_order_history(
@@ -174,7 +226,7 @@ pub async fn get_dip_snapshot(
             }
             (_, None) => {
                 notes.push(
-                    "Trigger JWT missing — pass Authorization: Bearer <jwt> or CLMM_JUPITER_TRIGGER_JWT"
+                    "Trigger JWT missing — POST /dip/trigger/attach {wallet_id}, or Authorization Bearer, or CLMM_JUPITER_TRIGGER_JWT"
                         .into(),
                 );
                 orders_source = "no_jwt".into();
@@ -221,7 +273,8 @@ pub async fn get_dip_snapshot(
     path = "/dip/runtime",
     tag = "Dip",
     params(
-        ("runtime_path" = Option<String>, Query, description = "Override path to runtime.yaml")
+        ("runtime_path" = Option<String>, Query, description = "Override path to runtime.yaml"),
+        ("wallet_id" = Option<String>, Query, description = "Include Trigger session status for this wallet")
     ),
     responses(
         (status = 200, description = "Dip runtime (public)", body = DipRuntimeResponse)
@@ -241,6 +294,12 @@ pub async fn get_dip_runtime(
         }
     };
 
+    let wallet_id = q
+        .wallet_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let trigger_session = wallet_id.and_then(session_status_dto);
     let ladder = ladder_dto(&file.ladder);
     Ok(Json(DipRuntimeResponse {
         path: path.to_string_lossy().to_string(),
@@ -248,7 +307,8 @@ pub async fn get_dip_runtime(
         mode: normalize_dip_mode(&file.mode),
         dca_allowed: file.jupiter.dca_allowed,
         jupiter_api_key_set: jupiter_api_key(&headers).is_some(),
-        trigger_jwt_set: trigger_jwt(&headers).is_some(),
+        trigger_jwt_set: trigger_jwt_present(&headers, wallet_id),
+        trigger_session,
         ladder,
         notes,
     }))
@@ -258,6 +318,154 @@ pub async fn get_dip_runtime(
 pub struct DipRuntimeQuery {
     #[serde(default)]
     pub runtime_path: Option<String>,
+    #[serde(default)]
+    pub wallet_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DipTriggerSessionQuery {
+    pub wallet_id: String,
+}
+
+/// `POST /dip/trigger/attach` — sign Trigger auth challenge with host keypair for `wallet_id`.
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/attach",
+    tag = "Dip",
+    request_body = DipTriggerAttachRequest,
+    responses(
+        (status = 200, description = "Trigger session attached (tokens stored server-side)", body = DipTriggerAttachResponse)
+    )
+)]
+pub async fn post_dip_trigger_attach(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerAttachRequest>,
+) -> ApiResult<Json<DipTriggerAttachResponse>> {
+    let wallet_id = req.wallet_id.trim();
+    if wallet_id.is_empty() {
+        return Err(ApiError::bad_request("wallet_id required"));
+    }
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+
+    let kp = load_wallet_keypair_for_id(&state, wallet_id)?;
+    let pubkey = kp.pubkey().to_string();
+    let client = JupiterTriggerClient::new(Some(api_key));
+
+    let challenge = client
+        .request_challenge(&pubkey, "message")
+        .await
+        .map_err(|e| ApiError::bad_request(format!("trigger auth/challenge failed: {e}")))?;
+
+    let signature = match challenge {
+        TriggerChallenge::Message { challenge } => {
+            kp.sign_message(challenge.as_bytes()).to_string()
+        }
+        TriggerChallenge::Transaction { .. } => {
+            return Err(ApiError::bad_request(
+                "transaction challenge not supported for host attach v1 — use type=message",
+            ));
+        }
+    };
+
+    let tokens = client
+        .verify_challenge(&pubkey, &signature, "message")
+        .await
+        .map_err(|e| ApiError::bad_request(format!("trigger auth/verify failed: {e}")))?;
+
+    if tokens.wallet_pubkey.trim() != pubkey {
+        return Err(ApiError::internal(
+            "verify returned wallet_pubkey mismatch vs host keypair",
+        ));
+    }
+
+    let session = DipTriggerSession {
+        wallet_id: wallet_id.to_string(),
+        wallet_pubkey: pubkey,
+        tokens,
+        attached_at: Utc::now().to_rfc3339(),
+    };
+    let dir = resolve_trigger_session_dir(None);
+    save_trigger_session(&dir, &session)
+        .map_err(|e| ApiError::internal(format!("save trigger session: {e}")))?;
+
+    Ok(Json(DipTriggerAttachResponse {
+        session: DipTriggerSessionStatusDto {
+            wallet_id: session.wallet_id,
+            wallet_pubkey: session.wallet_pubkey,
+            attached: true,
+            expires_at: session.tokens.expires_at,
+            attached_at: Some(session.attached_at),
+        },
+        notes: vec![
+            "Trigger JWT stored under data/dip/trigger_sessions (not returned)".into(),
+            "No create/cancel — attach is auth-only (E0)".into(),
+        ],
+    }))
+}
+
+/// `GET /dip/trigger/session` — public status for a wallet (no JWT).
+#[utoipa::path(
+    get,
+    path = "/dip/trigger/session",
+    tag = "Dip",
+    params(
+        ("wallet_id" = String, Query, description = "Host wallet id")
+    ),
+    responses(
+        (status = 200, description = "Trigger session status", body = DipTriggerSessionStatusDto)
+    )
+)]
+pub async fn get_dip_trigger_session(
+    Query(q): Query<DipTriggerSessionQuery>,
+) -> ApiResult<Json<DipTriggerSessionStatusDto>> {
+    let wallet_id = q.wallet_id.trim();
+    if wallet_id.is_empty() {
+        return Err(ApiError::bad_request("wallet_id required"));
+    }
+    if let Some(dto) = session_status_dto(wallet_id) {
+        return Ok(Json(dto));
+    }
+    Ok(Json(DipTriggerSessionStatusDto {
+        wallet_id: wallet_id.to_string(),
+        wallet_pubkey: String::new(),
+        attached: false,
+        expires_at: None,
+        attached_at: None,
+    }))
+}
+
+/// `DELETE /dip/trigger/session` — detach Trigger session for wallet.
+#[utoipa::path(
+    delete,
+    path = "/dip/trigger/session",
+    tag = "Dip",
+    params(
+        ("wallet_id" = String, Query, description = "Host wallet id")
+    ),
+    responses(
+        (status = 200, description = "Detach result", body = DipTriggerSessionStatusDto)
+    )
+)]
+pub async fn delete_dip_trigger_session(
+    Query(q): Query<DipTriggerSessionQuery>,
+) -> ApiResult<Json<DipTriggerSessionStatusDto>> {
+    let wallet_id = q.wallet_id.trim();
+    if wallet_id.is_empty() {
+        return Err(ApiError::bad_request("wallet_id required"));
+    }
+    let dir = resolve_trigger_session_dir(None);
+    let _ = delete_trigger_session(&dir, wallet_id)
+        .map_err(|e| ApiError::internal(format!("delete trigger session: {e}")))?;
+    Ok(Json(DipTriggerSessionStatusDto {
+        wallet_id: wallet_id.to_string(),
+        wallet_pubkey: String::new(),
+        attached: false,
+        expires_at: None,
+        attached_at: None,
+    }))
 }
 
 fn ladder_dto(l: &DipLadderDefaults) -> DipLadderDefaultsDto {

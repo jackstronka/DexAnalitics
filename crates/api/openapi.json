@@ -1051,6 +1051,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Include Trigger session status for this wallet",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1092,6 +1101,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Use Trigger session for this host wallet id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1101,6 +1119,99 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DipSnapshotResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dip/trigger/attach": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/attach` — sign Trigger auth challenge with host keypair for `wallet_id`.",
+        "operationId": "post_dip_trigger_attach",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerAttachRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Trigger session attached (tokens stored server-side)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerAttachResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dip/trigger/session": {
+      "get": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`GET /dip/trigger/session` — public status for a wallet (no JWT).",
+        "operationId": "get_dip_trigger_session",
+        "parameters": [
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Host wallet id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger session status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerSessionStatusDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`DELETE /dip/trigger/session` — detach Trigger session for wallet.",
+        "operationId": "delete_dip_trigger_session",
+        "parameters": [
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Host wallet id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detach result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerSessionStatusDto"
                 }
               }
             }
@@ -7625,7 +7736,18 @@
           },
           "trigger_jwt_set": {
             "type": "boolean",
-            "description": "`CLMM_JUPITER_TRIGGER_JWT` (or Authorization) present — never the value."
+            "description": "Bearer env JWT **or** per-wallet Trigger session present — never the value."
+          },
+          "trigger_session": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DipTriggerSessionStatusDto",
+                "description": "Optional: session status for `wallet_id` query (no JWT)."
+              }
+            ]
           }
         }
       },
@@ -7685,6 +7807,70 @@
           },
           "zones": {
             "$ref": "#/components/schemas/DipZonesDto"
+          }
+        }
+      },
+      "DipTriggerAttachRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/attach` — host keypair signs Jupiter Trigger auth challenge for `wallet_id`.",
+        "required": [
+          "wallet_id"
+        ],
+        "properties": {
+          "wallet_id": {
+            "type": "string",
+            "description": "Local wallet id (keypair file stem on API host)."
+          }
+        }
+      },
+      "DipTriggerAttachResponse": {
+        "type": "object",
+        "description": "Response after attach (tokens stored server-side; not returned).",
+        "required": [
+          "session",
+          "notes"
+        ],
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "session": {
+            "$ref": "#/components/schemas/DipTriggerSessionStatusDto"
+          }
+        }
+      },
+      "DipTriggerSessionStatusDto": {
+        "type": "object",
+        "description": "Public Trigger session status (no access/refresh tokens).",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "attached"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean"
+          },
+          "attached_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
           }
         }
       },

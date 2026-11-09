@@ -43,6 +43,7 @@ Live Trigger create/cancel = Faza E (osobny GO + osobna policy signera). Nie ł�
 - **B:** Trigger read + zones — DONE (`GET /dip/snapshot`, `dip-snapshot` CLI)  
 - **C:** propose `buy_dip|hold|…` → `agent_decisions.jsonl` — DONE (`POST /dip/propose`, CLI `dip-propose`, `kind=dip_propose`)  
 - **D:** UI limity + OOR LP — **U1**+**U1b**+**U2** DONE (`/dip` + Settings runtime); U3+ open  
+- **E0:** Trigger attach do host `wallet_id` (`POST /dip/trigger/attach`) — DONE; create/cancel nadal E+  
 - **E:** live create/cancel za flagą  
 
 Szczegóły: [`BRIDGE.md`](BRIDGE.md). Powierzchnia AI: [`AI_AGENT_LAYER.md`](../AI_AGENT_LAYER.md) § D.
