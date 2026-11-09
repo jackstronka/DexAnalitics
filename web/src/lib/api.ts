@@ -1,6 +1,7 @@
 // API client for Bociarz LP backend.
 // New endpoints: type request/response from `./api.contract` (generated OpenAPI).
 // Do not add handwritten interfaces for new routes; migrate api.ts types when touching an old call (C2).
+import type { OkJson } from './api.contract'
 export type { OkJson, Schema } from './api.contract'
 
 const API_BASE = '/api/v1'
@@ -2604,3 +2605,8 @@ export const runScript = (id: string, triggeredBy?: string) =>
       triggered_by: triggeredBy ?? 'web',
     }),
   })
+
+/** `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only). */
+export type DipSnapshotResponse = OkJson<'/dip/snapshot', 'get'>
+
+export const getDipSnapshot = () => fetchJson<DipSnapshotResponse>('/dip/snapshot')

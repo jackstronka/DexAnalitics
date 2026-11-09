@@ -312,7 +312,7 @@ Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, za
 | Krok | Zakres | Zależność |
 |------|--------|-----------|
 | **U0** | Ten dokument + linki + sekcja 3Commas (§1b) | — |
-| **U1** | `/dip` read-only: strefa + open orders (`/dip/snapshot`) | Faza B ✅ |
+| **U1** | `/dip` read-only: strefa + open orders (`/dip/snapshot`) | Faza B ✅ · **DONE 2026-11-09** |
 | **U1b** | **`DipLadderPreviewTable` + `DipLadderSummary`** (lokalna matematyka drabinki, bez create) | tylko web lib + cena P1 |
 | **U2** | Settings: S-API, S-JUP, S-JWT, S-DIP-MODE, **S-LADDER** defaults (read) | B + runtime/yaml |
 | **U3** | AH5 decisions browser + AH7 OOR alert | API decisions ✅ |
@@ -344,8 +344,8 @@ Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, za
 
 | Co chronimy | Typ testu | Fixture / dane | Stan |
 |-------------|-----------|----------------|------|
-| Client typów `/dip/snapshot` z OpenAPI | kontrakt (`api.gen` / `api.contract`) | wygenerowane OpenAPI | 🟡 po U1 |
-| Render strefy / empty orders bez JWT | unit web (`*.test.ts`) | mock JSON snapshot | ❌ |
+| Client typów `/dip/snapshot` z OpenAPI | kontrakt (`api.gen` / `api.contract`) | wygenerowane OpenAPI | ✅ U1 (`api.gen.test.ts`) |
+| Render strefy / empty orders bez JWT | unit web (`dipSnapshotDisplay.test.ts`) | mock `orders_source` | ✅ U1 |
 | **Ladder preview:** deviation / avg / required zgodne z formułami (scale=1 i scale≠1) | unit web `dipLadder*.ts` | syntetyczne ceny | ❌ U1b |
 | Summary: Required &gt; Available → propose disabled | unit web | mock balances | ❌ U1b |
 | Propose card nie woła create bez confirm | unit web | mock decision row | ❌ (C/D) |
