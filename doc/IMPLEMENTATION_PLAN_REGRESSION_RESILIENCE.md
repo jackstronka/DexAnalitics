@@ -197,7 +197,7 @@ Istniejący `lineage_shadow_expected.json` przeniesiony na `insta` (B5).
 | -- | ------ | ----- | -------- |
 | **E1** ✅ PR #35 | `verify-fast`: `cargo test -p` dla crate'ów z diffu + zależnych; web `tsc`+`vitest` tylko gdy ruszony `web/` lub `openapi.json` | S | R-PR7 |
 | **E2** ✅ PR #26 | `cargo nextest` lokalnie i w CI (równoległość, lepsze raporty flaków) | S | — |
-| **E3** | Szablon ticketu dla agenta: ID z planu, zakazane pliki, komenda verify, „characterization najpierw” przy PnL/GL/backtest | S | R-PR6 |
+| **E3** ✅ PR #36 | Szablon ticketu dla agenta: [`templates/AGENT_TICKET.md`](templates/AGENT_TICKET.md) — ID z planu, zakazane pliki, komenda verify, „characterization najpierw” przy PnL/GL/backtest | S | R-PR6 |
 
 ### Faza R — czytelne i spójne wyniki testów (G9), od fazy A
 

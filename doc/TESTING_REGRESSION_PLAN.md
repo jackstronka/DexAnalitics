@@ -204,6 +204,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `tools/verify_fast.py` / `make verify-fast` / `tools/verify-fast.ps1`: clippy+nextest tylko dla pakietów z `git diff` (+ reverse deps); web przy `web/` lub `openapi.json`. Unit: `tools/test_verify_fast.py`.
 
+### E3 (2026-11-09) — szablon ticketu dla agenta
+
+- `doc/templates/AGENT_TICKET.md`: Plan ID, zakazane pliki, komenda verify, characterization najpierw (PnL/GL/backtest). Linki: `AGENTS.md`, `AI_MERGE_CHECKLIST.md`.
+
 ### R5 (2026-11-09) — Ochrona testami w MASTER §2.2
 
 - Kolumna **Ochrona testami** w tabeli dojrzałości: `brak` / `unit` / `golden` / `golden+niezmiennik`. Mapa `ci/subsystem-protection.toml` + `tools/test_protection.py` (z R2/R4 JSON). CI: `test_protection_unit`. Lokalnie: `make test-protection`.

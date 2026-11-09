@@ -10,7 +10,8 @@ Bociarz LP — a Rust (edition 2024) monorepo with 8 crates and a React/TypeScri
 **Decision / orchestration layer (vision, phases, §1b capability registry / NO-GO, §11 audit, implementation plan):** `doc/DECISION_LAYER.md`, `doc/IMPLEMENTATION_PLAN_DECISION_LAYER.md`.  
 **Dip / Buy the Dip (propose-only + Trigger read):** [`doc/dip-agent/README.md`](doc/dip-agent/README.md), [`config/dip/`](config/dip/), `GET /api/v1/dip/snapshot`, CLI `dip-snapshot`.
 
-**Red CI on a PR:** classify and act per [`doc/templates/CI_TRIAGE.md`](doc/templates/CI_TRIAGE.md) (D4). Do **not** update goldens / expected money without explicit GO (`economic_regression`).
+**Red CI on a PR:** classify and act per [`doc/templates/CI_TRIAGE.md`](doc/templates/CI_TRIAGE.md) (D4). Do **not** update goldens / expected money without explicit GO (`economic_regression`).  
+**New agent ticket (E3):** fill [`doc/templates/AGENT_TICKET.md`](doc/templates/AGENT_TICKET.md) first (plan ID, forbidden files, verify command, characterization-first for PnL/GL/backtest).
 
 ### Required system dependencies
 
