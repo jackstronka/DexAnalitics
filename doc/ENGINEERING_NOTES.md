@@ -1,3 +1,10 @@
+## 2026-11-09 — D3: Bugbot flaguje osłabianie testów
+
+keywords: D3, BUGBOT, Bugbot, G6, assertion_weakened, ignore, golden, snapshot, test-integrity, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Root `.cursor/BUGBOT.md` (Bugbot nie czyta `*.mdc`) każe komentować PR przy osłabionej asercji, usuniętym/opróżnionym goldenie bez Golden delta, nowym/rozszerzonym `#[ignore]`/skip, wczesnym `return` w teście oraz pokrewnych lukach coverage. Klasa: `assertion_weakened` / `economic_regression`.
+- **paths:** `.cursor/BUGBOT.md`
+
 ## 2026-10-08 — D2: CODEOWNERS na goldeny / fixture / OpenAPI
 
 keywords: D2, CODEOWNERS, G6, golden, fixtures, snapshots, openapi, branch-protection, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
