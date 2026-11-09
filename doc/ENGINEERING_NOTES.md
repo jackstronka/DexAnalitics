@@ -1,3 +1,10 @@
+## 2026-11-09 — Dip Faza D U2: Settings + GET /dip/runtime
+
+keywords: dip-agent, UI, Faza D, U2, /dip/runtime, Settings, S-JUP, S-JWT, S-DIP-MODE, S-LADDER, runtime.yaml, serde_yaml, clmm-lp-data, clmm-lp-api
+
+- **What:** `load_dip_runtime_file` + sekcja `ladder:` w `config/dip/runtime.yaml`; `GET /api/v1/dip/runtime` zwraca mode / dca_allowed / ladder defaults oraz **presence** Jupiter key + Trigger JWT (bez wartości). Settings UI (S-API hint 8081, S-JUP/S-JWT/S-DIP-MODE/S-LADDER read-only). `/dip` seeduje formularz drabinki z runtime. OpenAPI + `api.gen.ts`.
+- **paths:** `crates/data/src/dip/runtime.rs`, `crates/api/src/handlers/dip.rs`, `web/src/pages/Settings.tsx`, `config/dip/runtime.yaml`
+
 ## 2026-11-09 — Dip Faza D U1b: ladder preview + Summary (local math)
 
 keywords: dip-agent, UI, Faza D, U1b, dipLadder, 3Commas, safety orders, DipLadderPreviewTable, DipLadderSummary, web

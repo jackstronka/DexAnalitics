@@ -18,7 +18,7 @@
 | Windows | `.\tools\verify.ps1` | to samo; `-SkipWeb` / `-SkipRust` |
 | Szybko (E1) | `make verify-fast` / `.\tools\verify-fast.ps1` | tylko crate’y z diffu vs `origin/main` (+ reverse deps); web tylko przy `web/` / `openapi.json` |
 | Szybko, tylko Rust | `make test` albo `LOGLEVEL=WARN cargo nextest run --workspace` | bez fmt/clippy/web; wymaga `cargo-nextest` (**E2**) |
-| Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint` | C2 gen + typy + 86 testy `src/lib/*.test.ts` + ESLint (C6) |
+| Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint` | C2 gen + typy + 90 testy `src/lib/*.test.ts` + ESLint (C6) |
 | Hook przed pushem | `git config core.hooksPath .githooks` | pre-push odpala `verify` (na Windows `verify.ps1`) |
 
 `make verify` **nie** odpala testów Postgres. Te są w jobie CI `db` albo ręcznie (§5).
@@ -223,11 +223,13 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `providers::jupiter_trigger` | Trigger V2 read: filter Buy-the-Dip, mock `orders/history` + `auth/verify` |
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
 | `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
+| `dip::runtime` | parse `runtime.yaml` mode + ladder defaults (U2) |
 
 ```bash
 cargo test -p clmm-lp-data jupiter_trigger
 cargo test -p clmm-lp-data dip::zones
 cargo test -p clmm-lp-data dip::propose
+cargo test -p clmm-lp-data dip::runtime
 ```
 
 ### `clmm-lp-execution`
@@ -271,15 +273,16 @@ Orca: tick↔price (C3(3) roundtrip `|t|≤443636`), deposit quote, wrap/unwrap,
 
 Tick/price (C3(3) roundtrip + granica 443636), IL, fee math, concentrated liquidity, constant product, price impact.
 
-### Web (`cd web && npx vitest run`) — 18 plików / 86 testy
+### Web (`cd web && npx vitest run`) — 19 plików / 90 testy
 
 Tylko `web/src/lib/*.test.ts` (logika liczbowa). **Brak** testów stron/komponentów.
 
 | Plik | Co robi |
 | ---- | ------- |
-| `api.gen.test.ts` | C2: `HealthResponse` + `DipSnapshotResponse` z `api.contract` + `/health` / `/dip/snapshot` w `api.gen.ts` / `openapi.json` |
+| `api.gen.test.ts` | C2: `HealthResponse` + `DipSnapshotResponse` + `DipRuntimeResponse` + `/dip/runtime` |
 | `dipSnapshotDisplay.test.ts` | U1 Dip UI: empty CTA (`no_jwt`/…), format USD/strefy |
 | `dipLadder.test.ts` | U1b: drabinka 3C (scale=1/≠1), Required&gt;Available, min size |
+| `dipRuntimeDisplay.test.ts` | U2: presence / live-armed / ladder summary line |
 | `whirlpoolTicks.test.ts` | C6: tick↔price UI, spacing, expand in-range |
 | `chainCapital.test.ts` / `sessionCapital.test.ts` | C6: quote body, inventory raw→UI, spend cap ≥ 0 |
 | `openPositionSwapEstimates.test.ts` | C6: deficyt vs saldo, ExactIn +5%, cena puli |

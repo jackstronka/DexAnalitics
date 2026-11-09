@@ -41,3 +41,14 @@ monitor:
 daemon:
   propose_decision_each_universe_tick: false  # true later when Decision loop wired
   write_candidates_md: true
+
+# Ladder defaults for `/dip` preview (U1b) + Settings S-LADDER (U2). No secrets.
+ladder:
+  base_order_usd: 50
+  safety_order_usd: 50
+  deviation_pct: 1
+  deviation_step_scale: 1
+  volume_scale: 1.5
+  max_safety_orders: 5
+  take_profit_pct: 1.5
+  min_order_usd: 10

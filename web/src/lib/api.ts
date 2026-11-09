@@ -2610,3 +2610,8 @@ export const runScript = (id: string, triggeredBy?: string) =>
 export type DipSnapshotResponse = OkJson<'/dip/snapshot', 'get'>
 
 export const getDipSnapshot = () => fetchJson<DipSnapshotResponse>('/dip/snapshot')
+
+/** `GET /dip/runtime` — mode + ladder defaults + secret presence flags (no secret values). */
+export type DipRuntimeResponse = OkJson<'/dip/runtime', 'get'>
+
+export const getDipRuntime = () => fetchJson<DipRuntimeResponse>('/dip/runtime')

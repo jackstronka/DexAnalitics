@@ -480,6 +480,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /dip/runtime` — mode + ladder defaults + whether Jupiter key / Trigger JWT are set (no secrets). */
+        get: operations["get_dip_runtime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/snapshot": {
         parameters: {
             query?: never;
@@ -3011,6 +3028,25 @@ export interface components {
             /** Format: double */
             trigger_price_usd?: number | null;
         };
+        /** @description Ladder defaults from `config/dip/runtime.yaml` (`ladder:`). */
+        DipLadderDefaultsDto: {
+            /** Format: double */
+            base_order_usd: number;
+            /** Format: double */
+            deviation_pct: number;
+            /** Format: double */
+            deviation_step_scale: number;
+            /** Format: int32 */
+            max_safety_orders: number;
+            /** Format: double */
+            min_order_usd: number;
+            /** Format: double */
+            safety_order_usd: number;
+            /** Format: double */
+            take_profit_pct: number;
+            /** Format: double */
+            volume_scale: number;
+        };
         /** @description `POST /dip/propose` — append propose-only dip decision (`kind=dip_propose`) to JSONL. */
         DipProposeRequest: {
             /** @description `buy_dip` | `sell` | `hold` | `cancel_order` | `adjust_lp` | `skip` */
@@ -3035,6 +3071,21 @@ export interface components {
             path: string;
             row: components["schemas"]["AgentDecisionRow"];
             written: boolean;
+        };
+        /** @description `GET /dip/runtime` — mode + ladder defaults + secret *presence* flags (no secret values). */
+        DipRuntimeResponse: {
+            dca_allowed: boolean;
+            file_missing: boolean;
+            /** @description `JUPITER_API_KEY` (or request header) present on API host — never the value. */
+            jupiter_api_key_set: boolean;
+            ladder: components["schemas"]["DipLadderDefaultsDto"];
+            /** @description `propose-only` | `paper` | `live` (normalized when recognized). */
+            mode: string;
+            notes: string[];
+            /** @description Path that was read (or attempted). */
+            path: string;
+            /** @description `CLMM_JUPITER_TRIGGER_JWT` (or Authorization) present — never the value. */
+            trigger_jwt_set: boolean;
         };
         /** @description `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders. */
         DipSnapshotResponse: {
@@ -5894,6 +5945,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipProposeResponse"];
+                };
+            };
+        };
+    };
+    get_dip_runtime: {
+        parameters: {
+            query?: {
+                /** @description Override path to runtime.yaml */
+                runtime_path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dip runtime (public) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipRuntimeResponse"];
                 };
             };
         };

@@ -312,6 +312,7 @@ fn create_base_http_router(state: AppState) -> Router {
         .route("/prices/jupiter", get(handlers::get_jupiter_prices))
         // Dip Agent (Jupiter Trigger read + zones; propose-only — no create)
         .route("/dip/snapshot", get(handlers::get_dip_snapshot))
+        .route("/dip/runtime", get(handlers::get_dip_runtime))
         .route("/dip/propose", post(handlers::post_dip_propose))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
         .route(
