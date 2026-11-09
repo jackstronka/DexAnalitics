@@ -142,6 +142,14 @@ test-protection:
 	python3 tools/test_protection.py --report $(REPORT)
 	python3 tools/test_protection.py --report $(REPORT) --check-master
 
+# D5: cargo-mutants on economic aggregators (slow; install: cargo install --locked cargo-mutants)
+.PHONY: mutants-d5 mutants-d5-unit
+mutants-d5-unit:
+	cd tools && python3 test_mutants_d5_summary.py
+
+mutants-d5:
+	bash scripts/ci/mutants-d5.sh
+
 # Run the project
 .PHONY: run
 run:

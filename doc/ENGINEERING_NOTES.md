@@ -1,9 +1,15 @@
+## 2026-11-09 — D5: cargo-mutants na agregatorach ekonomicznych
+
+keywords: D5, cargo-mutants, mutants, wallet_session, chain_economic_totals, session_capital, target_usd, survivors, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** Scoped `cargo mutants` (wallet_session agregatory, chain_economic_totals headline/refresh, session_capital clamps, `target_usd_*` w rebalance) przez `scripts/ci/mutants-d5.sh` + `.cargo/mutants.toml`. Summary `tools/mutants_d5_summary.py` (próg przeżycia &lt; 10%). Workflow `mutants_d5.yml` (schedule + `workflow_dispatch`) = **preferowane źródło prawdy** (Linux). Lokalnie: `make mutants-d5` (Windows bez Developer Mode → `--in-place`; symlink copy pada z os 1314). Unit: `make mutants-d5-unit`. Po pierwszym zielonym runie z survivorami — dopisać asercje w B/C w follow-up PR. PR #32.
+- **paths:** `.cargo/mutants.toml`, `scripts/ci/mutants-d5.sh`, `tools/mutants_d5_summary.py`, `.github/workflows/mutants_d5.yml`
 
 ## 2026-11-09 — API HTTP contract tests (typed happy-path)
 
 keywords: api, http-contract, axum, oneshot, HealthResponse, ListPositionsResponse, handlers, clmm-lp-api, TESTS
 
-- **What:** `handlers::api_http_contract_tests` — beyond status-code smoke (`endpoint_coverage_tests`): `oneshot` → deserialize into OpenAPI models for `/health`, `/metrics`, `/positions`, `/strategies` (seeded), `/wallets`, and close-all unknown batch → 404 JSON. Hermetic `RpcConfig` (no public fallbacks).
+- **What:** `handlers::api_http_contract_tests` — beyond status-code smoke (`endpoint_coverage_tests`): `oneshot` → deserialize into OpenAPI models for `/health`, `/metrics`, `/positions`, `/strategies` (seeded), `/wallets`, and close-all 404 JSON. Hermetic `RpcConfig` (no public fallbacks). PR #33.
 - **paths:** `crates/api/src/handlers/api_http_contract_tests.rs`
 
 ## 2026-11-09 — Plan UI: Reuse inventory Dex → Jupiter/Dip

@@ -1,0 +1,15 @@
+# D5 — cargo-mutants defaults for this workspace.
+# Scoped economic runs: `make mutants-d5` / `scripts/ci/mutants-d5.sh`
+# (CLI -f / --examine-re override examine_globs when passed.)
+
+test_tool = "nextest"
+
+# Skip noise that rarely carries economic meaning.
+exclude_re = [
+  "impl Debug",
+  "impl Display",
+  "to_string",
+  "with_context",
+  "bail!",
+  "tracing::",
+]

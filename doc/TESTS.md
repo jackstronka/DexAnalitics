@@ -32,6 +32,8 @@
 
 **R5 — ochrona subsystemów:** mapa [`ci/subsystem-protection.toml`](../ci/subsystem-protection.toml) → kolumna w [`MASTER_IMPLEMENTATION_PLAN.md`](MASTER_IMPLEMENTATION_PLAN.md) §2.2. `make test-protection` (fixture) / `REPORT=target/test-report/report.json make test-protection`; zapis: `python tools/test_protection.py --report … --write-master`.
 
+**D5 — cargo-mutants:** `make mutants-d5` (wymaga `cargo install --locked cargo-mutants`) albo Actions → **Mutants D5**. Summary: `target/mutants-d5/summary.md`. Unit parsera: `make mutants-d5-unit`.
+
 Czas lokalnie: zwykle **2,5–6 min** (pełny verify).
 
 ---
@@ -301,6 +303,7 @@ Wymagane na `main` (branch protection):
 | `critical_area_requires_tests` | zmiana pliku krytycznego (GL, lineage, `chain_portfolio`, `wallet_session`, `session_capital`, migracje, …) wymaga dodanych linii testowych albo etykiety `no-tests-needed` |
 | `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |
 | `test_protection_unit` (R5) | `tools/test_protection.py` + fixture → poziomy ochrony; `--check-master` vs `MASTER_IMPLEMENTATION_PLAN.md` §2.2 |
+| `mutants_d5_summary_unit` (D5) | parser outcomes.json; pełny `make mutants-d5` / workflow `Mutants D5` osobno (wolne) |
 | CODEOWNERS (D2) | GitHub prosi `@jackstronka` o review przy zmianie golden/fixture/`openapi.json`; merge-block tylko po „Require review from Code Owners” |
 | `bugs_have_tests` | **C5:** `high`/`critical` w `BUGS.md` → nazwa testu z `Guards/tests` istnieje, albo `manual:` |
 
