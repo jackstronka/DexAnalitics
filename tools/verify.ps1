@@ -84,7 +84,19 @@ foreach ($p in @(
 }
 if ($junit.Count -gt 0) {
     Write-Host "`n=== test report (R2) ===" -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot 'run_test_report.ps1') -Junit $junit -OutDir 'target/test-report'
+    $pyArgs = @()
+    foreach ($j in $junit) { $pyArgs += @('--junit', $j) }
+    $pyArgs += @('--out-dir', 'target/test-report')
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        & py -3 (Join-Path $PSScriptRoot 'test_report.py') @pyArgs
+    } else {
+        & python3 (Join-Path $PSScriptRoot 'test_report.py') @pyArgs
+    }
+    $reportMd = Join-Path $repoRoot 'target/test-report/report.md'
+    if (Test-Path $reportMd) {
+        Get-Content $reportMd | Write-Host
+    }
 }
 
 Write-Host "`n=== verify summary ===" -ForegroundColor Cyan
