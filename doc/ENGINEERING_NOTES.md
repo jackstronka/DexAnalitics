@@ -5,6 +5,13 @@ keywords: D5, cargo-mutants, mutants, wallet_session, chain_economic_totals, ses
 - **What:** Scoped `cargo mutants` (wallet_session agregatory, chain_economic_totals headline/refresh, session_capital clamps, `target_usd_*` w rebalance) przez `scripts/ci/mutants-d5.sh` + `.cargo/mutants.toml`. Summary `tools/mutants_d5_summary.py` (próg przeżycia &lt; 10%). Workflow `mutants_d5.yml` (schedule + `workflow_dispatch`) = **preferowane źródło prawdy** (Linux). Lokalnie: `make mutants-d5` (Windows bez Developer Mode → `--in-place`; symlink copy pada z os 1314). Unit: `make mutants-d5-unit`. Po pierwszym zielonym runie z survivorami — dopisać asercje w B/C w follow-up PR. PR #32.
 - **paths:** `.cargo/mutants.toml`, `scripts/ci/mutants-d5.sh`, `tools/mutants_d5_summary.py`, `.github/workflows/mutants_d5.yml`
 
+## 2026-11-09 — E1: verify-fast (crates z diffu + reverse deps)
+
+keywords: E1, verify-fast, G7, nextest, clippy, web, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
+
+- **What:** `tools/verify_fast.py` (+ `make verify-fast` / `tools/verify-fast.ps1`) wybiera pakiety z `git diff base...HEAD` (plus reverse dependents), odpala fmt/clippy/nextest tylko dla nich; web tylko przy `web/` lub `openapi.json`. Pełny workspace przy root CI/toolchain. Unit: `tools/test_verify_fast.py`. PR #35.
+- **paths:** `tools/verify_fast.py`, `Makefile`, `tools/verify-fast.ps1`
+
 ## 2026-11-09 — API HTTP contract tests (typed happy-path)
 
 keywords: api, http-contract, axum, oneshot, HealthResponse, ListPositionsResponse, handlers, clmm-lp-api, TESTS

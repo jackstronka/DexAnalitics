@@ -92,3 +92,11 @@ jobs:
       - name: D5 mutants summary unit tests
         working-directory: tools
         run: python3 test_mutants_d5_summary.py
+
+  verify_fast_unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: E1 verify_fast.py unit tests
+        working-directory: tools
+        run: python3 test_verify_fast.py

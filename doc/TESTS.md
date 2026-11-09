@@ -16,6 +16,7 @@
 | ---------- | ------- | ------- |
 | Linux / macOS | `make verify` | `fmt --check` + clippy `-D warnings` + `cargo nextest run --workspace` + web `check:api-gen` + `tsc` + `vitest` + `eslint` |
 | Windows | `.\tools\verify.ps1` | to samo; `-SkipWeb` / `-SkipRust` |
+| Szybko (E1) | `make verify-fast` / `.\tools\verify-fast.ps1` | tylko crate’y z diffu vs `origin/main` (+ reverse deps); web tylko przy `web/` / `openapi.json` |
 | Szybko, tylko Rust | `make test` albo `LOGLEVEL=WARN cargo nextest run --workspace` | bez fmt/clippy/web; wymaga `cargo-nextest` (**E2**) |
 | Szybko, tylko web | `cd web && npm run check:api-gen && npx tsc --noEmit && npx vitest run && npm run lint` | C2 gen + typy + 73 testy `src/lib/*.test.ts` + ESLint (C6) |
 | Hook przed pushem | `git config core.hooksPath .githooks` | pre-push odpala `verify` (na Windows `verify.ps1`) |
@@ -304,6 +305,7 @@ Wymagane na `main` (branch protection):
 | `golden_delta` | tabela było/jest/Δ z `*.snap` (R3) + **D1:** sekcja `Golden delta:` w opisie PR, gdy ruszony fixture/snap/`openapi.json` |
 | `test_protection_unit` (R5) | `tools/test_protection.py` + fixture → poziomy ochrony; `--check-master` vs `MASTER_IMPLEMENTATION_PLAN.md` §2.2 |
 | `mutants_d5_summary_unit` (D5) | parser outcomes.json; pełny `make mutants-d5` / workflow `Mutants D5` osobno (wolne) |
+| `verify_fast_unit` (E1) | selekcja pakietów/web z diffu dla `verify_fast.py` |
 | CODEOWNERS (D2) | GitHub prosi `@jackstronka` o review przy zmianie golden/fixture/`openapi.json`; merge-block tylko po „Require review from Code Owners” |
 | `bugs_have_tests` | **C5:** `high`/`critical` w `BUGS.md` → nazwa testu z `Guards/tests` istnieje, albo `manual:` |
 
