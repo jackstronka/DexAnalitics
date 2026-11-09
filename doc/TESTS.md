@@ -24,6 +24,8 @@
 
 **E2 — cargo-nextest:** zainstaluj raz `cargo install --locked cargo-nextest`. Konfig: [`.config/nextest.toml`](../.config/nextest.toml) (`retries=0`; profil `ci` w Actions). Pojedynczy filtr jak dawniej: `cargo nextest run -p clmm-lp-api golden_9vhky`. `cargo test` nadal działa do diagnostyki jednego testu / doctestów.
 
+**R1 — obszary:** mapa [`ci/test-areas.toml`](../ci/test-areas.toml). Klasyfikacja: `cargo nextest list --workspace --lib --bins --tests --message-format oneline | python tools/test_areas.py --stdin --web-glob 'web/src/**/*.test.ts'`. Walidacja mapy + unit: `make test-areas`.
+
 Czas lokalnie: zwykle **2,5–6 min** (pełny verify).
 
 ---

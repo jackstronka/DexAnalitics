@@ -52,6 +52,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`TESTING_REGRESSION_PLAN.md`](TESTING_REGRESSION_PLAN.md) | **Audyt testów 2026-09-30 + log wykonania** (backlog T-PR zastąpiony); plan: [`IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`](IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md) |
 | [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md) | **Szablon sekcji „Testy i kryteria regresji”** — obowiązkowy w każdym nowym planie (`IMPLEMENTATION_PLAN_*`, `ROADMAP_*`, `*_PLAN.md`) |
 | [`templates/CI_TRIAGE.md`](templates/CI_TRIAGE.md) | **Szablon triage pada CI (D4)** — klasy §3; agent wolno `stale_test` / `non_hermetic` / `infra`; `economic_regression` → raport + STOP |
+| [`../ci/test-areas.toml`](../ci/test-areas.toml) | **R1:** mapa prefiks testu → obszar (G9); klasyfikator `tools/test_areas.py` |
 | [`AI_STREAM_AGENT.md`](AI_STREAM_AGENT.md) | Local-first MVP for an AI narrator / stream agent (YouTube) |
 
 ## Runbooks and operations

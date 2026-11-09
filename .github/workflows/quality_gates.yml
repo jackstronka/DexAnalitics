@@ -55,3 +55,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: bash scripts/ci/golden-delta.sh
+
+  test_areas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: R1 test-areas map + classifier unit tests
+        run: bash scripts/ci/test-areas.sh

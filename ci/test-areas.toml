@@ -1,0 +1,151 @@
+# R1 — mapa test → obszar projektu (G9).
+# Matching: longest-prefix on a normalized id.
+#   Rust nextest oneline: "clmm-lp-api openapi::tests::foo" → "clmm-lp-api::openapi::tests::foo"
+#   Web vitest file: "web/src/lib/whirlpoolTicks.test.ts" (forward slashes)
+# Unmatched → area "Inne" (warning). Prefer longer, more specific prefixes first in spirit;
+# the tool always picks the longest matching prefix.
+
+version = 1
+
+[[area]]
+id = "ekonomia_gl"
+label = "Ekonomia / GL"
+prefixes = [
+  "clmm-lp-data::wallet_session",
+  "clmm-lp-data::wallet_gl",
+  "clmm-lp-data::session_gl",
+  "clmm-lp-api::services::wallet_gl",
+  "clmm-lp-api::services::wallet_ledger",
+  "clmm-lp-api::services::chain_portfolio",
+  "clmm-lp-execution::strategy::session_capital",
+  "web/src/lib/chainCapital",
+  "web/src/lib/sessionCapital",
+  "web/src/lib/solFirstFunding",
+  "web/src/lib/experimentCapital",
+  "web/src/lib/experimentFundingPlan",
+  "web/src/lib/experimentBudgetPlan",
+]
+
+[[area]]
+id = "lineage_pnl"
+label = "Lineage / PnL"
+prefixes = [
+  "clmm-lp-api::services::chain_economic_totals",
+  "clmm-lp-api::services::position_stream_lineage",
+  "clmm-lp-api::services::position_stream_pnl",
+  "clmm-lp-api::services::position_chain_history",
+  "clmm-lp-api::services::position_valuation",
+  "web/src/lib/lineageLedgerOpenQuote",
+  "web/src/lib/chainEconomicQuality",
+]
+
+[[area]]
+id = "execution_rebalance"
+label = "Execution / rebalance"
+prefixes = [
+  "clmm-lp-execution::strategy",
+  "clmm-lp-execution::agent_decision",
+  "clmm-lp-protocols::orca::executor",
+  "clmm-lp-api::services::position_close",
+  "clmm-lp-api::services::position_service",
+  "clmm-lp-api::services::registry_stale_reconcile",
+  "clmm-lp-api::services::position_close_signer",
+  "web/src/lib/openPositionSwapEstimates",
+  "web/src/lib/experimentLaunch",
+  "web/src/lib/experimentArm",
+]
+
+[[area]]
+id = "dane_decode"
+label = "Dane / decode"
+prefixes = [
+  "clmm-lp-cli::swap_sync",
+  "clmm-lp-cli::local_swap_fees",
+  "clmm-lp-cli::snapshots",
+  "clmm-lp-cli::commands::orca_wallet",
+  "clmm-lp-cli::decode",
+  "clmm-lp-cli::snapshot",
+  "clmm-lp-data::providers",
+  "clmm-lp-data::cache",
+  "clmm-lp-data::timeseries",
+  "clmm-lp-protocols::orca::pool_reader",
+  "clmm-lp-protocols::events",
+  "clmm-lp-protocols::raydium",
+  "clmm-lp-protocols::meteora",
+]
+
+[[area]]
+id = "backtest_strategie"
+label = "Backtest / strategie"
+prefixes = [
+  "clmm-lp-cli::engine",
+  "clmm-lp-cli::backtest",
+  "clmm-lp-simulation",
+  "clmm-lp-optimization",
+]
+
+[[area]]
+id = "decision_agent"
+label = "Decision layer / agent"
+prefixes = [
+  "clmm-lp-cli::orchestrator_gate",
+  "clmm-lp-cli::orchestrator_api",
+  "clmm-lp-cli::orchestrator",
+  "clmm-lp-api::services::position_agent",
+  "clmm-lp-api::handlers::agent",
+  "clmm-lp-domain::agent_decision",
+  "clmm-lp-execution::agent_decision",
+]
+
+[[area]]
+id = "domain_math"
+label = "Domain math"
+prefixes = [
+  "clmm-lp-domain::math",
+  "clmm-lp-protocols::orca::pool_reader::tests::tick",
+  "web/src/lib/whirlpoolTicks",
+]
+
+[[area]]
+id = "api_kontrakt"
+label = "API / kontrakt"
+prefixes = [
+  "clmm-lp-api::openapi",
+  "clmm-lp-api::handlers",
+  "clmm-lp-api::auth",
+  "clmm-lp-api::routes",
+  "clmm-lp-api::models",
+  "clmm-lp-api::error",
+  "clmm-lp-api::state",
+  "clmm-lp-api::server",
+  "clmm-lp-api::websocket",
+  "clmm-lp-api::services::strategy",
+  "web/src/lib/api.gen",
+  "web/src/lib/api.contract",
+  "web/src/lib/positionListDisplay",
+]
+
+[[area]]
+id = "web"
+label = "Web"
+prefixes = [
+  "web/src/",
+]
+
+[[area]]
+id = "inne"
+label = "Inne"
+# Catch-all crate roots so every known package maps somewhere if module prefixes miss.
+# Tool still warns when only this fallback matches (see --warn-fallback).
+prefixes = [
+  "clmm-lp-api",
+  "clmm-lp-cli",
+  "clmm-lp-data",
+  "clmm-lp-domain",
+  "clmm-lp-execution",
+  "clmm-lp-optimization",
+  "clmm-lp-protocols",
+  "clmm-lp-simulation",
+  "web/",
+  "tools/",
+]
