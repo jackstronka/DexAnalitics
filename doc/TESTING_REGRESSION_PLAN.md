@@ -196,6 +196,10 @@ Tylko przez PR (0 wymaganych review), obowiązuje też admina, bez force push / 
 
 - `target_usd_for_reopen_sizing` / `target_usd_for_swap_mix_and_open` / `target_usd_for_close_reopen_preflight` / `target_usd_from_prev_end_clamped` / `final_caps_cover_deposit_quote` są `pub(crate)` (seam do testów, semantyka bez zmian). Test `rebalance::tests::golden_reopen_sizing_table`: 5 wierszy — dust 10→9,95; **must_not_follow_smaller_wallet** (prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`); fallback prev_end=0; session cap (USDC 2,5M, pełny quote nie pokryty); clamp notional CHAIN. Mutacja +0,000001 w target → FAIL.
 
+### R2 (2026-11-09) — raport per obszar
+
+- `tools/test_report.py` + fixture JUnit → tabela Obszar/Testy/Pady/Golden/Niezm./Czas + FAIL z klasą §3. Lokalnie po `make verify` / `verify.ps1`. CI job `test_report` (needs rust+web, `if: always()`), Job Summary, artefakt `test-report`. Unit: `tools/test_test_report.py` / job `test_report_unit`.
+
 ### R1 (2026-11-09) — mapa obszarów testów
 
 - `ci/test-areas.toml` + `tools/test_areas.py` (longest-prefix → obszar G9). Nieprzypisane / tylko catch-all crate = „Inne” + warning. CI: job `test_areas` (`scripts/ci/test-areas.sh`). Lokalnie: `make test-areas`. Pełny raport tabelaryczny = R2.

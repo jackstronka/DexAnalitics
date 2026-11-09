@@ -26,6 +26,8 @@
 
 **R1 — obszary:** mapa [`ci/test-areas.toml`](../ci/test-areas.toml). Klasyfikacja: `cargo nextest list --workspace --lib --bins --tests --message-format oneline | python tools/test_areas.py --stdin --web-glob 'web/src/**/*.test.ts'`. Walidacja mapy + unit: `make test-areas`.
 
+**R2 — raport:** po `make verify` / `.\tools\verify.ps1` tabela w `target/test-report/report.md` (JUnit nextest + vitest). Sam skrypt: `python tools/test_report.py --junit … --out-dir target/test-report`. CI: job `test_report` + Job Summary.
+
 Czas lokalnie: zwykle **2,5–6 min** (pełny verify).
 
 ---

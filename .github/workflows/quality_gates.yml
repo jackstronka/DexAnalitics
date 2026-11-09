@@ -62,3 +62,11 @@ jobs:
       - uses: actions/checkout@v5
       - name: R1 test-areas map + classifier unit tests
         run: bash scripts/ci/test-areas.sh
+
+  test_report_unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: R2 test_report.py unit tests
+        working-directory: tools
+        run: python3 test_test_report.py

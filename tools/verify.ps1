@@ -2,6 +2,7 @@
 .SYNOPSIS
   Same checks as CI (Rust fmt/clippy/tests + web tsc/vitest), with a summary table.
   Windows counterpart of `make verify`; used by .githooks/pre-push.
+  R2: after tests, prints per-area report from JUnit XML when present.
 
 .EXAMPLE
   .\tools\verify.ps1
@@ -16,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 $env:LOGLEVEL = 'WARN'
+New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot 'target/test-report') | Out-Null
 
 $steps = @()
 if (-not $SkipRust) {
@@ -35,7 +37,17 @@ if (-not $SkipWeb) {
     }
     $steps += @{ Name = 'web: api.gen'; Dir = 'web'; Cmd = 'npm.cmd'; Args = @('run', 'check:api-gen') }
     $steps += @{ Name = 'web: tsc';     Dir = 'web'; Cmd = 'npx.cmd'; Args = @('tsc', '--noEmit') }
-    $steps += @{ Name = 'web: vitest';  Dir = 'web'; Cmd = 'npx.cmd'; Args = @('vitest', 'run') }
+    $steps += @{
+        Name = 'web: vitest'
+        Dir  = 'web'
+        Cmd  = 'npx.cmd'
+        Args = @(
+            'vitest', 'run',
+            '--reporter=default',
+            '--reporter=junit',
+            '--outputFile=../target/test-report/vitest-junit.xml'
+        )
+    }
     $steps += @{ Name = 'web: eslint';  Dir = 'web'; Cmd = 'npm.cmd'; Args = @('run', 'lint') }
 }
 
@@ -59,6 +71,20 @@ foreach ($s in $steps) {
 
 foreach ($s in ($steps | Select-Object -Skip $results.Count)) {
     $results += [pscustomobject]@{ Step = $s.Name; Status = 'SKIPPED'; Time = '' }
+}
+
+# R2 report (best-effort; does not override test failure)
+$junit = @()
+foreach ($p in @(
+        'target/nextest/default/junit.xml',
+        'target/nextest/ci/junit.xml',
+        'target/test-report/vitest-junit.xml'
+    )) {
+    if (Test-Path (Join-Path $repoRoot $p)) { $junit += $p }
+}
+if ($junit.Count -gt 0) {
+    Write-Host "`n=== test report (R2) ===" -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot 'run_test_report.ps1') -Junit $junit -OutDir 'target/test-report'
 }
 
 Write-Host "`n=== verify summary ===" -ForegroundColor Cyan

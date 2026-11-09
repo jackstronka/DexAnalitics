@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" failures="1" errors="0" time="0.050">
+  <testsuite name="clmm-lp-api" tests="2" failures="1" errors="0" time="0.030">
+    <testcase name="services::chain_economic_totals::tests::golden_9vhky_totals_computed_from_nodes" classname="clmm-lp-api" time="0.010"/>
+    <testcase name="services::chain_economic_totals::tests::net_pnl_identity_after_refresh" classname="clmm-lp-api" time="0.012">
+      <failure type="test failure" message="assertion failed">net_pnl mismatch</failure>
+    </testcase>
+  </testsuite>
+  <testsuite name="clmm-lp-domain" tests="1" failures="0" errors="0" time="0.020">
+    <testcase name="math::fee_math::tests::test_bps_to_decimal" classname="clmm-lp-domain" time="0.020"/>
+  </testsuite>
+</testsuites>

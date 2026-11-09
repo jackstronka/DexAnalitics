@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="vitest" tests="2" failures="0" errors="0" time="0.040">
+  <testsuite name="web/src/lib/whirlpoolTicks.test.ts" tests="2" failures="0" errors="0" time="0.040">
+    <testcase classname="web/src/lib/whirlpoolTicks.test.ts" name="alignPriceRatioToTicks keeps spacing" time="0.015"/>
+    <testcase classname="web/src/lib/whirlpoolTicks.test.ts" name="expand in-range" time="0.025"/>
+  </testsuite>
+</testsuites>
