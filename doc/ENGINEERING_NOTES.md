@@ -2,7 +2,7 @@
 
 keywords: R1, test-areas, G9, nextest, areas, test_areas.py, quality_gates, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
 
-- **What:** `ci/test-areas.toml` mapuje longest-prefix (nextest oneline / web `*.test.ts`) na obszary z planu G9. `tools/test_areas.py` (+ unit testy); job `test_areas` w `quality_gates`; `make test-areas`. Fallback „Inne” z ostrzeżeniem; `--strict` pada na samym Inne.
+- **What:** `ci/test-areas.toml` mapuje longest-prefix (nextest oneline / web `*.test.ts`) na obszary z planu G9. `tools/test_areas.py` (+ unit testy); job `test_areas` w `quality_gates`; `make test-areas`. Fallback „Inne” z ostrzeżeniem; `--strict` pada na samym Inne. PR #27.
 - **paths:** `ci/test-areas.toml`, `tools/test_areas.py`, `tools/test_test_areas.py`, `scripts/ci/test-areas.sh`
 
 ## 2026-11-09 — E2: cargo-nextest lokalnie i w CI
