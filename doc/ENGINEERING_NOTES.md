@@ -1,3 +1,10 @@
+## 2026-11-09 — Plan UI: 3Commas-like ladder + Dip/Jupiter + bot/agent
+
+keywords: dip-agent, UI, 3Commas, DCA, safety orders, ladder preview, Summary box, Jupiter Trigger, IMPLEMENTATION_PLAN_DIP_AGENT_UI, propose-only, Faza D
+
+- **What:** Rozszerzenie planu UI o wzorce 3Commas (formularz SO, tabela drabinki, Summary: max drop / avg / Required). Model A = N× Buy-the-Dip (orkiestracja); model B = native `POST /orders/dca`. 3Commas = CEX API, nie DEX. U1b/U8 w rollout.
+- **paths:** `doc/IMPLEMENTATION_PLAN_DIP_AGENT_UI.md` §1b, `doc/dip-agent/API-CAPABILITY-MATRIX.md` (D2b/D2c), `BRIDGE.md`
+
 ## 2026-11-09 — Plan UI: Dip/Jupiter + bot settings + agent
 
 keywords: dip-agent, UI, IMPLEMENTATION_PLAN_DIP_AGENT_UI, Jupiter, BotActivity, Settings, Position Agent, propose-only, Faza D

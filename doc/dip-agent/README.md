@@ -21,7 +21,7 @@ Wspólne: Jupiter Price (`GET /prices/jupiter`), audyt `data/agent/agent_decisio
 | [`dip-rotation.md`](dip-rotation.md) | Strategia rotacji dipów / strefy |
 | [`jupiter-API.md`](jupiter-API.md) | Allowlista endpointów Trigger / Swap / Price |
 | [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md) | Katalog funkcji P/T/S/D — pokrycie API vs status implementacji |
-| [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](../IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) | Plan UI: sekcja Jupiter/Dip, bot settings, agent (AH/BC/U*) |
+| [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](../IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) | Plan UI: Jupiter/Dip, bot settings, agent; **§1b UX 3Commas** (drabinka + Summary) |
 | [`jupiter-ALLOWED.md`](jupiter-ALLOWED.md) | Dozwolone produkty Jupitera |
 | [`LP-HYGIENE.md`](LP-HYGIENE.md) | Orca range out-of-range → `adjust_lp` |
 | [`BRIDGE.md`](BRIDGE.md) | Most dip ↔ LP (fazy B–E) |
