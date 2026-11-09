@@ -15,6 +15,7 @@ import {
   BarChart3,
   Database,
   ClipboardList,
+  TrendingDown,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -53,6 +54,7 @@ export default function Layout() {
     { key: 'nav.scripts', href: '/scripts', icon: Terminal },
     { key: 'nav.logs', href: '/logs', icon: ScrollText },
     { key: 'nav.botActivity', href: '/bot-activity', icon: History },
+    { key: 'nav.dip', href: '/dip', icon: TrendingDown },
     { key: 'nav.settings', href: '/settings', icon: Settings },
   ] as const
 

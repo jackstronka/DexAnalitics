@@ -1,3 +1,10 @@
+## 2026-11-09 — Dip Faza D U1: `/dip` read-only snapshot UI
+
+keywords: dip-agent, UI, Faza D, U1, /dip, dip/snapshot, DipSnapshotResponse, web, api.contract
+
+- **What:** Strona `/dip` (strefa SOL A/B/C + open Buy-the-Dip z `GET /dip/snapshot`), nav + i18n; `getDipSnapshot` typowany z OpenAPI; helpery `dipSnapshotDisplay` + vitest. Bez Trigger create/cancel (E) i bez drabinki (U1b).
+- **paths:** `web/src/pages/Dip.tsx`, `web/src/lib/dipSnapshotDisplay.ts`, `web/src/lib/api.ts`, `web/src/App.tsx`, `web/src/components/Layout.tsx`
+
 ## 2026-11-09 — A10: required check `quality_gates` + branch protection G1
 
 keywords: A10, G1, branch-protection, quality_gates, CI, IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE
