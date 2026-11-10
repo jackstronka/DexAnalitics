@@ -13,10 +13,12 @@ if [[ "${base}" != origin/* && "${base}" != */* ]]; then
   base="origin/${base}"
 fi
 
-git fetch --no-tags --depth=1 origin "${base#origin/}" >/dev/null 2>&1 || true
+# Full fetch only — `--depth=1` can orphan ${base} from HEAD and break
+# three-dot diffs with "fatal: ... no merge base" (PR #43 / quality_gates).
+git fetch --no-tags origin "${base#origin/}" >/dev/null 2>&1 || true
 
 if ! report="$(python3 "${root}/tools/golden_delta.py" --git-base "${base}")"; then
-  echo "golden-delta: generator failed" >&2
+  echo "golden-delta: generator failed (check merge base vs ${base})" >&2
   exit 1
 fi
 

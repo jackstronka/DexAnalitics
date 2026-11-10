@@ -1,3 +1,10 @@
+## 2026-11-10 — CI: no `--depth=1` w golden_delta / critical-area gate
+
+keywords: quality_gates, golden_delta, critical-area-test-gate, infra, no merge base, BUG-20261110-01
+
+- **What:** Usunięto `git fetch --depth=1` ze skryptów CI — shallow tip `origin/main` psuł three-dot diff (`fatal: no merge base`) na PR merge ref. Checkout już ma `fetch-depth: 0`.
+- **paths:** `scripts/ci/golden-delta.sh`, `scripts/ci/critical-area-test-gate.sh`, `doc/BUGS.md`
+
 ## 2026-11-09 — Dip E1: Trigger vault + deposit/craft (propose)
 
 keywords: dip-agent, Jupiter Trigger, vault, deposit/craft, T4, T5, T6, /dip/trigger/vault, E1, clmm-lp-data, clmm-lp-api
