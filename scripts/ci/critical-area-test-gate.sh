@@ -11,9 +11,16 @@ if [[ -z "${BASE_REF:-}" ]]; then
   exit 2
 fi
 
-git fetch --no-tags --depth=1 origin "${BASE_REF}" >/dev/null 2>&1 || true
+# Full fetch only — `--depth=1` can orphan origin/${BASE_REF} from HEAD and
+# break three-dot diffs with "fatal: ... no merge base" (PR #43 / quality_gates).
+git fetch --no-tags origin "${BASE_REF}" >/dev/null 2>&1 || true
 range="origin/${BASE_REF}...HEAD"
-changed_files="$(git diff --name-only "${range}")"
+if ! changed_files="$(git diff --name-only "${range}" 2>/dev/null)"; then
+  echo "critical-area-test-gate: cannot diff ${range} (missing merge base?)." >&2
+  git rev-parse --verify "origin/${BASE_REF}" >/dev/null || echo "  missing origin/${BASE_REF}" >&2
+  git rev-parse --verify HEAD >/dev/null || echo "  missing HEAD" >&2
+  exit 1
+fi
 
 if [[ -z "${changed_files}" ]]; then
   echo "No changed files detected."

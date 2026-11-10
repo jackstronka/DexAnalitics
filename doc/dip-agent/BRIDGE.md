@@ -97,7 +97,8 @@ Trigger create/cancel za flagą + osobny signer. Nadal: nie jeden shared keypair
 | Krok | Status |
 |------|--------|
 | **E0** Attach: host `wallet_id` → Trigger JWT session (`POST /dip/trigger/attach`) | DONE 2026-11-09 |
-| E1+ vault/deposit/create/cancel | ⬜ |
+| **E1** Vault + deposit/craft propose (`GET /dip/trigger/vault`, `POST …/deposit/craft`) | DONE 2026-11-09 |
+| E2+ sign deposit + create/cancel | ⬜ |
 
 Katalog funkcji do pokrycia (T4–T16, S1–S2, DoD): [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md).
 

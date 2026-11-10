@@ -220,7 +220,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `wallet_session` | B2 golden; C3(2) `cap_open_debits` saldo mint ≥ 0 |
 | `session_gl_integration` | Postgres, §5 |
 | cache / timeseries / providers | cache, CSV, Orca REST (hermetyczne) |
-| `providers::jupiter_trigger` | Trigger V2 read: filter Buy-the-Dip, mock `orders/history` + `auth/verify` |
+| `providers::jupiter_trigger` | Trigger V2 read: filter Buy-the-Dip, mock `orders/history` + `auth/verify`; E1 vault + deposit/craft parse (`vault_and_craft_parse_with_mock`) |
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
 | `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
 | `dip::runtime` | parse `runtime.yaml` mode + ladder defaults (U2) |
@@ -228,6 +228,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 
 ```bash
 cargo test -p clmm-lp-data jupiter_trigger
+cargo test -p clmm-lp-data vault_and_craft
 cargo test -p clmm-lp-data dip::zones
 cargo test -p clmm-lp-data dip::propose
 cargo test -p clmm-lp-data dip::runtime

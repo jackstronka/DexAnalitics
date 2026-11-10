@@ -36,9 +36,9 @@ Tryby:
 | T2 | Auth verify → JWT | `POST /auth/verify` | read/setup | B | ✅ |
 | T3 | Auth refresh | `POST /auth/refresh` | read/setup | B | ✅ |
 | T2b | **Attach host wallet** → per-`wallet_id` session (no create) | Dex `POST /dip/trigger/attach` (+ session GET/DELETE) | setup | E0 | ✅ |
-| T4 | Status vault | `GET /vault` | read | E prep | ⬜ |
-| T5 | Rejestracja vault | `GET /vault/register` | live (raz) | E | ⬜ |
-| T6 | Craft deposit (fund order) | `POST /deposit/craft` | propose → live | E | ⬜ |
+| T4 | Status vault | `GET /vault` → Dex `GET /dip/trigger/vault` | read | E1 | ✅ |
+| T5 | Rejestracja vault | `GET /vault/register` via `register_if_missing` | live (raz) | E1 | ✅ opt-in |
+| T6 | Craft deposit (fund order) | `POST /deposit/craft` → Dex `POST /dip/trigger/deposit/craft` | propose | E1 | ✅ unsigned |
 
 Każdy create limitu wymaga vault + signed deposit (`depositRequestId` + `depositSignedTx`).
 
@@ -148,7 +148,8 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 
 ## 10. Kryteria „pełnego tradingu przez API” (Definition of Done E)
 
-- [ ] T4–T6 + T7–T9 + T14–T16 w `JupiterTriggerClient` (hermetic httpmock)  
+- [x] T4–T6 w `JupiterTriggerClient` (hermetic httpmock vault+craft)
+- [ ] T7–T9 + T14–T16 w `JupiterTriggerClient` (hermetic httpmock)  
 - [ ] Propose path zwraca body bez broadcast (`mode: propose-only`)  
 - [ ] Live path za flagą + osobny signer  
 - [ ] Pending Withdraw po cancel dopięty zanim nowe `buy_dip`  

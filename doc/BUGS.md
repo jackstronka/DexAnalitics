@@ -28,6 +28,23 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20261110-01 — `golden_delta` / `critical_area_requires_tests`: `fatal: origin/main...HEAD: no merge base`
+
+status: fixed  
+severity: medium  
+reported_by: ai  
+first_seen: 2026-11-10  
+fixed_in: feat/dip-trigger-e1-vault-deposit  
+keywords: golden_delta, critical-area-test-gate, no merge base, fetch-depth, quality_gates, shallow fetch, infra, PR43
+
+- **Symptom:** PR #43 — job `golden_delta` i `critical_area_requires_tests` padały z `fatal: origin/main...HEAD: no merge base` (drugi run po concurrency cancel); pierwszy run czasem przechodził. Agregat `quality_gates` czerwony mimo zielonego `rust`/`web`.
+- **Root cause:** Oba skrypty po `actions/checkout` (`fetch-depth: 0`) robiły `git fetch --depth=1 origin main`, co mogło odciąć historię `origin/main` od HEAD (merge ref PR) i zepsuć three-dot `git diff`.
+- **Fix:** Usunięto `--depth=1`; fetch pełny tip `origin/${BASE_REF}` bez shallow. Lepszy komunikat błędu przy braku merge base.
+- **Guards/tests:** `manual: reproduce via scripts/ci/golden-delta.sh + critical-area-test-gate.sh against PR merge ref` (brak hermetycznego git-fixture w CI unit).
+- **Paths:** `scripts/ci/golden-delta.sh`, `scripts/ci/critical-area-test-gate.sh`
+
+---
+
 ### BUG-20261002-01 — Łańcuch 9vhKY: headline net +3,04 USD vs suma węzłów 0,99 USD; cashflow ~4 USD na węzłach bez zmiany NAV
 
 status: open (przyczyna potwierdzona 2026-10-02, fix czeka na GO)  

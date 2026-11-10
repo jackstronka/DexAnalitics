@@ -1157,6 +1157,37 @@
         }
       }
     },
+    "/dip/trigger/deposit/craft": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/deposit/craft` — T6 propose unsigned deposit (no order create).",
+        "operationId": "post_dip_trigger_deposit_craft",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerDepositCraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Unsigned deposit craft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerDepositCraftResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/trigger/session": {
       "get": {
         "tags": [
@@ -1212,6 +1243,47 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DipTriggerSessionStatusDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dip/trigger/vault": {
+      "get": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`GET /dip/trigger/vault` — T4 vault read (+ optional T5 register).",
+        "operationId": "get_dip_trigger_vault",
+        "parameters": [
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Host wallet id with attached Trigger session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "register_if_missing",
+            "in": "query",
+            "description": "Register vault if GET /vault fails",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger vault",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerVaultResponse"
                 }
               }
             }
@@ -7842,6 +7914,100 @@
           }
         }
       },
+      "DipTriggerDepositCraftRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/deposit/craft` — unsigned deposit for a future price/DCA order (T6 propose).",
+        "required": [
+          "wallet_id",
+          "input_mint",
+          "output_mint",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Amount in input mint smallest units (string to avoid JS precision issues)."
+          },
+          "input_mint": {
+            "type": "string"
+          },
+          "order_sub_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Default `single` when `order_type=price`."
+          },
+          "order_type": {
+            "type": "string",
+            "description": "Default `price`."
+          },
+          "output_mint": {
+            "type": "string"
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerDepositCraftResponse": {
+        "type": "object",
+        "description": "Propose-only craft response (no order create). Carry `request_id` into a later create.",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "request_id",
+          "transaction_base64",
+          "notes"
+        ],
+        "properties": {
+          "amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "receiver_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "token_decimals": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "transaction_base64": {
+            "type": "string",
+            "description": "Base64 unsigned transaction — sign before create; not broadcast here."
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
       "DipTriggerSessionStatusDto": {
         "type": "object",
         "description": "Public Trigger session status (no access/refresh tokens).",
@@ -7865,6 +8031,50 @@
               "string",
               "null"
             ]
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerVaultResponse": {
+        "type": "object",
+        "description": "`GET /dip/trigger/vault` — vault status for attached wallet (T4; optional T5 register).",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "vault_pubkey",
+          "registered_now",
+          "notes"
+        ],
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "privy_vault_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "registered_now": {
+            "type": "boolean",
+            "description": "True when this call registered a new vault."
+          },
+          "user_pubkey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vault_pubkey": {
+            "type": "string"
           },
           "wallet_id": {
             "type": "string"

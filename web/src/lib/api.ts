@@ -2645,3 +2645,25 @@ export const deleteDipTriggerSession = (walletId: string) =>
     `/dip/trigger/session?${new URLSearchParams({ wallet_id: walletId.trim() })}`,
     { method: 'DELETE' },
   )
+
+export type DipTriggerVaultResponse = OkJson<'/dip/trigger/vault', 'get'>
+export type DipTriggerDepositCraftResponse = OkJson<'/dip/trigger/deposit/craft', 'post'>
+
+export const getDipTriggerVault = (walletId: string, registerIfMissing = false) => {
+  const params = new URLSearchParams({ wallet_id: walletId.trim() })
+  if (registerIfMissing) params.set('register_if_missing', 'true')
+  return fetchJson<DipTriggerVaultResponse>(`/dip/trigger/vault?${params}`)
+}
+
+export const postDipTriggerDepositCraft = (body: {
+  wallet_id: string
+  input_mint: string
+  output_mint: string
+  amount: string
+  order_type?: string
+  order_sub_type?: string
+}) =>
+  fetchJson<DipTriggerDepositCraftResponse>('/dip/trigger/deposit/craft', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })

@@ -3418,6 +3418,60 @@ pub struct DipTriggerAttachResponse {
     pub notes: Vec<String>,
 }
 
+/// `GET /dip/trigger/vault` — vault status for attached wallet (T4; optional T5 register).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerVaultResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub vault_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privy_vault_id: Option<String>,
+    /// True when this call registered a new vault.
+    pub registered_now: bool,
+    pub notes: Vec<String>,
+}
+
+/// `POST /dip/trigger/deposit/craft` — unsigned deposit for a future price/DCA order (T6 propose).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDepositCraftRequest {
+    pub wallet_id: String,
+    pub input_mint: String,
+    pub output_mint: String,
+    /// Amount in input mint smallest units (string to avoid JS precision issues).
+    pub amount: String,
+    /// Default `price`.
+    #[serde(default = "default_dip_order_type_price")]
+    pub order_type: String,
+    /// Default `single` when `order_type=price`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_sub_type: Option<String>,
+}
+
+fn default_dip_order_type_price() -> String {
+    "price".into()
+}
+
+/// Propose-only craft response (no order create). Carry `request_id` into a later create.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDepositCraftResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub request_id: String,
+    /// Base64 unsigned transaction — sign before create; not broadcast here.
+    pub transaction_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_decimals: Option<u32>,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

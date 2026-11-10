@@ -1,7 +1,7 @@
-//! Jupiter Trigger Order API V2 — **read** client (auth + order history).
+//! Jupiter Trigger Order API V2 — auth + read + vault/deposit craft (E0/E1).
 //!
 //! Docs: <https://developers.jup.ag/docs/trigger>
-//! Live create/cancel is **out of scope** (Dip Agent Faza E).
+//! Create/cancel order broadcast remains **out of scope** until Faza E live GO.
 
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -80,6 +80,53 @@ pub struct OrderHistoryQuery {
     pub mint: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+}
+
+/// `GET /vault` / `GET /vault/register` response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerVault {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_pubkey: Option<String>,
+    pub vault_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privy_vault_id: Option<String>,
+}
+
+/// Request body for `POST /deposit/craft`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDepositCraftRequest {
+    pub input_mint: String,
+    pub output_mint: String,
+    pub user_address: String,
+    /// Amount in input mint smallest units.
+    pub amount: String,
+    /// `price` or `dca`.
+    pub order_type: String,
+    /// Required for `price`: `single` | `oco` | `otoco`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_sub_type: Option<String>,
+}
+
+/// Response from `POST /deposit/craft` (unsigned tx — sign client/host side).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDepositCraftResponse {
+    pub transaction: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_decimals: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_token_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_account: Option<String>,
 }
 
 /// HTTP client for Jupiter Trigger V2 (read + auth helpers).
@@ -288,6 +335,80 @@ impl JupiterTriggerClient {
             .await?;
         Ok(filter_open_buy_dips(&hist.orders))
     }
+
+    /// `GET /vault`
+    pub async fn get_vault(&self, access_token: &str) -> Result<TriggerVault> {
+        let req = self
+            .apply_api_key(
+                self.client
+                    .get(format!("{}/vault", self.base_url.trim_end_matches('/'))),
+            )?
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"));
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("vault {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// `GET /vault/register` — first-time vault; may 409 if already exists.
+    pub async fn register_vault(&self, access_token: &str) -> Result<TriggerVault> {
+        let req = self
+            .apply_api_key(self.client.get(format!(
+                "{}/vault/register",
+                self.base_url.trim_end_matches('/')
+            )))?
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"));
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("vault/register {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// Resolve vault: `GET /vault`, optionally `GET /vault/register` on failure when `register_if_missing`.
+    pub async fn resolve_vault(
+        &self,
+        access_token: &str,
+        register_if_missing: bool,
+    ) -> Result<TriggerVault> {
+        match self.get_vault(access_token).await {
+            Ok(v) => Ok(v),
+            Err(e) if register_if_missing => self
+                .register_vault(access_token)
+                .await
+                .map_err(|reg| anyhow!("vault failed ({e}); register failed: {reg}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `POST /deposit/craft` — unsigned deposit tx + `requestId` (no create order).
+    pub async fn craft_deposit(
+        &self,
+        access_token: &str,
+        body: &TriggerDepositCraftRequest,
+    ) -> Result<TriggerDepositCraftResponse> {
+        let url = format!("{}/deposit/craft", self.base_url.trim_end_matches('/'));
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("deposit/craft {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
 }
 
 /// Pure filter used by API/CLI and unit tests.
@@ -426,5 +547,54 @@ mod tests {
         assert_eq!(tokens.access_token, "acc");
         assert_eq!(tokens.refresh_token.as_deref(), Some("ref"));
         assert_eq!(tokens.wallet_pubkey, "Wallet111");
+    }
+
+    #[tokio::test]
+    async fn vault_and_craft_parse_with_mock() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/vault")
+                .header("Authorization", "Bearer jwt-v");
+            then.status(200).json_body(serde_json::json!({
+                "userPubkey": "User111",
+                "vaultPubkey": "Vault222",
+                "privyVaultId": "privy-1"
+            }));
+        });
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/deposit/craft")
+                .header("Authorization", "Bearer jwt-v");
+            then.status(200).json_body(serde_json::json!({
+                "transaction": "AQIDBA==",
+                "requestId": "req-1",
+                "receiverAddress": "Vault222",
+                "mint": "So11111111111111111111111111111111111111112",
+                "amount": "1000000",
+                "tokenDecimals": 6
+            }));
+        });
+
+        let client = JupiterTriggerClient::new(Some("k".into())).with_base_url(server.base_url());
+        let vault = client.get_vault("jwt-v").await.unwrap();
+        assert_eq!(vault.vault_pubkey, "Vault222");
+
+        let craft = client
+            .craft_deposit(
+                "jwt-v",
+                &TriggerDepositCraftRequest {
+                    input_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into(),
+                    output_mint: "So11111111111111111111111111111111111111112".into(),
+                    user_address: "User111".into(),
+                    amount: "1000000".into(),
+                    order_type: "price".into(),
+                    order_sub_type: Some("single".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(craft.request_id, "req-1");
+        assert_eq!(craft.transaction, "AQIDBA==");
     }
 }
