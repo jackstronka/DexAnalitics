@@ -196,7 +196,8 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 
 | Moduł / plik | Co robi |
 | ------------ | ------- |
-| `chain_economic_totals` | B1 golden; C3(1) `net_pnl` identity po `refresh_lineage_totals_from_nodes`; D5 follow-up: exact `close_nav_usd_*` / CloseEstimate / headline backward scan (`cargo test -p clmm-lp-api --lib close_nav_usd_from_raw_amounts_exact`) |
+| `chain_economic_totals` | B1 golden; C3(1) `net_pnl` identity; D5: exact `close_nav` / CloseEstimate / `reconcile_stream_pnl_*` (healthy noop, 80% hodl, current_missing, IL rewrite) — `cargo test -p clmm-lp-api --lib reconcile_stream_pnl` |
+| `rebalance` / `session_capital` (D5) | `target_usd_*` non-finite → 0; preflight wallet_cap; WSOL leg-B spend cap — `cargo test -p clmm-lp-execution --lib target_usd_reopen_sizing_rejects` / `apply_portfolio_caps_spendable` |
 | `chain_portfolio` | B6 golden; start ledgera, fees, nogi USD, filtry phantom mint |
 | `position_stream_lineage` | B5 golden + shadow; C3(5) close end = next baseline przy wspólnej sesji |
 | `position_stream_pnl` / `position_chain_history` | PnL strumienia; C3(4) `clean_il` / `lp_vs_hodl` identities |

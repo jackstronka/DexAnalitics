@@ -969,24 +969,29 @@ mod tests {
         assert!(!t.il_usd.is_zero() || !t.clean_il_usd.is_zero());
     }
 
-    #[test]
-    fn reconcile_stream_pnl_totals_with_nodes_repairs_degraded_hodl_and_stale_current() {
-        let mut totals = PositionStreamPnLResponse {
+    fn mk_totals(
+        baseline: Decimal,
+        current: Decimal,
+        hodl: Decimal,
+        baseline_ts: Option<&str>,
+        current_ts: Option<&str>,
+    ) -> PositionStreamPnLResponse {
+        PositionStreamPnLResponse {
             position_address: "PDA".to_string(),
-            baseline_ts_utc: Some("2026-05-20T20:49:54Z".to_string()),
-            current_ts_utc: Some("2026-05-20T20:49:54Z".to_string()),
-            baseline_value_usd: Decimal::from_str("10.004").unwrap(),
-            current_value_usd: Decimal::from_str("10.004").unwrap(),
-            hodl_value_usd: Decimal::from_str("4.859").unwrap(),
-            il_usd: Decimal::from_str("5.145").unwrap(),
-            il_pct: Decimal::ONE,
-            clean_il_usd: Decimal::from_str("5.145").unwrap(),
-            clean_il_pct: Decimal::ONE,
+            baseline_ts_utc: baseline_ts.map(str::to_string),
+            current_ts_utc: current_ts.map(str::to_string),
+            baseline_value_usd: baseline,
+            current_value_usd: current,
+            hodl_value_usd: hodl,
+            il_usd: Decimal::ZERO,
+            il_pct: Decimal::ZERO,
+            clean_il_usd: Decimal::ZERO,
+            clean_il_pct: Decimal::ZERO,
             realized_lp_fees_usd: Decimal::ZERO,
             uncollected_lp_fees_usd: Decimal::ZERO,
             lp_fees_total_usd: Decimal::ZERO,
-            lp_vs_hodl_with_fees_usd: Decimal::from_str("5.145").unwrap(),
-            lp_vs_hodl_with_fees_pct: Decimal::ONE,
+            lp_vs_hodl_with_fees_usd: Decimal::ZERO,
+            lp_vs_hodl_with_fees_pct: Decimal::ZERO,
             valuation_price_time_kind: "live_price".to_string(),
             price_basis_note: None,
             tx_fees_usd: Decimal::ZERO,
@@ -1000,7 +1005,18 @@ mod tests {
                 il_vs_initial_hodl_caption_pl: String::new(),
             },
             note: None,
-        };
+        }
+    }
+
+    #[test]
+    fn reconcile_stream_pnl_totals_with_nodes_repairs_degraded_hodl_and_stale_current() {
+        let mut totals = mk_totals(
+            Decimal::from_str("10.004").unwrap(),
+            Decimal::from_str("10.004").unwrap(),
+            Decimal::from_str("4.859").unwrap(),
+            Some("2026-05-20T20:49:54Z"),
+            Some("2026-05-20T20:49:54Z"),
+        );
         let mut node = mk_node(
             "PDA",
             Decimal::from_str("10.004").unwrap(),
@@ -1014,6 +1030,113 @@ mod tests {
             Decimal::from_str("10.011").unwrap()
         );
         assert_eq!(totals.net_pnl_usd, Decimal::from_str("0.007").unwrap());
+    }
+
+    /// D5: healthy path must early-return (kills `delete !` / `&&`→`||` on gate).
+    #[test]
+    fn reconcile_stream_pnl_noop_when_hodl_and_current_healthy() {
+        let mut totals = mk_totals(
+            Decimal::from(100),
+            Decimal::from(105),
+            Decimal::from(100), // >= 0.8 * baseline
+            Some("t0"),
+            Some("t1"),
+        );
+        totals.net_pnl_usd = Decimal::from(5);
+        let before = totals.clone();
+        let node = mk_node("PDA", Decimal::from(100), Decimal::from(105));
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.hodl_value_usd, before.hodl_value_usd);
+        assert_eq!(totals.current_value_usd, before.current_value_usd);
+        assert_eq!(totals.net_pnl_usd, before.net_pnl_usd);
+    }
+
+    /// D5: hodl == 0.8*baseline is NOT degraded (`<`, not `<=`); *0.8 exact.
+    #[test]
+    fn reconcile_stream_pnl_hodl_at_exactly_80pct_is_not_degraded() {
+        let baseline = Decimal::from(10);
+        let mut totals = mk_totals(
+            baseline,
+            Decimal::from(11),
+            Decimal::from(8), // == baseline * 0.8
+            Some("t0"),
+            Some("t1"),
+        );
+        totals.lp_fees_total_usd = Decimal::from(1);
+        let node = mk_node("PDA", baseline, Decimal::from(11));
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.hodl_value_usd, Decimal::from(8));
+        assert_eq!(totals.net_pnl_usd, Decimal::ZERO);
+    }
+
+    /// D5: current_missing + exact IL / net identities after repair.
+    #[test]
+    fn reconcile_stream_pnl_repairs_zero_current_with_exact_formulas() {
+        let baseline = Decimal::from(100);
+        let mut totals = mk_totals(
+            baseline,
+            Decimal::ZERO,
+            baseline, // hodl healthy
+            Some("t0"),
+            Some("t1"),
+        );
+        totals.lp_fees_total_usd = Decimal::from(5);
+        totals.realized_cashflow_usd = Decimal::from(2);
+        totals.tx_fees_usd = Decimal::from(1);
+        let mut node = mk_node("PDA", baseline, Decimal::from(90));
+        node.opened_ts_utc = Some("t0".to_string());
+        node.closed_ts_utc = Some("t_close".to_string());
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.current_value_usd, Decimal::from(90));
+        assert_eq!(totals.current_ts_utc.as_deref(), Some("t_close"));
+        // hodl not rewritten when not degraded
+        assert_eq!(totals.hodl_value_usd, baseline);
+        // net = current + cashflow − baseline − tx
+        assert_eq!(totals.net_pnl_usd, Decimal::from(-9)); // 90+2-100-1
+        assert_eq!(totals.net_pnl_pct, Decimal::from_str("-0.09").unwrap());
+    }
+
+    /// D5: when hodl is degraded, rewrite IL / lp_vs_hodl with exact arithmetic.
+    #[test]
+    fn reconcile_stream_pnl_hodl_degraded_rewrites_il_and_lp_vs_exact() {
+        let baseline = Decimal::from(100);
+        let mut totals = mk_totals(
+            baseline,
+            Decimal::from(90),
+            Decimal::from(50), // < 0.8 * 100
+            Some("t0"),
+            Some("t1"),
+        );
+        totals.lp_fees_total_usd = Decimal::from(5);
+        totals.tx_fees_usd = Decimal::from(1);
+        totals.realized_cashflow_usd = Decimal::from(2);
+        let node = mk_node("PDA", baseline, Decimal::from(90));
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.hodl_value_usd, baseline);
+        assert_eq!(totals.il_usd, Decimal::from(-10));
+        assert_eq!(totals.il_pct, Decimal::from_str("-0.1").unwrap());
+        assert_eq!(totals.clean_il_usd, Decimal::from(-10));
+        assert_eq!(totals.lp_vs_hodl_with_fees_usd, Decimal::from(-5)); // -10 + 5
+        assert_eq!(
+            totals.lp_vs_hodl_with_fees_pct,
+            Decimal::from_str("-0.05").unwrap()
+        );
+        assert_eq!(totals.net_pnl_usd, Decimal::from(-9));
+    }
+
+    #[test]
+    fn sync_chain_economic_totals_from_nodes_updates_pnl_from_live_node() {
+        let mut totals = mk_totals(
+            Decimal::from(10),
+            Decimal::ZERO,
+            Decimal::from(3),
+            Some("t0"),
+            None,
+        );
+        let mut nodes = vec![mk_node("PDA", Decimal::from(10), Decimal::from(12))];
+        sync_chain_economic_totals_from_nodes(&mut totals, &mut nodes);
+        assert_eq!(totals.current_value_usd, Decimal::from(12));
+        assert_eq!(totals.hodl_value_usd, Decimal::from(10));
     }
 
     fn usd(d: Decimal) -> String {

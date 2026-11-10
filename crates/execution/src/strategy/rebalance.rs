@@ -4934,6 +4934,16 @@ mod tests {
         assert!((t - 9.95).abs() < 1e-9);
     }
 
+    /// D5: non-finite / non-positive → 0; +inf must not take the dust path (`&&` not `||`).
+    #[test]
+    fn target_usd_reopen_sizing_rejects_non_finite_and_non_positive() {
+        assert_eq!(target_usd_for_reopen_sizing(0.0), 0.0);
+        assert_eq!(target_usd_for_reopen_sizing(-1.0), 0.0);
+        assert_eq!(target_usd_for_reopen_sizing(f64::NAN), 0.0);
+        assert_eq!(target_usd_for_reopen_sizing(f64::INFINITY), 0.0);
+        assert_eq!(target_usd_for_reopen_sizing(f64::NEG_INFINITY), 0.0);
+    }
+
     #[test]
     fn target_usd_reopen_sizing_does_not_clamp_to_smaller_wallet() {
         // Spec §2.2 / A4: reopen target is not `min(prev_end, wallet)`.
@@ -4981,6 +4991,19 @@ mod tests {
         let wallet = 0.0;
         let target = target_usd_for_close_reopen_preflight(prev_end, wallet);
         assert!((target - (prev_end * 0.995)).abs() < 1e-9);
+    }
+
+    /// D5: when prev_end invalid, wallet_cap = wallet*0.995 exactly; +inf prev_end → still wallet_cap.
+    #[test]
+    fn preflight_target_usd_wallet_cap_when_prev_end_invalid_or_non_finite() {
+        let wallet = 20.0;
+        let expected = wallet * 0.995;
+        assert!((target_usd_for_close_reopen_preflight(0.0, wallet) - expected).abs() < 1e-12);
+        assert!((target_usd_for_close_reopen_preflight(-5.0, wallet) - expected).abs() < 1e-12);
+        assert!(
+            (target_usd_for_close_reopen_preflight(f64::INFINITY, wallet) - expected).abs() < 1e-12
+        );
+        assert!((target_usd_for_close_reopen_preflight(f64::NAN, wallet) - expected).abs() < 1e-12);
     }
 
     #[test]
