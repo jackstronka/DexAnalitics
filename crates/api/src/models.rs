@@ -3508,6 +3508,26 @@ pub struct DipTriggerPriceOrderCreateResponse {
     pub notes: Vec<String>,
 }
 
+/// `POST /dip/trigger/orders/price/cancel` — cancel start + sign withdraw + confirm (E3 / T15–T16).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderCancelRequest {
+    pub wallet_id: String,
+    pub order_id: String,
+    /// Must be `true`; double-confirm live cancel + withdraw.
+    pub confirm_execute: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderCancelResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub order_id: String,
+    pub cancel_request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_signature: Option<String>,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

@@ -1219,6 +1219,37 @@
         }
       }
     },
+    "/dip/trigger/orders/price/cancel": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/orders/price/cancel` — E3 T15–T16: cancel start + sign withdraw + confirm.",
+        "operationId": "post_dip_trigger_orders_price_cancel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerPriceOrderCancelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cancelled Trigger price order + withdraw",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerPriceOrderCancelResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/trigger/session": {
       "get": {
         "tags": [
@@ -8030,6 +8061,63 @@
           "transaction_base64": {
             "type": "string",
             "description": "Base64 unsigned transaction — sign before create; not broadcast here."
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderCancelRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/orders/price/cancel` — cancel start + sign withdraw + confirm (E3 / T15–T16).",
+        "required": [
+          "wallet_id",
+          "order_id",
+          "confirm_execute"
+        ],
+        "properties": {
+          "confirm_execute": {
+            "type": "boolean",
+            "description": "Must be `true`; double-confirm live cancel + withdraw."
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderCancelResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "order_id",
+          "cancel_request_id",
+          "notes"
+        ],
+        "properties": {
+          "cancel_request_id": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "tx_signature": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "wallet_id": {
             "type": "string"

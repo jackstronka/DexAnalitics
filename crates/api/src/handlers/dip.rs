@@ -6,6 +6,7 @@ use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
     DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
     DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse,
+    DipTriggerPriceOrderCancelRequest, DipTriggerPriceOrderCancelResponse,
     DipTriggerPriceOrderCreateRequest, DipTriggerPriceOrderCreateResponse,
     DipTriggerSessionStatusDto, DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
 };
@@ -26,7 +27,7 @@ use clmm_lp_data::dip::{
 };
 use clmm_lp_data::providers::{
     JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDepositCraftRequest,
-    TriggerPriceOrderCreateRequest, filter_open_buy_dips,
+    TriggerPriceOrderConfirmCancelRequest, TriggerPriceOrderCreateRequest, filter_open_buy_dips,
 };
 use serde::Deserialize;
 use solana_sdk::signature::{Keypair, Signer};
@@ -643,28 +644,28 @@ pub async fn post_dip_trigger_deposit_craft(
     }))
 }
 
-/// Sign a Jupiter Trigger deposit `VersionedTransaction` (base64 ↔ base64).
-fn sign_trigger_deposit_tx_base64(tx_b64: &str, keypair: &Keypair) -> ApiResult<String> {
+/// Sign a Jupiter Trigger `VersionedTransaction` (deposit or cancel withdraw; base64 ↔ base64).
+fn sign_trigger_versioned_tx_base64(tx_b64: &str, keypair: &Keypair) -> ApiResult<String> {
     let raw = BASE64
         .decode(tx_b64.trim().as_bytes())
-        .map_err(|e| ApiError::bad_request(format!("deposit tx base64 decode: {e}")))?;
+        .map_err(|e| ApiError::bad_request(format!("trigger tx base64 decode: {e}")))?;
     let tx: VersionedTransaction = bincode::deserialize(&raw).map_err(|e| {
         ApiError::bad_request(format!(
-            "deposit tx deserialize (expected VersionedTransaction): {e}"
+            "trigger tx deserialize (expected VersionedTransaction): {e}"
         ))
     })?;
     let signed = VersionedTransaction::try_new(tx.message, &[keypair])
-        .map_err(|e| ApiError::bad_request(format!("deposit tx sign failed: {e}")))?;
+        .map_err(|e| ApiError::bad_request(format!("trigger tx sign failed: {e}")))?;
     let bytes = bincode::serialize(&signed)
-        .map_err(|e| ApiError::internal(format!("deposit tx serialize: {e}")))?;
+        .map_err(|e| ApiError::internal(format!("trigger tx serialize: {e}")))?;
     Ok(BASE64.encode(bytes))
 }
 
-fn require_live_create_gate(confirm_execute: bool) -> ApiResult<()> {
+fn require_live_execute_gate(confirm_execute: bool, action: &str) -> ApiResult<()> {
     if !confirm_execute {
-        return Err(ApiError::bad_request(
-            "confirm_execute=true required for Trigger order create",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "confirm_execute=true required for Trigger order {action}"
+        )));
     }
     let path = resolve_runtime_path(None);
     let rt = load_dip_runtime_file(&path)
@@ -672,7 +673,7 @@ fn require_live_create_gate(confirm_execute: bool) -> ApiResult<()> {
     let mode = normalize_dip_mode(&rt.mode);
     if mode != "live" {
         return Err(ApiError::bad_request(format!(
-            "dip runtime mode is '{mode}' — set config/dip/runtime.yaml mode: live for create"
+            "dip runtime mode is '{mode}' — set config/dip/runtime.yaml mode: live for {action}"
         )));
     }
     Ok(())
@@ -693,7 +694,7 @@ pub async fn post_dip_trigger_orders_price(
     headers: HeaderMap,
     Json(req): Json<DipTriggerPriceOrderCreateRequest>,
 ) -> ApiResult<Json<DipTriggerPriceOrderCreateResponse>> {
-    require_live_create_gate(req.confirm_execute)?;
+    require_live_execute_gate(req.confirm_execute, "create")?;
     let session = require_attached_session(&req.wallet_id)?;
     let api_key = jupiter_api_key(&headers).ok_or_else(|| {
         ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
@@ -750,7 +751,7 @@ pub async fn post_dip_trigger_orders_price(
         .await
         .map_err(|e| ApiError::bad_request(format!("deposit/craft failed: {e}")))?;
 
-    let signed_tx = sign_trigger_deposit_tx_base64(&craft.transaction, &kp)?;
+    let signed_tx = sign_trigger_versioned_tx_base64(&craft.transaction, &kp)?;
     let created = client
         .create_price_order(
             &session.tokens.access_token,
@@ -783,7 +784,71 @@ pub async fn post_dip_trigger_orders_price(
         trigger_price_usd: req.trigger_price_usd,
         notes: vec![
             "E2 live create: deposit signed with host wallet_id keypair".into(),
-            "cancel/confirm-cancel = later E step".into(),
+            "cancel via POST /dip/trigger/orders/price/cancel".into(),
+        ],
+    }))
+}
+
+/// `POST /dip/trigger/orders/price/cancel` — E3 T15–T16: cancel start + sign withdraw + confirm.
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/orders/price/cancel",
+    tag = "Dip",
+    request_body = DipTriggerPriceOrderCancelRequest,
+    responses(
+        (status = 200, description = "Cancelled Trigger price order + withdraw", body = DipTriggerPriceOrderCancelResponse)
+    )
+)]
+pub async fn post_dip_trigger_orders_price_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerPriceOrderCancelRequest>,
+) -> ApiResult<Json<DipTriggerPriceOrderCancelResponse>> {
+    require_live_execute_gate(req.confirm_execute, "cancel")?;
+    let session = require_attached_session(&req.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    let order_id = req.order_id.trim();
+    if order_id.is_empty() {
+        return Err(ApiError::bad_request("order_id required"));
+    }
+
+    let kp = load_wallet_keypair_for_id(&state, req.wallet_id.trim())?;
+    if kp.pubkey().to_string() != session.wallet_pubkey {
+        return Err(ApiError::bad_request(
+            "host keypair pubkey mismatch vs Trigger session wallet_pubkey",
+        ));
+    }
+
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let cancel = client
+        .cancel_price_order(&session.tokens.access_token, order_id)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/price/cancel failed: {e}")))?;
+
+    let signed_tx = sign_trigger_versioned_tx_base64(&cancel.transaction, &kp)?;
+    let confirmed = client
+        .confirm_cancel_price_order(
+            &session.tokens.access_token,
+            order_id,
+            &TriggerPriceOrderConfirmCancelRequest {
+                signed_transaction: signed_tx,
+                cancel_request_id: cancel.request_id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/price/confirm-cancel failed: {e}")))?;
+
+    Ok(Json(DipTriggerPriceOrderCancelResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        order_id: confirmed.id,
+        cancel_request_id: cancel.request_id,
+        tx_signature: confirmed.tx_signature,
+        notes: vec![
+            "E3 live cancel: withdraw signed with host wallet_id keypair".into(),
+            "order moved ready_to_cancel then cancelled after withdraw lands".into(),
         ],
     }))
 }
