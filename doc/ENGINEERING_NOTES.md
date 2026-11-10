@@ -47,6 +47,13 @@ keywords: dip-agent, UI, Faza D, U1, /dip, dip/snapshot, DipSnapshotResponse, we
 - **What:** Strona `/dip` (strefa SOL A/B/C + open Buy-the-Dip z `GET /dip/snapshot`), nav + i18n; `getDipSnapshot` typowany z OpenAPI; helpery `dipSnapshotDisplay` + vitest. Bez Trigger create/cancel (E) i bez drabinki (U1b).
 - **paths:** `web/src/pages/Dip.tsx`, `web/src/lib/dipSnapshotDisplay.ts`, `web/src/lib/api.ts`, `web/src/App.tsx`, `web/src/components/Layout.tsx`
 
+## 2026-11-10 — D5 final edges: stale OR-clauses + refresh baseline gate
+
+keywords: D5, cargo-mutants, reconcile_stream_pnl, refresh_lineage_totals, survivors, exclude_re
+
+- **What:** Unit tests for solo `current_stale` triggers (`current_ts` None; equal timestamps), `end_nav==0` not `current_missing`, refresh skips when baseline already set / first_baseline not `>0`. Stronger `--exclude-re` for `from_env` field-deletes in reopen_sizing. Residual: equivalent `end_nav > 0`→`>=` on L126 assign (same value when end_nav=0).
+- **paths:** `crates/api/src/services/chain_economic_totals.rs`, `scripts/ci/mutants-d5.sh`, `.cargo/mutants.toml`
+
 ## 2026-11-10 — D5 follow-up: reconcile / reopen / WSOL-B survivors
 
 keywords: D5, cargo-mutants, reconcile_stream_pnl, target_usd, session_capital, WSOL, survivors

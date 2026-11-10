@@ -1139,6 +1139,116 @@ mod tests {
         assert_eq!(totals.hodl_value_usd, Decimal::from(10));
     }
 
+    /// D5: only `current_ts = None` marks stale (`||`, not `&&` with ts-equality).
+    #[test]
+    fn reconcile_stream_pnl_stale_when_only_current_ts_missing() {
+        let baseline = Decimal::from(100);
+        let mut totals = mk_totals(
+            baseline,
+            Decimal::from(105), // ≠ baseline → third OR clause false
+            baseline,           // hodl healthy
+            Some("t0"),
+            None, // only this triggers stale
+        );
+        totals.net_pnl_usd = Decimal::from(99); // sentinel overwritten on repair
+        let mut node = mk_node("PDA", baseline, Decimal::from(105));
+        node.opened_ts_utc = Some("open".to_string());
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.current_value_usd, Decimal::from(105));
+        assert_eq!(totals.net_pnl_usd, Decimal::from(5)); // 105 - 100
+    }
+
+    /// D5: equal timestamps alone mark stale even when values differ.
+    #[test]
+    fn reconcile_stream_pnl_stale_when_only_timestamps_equal() {
+        let baseline = Decimal::from(100);
+        let mut totals = mk_totals(
+            baseline,
+            Decimal::from(105),
+            baseline,
+            Some("same"),
+            Some("same"),
+        );
+        totals.net_pnl_usd = Decimal::from(99);
+        let node = mk_node("PDA", baseline, Decimal::from(105));
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&node));
+        assert_eq!(totals.net_pnl_usd, Decimal::from(5));
+    }
+
+    /// D5: end_nav==0 is not `current_missing` (`>` not `>=` on L118).
+    #[test]
+    fn reconcile_stream_pnl_end_nav_zero_is_not_current_missing() {
+        let baseline = Decimal::from(100);
+        let mut totals = mk_totals(baseline, Decimal::ZERO, baseline, Some("t0"), Some("t1"));
+        totals.net_pnl_usd = Decimal::from(42);
+        let zero_node = mk_node("PDA", baseline, Decimal::ZERO);
+        reconcile_stream_pnl_totals_with_nodes(&mut totals, std::slice::from_ref(&zero_node));
+        assert_eq!(
+            totals.net_pnl_usd,
+            Decimal::from(42),
+            "end_nav==0 must not trigger current_missing repair"
+        );
+    }
+
+    /// D5: non-zero totals.baseline must not be treated as stale (`&&` not `||`).
+    #[test]
+    fn refresh_lineage_totals_skips_recompute_when_baseline_already_set() {
+        let mut totals = Some(mk_totals(
+            Decimal::from(100),
+            Decimal::from(105),
+            Decimal::from(100),
+            Some("t0"),
+            Some("t1"),
+        ));
+        let before = totals.clone();
+        let mut nodes = vec![mk_node("PDA", Decimal::from(100), Decimal::from(105))];
+        nodes[0].opened_ts_utc = Some("t0".to_string());
+        refresh_lineage_totals_from_nodes("PDA", &mut totals, &mut nodes);
+        let t = totals.as_ref().expect("totals");
+        let b = before.as_ref().expect("before");
+        // Reconcile may still run, but must not wipe via maybe_compute (stale_baseline false).
+        assert_eq!(t.baseline_value_usd, b.baseline_value_usd);
+        assert_eq!(t.valuation_price_time_kind, b.valuation_price_time_kind);
+    }
+
+    /// D5: totals.baseline==0 && first_baseline>0 refreshes; first_baseline==0 does not.
+    #[test]
+    fn refresh_lineage_totals_stale_baseline_gate_is_strict_gt_zero() {
+        let mut totals = Some(mk_totals(
+            Decimal::ZERO,
+            Decimal::from(5),
+            Decimal::ZERO,
+            None,
+            None,
+        ));
+        totals.as_mut().unwrap().valuation_price_time_kind = "node_fallback_unavailable".into();
+        totals.as_mut().unwrap().note =
+            Some("no valuation snapshots available for this position".into());
+        let mut nodes = vec![mk_node("PDA", Decimal::from(10), Decimal::from(12))];
+        nodes[0].opened_ts_utc = Some("t0".to_string());
+        refresh_lineage_totals_from_nodes("PDA", &mut totals, &mut nodes);
+        let t = totals.as_ref().expect("refreshed");
+        assert_eq!(t.baseline_value_usd, Decimal::from(10));
+
+        // Both baselines zero → not stale (`>` not `>=` / `==`).
+        let mut totals_z = Some(mk_totals(
+            Decimal::ZERO,
+            Decimal::from(3),
+            Decimal::ZERO,
+            None,
+            None,
+        ));
+        let kind = "keep_me";
+        totals_z.as_mut().unwrap().valuation_price_time_kind = kind.into();
+        let mut nodes_z = vec![mk_node("PDA", Decimal::ZERO, Decimal::from(3))];
+        refresh_lineage_totals_from_nodes("PDA", &mut totals_z, &mut nodes_z);
+        assert_eq!(
+            totals_z.as_ref().unwrap().valuation_price_time_kind,
+            kind,
+            "must not maybe_compute when first_baseline is not > 0"
+        );
+    }
+
     fn usd(d: Decimal) -> String {
         d.round_dp(6).normalize().to_string()
     }
