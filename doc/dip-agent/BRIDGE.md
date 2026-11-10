@@ -99,7 +99,8 @@ Trigger create/cancel za flagą + osobny signer. Nadal: nie jeden shared keypair
 | **E0** Attach: host `wallet_id` → Trigger JWT session (`POST /dip/trigger/attach`) | DONE 2026-11-09 |
 | **E1** Vault + deposit/craft propose (`GET /dip/trigger/vault`, `POST …/deposit/craft`) | DONE 2026-11-09 |
 | **E2** Sign deposit + create single price order (`POST /dip/trigger/orders/price`, T7) | DONE 2026-11-10 — requires `mode: live` + `confirm_execute` |
-| E3+ cancel / confirm-cancel / patch | ⬜ |
+| **E3** Cancel + confirm withdraw (`POST /dip/trigger/orders/price/cancel`, T15–T16) | DONE 2026-11-10 — same live gate |
+| E4+ patch trigger / DCA / swap | ⬜ |
 
 Katalog funkcji do pokrycia (T4–T16, S1–S2, DoD): [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md).
 

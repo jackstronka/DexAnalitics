@@ -12,7 +12,7 @@ mod dexscreener;
 pub mod dune;
 /// Jupiter Price API provider.
 pub mod jupiter;
-/// Jupiter Trigger Order API V2 (auth + vault/deposit + price create).
+/// Jupiter Trigger Order API V2 (auth + vault/deposit + create/cancel).
 pub mod jupiter_trigger;
 mod mock;
 mod orca_rest;
@@ -27,8 +27,10 @@ pub use jupiter::JupiterProvider;
 pub use jupiter_trigger::{
     JupiterTriggerClient, OrderHistoryQuery, TriggerAuthTokens, TriggerChallenge,
     TriggerDepositCraftRequest, TriggerDepositCraftResponse, TriggerOrderHistoryItem,
-    TriggerOrderHistoryResponse, TriggerPriceOrderCreateRequest, TriggerPriceOrderCreateResponse,
-    TriggerVault, filter_open_buy_dips,
+    TriggerOrderHistoryResponse, TriggerPriceOrderCancelResponse,
+    TriggerPriceOrderConfirmCancelRequest, TriggerPriceOrderConfirmCancelResponse,
+    TriggerPriceOrderCreateRequest, TriggerPriceOrderCreateResponse, TriggerVault,
+    filter_open_buy_dips,
 };
 pub use mock::MockMarketDataProvider;
 pub use orca_rest::{

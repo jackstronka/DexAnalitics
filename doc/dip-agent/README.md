@@ -45,7 +45,9 @@ Live Trigger create/cancel = Faza E (osobny GO + osobna policy signera). Nie ł�
 - **D:** UI limity + OOR LP — **U1**+**U1b**+**U2** DONE (`/dip` + Settings runtime); U3+ open  
 - **E0:** Trigger attach do host `wallet_id` — DONE  
 - **E1:** vault + deposit/craft (unsigned propose) — DONE  
-- **E2:** sign deposit + create single price order (`POST /dip/trigger/orders/price`) — DONE (gate: `mode: live` + `confirm_execute`); cancel = E3+  
+- **E2:** sign deposit + create single price order (`POST /dip/trigger/orders/price`) — DONE (gate: `mode: live` + `confirm_execute`)  
+- **E3:** cancel + sign withdraw + confirm (`POST /dip/trigger/orders/price/cancel`) — DONE (same live gate); patch/DCA = E4+  
+ 
  
 - **E:** live create/cancel za flagą  
 

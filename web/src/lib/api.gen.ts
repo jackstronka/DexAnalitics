@@ -565,6 +565,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/trigger/orders/price/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/trigger/orders/price/cancel` — E3 T15–T16: cancel start + sign withdraw + confirm. */
+        post: operations["post_dip_trigger_orders_price_cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/trigger/session": {
         parameters: {
             query?: never;
@@ -3223,6 +3240,21 @@ export interface components {
             token_decimals?: number | null;
             /** @description Base64 unsigned transaction — sign before create; not broadcast here. */
             transaction_base64: string;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `POST /dip/trigger/orders/price/cancel` — cancel start + sign withdraw + confirm (E3 / T15–T16). */
+        DipTriggerPriceOrderCancelRequest: {
+            /** @description Must be `true`; double-confirm live cancel + withdraw. */
+            confirm_execute: boolean;
+            order_id: string;
+            wallet_id: string;
+        };
+        DipTriggerPriceOrderCancelResponse: {
+            cancel_request_id: string;
+            notes: string[];
+            order_id: string;
+            tx_signature?: string | null;
             wallet_id: string;
             wallet_pubkey: string;
         };
@@ -6245,6 +6277,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipTriggerPriceOrderCreateResponse"];
+                };
+            };
+        };
+    };
+    post_dip_trigger_orders_price_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerPriceOrderCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Cancelled Trigger price order + withdraw */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerPriceOrderCancelResponse"];
                 };
             };
         };

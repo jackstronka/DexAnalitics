@@ -1,7 +1,7 @@
-//! Jupiter Trigger Order API V2 — auth + read + vault/deposit + price create (E0–E2).
+//! Jupiter Trigger Order API V2 — auth + vault/deposit + create/cancel (E0–E3).
 //!
 //! Docs: <https://developers.jup.ag/docs/trigger>
-//! Cancel/confirm-cancel = later E step. Live create is gated by Dex API (`mode: live`).
+//! Live create/cancel gated by Dex API (`mode: live` + `confirm_execute`).
 
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -158,6 +158,33 @@ pub struct TriggerPriceOrderCreateResponse {
     pub tx_signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deposit_confirmed: Option<bool>,
+}
+
+/// Response from `POST /orders/price/cancel/{id}` (unsigned withdraw tx).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderCancelResponse {
+    pub id: String,
+    /// Base64 unsigned withdraw transaction.
+    pub transaction: String,
+    pub request_id: String,
+}
+
+/// Body for `POST /orders/price/confirm-cancel/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderConfirmCancelRequest {
+    pub signed_transaction: String,
+    pub cancel_request_id: String,
+}
+
+/// Response from `POST /orders/price/confirm-cancel/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderConfirmCancelResponse {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_signature: Option<String>,
 }
 
 /// HTTP client for Jupiter Trigger V2 (read + auth helpers).
@@ -462,6 +489,65 @@ impl JupiterTriggerClient {
         }
         Ok(serde_json::from_str(&text)?)
     }
+
+    /// `POST /orders/price/cancel/{id}` — start cancel; returns unsigned withdraw tx.
+    pub async fn cancel_price_order(
+        &self,
+        access_token: &str,
+        order_id: &str,
+    ) -> Result<TriggerPriceOrderCancelResponse> {
+        let id = order_id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("order_id required"));
+        }
+        let url = format!(
+            "{}/orders/price/cancel/{}",
+            self.base_url.trim_end_matches('/'),
+            id
+        );
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"));
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/price/cancel {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// `POST /orders/price/confirm-cancel/{id}` — submit signed withdraw.
+    pub async fn confirm_cancel_price_order(
+        &self,
+        access_token: &str,
+        order_id: &str,
+        body: &TriggerPriceOrderConfirmCancelRequest,
+    ) -> Result<TriggerPriceOrderConfirmCancelResponse> {
+        let id = order_id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("order_id required"));
+        }
+        let url = format!(
+            "{}/orders/price/confirm-cancel/{}",
+            self.base_url.trim_end_matches('/'),
+            id
+        );
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/price/confirm-cancel {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
 }
 
 /// Pure filter used by API/CLI and unit tests.
@@ -689,5 +775,48 @@ mod tests {
         assert_eq!(created.id, "ord-42");
         assert_eq!(created.tx_signature.as_deref(), Some("Sig111"));
         assert_eq!(created.deposit_confirmed, Some(true));
+    }
+
+    #[tokio::test]
+    async fn cancel_and_confirm_parse_with_mock() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/orders/price/cancel/ord-9")
+                .header("Authorization", "Bearer jwt-x");
+            then.status(200).json_body(serde_json::json!({
+                "id": "ord-9",
+                "transaction": "AQIDBA==",
+                "requestId": "cancel-req-1"
+            }));
+        });
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/orders/price/confirm-cancel/ord-9")
+                .header("Authorization", "Bearer jwt-x");
+            then.status(200).json_body(serde_json::json!({
+                "id": "ord-9",
+                "txSignature": "WithdrawSig"
+            }));
+        });
+
+        let client = JupiterTriggerClient::new(Some("k".into())).with_base_url(server.base_url());
+        let cancel = client.cancel_price_order("jwt-x", "ord-9").await.unwrap();
+        assert_eq!(cancel.request_id, "cancel-req-1");
+        assert_eq!(cancel.transaction, "AQIDBA==");
+
+        let confirmed = client
+            .confirm_cancel_price_order(
+                "jwt-x",
+                "ord-9",
+                &TriggerPriceOrderConfirmCancelRequest {
+                    signed_transaction: "SIGNED==".into(),
+                    cancel_request_id: cancel.request_id,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirmed.id, "ord-9");
+        assert_eq!(confirmed.tx_signature.as_deref(), Some("WithdrawSig"));
     }
 }

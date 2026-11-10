@@ -2686,3 +2686,16 @@ export const postDipTriggerOrdersPrice = (body: {
     method: 'POST',
     body: JSON.stringify(body),
   })
+
+export type DipTriggerPriceOrderCancelResponse = OkJson<'/dip/trigger/orders/price/cancel', 'post'>
+
+/** Live cancel+withdraw (T15–T16). Requires `mode: live` + `confirm_execute: true`. */
+export const postDipTriggerOrdersPriceCancel = (body: {
+  wallet_id: string
+  order_id: string
+  confirm_execute: boolean
+}) =>
+  fetchJson<DipTriggerPriceOrderCancelResponse>('/dip/trigger/orders/price/cancel', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })

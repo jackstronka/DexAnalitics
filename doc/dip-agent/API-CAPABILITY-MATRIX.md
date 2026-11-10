@@ -56,8 +56,8 @@ Każdy create limitu wymaga vault + signed deposit (`depositRequestId` + `deposi
 | T12 | Historia / open orders | `GET /orders/history` | read | B | ✅ |
 | T13 | Filtr open Buy-the-Dip | lokalnie na T12 | read | B | ✅ |
 | T14 | Patch trigger / slippage | `PATCH /orders/price/{id}` | propose → live | E | ⬜ |
-| T15 | Cancel start | `POST /orders/price/cancel/{id}` | propose → live | E | ⬜ |
-| T16 | Confirm cancel + withdraw | `POST /orders/price/confirm-cancel/{id}` | live + sign | E | ⬜ |
+| T15 | Cancel start | `POST /orders/price/cancel/{id}` via Dex cancel | live | E3 | ✅ (one-shot with T16) |
+| T16 | Confirm cancel + withdraw | `POST /orders/price/confirm-cancel/{id}` → Dex `POST /dip/trigger/orders/price/cancel` | live + sign | E3 | ✅ |
 
 ### Powierzchnia Dex (obecna)
 
@@ -150,7 +150,8 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 
 - [x] T4–T6 w `JupiterTriggerClient` (hermetic httpmock vault+craft)
 - [x] T7 (+ T8 via `above`) create single — httpmock `create_price_order_parse_with_mock`
-- [ ] T9 + T14–T16 w `JupiterTriggerClient` (hermetic httpmock)  
+- [x] T15–T16 cancel + confirm — httpmock `cancel_and_confirm_parse_with_mock`
+- [ ] T9 + T14 w `JupiterTriggerClient` (hermetic httpmock)  
 - [ ] Propose path zwraca body bez broadcast (`mode: propose-only`)  
 - [ ] Live path za flagą + osobny signer  
 - [ ] Pending Withdraw po cancel dopięty zanim nowe `buy_dip`  

@@ -1,3 +1,10 @@
+## 2026-11-10 — Dip E3: cancel + confirm withdraw (T15–T16)
+
+keywords: dip-agent, Jupiter Trigger, E3, T15, T16, cancel, confirm-cancel, withdraw, live, confirm_execute, clmm-lp-data, clmm-lp-api
+
+- **What:** Client `cancel_price_order` + `confirm_cancel_price_order`; Dex `POST /dip/trigger/orders/price/cancel` one-shot (cancel → sign withdraw → confirm). Gate: `mode: live` + `confirm_execute`. Patch/DCA = E4+.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/api/src/handlers/dip.rs`
+
 ## 2026-11-10 — Dip E2: sign deposit + create single price order (T7)
 
 keywords: dip-agent, Jupiter Trigger, E2, T7, orders/price, deposit sign, VersionedTransaction, live, confirm_execute, clmm-lp-data, clmm-lp-api
