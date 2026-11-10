@@ -44,7 +44,9 @@ Live Trigger create/cancel = Faza E (osobny GO + osobna policy signera). Nie ł�
 - **C:** propose `buy_dip|hold|…` → `agent_decisions.jsonl` — DONE (`POST /dip/propose`, CLI `dip-propose`, `kind=dip_propose`)  
 - **D:** UI limity + OOR LP — **U1**+**U1b**+**U2** DONE (`/dip` + Settings runtime); U3+ open  
 - **E0:** Trigger attach do host `wallet_id` — DONE  
-- **E1:** vault + deposit/craft (unsigned propose) — DONE; create/cancel = E2+  
+- **E1:** vault + deposit/craft (unsigned propose) — DONE  
+- **E2:** sign deposit + create single price order (`POST /dip/trigger/orders/price`) — DONE (gate: `mode: live` + `confirm_execute`); cancel = E3+  
+ 
 - **E:** live create/cancel za flagą  
 
 Szczegóły: [`BRIDGE.md`](BRIDGE.md). Powierzchnia AI: [`AI_AGENT_LAYER.md`](../AI_AGENT_LAYER.md) § D.

@@ -2648,6 +2648,7 @@ export const deleteDipTriggerSession = (walletId: string) =>
 
 export type DipTriggerVaultResponse = OkJson<'/dip/trigger/vault', 'get'>
 export type DipTriggerDepositCraftResponse = OkJson<'/dip/trigger/deposit/craft', 'post'>
+export type DipTriggerPriceOrderCreateResponse = OkJson<'/dip/trigger/orders/price', 'post'>
 
 export const getDipTriggerVault = (walletId: string, registerIfMissing = false) => {
   const params = new URLSearchParams({ wallet_id: walletId.trim() })
@@ -2664,6 +2665,24 @@ export const postDipTriggerDepositCraft = (body: {
   order_sub_type?: string
 }) =>
   fetchJson<DipTriggerDepositCraftResponse>('/dip/trigger/deposit/craft', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+/** Live create (T7). Requires runtime `mode: live` + `confirm_execute: true`. */
+export const postDipTriggerOrdersPrice = (body: {
+  wallet_id: string
+  confirm_execute: boolean
+  input_mint: string
+  output_mint: string
+  amount: string
+  trigger_mint: string
+  trigger_condition: string
+  trigger_price_usd: number
+  expires_at_ms?: number
+  slippage_bps?: number
+}) =>
+  fetchJson<DipTriggerPriceOrderCreateResponse>('/dip/trigger/orders/price', {
     method: 'POST',
     body: JSON.stringify(body),
   })

@@ -48,8 +48,8 @@ Każdy create limitu wymaga vault + signed deposit (`depositRequestId` + `deposi
 
 | ID | Funkcja | Endpoint | Tryb | Faza | Status |
 |----|---------|----------|------|------|--------|
-| T7 | Create **Buy the Dip** (`below`) | `POST /orders/price` | propose → live | C body / E exec | ⬜ |
-| T8 | Create **Take Profit** (`above`) | `POST /orders/price` | propose → live | C / E | ⬜ |
+| T7 | Create **Buy the Dip** (`below`) | `POST /orders/price` → Dex `POST /dip/trigger/orders/price` | live | E2 | ✅ (`confirm_execute` + `mode: live`) |
+| T8 | Create **Take Profit** (`above`) | same Dex path (`trigger_condition=above`) | live | E2 | ✅ same endpoint |
 | T9 | Create **Stop Loss** | `POST /orders/price` | propose → live | E (flag) | ⬜ |
 | T10 | Create **OCO / OTOCO** | `POST /orders/price` | — | — | 🚫 |
 | T11 | **Trailing** (`trailingBps`) | `POST /orders/price` | — | — | 🚫 |
@@ -149,7 +149,8 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 ## 10. Kryteria „pełnego tradingu przez API” (Definition of Done E)
 
 - [x] T4–T6 w `JupiterTriggerClient` (hermetic httpmock vault+craft)
-- [ ] T7–T9 + T14–T16 w `JupiterTriggerClient` (hermetic httpmock)  
+- [x] T7 (+ T8 via `above`) create single — httpmock `create_price_order_parse_with_mock`
+- [ ] T9 + T14–T16 w `JupiterTriggerClient` (hermetic httpmock)  
 - [ ] Propose path zwraca body bez broadcast (`mode: propose-only`)  
 - [ ] Live path za flagą + osobny signer  
 - [ ] Pending Withdraw po cancel dopięty zanim nowe `buy_dip`  

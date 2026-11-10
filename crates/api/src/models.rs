@@ -3472,6 +3472,42 @@ pub struct DipTriggerDepositCraftResponse {
     pub notes: Vec<String>,
 }
 
+/// `POST /dip/trigger/orders/price` — craft + sign deposit + create single price order (E2 / T7).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderCreateRequest {
+    pub wallet_id: String,
+    /// Must be `true`; double-confirm live create.
+    pub confirm_execute: bool,
+    pub input_mint: String,
+    pub output_mint: String,
+    /// Amount in input mint smallest units.
+    pub amount: String,
+    pub trigger_mint: String,
+    /// `below` (Buy-the-Dip) or `above` (TP).
+    pub trigger_condition: String,
+    pub trigger_price_usd: f64,
+    /// Unix ms expiry; if omitted, now + 7d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderCreateResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub order_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposit_confirmed: Option<bool>,
+    pub deposit_request_id: String,
+    pub trigger_condition: String,
+    pub trigger_price_usd: f64,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================
