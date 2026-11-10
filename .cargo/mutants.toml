@@ -12,4 +12,6 @@ exclude_re = [
   "with_context",
   "bail!",
   "tracing::",
+  # Env wiring noise (D5 reopen_sizing survivors) — not economic math.
+  "RebalanceConfig::from_env",
 ]

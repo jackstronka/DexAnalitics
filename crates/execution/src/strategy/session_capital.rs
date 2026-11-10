@@ -456,6 +456,27 @@ mod tests {
         assert!((clamp_target_usd_to_chain_wallet_notional(5.0, 20.0) - 5.0).abs() < 1e-9);
     }
 
+    /// D5: when mint B is WSOL, spendable lamports use B's portfolio cap (`==`, not `!=`).
+    #[test]
+    fn apply_portfolio_caps_spendable_uses_wsol_leg_b_cap() {
+        let wsol: Pubkey = clmm_lp_protocols::orca::executor::WSOL_MINT
+            .parse()
+            .expect("WSOL");
+        let other = Pubkey::new_unique();
+        let mut caps = SessionMintCaps::empty("chain-wsol-b");
+        caps.caps_by_mint.insert(wsol.to_string(), 40);
+        let (_wa, _wb, spend) = apply_portfolio_caps_to_wallet_raw(
+            1_000,
+            500,
+            999,
+            &other,
+            &wsol,
+            &wsol,
+            Some(&caps),
+        );
+        assert_eq!(spend, 40);
+    }
+
     #[test]
     fn clamp_deposit_quote_to_portfolio_limits_token_max() {
         let mint_a = Pubkey::new_unique();

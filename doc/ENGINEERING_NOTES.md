@@ -26,6 +26,13 @@ keywords: dip-agent, UI, Faza D, U1, /dip, dip/snapshot, DipSnapshotResponse, we
 - **What:** Strona `/dip` (strefa SOL A/B/C + open Buy-the-Dip z `GET /dip/snapshot`), nav + i18n; `getDipSnapshot` typowany z OpenAPI; helpery `dipSnapshotDisplay` + vitest. Bez Trigger create/cancel (E) i bez drabinki (U1b).
 - **paths:** `web/src/pages/Dip.tsx`, `web/src/lib/dipSnapshotDisplay.ts`, `web/src/lib/api.ts`, `web/src/App.tsx`, `web/src/components/Layout.tsx`
 
+## 2026-11-10 — D5 follow-up: reconcile / reopen / WSOL-B survivors
+
+keywords: D5, cargo-mutants, reconcile_stream_pnl, target_usd, session_capital, WSOL, survivors
+
+- **What:** Unit tests killing Actions MISSED on `reconcile_stream_pnl_totals_with_nodes` (noop healthy, hodl==80% not degraded, current_missing + exact net/IL, hodl-degraded rewrite, `sync_chain_economic_totals_from_nodes`), `target_usd_for_reopen_sizing` / preflight non-finite, `apply_portfolio_caps` when mint B is WSOL. Residual: `RebalanceConfig::from_env` field-delete mutants (env wiring, not money math).
+- **paths:** `crates/api/src/services/chain_economic_totals.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/session_capital.rs`
+
 ## 2026-11-09 — D5 follow-up: kill chain_economic_totals NAV survivors
 
 keywords: D5, cargo-mutants, chain_economic_totals, close_nav, CloseEstimate, survivors, clmm-lp-api
