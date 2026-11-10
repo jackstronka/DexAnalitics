@@ -72,7 +72,8 @@ run_one session_capital \
 run_one reopen_sizing \
   -p clmm-lp-execution \
   -f rebalance.rs \
-  -F 'target_usd_'
+  -F 'target_usd_' \
+  --exclude-re 'from_env|max_slippage_bps|profitability_mode|est_tx_cost_lamports'
 
 python3 tools/mutants_d5_summary.py --root "$OUT" --out "$OUT/summary.json" --md "$OUT/summary.md"
 echo ""

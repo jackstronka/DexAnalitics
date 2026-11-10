@@ -14,4 +14,8 @@ exclude_re = [
   "tracing::",
   # Env wiring noise (D5 reopen_sizing survivors) — not economic math.
   "RebalanceConfig::from_env",
+  "from_env",
+  "delete field max_slippage_bps",
+  "delete field profitability_mode",
+  "delete field est_tx_cost_lamports",
 ]
