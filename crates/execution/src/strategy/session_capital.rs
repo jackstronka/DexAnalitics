@@ -465,15 +465,8 @@ mod tests {
         let other = Pubkey::new_unique();
         let mut caps = SessionMintCaps::empty("chain-wsol-b");
         caps.caps_by_mint.insert(wsol.to_string(), 40);
-        let (_wa, _wb, spend) = apply_portfolio_caps_to_wallet_raw(
-            1_000,
-            500,
-            999,
-            &other,
-            &wsol,
-            &wsol,
-            Some(&caps),
-        );
+        let (_wa, _wb, spend) =
+            apply_portfolio_caps_to_wallet_raw(1_000, 500, 999, &other, &wsol, &wsol, Some(&caps));
         assert_eq!(spend, 40);
     }
 
