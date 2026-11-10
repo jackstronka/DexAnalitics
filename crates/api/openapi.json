@@ -1250,6 +1250,37 @@
         }
       }
     },
+    "/dip/trigger/orders/price/patch": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/orders/price/patch` — E4 T14: patch single order trigger/slippage.",
+        "operationId": "post_dip_trigger_orders_price_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerPriceOrderPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Patched Trigger price order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerPriceOrderPatchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/trigger/session": {
       "get": {
         "tags": [
@@ -8229,6 +8260,83 @@
               "string",
               "null"
             ]
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderPatchRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/orders/price/patch` — update trigger/slippage on a single order (E4 / T14).",
+        "required": [
+          "wallet_id",
+          "order_id",
+          "confirm_execute"
+        ],
+        "properties": {
+          "confirm_execute": {
+            "type": "boolean",
+            "description": "Must be `true`; double-confirm live patch."
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "slippage_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "trigger_price_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderPatchResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "order_id",
+          "notes"
+        ],
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "slippage_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "trigger_price_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "wallet_id": {
             "type": "string"

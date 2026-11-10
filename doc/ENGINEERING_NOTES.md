@@ -1,3 +1,10 @@
+## 2026-11-10 — Dip E4: patch Trigger price order (T14)
+
+keywords: dip-agent, Jupiter Trigger, E4, T14, PATCH, orders/price, trigger_price_usd, slippage_bps, live, confirm_execute, clmm-lp-data, clmm-lp-api
+
+- **What:** `JupiterTriggerClient::patch_price_order` + `POST /dip/trigger/orders/price/patch` (single only). Gate: `mode: live` + `confirm_execute`. DCA/swap = E5+.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/api/src/handlers/dip.rs`
+
 ## 2026-11-10 — Dip E3: cancel + confirm withdraw (T15–T16)
 
 keywords: dip-agent, Jupiter Trigger, E3, T15, T16, cancel, confirm-cancel, withdraw, live, confirm_execute, clmm-lp-data, clmm-lp-api

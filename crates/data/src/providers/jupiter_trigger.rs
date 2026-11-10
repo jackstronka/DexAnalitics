@@ -1,7 +1,7 @@
-//! Jupiter Trigger Order API V2 — auth + vault/deposit + create/cancel (E0–E3).
+//! Jupiter Trigger Order API V2 — auth + vault/deposit + create/cancel/patch (E0–E4).
 //!
 //! Docs: <https://developers.jup.ag/docs/trigger>
-//! Live create/cancel gated by Dex API (`mode: live` + `confirm_execute`).
+//! Live writes gated by Dex API (`mode: live` + `confirm_execute`).
 
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -185,6 +185,25 @@ pub struct TriggerPriceOrderConfirmCancelResponse {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_signature: Option<String>,
+}
+
+/// `PATCH /orders/price/{id}` body for a **single** order (T14).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderPatchRequest {
+    /// Must be `single` for E4 (OCO/OTOCO/trailing out of scope).
+    pub order_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+}
+
+/// Response from `PATCH /orders/price/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderPatchResponse {
+    pub id: String,
 }
 
 /// HTTP client for Jupiter Trigger V2 (read + auth helpers).
@@ -548,6 +567,37 @@ impl JupiterTriggerClient {
         }
         Ok(serde_json::from_str(&text)?)
     }
+
+    /// `PATCH /orders/price/{id}` — update trigger price / slippage (single).
+    pub async fn patch_price_order(
+        &self,
+        access_token: &str,
+        order_id: &str,
+        body: &TriggerPriceOrderPatchRequest,
+    ) -> Result<TriggerPriceOrderPatchResponse> {
+        let id = order_id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("order_id required"));
+        }
+        let url = format!(
+            "{}/orders/price/{}",
+            self.base_url.trim_end_matches('/'),
+            id
+        );
+        let req = self
+            .apply_api_key(self.client.patch(url))?
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/price PATCH {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
 }
 
 /// Pure filter used by API/CLI and unit tests.
@@ -567,7 +617,7 @@ pub fn filter_open_buy_dips(orders: &[TriggerOrderHistoryItem]) -> Vec<TriggerOr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use httpmock::Method::{GET, POST};
+    use httpmock::Method::{GET, PATCH, POST};
     use httpmock::MockServer;
 
     #[test]
@@ -818,5 +868,33 @@ mod tests {
             .unwrap();
         assert_eq!(confirmed.id, "ord-9");
         assert_eq!(confirmed.tx_signature.as_deref(), Some("WithdrawSig"));
+    }
+
+    #[tokio::test]
+    async fn patch_price_order_parse_with_mock() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(PATCH)
+                .path("/orders/price/ord-7")
+                .header("Authorization", "Bearer jwt-p");
+            then.status(200).json_body(serde_json::json!({
+                "id": "ord-7"
+            }));
+        });
+
+        let client = JupiterTriggerClient::new(Some("k".into())).with_base_url(server.base_url());
+        let patched = client
+            .patch_price_order(
+                "jwt-p",
+                "ord-7",
+                &TriggerPriceOrderPatchRequest {
+                    order_type: "single".into(),
+                    trigger_price_usd: Some(88.25),
+                    slippage_bps: Some(150),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(patched.id, "ord-7");
     }
 }

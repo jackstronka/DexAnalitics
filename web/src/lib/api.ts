@@ -2699,3 +2699,18 @@ export const postDipTriggerOrdersPriceCancel = (body: {
     method: 'POST',
     body: JSON.stringify(body),
   })
+
+export type DipTriggerPriceOrderPatchResponse = OkJson<'/dip/trigger/orders/price/patch', 'post'>
+
+/** Live patch trigger/slippage (T14). Requires `mode: live` + `confirm_execute: true`. */
+export const postDipTriggerOrdersPricePatch = (body: {
+  wallet_id: string
+  order_id: string
+  confirm_execute: boolean
+  trigger_price_usd?: number
+  slippage_bps?: number
+}) =>
+  fetchJson<DipTriggerPriceOrderPatchResponse>('/dip/trigger/orders/price/patch', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
