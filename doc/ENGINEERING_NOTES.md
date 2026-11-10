@@ -1,3 +1,10 @@
+## 2026-11-10 — Dip E2: sign deposit + create single price order (T7)
+
+keywords: dip-agent, Jupiter Trigger, E2, T7, orders/price, deposit sign, VersionedTransaction, live, confirm_execute, clmm-lp-data, clmm-lp-api
+
+- **What:** `JupiterTriggerClient::create_price_order` + `POST /dip/trigger/orders/price` — craft → sign host keypair (`VersionedTransaction`) → create. Gate: `runtime.mode=live` + `confirm_execute=true`. Cancel = E3+.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/api/src/handlers/dip.rs`
+
 ## 2026-11-10 — CI: no `--depth=1` w golden_delta / critical-area gate
 
 keywords: quality_gates, golden_delta, critical-area-test-gate, infra, no merge base, BUG-20261110-01

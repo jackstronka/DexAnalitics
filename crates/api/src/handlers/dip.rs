@@ -1,18 +1,21 @@
-//! Dip Agent endpoints: snapshot (B) + propose (C) + runtime (U2) + Trigger wallet attach (E0).
+//! Dip Agent endpoints: snapshot (B) + propose (C) + runtime (U2) + Trigger attach/vault/create (E0–E2).
 
 use crate::error::{ApiError, ApiResult};
 use crate::handlers::wallets::load_wallet_keypair_for_id;
 use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
     DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
-    DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse, DipTriggerSessionStatusDto,
-    DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
+    DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse,
+    DipTriggerPriceOrderCreateRequest, DipTriggerPriceOrderCreateResponse,
+    DipTriggerSessionStatusDto, DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use clmm_lp_data::dip::{
     DipAuditDecisionRow, DipLadderDefaults, DipProposeAction, DipProposeDecision, DipProposeMode,
@@ -23,10 +26,11 @@ use clmm_lp_data::dip::{
 };
 use clmm_lp_data::providers::{
     JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDepositCraftRequest,
-    filter_open_buy_dips,
+    TriggerPriceOrderCreateRequest, filter_open_buy_dips,
 };
 use serde::Deserialize;
-use solana_sdk::signer::Signer;
+use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::transaction::VersionedTransaction;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -632,8 +636,154 @@ pub async fn post_dip_trigger_deposit_craft(
         amount: craft.amount,
         token_decimals: craft.token_decimals,
         notes: vec![
-            "propose-only: unsigned deposit; sign + create order = later E step".into(),
+            "propose-only: unsigned deposit; sign + create via POST /dip/trigger/orders/price"
+                .into(),
             "request_id is single-use as depositRequestId on create".into(),
+        ],
+    }))
+}
+
+/// Sign a Jupiter Trigger deposit `VersionedTransaction` (base64 ↔ base64).
+fn sign_trigger_deposit_tx_base64(tx_b64: &str, keypair: &Keypair) -> ApiResult<String> {
+    let raw = BASE64
+        .decode(tx_b64.trim().as_bytes())
+        .map_err(|e| ApiError::bad_request(format!("deposit tx base64 decode: {e}")))?;
+    let tx: VersionedTransaction = bincode::deserialize(&raw).map_err(|e| {
+        ApiError::bad_request(format!(
+            "deposit tx deserialize (expected VersionedTransaction): {e}"
+        ))
+    })?;
+    let signed = VersionedTransaction::try_new(tx.message, &[keypair])
+        .map_err(|e| ApiError::bad_request(format!("deposit tx sign failed: {e}")))?;
+    let bytes = bincode::serialize(&signed)
+        .map_err(|e| ApiError::internal(format!("deposit tx serialize: {e}")))?;
+    Ok(BASE64.encode(bytes))
+}
+
+fn require_live_create_gate(confirm_execute: bool) -> ApiResult<()> {
+    if !confirm_execute {
+        return Err(ApiError::bad_request(
+            "confirm_execute=true required for Trigger order create",
+        ));
+    }
+    let path = resolve_runtime_path(None);
+    let rt = load_dip_runtime_file(&path)
+        .map_err(|e| ApiError::bad_request(format!("load dip runtime {}: {e}", path.display())))?;
+    let mode = normalize_dip_mode(&rt.mode);
+    if mode != "live" {
+        return Err(ApiError::bad_request(format!(
+            "dip runtime mode is '{mode}' — set config/dip/runtime.yaml mode: live for create"
+        )));
+    }
+    Ok(())
+}
+
+/// `POST /dip/trigger/orders/price` — E2 T7: craft + sign deposit + create single price order.
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/orders/price",
+    tag = "Dip",
+    request_body = DipTriggerPriceOrderCreateRequest,
+    responses(
+        (status = 200, description = "Created Trigger price order", body = DipTriggerPriceOrderCreateResponse)
+    )
+)]
+pub async fn post_dip_trigger_orders_price(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerPriceOrderCreateRequest>,
+) -> ApiResult<Json<DipTriggerPriceOrderCreateResponse>> {
+    require_live_create_gate(req.confirm_execute)?;
+    let session = require_attached_session(&req.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+
+    let cond = req.trigger_condition.trim().to_ascii_lowercase();
+    if cond != "below" && cond != "above" {
+        return Err(ApiError::bad_request(
+            "trigger_condition must be 'below' (Buy-the-Dip) or 'above' (TP)",
+        ));
+    }
+    if req.input_mint.trim().is_empty()
+        || req.output_mint.trim().is_empty()
+        || req.trigger_mint.trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "input_mint, output_mint, trigger_mint required",
+        ));
+    }
+    if req.amount.trim().is_empty() {
+        return Err(ApiError::bad_request("amount required (smallest units)"));
+    }
+    if !req.trigger_price_usd.is_finite() || req.trigger_price_usd <= 0.0 {
+        return Err(ApiError::bad_request("trigger_price_usd must be > 0"));
+    }
+
+    let expires_at = req
+        .expires_at_ms
+        .unwrap_or_else(|| Utc::now().timestamp_millis() + 7 * 24 * 60 * 60 * 1000);
+    if expires_at <= Utc::now().timestamp_millis() {
+        return Err(ApiError::bad_request("expires_at_ms must be in the future"));
+    }
+
+    let kp = load_wallet_keypair_for_id(&state, req.wallet_id.trim())?;
+    if kp.pubkey().to_string() != session.wallet_pubkey {
+        return Err(ApiError::bad_request(
+            "host keypair pubkey mismatch vs Trigger session wallet_pubkey",
+        ));
+    }
+
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let craft = client
+        .craft_deposit(
+            &session.tokens.access_token,
+            &TriggerDepositCraftRequest {
+                input_mint: req.input_mint.trim().to_string(),
+                output_mint: req.output_mint.trim().to_string(),
+                user_address: session.wallet_pubkey.clone(),
+                amount: req.amount.trim().to_string(),
+                order_type: "price".into(),
+                order_sub_type: Some("single".into()),
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("deposit/craft failed: {e}")))?;
+
+    let signed_tx = sign_trigger_deposit_tx_base64(&craft.transaction, &kp)?;
+    let created = client
+        .create_price_order(
+            &session.tokens.access_token,
+            &TriggerPriceOrderCreateRequest {
+                order_type: "single".into(),
+                deposit_request_id: craft.request_id.clone(),
+                deposit_signed_tx: signed_tx,
+                user_pubkey: session.wallet_pubkey.clone(),
+                input_mint: req.input_mint.trim().to_string(),
+                output_mint: req.output_mint.trim().to_string(),
+                input_amount: req.amount.trim().to_string(),
+                trigger_mint: req.trigger_mint.trim().to_string(),
+                trigger_condition: cond.clone(),
+                trigger_price_usd: req.trigger_price_usd,
+                expires_at,
+                slippage_bps: req.slippage_bps,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/price create failed: {e}")))?;
+
+    Ok(Json(DipTriggerPriceOrderCreateResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        order_id: created.id,
+        tx_signature: created.tx_signature,
+        deposit_confirmed: created.deposit_confirmed,
+        deposit_request_id: craft.request_id,
+        trigger_condition: cond,
+        trigger_price_usd: req.trigger_price_usd,
+        notes: vec![
+            "E2 live create: deposit signed with host wallet_id keypair".into(),
+            "cancel/confirm-cancel = later E step".into(),
         ],
     }))
 }

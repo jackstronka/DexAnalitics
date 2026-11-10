@@ -1188,6 +1188,37 @@
         }
       }
     },
+    "/dip/trigger/orders/price": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/orders/price` — E2 T7: craft + sign deposit + create single price order.",
+        "operationId": "post_dip_trigger_orders_price",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerPriceOrderCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created Trigger price order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerPriceOrderCreateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/trigger/session": {
       "get": {
         "tags": [
@@ -7999,6 +8030,117 @@
           "transaction_base64": {
             "type": "string",
             "description": "Base64 unsigned transaction — sign before create; not broadcast here."
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderCreateRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/orders/price` — craft + sign deposit + create single price order (E2 / T7).",
+        "required": [
+          "wallet_id",
+          "confirm_execute",
+          "input_mint",
+          "output_mint",
+          "amount",
+          "trigger_mint",
+          "trigger_condition",
+          "trigger_price_usd"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Amount in input mint smallest units."
+          },
+          "confirm_execute": {
+            "type": "boolean",
+            "description": "Must be `true`; double-confirm live create."
+          },
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms expiry; if omitted, now + 7d."
+          },
+          "input_mint": {
+            "type": "string"
+          },
+          "output_mint": {
+            "type": "string"
+          },
+          "slippage_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "trigger_condition": {
+            "type": "string",
+            "description": "`below` (Buy-the-Dip) or `above` (TP)."
+          },
+          "trigger_mint": {
+            "type": "string"
+          },
+          "trigger_price_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderCreateResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "order_id",
+          "deposit_request_id",
+          "trigger_condition",
+          "trigger_price_usd",
+          "notes"
+        ],
+        "properties": {
+          "deposit_confirmed": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "deposit_request_id": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "trigger_condition": {
+            "type": "string"
+          },
+          "trigger_price_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "tx_signature": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "wallet_id": {
             "type": "string"

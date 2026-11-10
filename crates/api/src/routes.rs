@@ -326,6 +326,10 @@ fn create_base_http_router(state: AppState) -> Router {
             "/dip/trigger/deposit/craft",
             post(handlers::post_dip_trigger_deposit_craft),
         )
+        .route(
+            "/dip/trigger/orders/price",
+            post(handlers::post_dip_trigger_orders_price),
+        )
         .route("/dip/propose", post(handlers::post_dip_propose))
         // Base EVM — Aerodrome Slipstream (read-only; needs BASE_RPC_URL)
         .route(

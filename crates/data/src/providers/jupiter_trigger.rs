@@ -1,7 +1,7 @@
-//! Jupiter Trigger Order API V2 — auth + read + vault/deposit craft (E0/E1).
+//! Jupiter Trigger Order API V2 — auth + read + vault/deposit + price create (E0–E2).
 //!
 //! Docs: <https://developers.jup.ag/docs/trigger>
-//! Create/cancel order broadcast remains **out of scope** until Faza E live GO.
+//! Cancel/confirm-cancel = later E step. Live create is gated by Dex API (`mode: live`).
 
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -127,6 +127,37 @@ pub struct TriggerDepositCraftResponse {
     pub input_token_account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_token_account: Option<String>,
+}
+
+/// `POST /orders/price` body for a **single** price order (Buy-the-Dip / TP / SL).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderCreateRequest {
+    /// Create variant: `single` (OCO/OTOCO out of scope for E2).
+    pub order_type: String,
+    pub deposit_request_id: String,
+    pub deposit_signed_tx: String,
+    pub user_pubkey: String,
+    pub input_mint: String,
+    pub output_mint: String,
+    pub input_amount: String,
+    pub trigger_mint: String,
+    pub trigger_condition: String,
+    pub trigger_price_usd: f64,
+    pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+}
+
+/// Response from `POST /orders/price`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerPriceOrderCreateResponse {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposit_confirmed: Option<bool>,
 }
 
 /// HTTP client for Jupiter Trigger V2 (read + auth helpers).
@@ -409,6 +440,28 @@ impl JupiterTriggerClient {
         }
         Ok(serde_json::from_str(&text)?)
     }
+
+    /// `POST /orders/price` — create single price order (consumes signed deposit).
+    pub async fn create_price_order(
+        &self,
+        access_token: &str,
+        body: &TriggerPriceOrderCreateRequest,
+    ) -> Result<TriggerPriceOrderCreateResponse> {
+        let url = format!("{}/orders/price", self.base_url.trim_end_matches('/'));
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/price {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
 }
 
 /// Pure filter used by API/CLI and unit tests.
@@ -596,5 +649,45 @@ mod tests {
             .unwrap();
         assert_eq!(craft.request_id, "req-1");
         assert_eq!(craft.transaction, "AQIDBA==");
+    }
+
+    #[tokio::test]
+    async fn create_price_order_parse_with_mock() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/orders/price")
+                .header("Authorization", "Bearer jwt-c");
+            then.status(200).json_body(serde_json::json!({
+                "id": "ord-42",
+                "txSignature": "Sig111",
+                "depositConfirmed": true
+            }));
+        });
+
+        let client = JupiterTriggerClient::new(Some("k".into())).with_base_url(server.base_url());
+        let created = client
+            .create_price_order(
+                "jwt-c",
+                &TriggerPriceOrderCreateRequest {
+                    order_type: "single".into(),
+                    deposit_request_id: "req-1".into(),
+                    deposit_signed_tx: "SIGNED==".into(),
+                    user_pubkey: "User111".into(),
+                    input_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into(),
+                    output_mint: "So11111111111111111111111111111111111111112".into(),
+                    input_amount: "10000000".into(),
+                    trigger_mint: "So11111111111111111111111111111111111111112".into(),
+                    trigger_condition: "below".into(),
+                    trigger_price_usd: 90.5,
+                    expires_at: 1_900_000_000_000,
+                    slippage_bps: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.id, "ord-42");
+        assert_eq!(created.tx_signature.as_deref(), Some("Sig111"));
+        assert_eq!(created.deposit_confirmed, Some(true));
     }
 }

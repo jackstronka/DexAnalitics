@@ -548,6 +548,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/trigger/orders/price": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/trigger/orders/price` — E2 T7: craft + sign deposit + create single price order. */
+        post: operations["post_dip_trigger_orders_price"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/trigger/session": {
         parameters: {
             query?: never;
@@ -3206,6 +3223,40 @@ export interface components {
             token_decimals?: number | null;
             /** @description Base64 unsigned transaction — sign before create; not broadcast here. */
             transaction_base64: string;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `POST /dip/trigger/orders/price` — craft + sign deposit + create single price order (E2 / T7). */
+        DipTriggerPriceOrderCreateRequest: {
+            /** @description Amount in input mint smallest units. */
+            amount: string;
+            /** @description Must be `true`; double-confirm live create. */
+            confirm_execute: boolean;
+            /**
+             * Format: int64
+             * @description Unix ms expiry; if omitted, now + 7d.
+             */
+            expires_at_ms?: number | null;
+            input_mint: string;
+            output_mint: string;
+            /** Format: int32 */
+            slippage_bps?: number | null;
+            /** @description `below` (Buy-the-Dip) or `above` (TP). */
+            trigger_condition: string;
+            trigger_mint: string;
+            /** Format: double */
+            trigger_price_usd: number;
+            wallet_id: string;
+        };
+        DipTriggerPriceOrderCreateResponse: {
+            deposit_confirmed?: boolean | null;
+            deposit_request_id: string;
+            notes: string[];
+            order_id: string;
+            trigger_condition: string;
+            /** Format: double */
+            trigger_price_usd: number;
+            tx_signature?: string | null;
             wallet_id: string;
             wallet_pubkey: string;
         };
@@ -6170,6 +6221,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipTriggerDepositCraftResponse"];
+                };
+            };
+        };
+    };
+    post_dip_trigger_orders_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerPriceOrderCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created Trigger price order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerPriceOrderCreateResponse"];
                 };
             };
         };
