@@ -212,10 +212,7 @@ async fn dip_snapshot_orders_history_via_httpmock() {
         test_router(test_state()),
         Method::GET,
         &uri,
-        &[
-            ("x-api-key", "test-key"),
-            ("Authorization", "Bearer jwt-1"),
-        ],
+        &[("x-api-key", "test-key"), ("Authorization", "Bearer jwt-1")],
         None,
     )
     .await;

@@ -11,8 +11,8 @@
 use super::http_test_support::{get_json, request_body, test_router, test_state};
 use crate::models::{
     CloseAllBatchStatusResponse, CloseAllItemStatus, CloseAllPositionsPreviewResponse,
-    CloseAllPositionsStartResponse, HealthResponse, ListPositionsResponse,
-    ListStrategiesResponse, MetricsResponse, ServiceStatus, WalletsListResponse,
+    CloseAllPositionsStartResponse, HealthResponse, ListPositionsResponse, ListStrategiesResponse,
+    MetricsResponse, ServiceStatus, WalletsListResponse,
 };
 use crate::services::position_close_all::{
     clear_close_all_jobs_memory_for_tests, reload_close_all_jobs_from_disk,
@@ -203,7 +203,11 @@ async fn close_all_preview_explicit_unmanaged_is_skipped_not_closable() {
         test_router(test_state()),
         Method::POST,
         "/api/v1/positions/close-all/preview",
-        Some(close_all_body("explicit", vec![pda.as_str()], "confirm_sync")),
+        Some(close_all_body(
+            "explicit",
+            vec![pda.as_str()],
+            "confirm_sync",
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
@@ -232,7 +236,11 @@ async fn close_all_start_zero_closable_then_get_status_deserializes() {
         router.clone(),
         Method::POST,
         "/api/v1/positions/close-all",
-        Some(close_all_body("explicit", vec![pda.as_str()], "confirm_sync")),
+        Some(close_all_body(
+            "explicit",
+            vec![pda.as_str()],
+            "confirm_sync",
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "body={body}");
@@ -276,13 +284,21 @@ async fn close_all_http_get_survives_disk_reload() {
         router.clone(),
         Method::POST,
         "/api/v1/positions/close-all",
-        Some(close_all_body("explicit", vec![pda.as_str()], "confirm_sync")),
+        Some(close_all_body(
+            "explicit",
+            vec![pda.as_str()],
+            "confirm_sync",
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "body={body}");
     let start: CloseAllPositionsStartResponse =
         serde_json::from_str(&body).expect("CloseAllPositionsStartResponse");
-    assert!(jobs_path.is_file(), "jobs file missing at {}", jobs_path.display());
+    assert!(
+        jobs_path.is_file(),
+        "jobs file missing at {}",
+        jobs_path.display()
+    );
 
     clear_close_all_jobs_memory_for_tests().await;
     let path = format!("/api/v1/positions/close-all/{}", start.batch_id);

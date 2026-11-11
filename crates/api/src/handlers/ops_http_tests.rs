@@ -16,7 +16,10 @@ use axum::http::{Method, Request, StatusCode};
 use std::io::Write;
 use tower::util::ServiceExt;
 
-fn hermetic_bot_paths(env: &mut EnvGuard, dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+fn hermetic_bot_paths(
+    env: &mut EnvGuard,
+    dir: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let ledger = dir.join("lifecycle.jsonl");
     let pending = dir.join("pending-open-recovery.json");
     let dismissed = dir.join("stranded-dismissed.json");
@@ -37,7 +40,11 @@ async fn pending_open_missing_file_deserializes() {
     let (_ledger, pending) = hermetic_bot_paths(&mut env, dir.path());
     assert!(!pending.exists());
 
-    let (status, body) = get_json(test_router(test_state()), "/api/v1/bot-activity/pending-open").await;
+    let (status, body) = get_json(
+        test_router(test_state()),
+        "/api/v1/bot-activity/pending-open",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     let resp: PendingOpenRecoveryResponse =
         serde_json::from_str(&body).expect("PendingOpenRecoveryResponse");
@@ -62,9 +69,14 @@ async fn pending_open_seeded_file_deserializes() {
         }],
         "dismissed_session_ids": []
     });
-    std::fs::write(&pending, serde_json::to_string_pretty(&payload).unwrap()).expect("write pending");
+    std::fs::write(&pending, serde_json::to_string_pretty(&payload).unwrap())
+        .expect("write pending");
 
-    let (status, body) = get_json(test_router(test_state()), "/api/v1/bot-activity/pending-open").await;
+    let (status, body) = get_json(
+        test_router(test_state()),
+        "/api/v1/bot-activity/pending-open",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     let resp: PendingOpenRecoveryResponse =
         serde_json::from_str(&body).expect("PendingOpenRecoveryResponse");
@@ -124,10 +136,7 @@ async fn stranded_list_and_dismiss_round_trip() {
     let after: StrandedRebalancesResponse =
         serde_json::from_str(&body).expect("StrandedRebalancesResponse after dismiss");
     assert!(
-        after
-            .items
-            .iter()
-            .all(|it| it.rebalance_session_id != sid),
+        after.items.iter().all(|it| it.rebalance_session_id != sid),
         "dismissed session still listed: {after:?}"
     );
 
@@ -136,10 +145,7 @@ async fn stranded_list_and_dismiss_round_trip() {
     let again: StrandedRebalancesResponse =
         serde_json::from_str(&body).expect("StrandedRebalancesResponse reload");
     assert!(
-        again
-            .items
-            .iter()
-            .all(|it| it.rebalance_session_id != sid),
+        again.items.iter().all(|it| it.rebalance_session_id != sid),
         "dismiss not durable across GET: {again:?}"
     );
 }
@@ -209,7 +215,10 @@ async fn positions_ws_upgrade_and_injected_event_shape() {
     let text = serde_json::to_string(&event.payload).expect("payload json");
     let v: serde_json::Value = serde_json::from_str(&text).expect("payload object");
     assert_eq!(v["update_type"], "h4_fixture");
-    assert_eq!(v["position_address"], "PosH4ccccccccccccccccccccccccccccccccc");
+    assert_eq!(
+        v["position_address"],
+        "PosH4ccccccccccccccccccccccccccccccccc"
+    );
     assert_eq!(v["data"]["source"], "ops_http_tests");
     assert!(v.get("timestamp").is_some());
 }

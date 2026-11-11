@@ -21,8 +21,7 @@ async fn agent_worker_settings_and_status_deserializes() {
     let router = test_router(test_state());
     let (status, body) = get_json(router.clone(), "/api/v1/agent/worker/settings").await;
     assert_eq!(status, StatusCode::OK, "body={body}");
-    let settings: AgentWorkerSettings =
-        serde_json::from_str(&body).expect("AgentWorkerSettings");
+    let settings: AgentWorkerSettings = serde_json::from_str(&body).expect("AgentWorkerSettings");
     assert!(settings.default_position_scan_interval_hours >= 1);
 
     let (status, body) = get_json(router, "/api/v1/agent/worker/status").await;
@@ -44,8 +43,7 @@ async fn position_agent_start_then_chat_deserializes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
-    let started: AgentSessionResponse =
-        serde_json::from_str(&body).expect("AgentSessionResponse");
+    let started: AgentSessionResponse = serde_json::from_str(&body).expect("AgentSessionResponse");
     assert_eq!(started.session.position_address, pda);
     assert_eq!(started.session.status, "active");
     assert_eq!(started.session.scan_interval_hours, 4);

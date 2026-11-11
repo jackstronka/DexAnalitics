@@ -57,11 +57,8 @@ async fn chain_portfolio_no_db_deserializes_empty_envelope() {
 
 #[tokio::test]
 async fn chain_portfolio_requires_chain_session_id() {
-    let (status, body) = get_json(
-        test_router(test_state()),
-        "/api/v1/wallets/chain-portfolio",
-    )
-    .await;
+    let (status, body) =
+        get_json(test_router(test_state()), "/api/v1/wallets/chain-portfolio").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
 }
 
@@ -217,8 +214,7 @@ async fn wallet_balances_via_httpmock_rpc() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
-    let resp: WalletBalancesResponse =
-        serde_json::from_str(&body).expect("WalletBalancesResponse");
+    let resp: WalletBalancesResponse = serde_json::from_str(&body).expect("WalletBalancesResponse");
     assert_eq!(resp.owner, owner);
     assert_eq!(resp.lamports, 1_500_000_000);
     assert!(resp.sol.starts_with("1.5"));
