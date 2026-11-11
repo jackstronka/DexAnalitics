@@ -290,6 +290,8 @@ impl ApiServer {
     pub async fn new(config: ServerConfig) -> Self {
         let db = connect_db_best_effort().await;
         let state = AppState::new(config.rpc_config.clone(), config.api_config.clone(), db);
+        // F2.8: restore close-all batch status after API restart.
+        crate::services::position_close_all::reload_close_all_jobs_from_disk().await;
         if state.db.is_some() {
             tracing::info!(
                 "Postgres connected: chain-history and DB-backed stream paths are enabled"

@@ -80,7 +80,7 @@ Fixtures w repo: `crates/api/tests/fixtures/{chain_history_9vhKY.json, stream_li
 
 **Raportowanie wyników:** brak. Wynik = zielony/czerwony check + surowy log `cargo test` (~650 linii); brak podziału na obszary, brak JUnit, brak historii. Diff goldena = surowy diff JSON. Master plan wymaga testów, których nie ma (§6: „0 regresji BUG-20260413-05 w testach golden”; F2.4 „regresja golden”; F2.9 „UI regression tests”), a tabela dojrzałości (§2.2) nie mówi, co jest chronione testami.
 
-**Rozwój vs testy:** aktywne bugi Fali 2 master planu nadal otwarte (2026-09-30): BUG-20260413-05 `regressed` (lineage parent), BUG-20260512-03 `regressed` (reopen downsizing), BUG-20260410-06 `open` (rotacja bez reopen), BUG-20260410-04 `open` (brak testów UI), BUG-20260413-06 `open` (PositionCreate wallet race).
+**Rozwój vs testy:** Fala 2 (aktualizacja 2026-11-11): BUG-20260413-05 / BUG-20260410-06 / BUG-20260512-03 → `fixed` (B5 + F2.1 incomplete + F2.2 missing-quote guard). Nadal otwarte: BUG-20260410-04 `open` (F2.9 UI), BUG-20260413-06 `open` (PositionCreate wallet race / F2.6).
 
 **Web:** testy tylko w `web/src/lib` (9 plików, 7 o experiment launcher). Bez testów m.in. `whirlpoolTicks.ts`, `chainCapital.ts`, `sessionCapital.ts`, `openPositionSwapEstimates.ts`, `lineageLedgerOpenQuote.ts`, `chainEconomicQuality.ts`. Strony 2400–2600 linii (`PositionCreate`, `PositionDetail`) z logiką w komponentach. Vitest `environment: 'node'`, brak ESLint config.
 
@@ -283,9 +283,9 @@ Faza 0–A i R1–R2 **nie czekają** na rozwój; testy z §7 dla danej fali pow
 
 | Pozycja | Bug | Test exit gate | Typ / ID |
 | ------- | --- | -------------- | -------- |
-| F2.1 reopen po rotacji | BUG-20260410-06 `open` | Sekwencja close → open na fałszywym executorze: po close rotacji zawsze open albo jawny stan błędu z powodem (nigdy „wisi”); **najpierw sprawdzić seam** (czy `rebalance` da się uruchomić bez RPC — jeśli nie, wydzielić funkcję decyzji) | niezmiennik |
-| F2.2 reopen downsizing | BUG-20260512-03 `regressed` | Przypadek ~$10 → ~$4 odtworzony jako wiersz goldena sizing: notional ≥ target × (1−ε) albo jawny `session_cap_*` | **B3** |
-| F2.3 lineage parent | BUG-20260413-05 `regressed` | Manual open ≠ false parent; rebalance bota łączy łańcuch (przypadki w fixture multi-rotation) | **B5** + C3(5) |
+| F2.1 reopen po rotacji | BUG-20260410-06 `fixed` | `rebalance_needs_incomplete_recovery` + pending-open enqueue; units `incomplete_recovery_*` | niezmiennik ✅ |
+| F2.2 reopen downsizing | BUG-20260512-03 `fixed` | B3 golden + final_caps; residual: brak quote przy `prev_end>0` → block (`reopen_missing_quote_blocks_open`) | **B3** ✅ |
+| F2.3 lineage parent | BUG-20260413-05 `fixed` | Manual open ≠ false parent; rebalance bota łączy łańcuch (przypadki w fixture multi-rotation) | **B5** + C3(5) ✅ |
 | F2.4 valuation vs lineage | — | Performance ≈ lineage baseline na 9vhKY; `net_pnl` identity | **B1** + C3(1) |
 | F2.5 session capital default | — | Reopen/open respektuje `SessionMintCaps` przy fladze on/off (istniejące testy `session_capital` pod `EnvGuard`) + saldo SESSION nigdy < 0 | B2 + C3(2) |
 | F2.6 PositionCreate wallet race | BUG-20260413-06 `open` | Logika „czy salda są dla właściwego api-signer” wydzielona do `web/src/lib` + test | C6 |
@@ -294,6 +294,19 @@ Faza 0–A i R1–R2 **nie czekają** na rozwój; testy z §7 dla danej fali pow
 | F2.9 UI regression | BUG-20260410-04 `open` | Komunikaty collect/swap przepuszczane 1:1 z API — test funkcji mapującej odpowiedź na komunikat (lib), bez E2E | C6 |
 
 Metryka master planu „Lineage chain integrity: 0 regresji BUG-20260413-05 w testach golden” jest spełniona przez **B5** — od tej chwili liczona w raporcie R4.
+
+### API HTTP hardening (obszar: API / kontrakt) — plan [`IMPLEMENTATION_PLAN_API_HTTP_TESTS.md`](IMPLEMENTATION_PLAN_API_HTTP_TESTS.md)
+
+Uzupełnia C1/C2 (schemat) o **typed HTTP** i persistence. Nie zastępuje goldenów B1/B5/B6.
+
+| Pozycja | Test exit gate | Typ |
+| ------- | -------------- | --- |
+| API-H0 ✅ | Close-all preview/start (zero closable) + GET status → modele OpenAPI; `http_test_support` + hermetic `fallback_urls: []` w smoke | kontrakt HTTP |
+| API-H1 ✅ | Close-all job przeżywa restart (JSON store + HTTP round-trip) (**F2.8**) | unit + kontrakt |
+| API-H2 ✅ | Dip snapshot/runtime/propose + live-gate 4xx; Agent start/chat bez live LLM; Trigger httpmock | kontrakt + httpmock |
+| API-H3 ✅ | Chain-portfolio no-DB envelope + B6 footer helpers; wallets balances/effective/api-signer typed | kontrakt + httpmock |
+| API-H4 | Bot stranded/pending-open; WS event shape; backtest job status | smoke + kontrakt |
+| API-H5 ✅ | Stream-pnl / lifecycle / diagnostics HTTP envelope; nawyk: nowy OpenAPI op = C1+C2+smoke\|contract (`AI_MERGE_CHECKLIST`); H5.3 F2.9 = C6 | kontrakt |
 
 ### Fala 3 — decision layer MVP (obszar: Decision layer / agent, Backtest)
 

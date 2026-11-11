@@ -596,6 +596,23 @@ pub(crate) fn final_caps_cover_deposit_quote(
     balances_cover_deposit_quote(cap_a, cap_b, q)
 }
 
+/// F2.2 / BUG-20260512-03: when prior close notional is known, reopen must obtain a deposit quote
+/// so [`final_caps_cover_deposit_quote`] can enforce target size. Opening on raw wallet caps alone
+/// can silently downsize (~$10 → ~$4).
+#[must_use]
+pub(crate) fn reopen_requires_deposit_quote(prev_end_value_usd: f64) -> bool {
+    prev_end_value_usd.is_finite() && prev_end_value_usd > 0.0
+}
+
+/// True when open must be blocked because a required deposit quote is missing.
+#[must_use]
+pub(crate) fn reopen_missing_quote_blocks_open(
+    prev_end_value_usd: f64,
+    quote_present: bool,
+) -> bool {
+    reopen_requires_deposit_quote(prev_end_value_usd) && !quote_present
+}
+
 fn widen_ticks_around_current(
     tick_current: i32,
     tick_spacing: u16,
@@ -846,6 +863,16 @@ pub struct RebalanceResult {
     pub error: Option<String>,
     /// Session id used to tag collect/close/swap/open lifecycle rows for this rebalance attempt.
     pub rebalance_session_id: Option<String>,
+}
+
+/// F2.1 / BUG-20260410-06: after a rotation close, never leave the session without an explicit
+/// incomplete handoff (IL `rebalance_incomplete` + pending-open enqueue).
+///
+/// True when the old NFT was closed on-chain but no new position was opened. Independent of
+/// `success` so a partial post-close failure cannot skip recovery.
+#[must_use]
+pub fn rebalance_needs_incomplete_recovery(result: &RebalanceResult) -> bool {
+    result.old_position_closed_on_chain && result.new_position.is_none()
 }
 
 /// Executor for rebalancing operations.
@@ -2407,6 +2434,50 @@ impl RebalanceExecutor {
             }
             last_cap_a = cap_a;
             last_cap_b = cap_b;
+            if reopen_missing_quote_blocks_open(prev_end_value_usd, quote_opt.is_some()) {
+                let err_s = format!(
+                    "reopen_missing_deposit_quote: prev_end_value_usd={prev_end_value_usd:.8} \
+                     target_usd={target_usd:.8} wallet_notional={wallet_notional:.8} \
+                     (cannot enforce final_caps vs target without quote; refuse silent downsize)"
+                );
+                warn!(
+                    op = "orca_rebalance",
+                    stage = "open_position",
+                    outcome = "missing_deposit_quote",
+                    attempt,
+                    max_attempts = max_open_attempts,
+                    position = %log_position,
+                    pool = %pool,
+                    target_usd,
+                    wallet_notional,
+                    prev_end_value_usd,
+                    "Blocking reopen without deposit quote when prev_end is known"
+                );
+                clmm_lp_protocols::ledger::tx_lifecycle::try_append_bot_diagnostic_row(
+                    self.provider.as_ref(),
+                    "bot_reopen_missing_deposit_quote",
+                    "open_position",
+                    Some(*pool),
+                    Some(*log_position),
+                    ledger_session_id.clone(),
+                    serde_json::json!({
+                        "attempt": attempt,
+                        "max_attempts": max_open_attempts,
+                        "cap_a": cap_a,
+                        "cap_b": cap_b,
+                        "target_usd": target_usd,
+                        "wallet_notional": wallet_notional,
+                        "prev_end_value_usd": prev_end_value_usd,
+                        "note": "F2.2: no deposit quote with known prev_end — skip open (pending-open) instead of raw-cap downsize."
+                    }),
+                )
+                .await;
+                last_open_err = Some(err_s);
+                if attempt < max_open_attempts {
+                    tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+                }
+                continue;
+            }
             if let Some(q) = quote_opt.as_ref()
                 && !final_caps_cover_deposit_quote(cap_a, cap_b, q)
             {
@@ -4985,6 +5056,23 @@ mod tests {
         ));
     }
 
+    /// F2.2 residual: known prev_end without deposit quote must not open on raw caps.
+    #[test]
+    fn reopen_missing_quote_blocks_when_prev_end_known() {
+        assert!(reopen_requires_deposit_quote(9.76));
+        assert!(reopen_missing_quote_blocks_open(9.76, false));
+        assert!(!reopen_missing_quote_blocks_open(9.76, true));
+    }
+
+    /// Wallet-cap fallback path (prev_end unknown/zero) may proceed without a quote.
+    #[test]
+    fn reopen_missing_quote_allowed_when_prev_end_unknown() {
+        assert!(!reopen_requires_deposit_quote(0.0));
+        assert!(!reopen_requires_deposit_quote(f64::NAN));
+        assert!(!reopen_missing_quote_blocks_open(0.0, false));
+        assert!(!reopen_missing_quote_blocks_open(f64::NEG_INFINITY, false));
+    }
+
     #[test]
     fn preflight_target_usd_includes_position_value_when_wallet_spl_empty() {
         let prev_end = 10.0;
@@ -5391,5 +5479,57 @@ mod tests {
         };
         let raw = RebalanceExecutor::estimate_stable_raw_for_sol_deficit(&pool, 6, 0.01);
         assert!(raw > 0);
+    }
+
+    fn sample_rebalance_result(
+        closed: bool,
+        new_pos: Option<Pubkey>,
+        success: bool,
+    ) -> RebalanceResult {
+        RebalanceResult {
+            success,
+            old_position_closed_on_chain: closed,
+            old_position: Pubkey::new_unique(),
+            new_position: new_pos,
+            fees_collected: None,
+            liquidity_removed: 0,
+            liquidity_added: 0,
+            tx_cost_lamports: 0,
+            error: if success {
+                None
+            } else {
+                Some("open failed after close".into())
+            },
+            rebalance_session_id: Some("sess-f21".into()),
+        }
+    }
+
+    /// F2.1: close OK + open missing → incomplete recovery (never silent hang).
+    #[test]
+    fn incomplete_recovery_when_closed_without_new_position() {
+        let r = sample_rebalance_result(true, None, false);
+        assert!(rebalance_needs_incomplete_recovery(&r));
+        assert_eq!(r.rebalance_session_id.as_deref(), Some("sess-f21"));
+    }
+
+    /// F2.1: close failed → do not enqueue incomplete (old NFT still exists).
+    #[test]
+    fn no_incomplete_recovery_when_close_did_not_land() {
+        let r = sample_rebalance_result(false, None, false);
+        assert!(!rebalance_needs_incomplete_recovery(&r));
+    }
+
+    /// F2.1: close + open success → no incomplete handoff.
+    #[test]
+    fn no_incomplete_recovery_when_new_position_opened() {
+        let r = sample_rebalance_result(true, Some(Pubkey::new_unique()), true);
+        assert!(!rebalance_needs_incomplete_recovery(&r));
+    }
+
+    /// Guard against a buggy success=true with missing new_position after close.
+    #[test]
+    fn incomplete_recovery_even_if_success_flag_inconsistent() {
+        let r = sample_rebalance_result(true, None, true);
+        assert!(rebalance_needs_incomplete_recovery(&r));
     }
 }

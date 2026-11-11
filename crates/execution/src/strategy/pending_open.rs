@@ -143,7 +143,7 @@ pub fn should_defer_pending_open_rate_limit_with(
 mod tests {
     use super::{
         PendingOpenItem, PendingOpenStore, attempts_alert_threshold,
-        should_defer_pending_open_rate_limit_with,
+        should_defer_pending_open_rate_limit_with, upsert,
     };
     use crate::lifecycle::RebalanceReason;
 
@@ -187,6 +187,38 @@ mod tests {
     #[test]
     fn alert_attempt_threshold_has_safe_default() {
         assert!(attempts_alert_threshold() >= 1);
+    }
+
+    /// F2.1: enqueue after incomplete must keep session id for lineage continuity.
+    #[test]
+    fn upsert_preserves_rebalance_session_id() {
+        let mut store = PendingOpenStore::default();
+        upsert(
+            &mut store,
+            PendingOpenItem {
+                pool: "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE".into(),
+                intended_tick_lower: -10,
+                intended_tick_upper: 10,
+                closed_position_nft: "DfjqibKyfMtXqkZrfsfmWvbxZxdZTH6m6J1L5qKnv4Xq".into(),
+                rebalance_session_id: Some("sess-f21-pending".into()),
+                planned_at_utc: None,
+                planned_price_ab: None,
+                reason: RebalanceReason::RangeExit,
+                optimization_run_id: None,
+                attempts: 0,
+                last_error: Some("open failed".into()),
+                last_attempt_at: None,
+                stuck_reason: None,
+                stuck_since: None,
+                last_alert_attempts: None,
+                created_at: "2026-04-17T09:00:00Z".into(),
+            },
+        );
+        assert_eq!(store.items.len(), 1);
+        assert_eq!(
+            store.items[0].rebalance_session_id.as_deref(),
+            Some("sess-f21-pending")
+        );
     }
 
     fn sample_item(last_attempt: Option<&str>, attempts: u32) -> PendingOpenItem {

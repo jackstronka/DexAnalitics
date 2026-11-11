@@ -382,8 +382,8 @@ Szablon: [`templates/TEST_SECTION.md`](templates/TEST_SECTION.md).
 | Rozwiązanie signera (§4.3): registry owner wygrywa z active signer; brak registry → RPC owner | unit na resolverze (tabela przypadków z §9) | syntetyczne registry + fałszywy lookup owner | ❌ |
 | Grupowanie per portfel; pozycje spoza API → `skipped_unmanaged_signer` | unit | lista pozycji w teście | ❌ |
 | Dry-run nie wysyła tx | unit z fałszywym executorem (licznik wywołań = 0) | — | ❌ |
-| Job zapisany → „restart” (nowy store z tego samego tempdir / DB) → job odczytany ze statusem | unit + `db` | tempdir / Postgres w job `db` | ❌ |
-| Kontrakt `POST /positions/close-all` i `GET .../{batch_id}` | kontrakt OpenAPI ↔ TS (C1/C2) | snapshot OpenAPI | ❌ |
+| Job zapisany → „restart” (nowy store z tego samego tempdir / DB) → job odczytany ze statusem | unit + HTTP | tempdir `CLMM_CLOSE_ALL_JOBS_PATH` | ✅ API-H1 |
+| Kontrakt `POST /positions/close-all` i `GET .../{batch_id}` | kontrakt HTTP + C1/C2 | OpenAPI + `api_http_contract_tests` | ✅ API-H0/H1 |
 
 **Test exit gate:** resolver + persistence zielone w `rust` / `db`; kontrakt w C1.  
 **Bugi powiązane:** brak otwartych — nowe wpisy w [`BUGS.md`](BUGS.md) dostają test w `Guards/tests`.  

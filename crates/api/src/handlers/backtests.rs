@@ -2890,6 +2890,20 @@ pub async fn apply_backtest_auto_tune_to_strategy(
     }))
 }
 
+/// Test-only: seed in-memory JOBS without spawning CLI (API-H4.3).
+#[cfg(test)]
+pub async fn seed_backtest_job_for_tests(job: crate::models::BacktestJobResponse) {
+    let mut w = JOBS.write().await;
+    w.insert(job.id.clone(), job);
+}
+
+/// Test-only: seed in-memory FULL_JOBS without spawning CLI (API-H4.3).
+#[cfg(test)]
+pub async fn seed_full_backtest_job_for_tests(job: crate::models::BacktestFullJobResponse) {
+    let mut w = FULL_JOBS.write().await;
+    w.insert(job.id.clone(), job);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

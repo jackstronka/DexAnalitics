@@ -1427,7 +1427,7 @@ impl StrategyExecutor {
                 let result = self.rebalance_executor.execute(params).await;
 
                 if !result.success {
-                    if result.old_position_closed_on_chain && result.new_position.is_none() {
+                    if super::rebalance::rebalance_needs_incomplete_recovery(&result) {
                         error!(
                             op = "orca_rebalance",
                             outcome = "incomplete",

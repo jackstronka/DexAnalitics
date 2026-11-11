@@ -46,6 +46,23 @@ keywords: dip-agent, Jupiter Trigger, deposit/craft, VersionedTransaction, try_n
 
 ---
 
+### BUG-20261111-02 — Close-all batch status lost on API restart (in-memory only)
+
+status: fixed  
+severity: medium  
+reported_by: ai  
+first_seen: 2026-11-11  
+fixed_in: API-H1 / F2.8  
+keywords: close-all, F2.8, API-H1, persistence, restart, CLOSE_ALL_JOBS, CLMM_CLOSE_ALL_JOBS_PATH, batch_id
+
+- **Symptom:** After `POST /positions/close-all`, restarting `clmm-lp-api` made `GET /positions/close-all/{batch_id}` return 404; UI banner lost batch progress even when on-chain closes had completed.
+- **Root cause:** Job store was process-local `LazyLock<HashMap>` with no disk persistence (`POSITIONS_CLOSE_ALL` P1 documented this as known risk).
+- **Fix:** Persist jobs to `data/close_all_jobs.json` (override `CLMM_CLOSE_ALL_JOBS_PATH`); reload on API startup; rewrite file on insert/item/finish.
+- **Guards/tests:** `close_all_job_survives_store_reload_from_tempdir`; `close_all_http_get_survives_disk_reload`.
+- **Paths:** `crates/api/src/services/position_close_all.rs`, `crates/api/src/server.rs`
+
+---
+
 ### BUG-20261110-01 — `golden_delta` / `critical_area_requires_tests`: `fatal: origin/main...HEAD: no merge base`
 
 status: fixed  
@@ -644,19 +661,21 @@ keywords: wallet, effective-balances, PositionCreate, stale, warmup-placeholder,
 
 ### BUG-20260512-03 — Reopen silently downsizes position from ~$10 to ~$4
 
-status: regressed  
+status: fixed  
 severity: high  
 reported_by: user  
 first_seen: 2026-05-12  
 fixed_in: local  
-keywords: rebalance, reopen, silent-downsize, target_usd, open_position, token_caps, swap_mix, GgcTn1ij, 9danMXEL, AjKc9epD, Retouch shift
+keywords: rebalance, reopen, silent-downsize, target_usd, open_position, token_caps, swap_mix, GgcTn1ij, 9danMXEL, AjKc9epD, Retouch shift, F2.2, reopen_missing_quote_blocks_open
 
 - **Symptom:** Rotation history for `GgcTn1ijVCcvPX1fHWUEFAqFBLWpeQhDbuUmwYkfVC9k` shows strategy notional dropping from about `$9.8` to about `$4.1`; user reports "znowu z 10 zrobiło się 4".
 - **Observed evidence (2026-05-12):** Local API `/positions/GgcTn1ijVCcvPX1fHWUEFAqFBLWpeQhDbuUmwYkfVC9k` returns live `value_usd ~= 4.06`, so this is not only a UI render artifact. `/stream-lineage?mode=live` shows first shrink at `9danMXELSER2DxGiV4z1hoqAJVVii15dFQg73YjjKMMK` (`baseline_value_usd ~= 4.238`) after `AY746rx48R6jsXzrt8uCsBV4ksktM3nasbZaazWBdyK2` closed around `$9.760`.
 - **Related prior bug family:** Similar product invariant to `BUG-20260510-01` (avoid `target_usd=0` / wallet-clamped downsizing) and `BUG-20260504-04` (~half notional opens when caps/quote are stale or incomplete), but this appears in automated rebalance/reopen rather than manual `PositionCreate`.
 - **Root cause:** `open_new_range_with_wallet_mix` computes `target_usd` from previous close value, but before `open_position` it clamps each token cap independently to `min(wallet_cap, quote.token_max_*)` and did not re-check that the final caps still cover the quote. If swap-mix left one leg missing/stale, the open could proceed with only one quoted leg, producing an approximately half-sized position instead of failing into pending-open recovery.
 - **Fix:** Added a final pre-open invariant after cap calculation: when a quote exists, effective caps (including native SOL for WSOL legs) must cover `q.amount_a/q.amount_b` within existing tolerance. If not, executor appends `bot_reopen_final_caps_below_target`, skips `open_position`, retries short refresh attempts, then returns a hard error for pending-open/recovery instead of opening undersized.
-- **Guards/tests:** `final_caps_guard_rejects_materially_undersized_quote_leg`; B3 golden `golden_reopen_sizing_table` (wiersz `must_not_follow_smaller_wallet`: prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`).
+- **Fix (2026-11-11, F2.2 residual):** When `prev_end_value_usd > 0` and deposit quote is missing, open is blocked (`reopen_missing_quote_blocks_open` / `bot_reopen_missing_deposit_quote`) instead of proceeding on raw wallet caps (bypass of final_caps). Wallet-cap path (`prev_end=0`) still allows open without quote.
+- **Guards/tests:** `final_caps_guard_rejects_materially_undersized_quote_leg`; `reopen_missing_quote_blocks_when_prev_end_known`; `reopen_missing_quote_allowed_when_prev_end_unknown`; B3 golden `golden_reopen_sizing_table` (wiersz `must_not_follow_smaller_wallet`: prev_end 9,76 / wallet 4,06 → target 9,7112, legacy clamp 4,0397, half-leg `covers=false`).
+- **Residual risks:** Quote failures still leave session in pending-open until ticks/market allow a quote; not a silent undersize open.
 - **Paths:** `crates/execution/src/strategy/rebalance.rs`, `doc/BUGS.md`
 
 ---
@@ -1900,7 +1919,7 @@ keywords: position-detail, performance, stream-lineage, value-usd, snapshots, va
 
 ### BUG-20260413-05 — Stream lineage chained manual opens to unrelated rotation history
 
-status: regressed  
+status: fixed  
 severity: medium  
 reported_by: user  
 first_seen: 2026-04-13  
@@ -1927,7 +1946,8 @@ keywords: position-stream-lineage, rotation, registry.jsonl, lifecycle, rebalanc
 - **Fix (follow-up 4):** On successful pending-open recovery, executor now performs the same continuity steps as standard rebalance success: replace `managed_allowlist` entry `old->new` (without growth) and call `reopen_hook(old, new)` to update strategy links.
 - **Fix (follow-up 5):** `set_managed_allowlist` now keeps explicit empty list as restrictive (`Some(empty)`, target `0`) instead of unrestricted; added regression test `empty_managed_allowlist_stays_restrictive`.
 - **Guards/tests (2026-04-14):** Added `jsonl_stitch_allowed_when_rotation_parent_exists_without_session_match`; existing `jsonl_stitch_suppressed_when_open_session_not_on_prior_close` and `jsonl_stitch_allowed_when_session_matches_prior_close` still pass.
-- **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`. B5 golden `golden_lineage_multi_rotation_continuity` (bot zszywa łańcuch; `manualE` operator_api nie jest dzieckiem; fork `sibX` poza łańcuchem `rotD`).
+- **Guards/tests:** Unit tests `lifecycle_chain_*`, `db_edges_*`, `jsonl_stitch_*`. B5 golden `golden_lineage_multi_rotation_continuity` (bot zszywa łańcuch; `manualE` operator_api nie jest dzieckiem; fork `sibX` poza łańcuchem `rotD`). Re-verified green 2026-11-11 → status `fixed`.
+- **Residual risks:** Live DB-edge forks with stale JSONL still need operator care; valuation zeros (`BUG-20260410-01`) are separate.
 - **Paths:** `crates/api/src/services/position_stream_lineage.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`
 
 ### BUG-20260413-04 — Open target USD looked too low after success
@@ -2010,12 +2030,12 @@ keywords: manual-close, stale-snapshot, strategy-executor, evaluate_position, re
 
 ### BUG-20260410-06 — Rotacja zamyka pozycję bez otwarcia nowej (urwany rebalance flow)
 
-status: open  
+status: fixed  
 severity: high  
 reported_by: user  
 first_seen: 2026-04-10  
-fixed_in:   
-keywords: rebalance, close_without_open, swap_mix, recovery, strategy
+fixed_in: local  
+keywords: rebalance, close_without_open, swap_mix, recovery, strategy, F2.1, rebalance_needs_incomplete_recovery
 
 - **Symptom:** Pozycja zamknięta jako `close_kind=rotation`, ale brak kolejnego `bot_open_position` dla tej sesji/łańcucha.
 - **Symptom (2026-04-16):** Dla sesji `facce436-7913-4173-b954-17f403d15a9d` (old PDA `4NLjjVqBtV4CVeFL224UzVpSW4Ds7g16rxuTvir78Qh3`) i `323c4f01-0526-484a-b9c4-ce820e4fc1e6` (old PDA `D6tnfq94B3WnAGeqVX3JUri9AhKfkfHNcNHviyTaBrcV`) recovery ma `attempts=13` i kończy się `open_position failed ... InstructionError(3, Custom(6012))` na `OpenPositionWithTokenExtensions`; wpisy pozostają w `data/pending-open-recovery.json` i w UI `Closed by bot, waiting for reopen`.
@@ -2039,9 +2059,11 @@ keywords: rebalance, close_without_open, swap_mix, recovery, strategy
 - **Root cause (2026-04-30, follow-up 4):** SOL-first auto-unwrap po `swap_exact_in` działał także gdy swap **kupował WSOL** (np. leg B->A w swap-mix), więc świeżo kupiony WSOL mógł być od razu odwijany do native SOL przed kolejnym krokiem open.
 - **Fix (2026-04-30, follow-up 3):** Recovery fallback dla brakujących close amounts zmieniono na `(0,0)` + jawny warning; przy `prev_end<=0` sizing przechodzi na `wallet_cap` (`target_usd_from_prev_end_clamped`) zamiast mikro-notionalu.
 - **Fix (2026-04-30, follow-up 4):** `swap_exact_in` wykonuje auto-unwrap tylko gdy `specified_mint == WSOL` (sprzedaż WSOL). Dla swapów kupujących WSOL cleanup jest pomijany, żeby nie niszczyć miksu tokenów wymaganego przez natychmiastowy open/reopen.
-- **Guards/tests:** test scenariusza: close success + swap rounds + open failure/abort => wpis `rebalance_incomplete` + recovery artifact; dodatkowo testy klasyfikacji `stuck_reason` i progowego alertowania attempts.
+- **Fix (2026-11-11, F2.1):** Wydzielono `rebalance_needs_incomplete_recovery` (close on-chain + brak `new_position` → incomplete handoff); executor używa helpera. Unit tests: close+no-open → true; close fail / open OK → false; inconsistent success flag nadal true. Pending upsert zachowuje `rebalance_session_id`.
+- **Guards/tests:** `rebalance::tests::incomplete_recovery_*`; `pending_open::tests::upsert_preserves_rebalance_session_id`; `classify_pending_open_stuck_reason_*` / stuck alert threshold.
 - **Guards/tests (2026-04-30, follow-up 3):** `cargo test -p clmm-lp-execution target_usd_uses_wallet_cap_when_prev_end_unknown_or_zero -- --nocapture`, `cargo check -p clmm-lp-execution`.
 - **Guards/tests (2026-04-30, follow-up 4):** `cargo check -p clmm-lp-protocols`.
+- **Residual risks:** Recovery quality (6012 / tick OOR / stuck loops) still operator-visible until reopen succeeds; F2.2 covers silent downsizing.
 - **Paths:** `data/ledger/orca_position_lifecycle.jsonl`, `crates/execution/src/strategy/rebalance.rs`, `crates/execution/src/strategy/pending_open.rs`, `crates/execution/src/strategy/executor.rs`, `crates/execution/src/lifecycle/events.rs`, `crates/api/src/handlers/positions.rs`
 
 ### BUG-20260410-05 — Collect Fees: brak executora mimo aktywnego środowiska

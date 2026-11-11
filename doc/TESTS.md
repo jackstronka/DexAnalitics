@@ -204,7 +204,15 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `wallet_gl_posting` / `wallet_ledger*` | księgowanie GL z lifecycle |
 | `openapi` | C1: `openapi_matches_committed_snapshot` — live `ApiDoc` (utoipa) = `crates/api/openapi.json`; update: `UPDATE_OPENAPI=1 cargo test -p clmm-lp-api --lib openapi_matches_committed` |
 | `handlers::endpoint_coverage_tests` | czy endpointy odpowiadają (404/walidacja), bez pełnego DB-happy-path |
-| `handlers::api_http_contract_tests` | HTTP→JSON→modele OpenAPI: health/metrics/positions/strategies/wallets + close-all 404; hermetyczny RPC `127.0.0.1:1` |
+| `handlers::http_test_support` | API-H0: wspólne `hermetic_rpc` (`fallback_urls: []`) + `oneshot` helpers dla contract/coverage |
+| `handlers::api_http_contract_tests` | HTTP→JSON→modele: health/metrics/lists; close-all 404 + preview/start (zero closable) + **F2.8** GET po disk reload (`close_all_http_get_survives_disk_reload`); jobs path = tempdir |
+| `handlers::dip_http_tests` | API-H2: `/dip/snapshot|runtime|session|propose` + live `confirm_execute`/mode gates; vault/craft/history via httpmock (`CLMM_JUPITER_TRIGGER_BASE_URL`) |
+| `handlers::agent_http_tests` | API-H2: worker settings/status; position agent start→chat; supervisor bez chain/DB → stabilny 4xx/5xx (`CLMM_AGENT_DATA_DIR`) |
+| `handlers::wallets_http_tests` | API-H3: chain-portfolio no-DB envelope + B6 footer helpers; history/backfill bez DB; balances httpmock; effective warmup; api-signer unconfigured |
+| `handlers::ops_http_tests` | API-H4: pending-open/stranded list+dismiss (tempdir ledgers); WS upgrade + injected `position.updated` payload shape; backtest JOBS/FULL seed GET + 4xx validation (no CLI) |
+| `handlers::positions_detail_http_tests` | API-H5: stream-pnl no-DB degraded; lifecycle-summary missing/seeded ledger; diagnostics empty; invalid address → 400 |
+| `position_close_all` | send_mode/scope unit + **F2.8** `close_all_job_survives_store_reload_from_tempdir`; store: `CLMM_CLOSE_ALL_JOBS_PATH` / `data/close_all_jobs.json` |
+| *(plan)* API HTTP hardening | H0–H5 ✅ (H5.3 F2.9 = osobny C6): [`IMPLEMENTATION_PLAN_API_HTTP_TESTS.md`](IMPLEMENTATION_PLAN_API_HTTP_TESTS.md) |
 | `handlers::backtests` | readiness snapshotów, warianty okien |
 | `handlers::wallets` | merge sald, monotonic guard, fan-out RPC |
 | `handlers::orca_tests` | proxy REST Orca (mock) |
@@ -243,9 +251,10 @@ cargo test -p clmm-lp-data dip::trigger_session
 
 | Moduł | Co robi |
 | ----- | ------- |
-| `strategy::rebalance` | B3 golden sizingu reopen; walidacja wyniku close/open |
+| `strategy::rebalance` | B3 golden sizingu reopen; **F2.2** `reopen_missing_quote_blocks_*` + final_caps; walidacja wyniku close/open |
 | `strategy::session_capital` | flagi CHAIN, clamp capów, load mint caps |
-| `strategy::decision` / `executor` / `pending_open` | silnik decyzji, pending open |
+| `strategy::decision` / `executor` / `pending_open` | silnik decyzji, pending open; **F2.1** `rebalance_needs_incomplete_recovery` + `upsert_preserves_rebalance_session_id` |
+| `strategy::rebalance` (F2.1) | close-without-open → incomplete handoff units (`incomplete_recovery_*`) — `cargo test -p clmm-lp-execution incomplete_recovery` |
 | `agent_decision` | kontrakt decyzji agenta |
 | alerts / emergency / scheduler / tx | unit reguł i builderów |
 

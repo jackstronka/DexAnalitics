@@ -100,6 +100,7 @@ This file is the **table of contents** for `doc/`: use it like a book—**themat
 | [`ONCHAIN_FEES_PROGRESS.md`](ONCHAIN_FEES_PROGRESS.md) | Progress log for on-chain fees work |
 | [`TODO_ONCHAIN_NEXT_STEPS.md`](TODO_ONCHAIN_NEXT_STEPS.md) | Roadmap: priorytet startowy, fazy A–F + **M** (M1/M2), log wykonania |
 | [`METEORA_DLMM_SWAP_EVENT.md`](METEORA_DLMM_SWAP_EVENT.md) | Meteora DLMM swap event notes |
+| [`RECON_HYPERLIQUID_LIQUIDATION_MAP.md`](RECON_HYPERLIQUID_LIQUIDATION_MAP.md) | **Rozpoznanie (bez implementacji):** mapa likwidacji Hyperliquid vs dane CLMM, publiczny JSON MyLiquidBot, trudność zbiórki, slot w dipie §1.C; Hermes (Windows, cena, konkurencja); plan F0–F5 zamrożony do GO |
 
 ## Position economics (IL, HODL, USD)
 
@@ -181,6 +182,7 @@ When adding a new standalone doc under `doc/`, **add one row to the appropriate 
 | [`ROADMAP.md`](ROADMAP.md) | roadmap, position, strategy, shadow, counterfactual, live, history, assignment |
 | [`ROADMAP_JUPITER_MULTI_VENUE_LP.md`](ROADMAP_JUPITER_MULTI_VENUE_LP.md) | Jupiter, multi-venue, routing, fee hypothesis, CLMM roadmap |
 | [`RPC_SOLANA_BOT_NOTES.md`](RPC_SOLANA_BOT_NOTES.md) | rpc, solana, mainnet, fallback, free tier, orca bot |
+| [`RECON_HYPERLIQUID_LIQUIDATION_MAP.md`](RECON_HYPERLIQUID_LIQUIDATION_MAP.md) | hyperliquid, liquidationPx, recon, hermes-agent, OpenClaw, Nous Portal, dip zones, no implementation |
 | [`SCRIPTS_CATALOG.md`](SCRIPTS_CATALOG.md) | tools, powershell, snapshot-health, slack, monitoring, keywords |
 | [`README.md`](README.md) | *this file* — TOC + A–Z index |
 | [`SOLANA_INDEXING.md`](SOLANA_INDEXING.md) | solana, indexing, RPC, Geyser, swaps-sync, misconceptions |
