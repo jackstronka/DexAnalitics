@@ -8,6 +8,7 @@ use crate::models::{
     DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse,
     DipTriggerPriceOrderCancelRequest, DipTriggerPriceOrderCancelResponse,
     DipTriggerPriceOrderCreateRequest, DipTriggerPriceOrderCreateResponse,
+    DipTriggerPriceOrderPatchRequest, DipTriggerPriceOrderPatchResponse,
     DipTriggerSessionStatusDto, DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
@@ -27,7 +28,8 @@ use clmm_lp_data::dip::{
 };
 use clmm_lp_data::providers::{
     JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDepositCraftRequest,
-    TriggerPriceOrderConfirmCancelRequest, TriggerPriceOrderCreateRequest, filter_open_buy_dips,
+    TriggerPriceOrderConfirmCancelRequest, TriggerPriceOrderCreateRequest,
+    TriggerPriceOrderPatchRequest, filter_open_buy_dips,
 };
 use serde::Deserialize;
 use solana_sdk::signature::{Keypair, Signer};
@@ -849,6 +851,72 @@ pub async fn post_dip_trigger_orders_price_cancel(
         notes: vec![
             "E3 live cancel: withdraw signed with host wallet_id keypair".into(),
             "order moved ready_to_cancel then cancelled after withdraw lands".into(),
+        ],
+    }))
+}
+
+/// `POST /dip/trigger/orders/price/patch` — E4 T14: patch single order trigger/slippage.
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/orders/price/patch",
+    tag = "Dip",
+    request_body = DipTriggerPriceOrderPatchRequest,
+    responses(
+        (status = 200, description = "Patched Trigger price order", body = DipTriggerPriceOrderPatchResponse)
+    )
+)]
+pub async fn post_dip_trigger_orders_price_patch(
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerPriceOrderPatchRequest>,
+) -> ApiResult<Json<DipTriggerPriceOrderPatchResponse>> {
+    require_live_execute_gate(req.confirm_execute, "patch")?;
+    let session = require_attached_session(&req.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    let order_id = req.order_id.trim();
+    if order_id.is_empty() {
+        return Err(ApiError::bad_request("order_id required"));
+    }
+    if req.trigger_price_usd.is_none() && req.slippage_bps.is_none() {
+        return Err(ApiError::bad_request(
+            "at least one of trigger_price_usd or slippage_bps required",
+        ));
+    }
+    if let Some(px) = req.trigger_price_usd
+        && (!px.is_finite() || px <= 0.0)
+    {
+        return Err(ApiError::bad_request("trigger_price_usd must be > 0"));
+    }
+    if let Some(bps) = req.slippage_bps
+        && bps > 10_000
+    {
+        return Err(ApiError::bad_request("slippage_bps must be 0..=10000"));
+    }
+
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let patched = client
+        .patch_price_order(
+            &session.tokens.access_token,
+            order_id,
+            &TriggerPriceOrderPatchRequest {
+                order_type: "single".into(),
+                trigger_price_usd: req.trigger_price_usd,
+                slippage_bps: req.slippage_bps,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/price PATCH failed: {e}")))?;
+
+    Ok(Json(DipTriggerPriceOrderPatchResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        order_id: patched.id,
+        trigger_price_usd: req.trigger_price_usd,
+        slippage_bps: req.slippage_bps,
+        notes: vec![
+            "E4 live patch: single order only (no OCO/trailing)".into(),
+            "JWT from attached wallet_id session".into(),
         ],
     }))
 }

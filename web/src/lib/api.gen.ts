@@ -582,6 +582,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/trigger/orders/price/patch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/trigger/orders/price/patch` — E4 T14: patch single order trigger/slippage. */
+        post: operations["post_dip_trigger_orders_price_patch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/trigger/session": {
         parameters: {
             query?: never;
@@ -3289,6 +3306,27 @@ export interface components {
             /** Format: double */
             trigger_price_usd: number;
             tx_signature?: string | null;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `POST /dip/trigger/orders/price/patch` — update trigger/slippage on a single order (E4 / T14). */
+        DipTriggerPriceOrderPatchRequest: {
+            /** @description Must be `true`; double-confirm live patch. */
+            confirm_execute: boolean;
+            order_id: string;
+            /** Format: int32 */
+            slippage_bps?: number | null;
+            /** Format: double */
+            trigger_price_usd?: number | null;
+            wallet_id: string;
+        };
+        DipTriggerPriceOrderPatchResponse: {
+            notes: string[];
+            order_id: string;
+            /** Format: int32 */
+            slippage_bps?: number | null;
+            /** Format: double */
+            trigger_price_usd?: number | null;
             wallet_id: string;
             wallet_pubkey: string;
         };
@@ -6301,6 +6339,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipTriggerPriceOrderCancelResponse"];
+                };
+            };
+        };
+    };
+    post_dip_trigger_orders_price_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerPriceOrderPatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Patched Trigger price order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerPriceOrderPatchResponse"];
                 };
             };
         };

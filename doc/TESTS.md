@@ -221,7 +221,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `wallet_session` | B2 golden; C3(2) `cap_open_debits` saldo mint ≥ 0 |
 | `session_gl_integration` | Postgres, §5 |
 | cache / timeseries / providers | cache, CSV, Orca REST (hermetyczne) |
-| `providers::jupiter_trigger` | Trigger V2: filter Buy-the-Dip; mock history/verify; E1 vault+craft; E2 create; E3 cancel+confirm (`cancel_and_confirm_parse_with_mock`) |
+| `providers::jupiter_trigger` | Trigger V2: filter Buy-the-Dip; mock history/verify; E1–E4 vault/craft/create/cancel/patch (`patch_price_order_parse_with_mock`) |
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
 | `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
 | `dip::runtime` | parse `runtime.yaml` mode + ladder defaults (U2) |

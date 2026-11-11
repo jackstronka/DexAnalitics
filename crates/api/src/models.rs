@@ -3528,6 +3528,31 @@ pub struct DipTriggerPriceOrderCancelResponse {
     pub notes: Vec<String>,
 }
 
+/// `POST /dip/trigger/orders/price/patch` — update trigger/slippage on a single order (E4 / T14).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderPatchRequest {
+    pub wallet_id: String,
+    pub order_id: String,
+    /// Must be `true`; double-confirm live patch.
+    pub confirm_execute: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderPatchResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub order_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================
