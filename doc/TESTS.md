@@ -222,6 +222,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | `session_gl_integration` | Postgres, §5 |
 | cache / timeseries / providers | cache, CSV, Orca REST (hermetyczne) |
 | `providers::jupiter_trigger` | Trigger V2: role classify (buy_dip/TP/SL); open filters; mock history/verify; E1–E5 vault/craft/create/cancel/patch/DCA |
+| `providers::jupiter_swap` | Swap V2: order+execute parse (`order_and_execute_parse_with_mock`) |
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
 | `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
 | `dip::runtime` | parse `runtime.yaml` mode + ladder defaults (U2) |
@@ -229,6 +230,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 
 ```bash
 cargo test -p clmm-lp-data jupiter_trigger
+cargo test -p clmm-lp-data jupiter_swap
 cargo test -p clmm-lp-data vault_and_craft
 cargo test -p clmm-lp-data dip::zones
 cargo test -p clmm-lp-data dip::propose

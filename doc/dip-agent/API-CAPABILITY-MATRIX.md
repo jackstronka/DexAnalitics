@@ -89,9 +89,9 @@ Włączane tylko gdy `runtime.jupiter.dca_allowed: true`.
 
 | ID | Funkcja | Endpoint | Tryb | Faza | Status |
 |----|---------|----------|------|------|--------|
-| S1 | Quote + unsigned tx | `GET /swap/v2/order` | propose → live | E | ⬜ |
-| S2 | Execute signed | `POST /swap/v2/execute` | live | E | ⬜ |
-| S3 | Custom build | `GET /swap/v2/build` | opcjonalnie | E | ⬜ |
+| S1 | Quote + unsigned tx | `GET /swap/v2/order` → Dex `POST /dip/swap/order` | propose | E | ✅ |
+| S2 | Execute signed | `POST /swap/v2/execute` → Dex `POST /dip/swap/execute` (order→sign→execute) | live | E | ✅ (`confirm_execute` + `mode: live`) |
+| S3 | Custom build | `GET /swap/v2/build` | opcjonalnie | E | ⬜ (not default) |
 
 ---
 
@@ -154,7 +154,8 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 - [x] T14 patch single — httpmock `patch_price_order_parse_with_mock`
 - [x] T17–T19 DCA time_based — httpmock `dca_create_history_cancel_parse_with_mock` (`dca_allowed`)
 - [x] T9 static Stop Loss + T12 open_orders roles (`classify_price_order_role`)
-- [ ] Swap / DCA `price_conditional` / trailing SL (later)  
+- [x] S1–S2 Swap V2 — httpmock `order_and_execute_parse_with_mock`
+- [ ] DCA `price_conditional` / trailing SL / S3 build (later)  
 
 - [ ] Propose path zwraca body bez broadcast (`mode: propose-only`)  
 - [ ] Live path za flagą + osobny signer  
@@ -169,6 +170,7 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 
 | Data | Zmiana |
 |------|--------|
+| 2026-11-11 | Swap S1–S2: `POST /dip/swap/order` + `/execute` |
 | 2026-11-11 | Monitor: snapshot `open_orders` + `GET /dip/trigger/orders/price`; T9 static SL role |
 | 2026-11-11 | E5: T17–T19 DCA time_based Dex surfaces (`dca_allowed` + live gate) |
 | 2026-11-09 | v1 matryca: P/T/S/D IDs, status A+B vs C–E, deny list |

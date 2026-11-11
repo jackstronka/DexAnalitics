@@ -103,7 +103,8 @@ Trigger create/cancel za flagą + osobny signer. Nadal: nie jeden shared keypair
 | **E4** Patch trigger/slippage (`POST /dip/trigger/orders/price/patch`, T14) | DONE 2026-11-10 — same live gate |
 | **E5** DCA time_based create/history/cancel (T17–T19) | DONE 2026-11-11 — `dca_allowed` + live gate on writes |
 | **Monitor / T9** open_orders roles + static Stop Loss | DONE 2026-11-11 — `GET …/orders/price`, snapshot `open_orders` |
-| E5+ swap / DCA `price_conditional` / trailing SL | ⬜ |
+| **Swap S1–S2** market exit | DONE 2026-11-11 — `POST /dip/swap/order` + `/execute` |
+| E5+ DCA `price_conditional` / trailing SL / S3 build | ⬜ |
 
 Katalog funkcji do pokrycia (T4–T16, S1–S2, DoD): [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md).
 

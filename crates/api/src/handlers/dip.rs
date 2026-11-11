@@ -4,7 +4,8 @@ use crate::error::{ApiError, ApiResult};
 use crate::handlers::wallets::load_wallet_keypair_for_id;
 use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
-    DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
+    DipRuntimeResponse, DipSnapshotResponse, DipSwapExecuteRequest, DipSwapExecuteResponse,
+    DipSwapOrderRequest, DipSwapOrderResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
     DipTriggerDcaHistoryResponse, DipTriggerDcaOrder, DipTriggerDcaOrderCancelRequest,
     DipTriggerDcaOrderCancelResponse, DipTriggerDcaOrderCreateRequest,
     DipTriggerDcaOrderCreateResponse, DipTriggerDepositCraftRequest,
@@ -30,11 +31,11 @@ use clmm_lp_data::dip::{
     resolve_runtime_path, resolve_trigger_session_dir, save_trigger_session,
 };
 use clmm_lp_data::providers::{
-    JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDcaOrderCreateRequest,
-    TriggerDepositCraftRequest, TriggerOrderHistoryItem, TriggerPriceOrderConfirmCancelRequest,
-    TriggerPriceOrderCreateRequest, TriggerPriceOrderPatchRequest, TriggerPriceOrderRole,
-    classify_history_item_role, classify_price_order_role, filter_open_buy_dips,
-    filter_open_price_orders,
+    JupiterSwapClient, JupiterTriggerClient, OrderHistoryQuery, SwapExecuteRequest, SwapOrderQuery,
+    TriggerChallenge, TriggerDcaOrderCreateRequest, TriggerDepositCraftRequest,
+    TriggerOrderHistoryItem, TriggerPriceOrderConfirmCancelRequest, TriggerPriceOrderCreateRequest,
+    TriggerPriceOrderPatchRequest, TriggerPriceOrderRole, classify_history_item_role,
+    classify_price_order_role, filter_open_buy_dips, filter_open_price_orders,
 };
 use serde::Deserialize;
 use solana_sdk::signature::{Keypair, Signer};
@@ -1269,6 +1270,165 @@ pub async fn post_dip_trigger_orders_dca_cancel(
         tx_signature: confirmed.tx_signature,
         refund_amount: cancel.refund_amount,
         notes: vec!["E5 live DCA cancel: withdraw signed with host wallet".into()],
+    }))
+}
+
+/// `POST /dip/swap/order` — S1: Swap V2 quote + unsigned tx (propose-safe; no broadcast).
+#[utoipa::path(
+    post,
+    path = "/dip/swap/order",
+    tag = "Dip",
+    request_body = DipSwapOrderRequest,
+    responses(
+        (status = 200, description = "Swap quote + unsigned tx", body = DipSwapOrderResponse)
+    )
+)]
+pub async fn post_dip_swap_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipSwapOrderRequest>,
+) -> ApiResult<Json<DipSwapOrderResponse>> {
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    if req.input_mint.trim().is_empty() || req.output_mint.trim().is_empty() {
+        return Err(ApiError::bad_request("input_mint and output_mint required"));
+    }
+    if req.amount.trim().is_empty() {
+        return Err(ApiError::bad_request("amount required (smallest units)"));
+    }
+    let kp = load_wallet_keypair_for_id(&state, req.wallet_id.trim())?;
+    let wallet_pubkey = kp.pubkey().to_string();
+    let client = JupiterSwapClient::new(Some(api_key));
+    let order = client
+        .get_order(&SwapOrderQuery {
+            input_mint: req.input_mint.trim().to_string(),
+            output_mint: req.output_mint.trim().to_string(),
+            amount: req.amount.trim().to_string(),
+            taker: Some(wallet_pubkey.clone()),
+            slippage_bps: req.slippage_bps,
+        })
+        .await
+        .map_err(|e| ApiError::bad_request(format!("swap/v2/order failed: {e}")))?;
+
+    if let Some(code) = order.error_code {
+        return Err(ApiError::bad_request(format!(
+            "swap/v2/order build error code={code}: {}",
+            order
+                .error_message
+                .unwrap_or_else(|| "transaction empty".into())
+        )));
+    }
+    let tx = order.transaction.clone().unwrap_or_default();
+    if tx.is_empty() {
+        return Err(ApiError::bad_request(
+            "swap/v2/order returned empty transaction — check balances / taker",
+        ));
+    }
+
+    Ok(Json(DipSwapOrderResponse {
+        wallet_id: req.wallet_id.trim().to_string(),
+        wallet_pubkey,
+        request_id: order.request_id,
+        in_amount: order.in_amount,
+        out_amount: order.out_amount,
+        in_usd_value: order.in_usd_value,
+        out_usd_value: order.out_usd_value,
+        price_impact: order.price_impact,
+        other_amount_threshold: order.other_amount_threshold,
+        slippage_bps: order.slippage_bps,
+        router: order.router,
+        transaction: Some(tx),
+        notes: vec![
+            "S1 propose: unsigned Swap V2 order — no broadcast".into(),
+            "live path: POST /dip/swap/execute with confirm_execute".into(),
+            "not for catching dips — use Trigger price orders".into(),
+        ],
+    }))
+}
+
+/// `POST /dip/swap/execute` — S2: order → sign host keypair → Jupiter `/execute` (live).
+#[utoipa::path(
+    post,
+    path = "/dip/swap/execute",
+    tag = "Dip",
+    request_body = DipSwapExecuteRequest,
+    responses(
+        (status = 200, description = "Swap executed", body = DipSwapExecuteResponse)
+    )
+)]
+pub async fn post_dip_swap_execute(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipSwapExecuteRequest>,
+) -> ApiResult<Json<DipSwapExecuteResponse>> {
+    require_live_execute_gate(req.confirm_execute, "swap execute")?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    if req.input_mint.trim().is_empty() || req.output_mint.trim().is_empty() {
+        return Err(ApiError::bad_request("input_mint and output_mint required"));
+    }
+    if req.amount.trim().is_empty() {
+        return Err(ApiError::bad_request("amount required (smallest units)"));
+    }
+    let kp = load_wallet_keypair_for_id(&state, req.wallet_id.trim())?;
+    let wallet_pubkey = kp.pubkey().to_string();
+    let client = JupiterSwapClient::new(Some(api_key));
+    let order = client
+        .get_order(&SwapOrderQuery {
+            input_mint: req.input_mint.trim().to_string(),
+            output_mint: req.output_mint.trim().to_string(),
+            amount: req.amount.trim().to_string(),
+            taker: Some(wallet_pubkey.clone()),
+            slippage_bps: req.slippage_bps,
+        })
+        .await
+        .map_err(|e| ApiError::bad_request(format!("swap/v2/order failed: {e}")))?;
+    if let Some(code) = order.error_code {
+        return Err(ApiError::bad_request(format!(
+            "swap/v2/order build error code={code}: {}",
+            order
+                .error_message
+                .unwrap_or_else(|| "transaction empty".into())
+        )));
+    }
+    let tx = order.transaction.clone().unwrap_or_default();
+    if tx.is_empty() {
+        return Err(ApiError::bad_request(
+            "swap/v2/order returned empty transaction — check balances / taker",
+        ));
+    }
+    let signed_tx = sign_trigger_versioned_tx_base64(&tx, &kp)?;
+    let exec = client
+        .execute(&SwapExecuteRequest {
+            signed_transaction: signed_tx,
+            request_id: order.request_id.clone(),
+        })
+        .await
+        .map_err(|e| ApiError::bad_request(format!("swap/v2/execute failed: {e}")))?;
+
+    if exec.status.eq_ignore_ascii_case("Failed") {
+        return Err(ApiError::bad_request(format!(
+            "swap/v2/execute status=Failed: {}",
+            exec.error.unwrap_or_else(|| "unknown".into())
+        )));
+    }
+
+    Ok(Json(DipSwapExecuteResponse {
+        wallet_id: req.wallet_id.trim().to_string(),
+        wallet_pubkey,
+        request_id: order.request_id,
+        status: exec.status,
+        signature: exec.signature,
+        in_amount: order.in_amount,
+        out_amount: order.out_amount,
+        total_input_amount: exec.total_input_amount,
+        total_output_amount: exec.total_output_amount,
+        notes: vec![
+            "S2 live: signed with host wallet_id keypair; Jupiter managed landing".into(),
+            "urgent exit / small rebalance only — not Buy-the-Dip".into(),
+        ],
     }))
 }
 

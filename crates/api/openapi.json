@@ -1126,6 +1126,68 @@
         }
       }
     },
+    "/dip/swap/execute": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/swap/execute` — S2: order → sign host keypair → Jupiter `/execute` (live).",
+        "operationId": "post_dip_swap_execute",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipSwapExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Swap executed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipSwapExecuteResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dip/swap/order": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/swap/order` — S1: Swap V2 quote + unsigned tx (propose-safe; no broadcast).",
+        "operationId": "post_dip_swap_order",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipSwapOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Swap quote + unsigned tx",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipSwapOrderResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/trigger/attach": {
       "post": {
         "tags": [
@@ -8151,6 +8213,221 @@
           },
           "zones": {
             "$ref": "#/components/schemas/DipZonesDto"
+          }
+        }
+      },
+      "DipSwapExecuteRequest": {
+        "type": "object",
+        "description": "`POST /dip/swap/execute` — S2: `/order` → sign host keypair → `/execute` (live).",
+        "required": [
+          "wallet_id",
+          "confirm_execute",
+          "input_mint",
+          "output_mint",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string"
+          },
+          "confirm_execute": {
+            "type": "boolean"
+          },
+          "input_mint": {
+            "type": "string"
+          },
+          "output_mint": {
+            "type": "string"
+          },
+          "slippage_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipSwapExecuteResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "request_id",
+          "status",
+          "notes"
+        ],
+        "properties": {
+          "in_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "out_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "total_input_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_output_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipSwapOrderRequest": {
+        "type": "object",
+        "description": "`POST /dip/swap/order` — Swap V2 quote (+ unsigned tx) for urgent exit / rebalance (S1).",
+        "required": [
+          "wallet_id",
+          "input_mint",
+          "output_mint",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Amount in input mint smallest units."
+          },
+          "input_mint": {
+            "type": "string"
+          },
+          "output_mint": {
+            "type": "string"
+          },
+          "slippage_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipSwapOrderResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "request_id",
+          "notes"
+        ],
+        "properties": {
+          "in_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "in_usd_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "other_amount_threshold": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "out_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "out_usd_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "price_impact": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "router": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slippage_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "transaction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 unsigned VersionedTransaction (null/empty if Jupiter could not build)."
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
           }
         }
       },

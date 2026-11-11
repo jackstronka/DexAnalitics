@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip: Swap V2 order + execute (S1–S2)
+
+keywords: dip-agent, Jupiter Swap, S1, S2, swap/v2, order, execute, urgent exit, clmm-lp-data, clmm-lp-api
+
+- **What:** `JupiterSwapClient` (`GET /order`, `POST /execute`) + Dex `POST /dip/swap/order` (propose quote+unsigned) and `POST /dip/swap/execute` (live: order→sign→execute). Gate on execute: `mode: live` + `confirm_execute`. Not for catching dips.
+- **paths:** `crates/data/src/providers/jupiter_swap.rs`, `crates/api/src/handlers/dip.rs`
+
 ## 2026-11-11 — Dip: full open price-order monitor + static Stop Loss role (T9/T12)
 
 keywords: dip-agent, Jupiter Trigger, T9, T12, T13, open_orders, stop_loss, take_profit, buy_dip, role, classify_price_order_role, clmm-lp-data, clmm-lp-api

@@ -514,6 +514,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/swap/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/swap/execute` — S2: order → sign host keypair → Jupiter `/execute` (live). */
+        post: operations["post_dip_swap_execute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dip/swap/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/swap/order` — S1: Swap V2 quote + unsigned tx (propose-safe; no broadcast). */
+        post: operations["post_dip_swap_order"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/trigger/attach": {
         parameters: {
             query?: never;
@@ -3262,6 +3296,58 @@ export interface components {
             /** @description `A` | `B` | `C` | `none` */
             zone: string;
             zones: components["schemas"]["DipZonesDto"];
+        };
+        /** @description `POST /dip/swap/execute` — S2: `/order` → sign host keypair → `/execute` (live). */
+        DipSwapExecuteRequest: {
+            amount: string;
+            confirm_execute: boolean;
+            input_mint: string;
+            output_mint: string;
+            /** Format: int32 */
+            slippage_bps?: number | null;
+            wallet_id: string;
+        };
+        DipSwapExecuteResponse: {
+            in_amount?: string | null;
+            notes: string[];
+            out_amount?: string | null;
+            request_id: string;
+            signature?: string | null;
+            status: string;
+            total_input_amount?: string | null;
+            total_output_amount?: string | null;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `POST /dip/swap/order` — Swap V2 quote (+ unsigned tx) for urgent exit / rebalance (S1). */
+        DipSwapOrderRequest: {
+            /** @description Amount in input mint smallest units. */
+            amount: string;
+            input_mint: string;
+            output_mint: string;
+            /** Format: int32 */
+            slippage_bps?: number | null;
+            wallet_id: string;
+        };
+        DipSwapOrderResponse: {
+            in_amount?: string | null;
+            /** Format: double */
+            in_usd_value?: number | null;
+            notes: string[];
+            other_amount_threshold?: string | null;
+            out_amount?: string | null;
+            /** Format: double */
+            out_usd_value?: number | null;
+            /** Format: double */
+            price_impact?: number | null;
+            request_id: string;
+            router?: string | null;
+            /** Format: int32 */
+            slippage_bps?: number | null;
+            /** @description Base64 unsigned VersionedTransaction (null/empty if Jupiter could not build). */
+            transaction?: string | null;
+            wallet_id: string;
+            wallet_pubkey: string;
         };
         /** @description `POST /dip/trigger/attach` — host keypair signs Jupiter Trigger auth challenge for `wallet_id`. */
         DipTriggerAttachRequest: {
@@ -6367,6 +6453,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipSnapshotResponse"];
+                };
+            };
+        };
+    };
+    post_dip_swap_execute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipSwapExecuteRequest"];
+            };
+        };
+        responses: {
+            /** @description Swap executed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipSwapExecuteResponse"];
+                };
+            };
+        };
+    };
+    post_dip_swap_order: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipSwapOrderRequest"];
+            };
+        };
+        responses: {
+            /** @description Swap quote + unsigned tx */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipSwapOrderResponse"];
                 };
             };
         };
