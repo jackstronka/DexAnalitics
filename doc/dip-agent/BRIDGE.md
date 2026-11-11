@@ -101,7 +101,8 @@ Trigger create/cancel za flagą + osobny signer. Nadal: nie jeden shared keypair
 | **E2** Sign deposit + create single price order (`POST /dip/trigger/orders/price`, T7) | DONE 2026-11-10 — requires `mode: live` + `confirm_execute` |
 | **E3** Cancel + confirm withdraw (`POST /dip/trigger/orders/price/cancel`, T15–T16) | DONE 2026-11-10 — same live gate |
 | **E4** Patch trigger/slippage (`POST /dip/trigger/orders/price/patch`, T14) | DONE 2026-11-10 — same live gate |
-| E5+ DCA / swap | ⬜ |
+| **E5** DCA time_based create/history/cancel (T17–T19) | DONE 2026-11-11 — `dca_allowed` + live gate on writes |
+| E5+ swap / DCA `price_conditional` | ⬜ |
 
 Katalog funkcji do pokrycia (T4–T16, S1–S2, DoD): [`API-CAPABILITY-MATRIX.md`](API-CAPABILITY-MATRIX.md).
 

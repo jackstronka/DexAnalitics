@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip E5: DCA create / history / cancel (T17–T19)
+
+keywords: dip-agent, Jupiter Trigger, E5, T17, T18, T19, DCA, time_based, dca_allowed, orders/dca, live, confirm_execute, clmm-lp-data, clmm-lp-api
+
+- **What:** `JupiterTriggerClient` DCA history/create/cancel+confirm; Dex `GET|POST /dip/trigger/orders/dca` + `POST …/dca/cancel`. Gates: `jupiter.dca_allowed` + (writes) `mode: live` + `confirm_execute`. Scope: `time_based` only; `price_conditional` / swap = later.
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/api/src/handlers/dip.rs`, `crates/api/src/routes.rs`
+
 ## 2026-11-10 — Dip E4: patch Trigger price order (T14)
 
 keywords: dip-agent, Jupiter Trigger, E4, T14, PATCH, orders/price, trigger_price_usd, slippage_bps, live, confirm_execute, clmm-lp-data, clmm-lp-api

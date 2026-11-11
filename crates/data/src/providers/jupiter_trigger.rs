@@ -1,7 +1,7 @@
-//! Jupiter Trigger Order API V2 — auth + vault/deposit + create/cancel/patch (E0–E4).
+//! Jupiter Trigger Order API V2 — auth + vault/deposit + price + DCA (E0–E5).
 //!
 //! Docs: <https://developers.jup.ag/docs/trigger>
-//! Live writes gated by Dex API (`mode: live` + `confirm_execute`).
+//! Live writes gated by Dex API (`mode: live` + `confirm_execute`; DCA also needs `dca_allowed`).
 
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -204,6 +204,84 @@ pub struct TriggerPriceOrderPatchRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TriggerPriceOrderPatchResponse {
     pub id: String,
+}
+
+/// `POST /orders/dca` body (time_based; price_conditional fields optional for later).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDcaOrderCreateRequest {
+    pub deposit_request_id: String,
+    pub deposit_signed_tx: String,
+    pub user_pubkey: String,
+    pub input_mint: String,
+    pub output_mint: String,
+    pub input_amount: String,
+    pub order_count: u32,
+    pub interval_seconds: u64,
+    /// `time_based` (E5) or `price_conditional`.
+    #[serde(default = "default_dca_order_type")]
+    pub order_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_price_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_mint: Option<String>,
+}
+
+fn default_dca_order_type() -> String {
+    "time_based".into()
+}
+
+/// Response from `POST /orders/dca` / confirm-cancel DCA.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDcaOrderTxResponse {
+    pub id: String,
+    pub tx_signature: String,
+}
+
+/// Item from `GET /orders/history/dca`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDcaHistoryItem {
+    pub id: String,
+    #[serde(default)]
+    pub order_state: Option<String>,
+    #[serde(default)]
+    pub order_type: Option<String>,
+    #[serde(default)]
+    pub input_mint: Option<String>,
+    #[serde(default)]
+    pub output_mint: Option<String>,
+    #[serde(default)]
+    pub input_amount: Option<String>,
+    #[serde(default)]
+    pub order_count: Option<u32>,
+    #[serde(default)]
+    pub interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub rounds_remaining: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TriggerDcaHistoryResponse {
+    pub orders: Vec<TriggerDcaHistoryItem>,
+    #[serde(default)]
+    pub pagination: Option<TriggerOrderPagination>,
+}
+
+/// Response from `POST /orders/dca/cancel/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDcaOrderCancelResponse {
+    pub id: String,
+    pub transaction: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds_remaining: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_amount: Option<String>,
 }
 
 /// HTTP client for Jupiter Trigger V2 (read + auth helpers).
@@ -598,6 +676,127 @@ impl JupiterTriggerClient {
         }
         Ok(serde_json::from_str(&text)?)
     }
+
+    /// `GET /orders/history/dca`
+    pub async fn get_dca_order_history(
+        &self,
+        access_token: &str,
+        query: &OrderHistoryQuery,
+    ) -> Result<TriggerDcaHistoryResponse> {
+        let mut url = format!(
+            "{}/orders/history/dca",
+            self.base_url.trim_end_matches('/')
+        );
+        let mut params = Vec::new();
+        if let Some(s) = &query.state {
+            params.push(format!("state={s}"));
+        }
+        if let Some(m) = &query.mint {
+            params.push(format!("mint={m}"));
+        }
+        if let Some(l) = query.limit {
+            params.push(format!("limit={l}"));
+        }
+        if let Some(o) = query.offset {
+            params.push(format!("offset={o}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+        let req = self
+            .apply_api_key(self.client.get(url))?
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"));
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/history/dca {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// `POST /orders/dca` — create DCA (consumes signed deposit crafted with orderType=dca).
+    pub async fn create_dca_order(
+        &self,
+        access_token: &str,
+        body: &TriggerDcaOrderCreateRequest,
+    ) -> Result<TriggerDcaOrderTxResponse> {
+        let url = format!("{}/orders/dca", self.base_url.trim_end_matches('/'));
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/dca {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// `POST /orders/dca/cancel/{id}`
+    pub async fn cancel_dca_order(
+        &self,
+        access_token: &str,
+        order_id: &str,
+    ) -> Result<TriggerDcaOrderCancelResponse> {
+        let id = order_id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("order_id required"));
+        }
+        let url = format!(
+            "{}/orders/dca/cancel/{}",
+            self.base_url.trim_end_matches('/'),
+            id
+        );
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"));
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/dca/cancel {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// `POST /orders/dca/confirm-cancel/{id}`
+    pub async fn confirm_cancel_dca_order(
+        &self,
+        access_token: &str,
+        order_id: &str,
+        body: &TriggerPriceOrderConfirmCancelRequest,
+    ) -> Result<TriggerDcaOrderTxResponse> {
+        let id = order_id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("order_id required"));
+        }
+        let url = format!(
+            "{}/orders/dca/confirm-cancel/{}",
+            self.base_url.trim_end_matches('/'),
+            id
+        );
+        let req = self
+            .apply_api_key(self.client.post(url))?
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(body);
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("orders/dca/confirm-cancel {status}: {text}"));
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
 }
 
 /// Pure filter used by API/CLI and unit tests.
@@ -896,5 +1095,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(patched.id, "ord-7");
+    }
+
+    #[tokio::test]
+    async fn dca_create_history_cancel_parse_with_mock() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/orders/history/dca")
+                .header("Authorization", "Bearer jwt-d");
+            then.status(200).json_body(serde_json::json!({
+                "orders": [{
+                    "id": "dca-1",
+                    "orderState": "active",
+                    "orderType": "time_based",
+                    "inputMint": "USDC",
+                    "outputMint": "SOL",
+                    "inputAmount": "20000000",
+                    "orderCount": 2,
+                    "intervalSeconds": 3600,
+                    "roundsRemaining": 2
+                }],
+                "pagination": { "total": 1, "limit": 20, "offset": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/orders/dca")
+                .header("Authorization", "Bearer jwt-d");
+            then.status(200).json_body(serde_json::json!({
+                "id": "dca-2",
+                "txSignature": "DcaSig"
+            }));
+        });
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/orders/dca/cancel/dca-2")
+                .header("Authorization", "Bearer jwt-d");
+            then.status(200).json_body(serde_json::json!({
+                "id": "dca-2",
+                "transaction": "AQIDBA==",
+                "requestId": "dca-cancel-1",
+                "roundsRemaining": 1,
+                "refundAmount": "10000000"
+            }));
+        });
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/orders/dca/confirm-cancel/dca-2")
+                .header("Authorization", "Bearer jwt-d");
+            then.status(200).json_body(serde_json::json!({
+                "id": "dca-2",
+                "txSignature": "WithdrawDca"
+            }));
+        });
+
+        let client = JupiterTriggerClient::new(Some("k".into())).with_base_url(server.base_url());
+        let hist = client
+            .get_dca_order_history("jwt-d", &OrderHistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(hist.orders.len(), 1);
+        assert_eq!(hist.orders[0].id, "dca-1");
+
+        let created = client
+            .create_dca_order(
+                "jwt-d",
+                &TriggerDcaOrderCreateRequest {
+                    deposit_request_id: "req".into(),
+                    deposit_signed_tx: "SIGNED==".into(),
+                    user_pubkey: "User".into(),
+                    input_mint: "USDC".into(),
+                    output_mint: "SOL".into(),
+                    input_amount: "20000000".into(),
+                    order_count: 2,
+                    interval_seconds: 3600,
+                    order_type: "time_based".into(),
+                    min_price_usd: None,
+                    max_price_usd: None,
+                    trigger_mint: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.id, "dca-2");
+
+        let cancel = client.cancel_dca_order("jwt-d", "dca-2").await.unwrap();
+        assert_eq!(cancel.request_id, "dca-cancel-1");
+        let confirmed = client
+            .confirm_cancel_dca_order(
+                "jwt-d",
+                "dca-2",
+                &TriggerPriceOrderConfirmCancelRequest {
+                    signed_transaction: "SIGNED==".into(),
+                    cancel_request_id: cancel.request_id,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirmed.tx_signature, "WithdrawDca");
     }
 }

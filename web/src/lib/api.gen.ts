@@ -548,6 +548,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dip/trigger/orders/dca": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /dip/trigger/orders/dca` — E5 T18 DCA history for attached wallet. */
+        get: operations["get_dip_trigger_orders_dca"];
+        put?: never;
+        /** `POST /dip/trigger/orders/dca` — E5 T17: craft+sign+create time_based DCA. */
+        post: operations["post_dip_trigger_orders_dca"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dip/trigger/orders/dca/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /dip/trigger/orders/dca/cancel` — E5 T19: cancel + sign withdraw + confirm. */
+        post: operations["post_dip_trigger_orders_dca_cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dip/trigger/orders/price": {
         parameters: {
             query?: never;
@@ -3233,6 +3268,66 @@ export interface components {
         DipTriggerAttachResponse: {
             notes: string[];
             session: components["schemas"]["DipTriggerSessionStatusDto"];
+        };
+        DipTriggerDcaHistoryResponse: {
+            notes: string[];
+            orders: components["schemas"]["DipTriggerDcaOrder"][];
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description Open DCA order row for `GET /dip/trigger/orders/dca`. */
+        DipTriggerDcaOrder: {
+            id: string;
+            input_amount?: string | null;
+            input_mint?: string | null;
+            /** Format: int64 */
+            interval_seconds?: number | null;
+            /** Format: int32 */
+            order_count?: number | null;
+            order_state?: string | null;
+            order_type?: string | null;
+            output_mint?: string | null;
+            /** Format: int32 */
+            rounds_remaining?: number | null;
+        };
+        /** @description `POST /dip/trigger/orders/dca/cancel` — cancel + sign withdraw + confirm (E5 / T19). */
+        DipTriggerDcaOrderCancelRequest: {
+            confirm_execute: boolean;
+            order_id: string;
+            wallet_id: string;
+        };
+        DipTriggerDcaOrderCancelResponse: {
+            cancel_request_id: string;
+            notes: string[];
+            order_id: string;
+            refund_amount?: string | null;
+            tx_signature: string;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `POST /dip/trigger/orders/dca` — craft+sign+create time_based DCA (E5 / T17). */
+        DipTriggerDcaOrderCreateRequest: {
+            amount: string;
+            confirm_execute: boolean;
+            input_mint: string;
+            /** Format: int64 */
+            interval_seconds: number;
+            /** Format: int32 */
+            order_count: number;
+            output_mint: string;
+            wallet_id: string;
+        };
+        DipTriggerDcaOrderCreateResponse: {
+            deposit_request_id: string;
+            /** Format: int64 */
+            interval_seconds: number;
+            notes: string[];
+            /** Format: int32 */
+            order_count: number;
+            order_id: string;
+            tx_signature: string;
+            wallet_id: string;
+            wallet_pubkey: string;
         };
         /** @description `POST /dip/trigger/deposit/craft` — unsigned deposit for a future price/DCA order (T6 propose). */
         DipTriggerDepositCraftRequest: {
@@ -6291,6 +6386,81 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipTriggerDepositCraftResponse"];
+                };
+            };
+        };
+    };
+    get_dip_trigger_orders_dca: {
+        parameters: {
+            query: {
+                /** @description Host wallet id with attached Trigger session */
+                wallet_id: string;
+                /** @description Optional Jupiter state filter */
+                state?: string;
+                /** @description Page size */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description DCA order history */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerDcaHistoryResponse"];
+                };
+            };
+        };
+    };
+    post_dip_trigger_orders_dca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerDcaOrderCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created DCA order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerDcaOrderCreateResponse"];
+                };
+            };
+        };
+    };
+    post_dip_trigger_orders_dca_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DipTriggerDcaOrderCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Cancelled DCA + withdraw */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerDcaOrderCancelResponse"];
                 };
             };
         };
