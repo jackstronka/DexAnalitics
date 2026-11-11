@@ -28,6 +28,24 @@ keywords: comma,separated,tokens,for,search
 
 ---
 
+### BUG-20261111-01 — Trigger deposit sign: `not enough signers` on live create
+
+status: fixed  
+severity: high  
+reported_by: ai  
+first_seen: 2026-11-11  
+fixed_in: feat/dip-partial-sign-versioned-tx  
+keywords: dip-agent, Jupiter Trigger, deposit/craft, VersionedTransaction, try_new, not enough signers, partial sign, E2, live smoke
+
+- **Symptom:** Live smoke `POST /dip/trigger/orders/price` after vault register → `400 trigger tx sign failed: not enough signers`. Attach + vault register OK.
+- **Root cause:** `VersionedTransaction::try_new` requires **all** required signers; Jupiter deposit/cancel txs can be multi-signer (vault/fee). Web3.js uses `tx.sign([keypair])` (partial).
+- **Fix:** Place host signature by account-key index (`sign_message` on serialized message) instead of `try_new`.
+- **Guards/tests:** `handlers::dip::tests::partial_sign_succeeds_when_try_new_needs_all_signers`
+- **Paths:** `crates/api/src/handlers/dip.rs`
+- **Residual:** Live create still needs ≥10 USD USDC on wallet (Jupiter deposit min); smoke on `wallet1` had ~6.84 USDC.
+
+---
+
 ### BUG-20261110-01 — `golden_delta` / `critical_area_requires_tests`: `fatal: origin/main...HEAD: no merge base`
 
 status: fixed  
