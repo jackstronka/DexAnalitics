@@ -196,9 +196,9 @@ Cel: jedna strona lub rozbudowa Settings + Strategies = **„Bot / Execution”*
 
 | Funkcja UI | Opis | Priorytet |
 |------------|------|-----------|
-| **BC1** Status bota / strategii | running / stopped, ostatni tick, błędy | P0 |
-| **BC2** Start / Stop | jak dziś Strategies — czytelniej na cockpit | P0 |
-| **BC3** Dry-run vs live | przełącznik + ostrzeżenie; źródło prawdy = API/config, nie tylko localStorage | P0 |
+| **BC1** Status bota / strategii | running / stopped, ostatni tick, błędy | DONE 2026-11-11 (fleet + badges; last tick = P1) |
+| **BC2** Start / Stop | jak dziś Strategies — czytelniej na cockpit | DONE 2026-11-11 (cockpit summary) |
+| **BC3** Dry-run vs live | przełącznik + ostrzeżenie; źródło prawdy = API/config, nie tylko localStorage | DONE 2026-11-11 (`/health.dry_run`) |
 | **BC4** Podgląd `StrategyMode` / progów DecisionEngine | read + link do Edit | P1 |
 | **BC5** Ledger skrót | embed lub link do BotActivity | P1 |
 | **BC6** Env health | API port, RPC reachability, `JUPITER_API_KEY` present (bez ujawniania sekretu) | P1 |
@@ -317,7 +317,7 @@ Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, za
 | **U2** | Settings: S-API, S-JUP, S-JWT, S-DIP-MODE, **S-LADDER** defaults (read) | B + runtime/yaml · **DONE 2026-11-09** (`GET /dip/runtime`) |
 | **U3** | AH5 decisions browser + AH7 OOR alert | API decisions ✅ · **DONE 2026-11-11** (`/agent/decisions` + PositionDetail OOR) |
 | **U4** | AH4 propose queue — body N× Buy-the-Dip z drabinki + TP | Faza C · **DONE 2026-11-11** (`/dip` Propose + queue confirm/reject audit) |
-| **U5** | Bot Control BC1–BC3 hardening (dry-run bound to server) | LP API |
+| **U5** | Bot Control BC1–BC3 hardening (dry-run bound to server) | LP API · **DONE 2026-11-11** (`/health.dry_run` + Settings/Strategies) |
 | **U6** | Live: materializacja drabinki (T6–T9, T14–T16) + opcjonalnie native DCA T17 | Faza E GO |
 | **U7** | AH1 optimize envelope UX | niezależnie |
 | **U8** | Native Jupiter DCA card (model B) osobno od ladder | `dca_allowed` |

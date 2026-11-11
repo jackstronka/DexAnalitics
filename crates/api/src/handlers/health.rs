@@ -80,6 +80,7 @@ pub async fn health_check(State(state): State<AppState>) -> ApiResult<Json<Healt
             database: state.db.is_some(),
             circuit_breaker: circuit_status,
         },
+        dry_run: state.dry_run,
     };
 
     Ok(Json(response))

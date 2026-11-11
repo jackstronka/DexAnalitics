@@ -2340,6 +2340,8 @@ pub struct HealthResponse {
     pub uptime_secs: u64,
     /// Component health.
     pub components: ComponentHealth,
+    /// Host `DRY_RUN` / AppState execution gate (U5 / BC3 source of truth).
+    pub dry_run: bool,
 }
 
 /// Service status.

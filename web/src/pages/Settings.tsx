@@ -7,8 +7,10 @@ import { ErrorBanner } from '@/components/ui/error-banner'
 import {
   deleteDipTriggerSession,
   getDipRuntime,
+  getHealth,
   postDipTriggerAttach,
 } from '@/lib/api'
+import { botDryRunMismatch } from '@/lib/botControlDisplay'
 import {
   dipLiveArmed,
   formatLadderDefaultsLine,
@@ -32,12 +34,27 @@ export default function Settings() {
   const [metricsMode, setMetricsMode] = useState<MetricsMode>(() => getMetricsMode())
   const [apiKey, setApiKey] = useState('')
   const [rpcUrl, setRpcUrl] = useState('https://api.mainnet-beta.solana.com')
-  const [dryRun, setDryRun] = useState(true)
+  const [dryRun, setDryRun] = useState(() => {
+    try {
+      const raw = localStorage.getItem('clmm-settings')
+      if (!raw) return true
+      const parsed = JSON.parse(raw) as { dryRun?: unknown }
+      return typeof parsed.dryRun === 'boolean' ? parsed.dryRun : true
+    } catch {
+      return true
+    }
+  })
   const [walletId, setWalletId] = useState(
     () => localStorage.getItem(LS_SELECTED_WALLET_ID)?.trim() || '',
   )
 
   const walletIdTrim = walletId.trim()
+  const healthQ = useQuery({
+    queryKey: ['health'],
+    queryFn: getHealth,
+    refetchInterval: 30_000,
+    retry: 1,
+  })
   const runtimeQ = useQuery({
     queryKey: ['dip-runtime', walletIdTrim || null],
     queryFn: () => getDipRuntime(walletIdTrim || undefined),
@@ -45,6 +62,8 @@ export default function Settings() {
     retry: 1,
   })
   const rt = runtimeQ.data
+  const apiDryRun = healthQ.data?.dry_run
+  const dryMismatch = botDryRunMismatch(dryRun, apiDryRun)
 
   const attachM = useMutation({
     mutationFn: () => postDipTriggerAttach(walletIdTrim),
@@ -237,6 +256,27 @@ export default function Settings() {
           <CardDescription>{t('settings.execHint')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="rounded-md border p-3 text-sm space-y-1">
+            <div className="flex justify-between gap-2 items-center">
+              <span className="font-medium">{t('settings.dryRunApi')}</span>
+              <span
+                className={`inline-flex rounded border px-2 py-0.5 text-xs font-medium ${
+                  apiDryRun === true
+                    ? 'bg-amber-100 text-amber-900 border-amber-200'
+                    : apiDryRun === false
+                      ? 'bg-rose-100 text-rose-900 border-rose-200'
+                      : 'bg-muted text-muted-foreground border-border'
+                }`}
+              >
+                {apiDryRun == null
+                  ? t('settings.dryRunApiUnknown')
+                  : apiDryRun
+                    ? 'dry-run'
+                    : 'live'}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">{t('settings.dryRunApiHint')}</p>
+          </div>
           <div className="flex items-center justify-between">
             <div>
               <div className="font-medium">{t('settings.dryRun')}</div>
@@ -256,6 +296,19 @@ export default function Settings() {
               />
             </button>
           </div>
+          {dryMismatch === 'local_live_api_dry' ? (
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              {t('settings.dryRunMismatchLiveLocal')}
+            </p>
+          ) : null}
+          {dryMismatch === 'local_dry_api_live' ? (
+            <p className="text-xs text-rose-700 dark:text-rose-400">
+              {t('settings.dryRunMismatchDryLocal')}
+            </p>
+          ) : null}
+          <Button asChild variant="secondary" size="sm">
+            <Link to="/strategies">{t('settings.openStrategies')}</Link>
+          </Button>
         </CardContent>
       </Card>
 

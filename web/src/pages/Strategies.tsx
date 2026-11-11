@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { Plus, Play, Square, RefreshCw, Pencil, FlaskConical } from 'lucide-react'
@@ -6,10 +7,12 @@ import { Button } from '@/components/ui/button'
 import {
   applyBacktestAutoTuneToStrategy,
   getBacktestAutoTuneStatus,
+  getHealth,
   getStrategies,
   startStrategy,
   stopStrategy,
 } from '@/lib/api'
+import { strategyExecBadge, summarizeStrategyFleet } from '@/lib/botControlDisplay'
 import { useI18n } from '@/lib/i18n'
 
 export default function Strategies() {
@@ -19,6 +22,12 @@ export default function Strategies() {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
+  })
+  const healthQ = useQuery({
+    queryKey: ['health'],
+    queryFn: getHealth,
+    refetchInterval: 30_000,
+    retry: 1,
   })
   const autoTuneQ = useQuery({
     queryKey: ['backtests-auto-tune-status'],
@@ -41,6 +50,8 @@ export default function Strategies() {
   })
 
   const strategies = data?.strategies || []
+  const fleet = useMemo(() => summarizeStrategyFleet(strategies), [strategies])
+  const apiDryRun = healthQ.data?.dry_run
 
   return (
     <div className="space-y-6">
@@ -49,6 +60,39 @@ export default function Strategies() {
           ? 'Lista strategii pochodzi z API — utwórz wpis lub zobacz pełne wyjaśnienie źródeł danych na stronie Dashboard.'
           : 'Strategy list comes from API — create an entry or see full data-source explanation on the Dashboard page.'}
       </p>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">
+            {locale === 'pl' ? 'Bot Control (BC1–BC2)' : 'Bot Control (BC1–BC2)'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm flex flex-wrap gap-x-6 gap-y-2">
+          <div>
+            <span className="text-muted-foreground">
+              {locale === 'pl' ? 'Uruchomione' : 'Running'}:{' '}
+            </span>
+            <span className="font-medium">
+              {fleet.running}/{fleet.total}
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">
+              {locale === 'pl' ? 'Live armed (running)' : 'Live armed (running)'}:{' '}
+            </span>
+            <span className="font-medium">{fleet.liveArmedRunning}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">API dry_run: </span>
+            <span className="font-medium">
+              {apiDryRun == null ? '—' : apiDryRun ? 'true' : 'false'}
+            </span>
+          </div>
+          <Link to="/settings" className="text-primary hover:underline text-xs self-center">
+            {locale === 'pl' ? '→ Settings (BC3)' : '→ Settings (BC3)'}
+          </Link>
+        </CardContent>
+      </Card>
 
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">{locale === 'pl' ? 'Strategie' : 'Strategies'}</h1>
@@ -114,6 +158,24 @@ export default function Strategies() {
                   <span className="text-muted-foreground">{locale === 'pl' ? 'Typ:' : 'Type:'}</span>
                   <span className="capitalize">{strategy.strategy_type.replace('_', ' ')}</span>
                 </div>
+                {(() => {
+                  const badge = strategyExecBadge(strategy)
+                  return (
+                    <div className="flex flex-wrap gap-1.5 text-xs">
+                      <span className="inline-flex rounded-full border px-2 py-0.5 text-muted-foreground">
+                        dry_run: {badge.dryRun ? 'yes' : 'no'}
+                      </span>
+                      <span className="inline-flex rounded-full border px-2 py-0.5 text-muted-foreground">
+                        auto_execute: {badge.autoExecute ? 'yes' : 'no'}
+                      </span>
+                      {badge.liveArmed ? (
+                        <span className="inline-flex rounded-full border border-rose-300 bg-rose-50 text-rose-800 px-2 py-0.5">
+                          live armed
+                        </span>
+                      ) : null}
+                    </div>
+                  )
+                })()}
                 {strategy.parameters?.auto_start ? (
                   <div className="text-xs">
                     <span className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-muted-foreground">

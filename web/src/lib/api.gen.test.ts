@@ -16,6 +16,7 @@ function sampleHealth(): HealthFromSchema {
     status: 'healthy',
     version: 'test',
     uptime_secs: 1,
+    dry_run: true,
     components: {
       rpc: true,
       database: true,

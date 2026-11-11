@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip U5: Bot Control BC1–BC3 (API dry_run)
+
+keywords: dip-agent, U5, BC1, BC2, BC3, Bot Control, dry_run, health, Strategies, Settings, openapi
+
+- **What:** `GET /health` exposes host `dry_run` (AppState/DRY_RUN). Settings shows server dry-run + warns on localStorage mismatch; Strategies adds fleet status (running / live-armed) and per-strategy dry_run/auto_execute badges. Start/stop unchanged (BC2).
+- **paths:** `crates/api/src/models.rs`, `handlers/health.rs`, `openapi.json`, `web/src/lib/botControlDisplay.ts`, `Settings.tsx`, `Strategies.tsx`
+
 ## 2026-11-11 — Dip U4: ladder propose queue (AH4)
 
 keywords: dip-agent, U4, AH4, dip_propose, ladder, propose queue, POST /dip/propose, web, Dip
