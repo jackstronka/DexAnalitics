@@ -31,8 +31,8 @@ pub use jupiter_trigger::{
     TriggerDepositCraftResponse, TriggerOrderHistoryItem, TriggerOrderHistoryResponse,
     TriggerPriceOrderCancelResponse, TriggerPriceOrderConfirmCancelRequest,
     TriggerPriceOrderConfirmCancelResponse, TriggerPriceOrderCreateRequest,
-    TriggerPriceOrderCreateResponse, TriggerPriceOrderPatchRequest,
-    TriggerPriceOrderPatchResponse, TriggerVault, filter_open_buy_dips,
+    TriggerPriceOrderCreateResponse, TriggerPriceOrderPatchRequest, TriggerPriceOrderPatchResponse,
+    TriggerVault, filter_open_buy_dips,
 };
 pub use mock::MockMarketDataProvider;
 pub use orca_rest::{

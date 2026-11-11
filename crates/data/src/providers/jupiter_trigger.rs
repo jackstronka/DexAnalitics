@@ -683,10 +683,7 @@ impl JupiterTriggerClient {
         access_token: &str,
         query: &OrderHistoryQuery,
     ) -> Result<TriggerDcaHistoryResponse> {
-        let mut url = format!(
-            "{}/orders/history/dca",
-            self.base_url.trim_end_matches('/')
-        );
+        let mut url = format!("{}/orders/history/dca", self.base_url.trim_end_matches('/'));
         let mut params = Vec::new();
         if let Some(s) = &query.state {
             params.push(format!("state={s}"));

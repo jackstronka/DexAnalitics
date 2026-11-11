@@ -5,10 +5,10 @@ use crate::handlers::wallets::load_wallet_keypair_for_id;
 use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
     DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
-    DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse,
     DipTriggerDcaHistoryResponse, DipTriggerDcaOrder, DipTriggerDcaOrderCancelRequest,
     DipTriggerDcaOrderCancelResponse, DipTriggerDcaOrderCreateRequest,
-    DipTriggerDcaOrderCreateResponse, DipTriggerPriceOrderCancelRequest,
+    DipTriggerDcaOrderCreateResponse, DipTriggerDepositCraftRequest,
+    DipTriggerDepositCraftResponse, DipTriggerPriceOrderCancelRequest,
     DipTriggerPriceOrderCancelResponse, DipTriggerPriceOrderCreateRequest,
     DipTriggerPriceOrderCreateResponse, DipTriggerPriceOrderPatchRequest,
     DipTriggerPriceOrderPatchResponse, DipTriggerSessionStatusDto, DipTriggerVaultResponse,
@@ -1150,9 +1150,7 @@ pub async fn post_dip_trigger_orders_dca_cancel(
             },
         )
         .await
-        .map_err(|e| {
-            ApiError::bad_request(format!("orders/dca/confirm-cancel failed: {e}"))
-        })?;
+        .map_err(|e| ApiError::bad_request(format!("orders/dca/confirm-cancel failed: {e}")))?;
 
     Ok(Json(DipTriggerDcaOrderCancelResponse {
         wallet_id: session.wallet_id,
