@@ -5,6 +5,69 @@ keywords: dip-agent, Jupiter Trigger, VersionedTransaction, partial sign, not en
 - **What:** Host wallet signs Jupiter multi-signer deposit/cancel txs by account-key index (web3.js-style), not `try_new` (all signers). Unblocked smoke past craft→sign; create still needs ≥10 USD deposit.
 - **paths:** `crates/api/src/handlers/dip.rs`, `doc/dip-agent/SMOKE_LIVE.md`
 
+## 2026-11-11 — F2.2: block reopen without deposit quote when prev_end known
+
+keywords: F2.2, BUG-20260512-03, reopen_missing_quote_blocks_open, final_caps, silent-downsize, rebalance, B3
+
+- **What:** Residual downsize bypass: with known `prev_end` and no deposit quote, open was unguarded. Now blocked (`bot_reopen_missing_deposit_quote` → pending-open). Units + B3 golden unchanged/green. BUG-20260512-03 → `fixed`.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`
+
+## 2026-11-11 — F2.1 incomplete recovery helper + F2.3 BUG hygiene
+
+keywords: F2.1, F2.3, rebalance_needs_incomplete_recovery, pending-open, BUG-20260410-06, BUG-20260413-05, B5, lineage
+
+- **What:** Hermetic F2.1 invariant: `rebalance_needs_incomplete_recovery` (close on-chain without new PDA) wired in executor; unit + pending session-id upsert. F2.3: B5 golden re-verified; BUG-20260413-05 / BUG-20260410-06 → `fixed` with residual notes.
+- **paths:** `crates/execution/src/strategy/rebalance.rs`, `executor.rs`, `pending_open.rs`, `doc/BUGS.md`
+
+## 2026-11-11 — API-H5: position detail HTTP envelopes + OpenAPI habit
+
+keywords: API-H5, positions_detail_http_tests, stream-pnl, lifecycle-summary, diagnostics, OpenAPI, AI_MERGE_CHECKLIST, hermetic
+
+- **What:** Typed HTTP for `/positions/{addr}/stream-pnl` (no-DB degraded), `/lifecycle-summary` (missing + seeded ledger), `/diagnostics` (empty monitor). Checklist rule: new OpenAPI op = C1+C2+smoke|typed contract. H5.3 (F2.9 web message map) remains separate C6 PR.
+- **paths:** `crates/api/src/handlers/positions_detail_http_tests.rs`, `doc/AI_MERGE_CHECKLIST.md`
+
+## 2026-11-11 — API-H4: bot stranded / WS / backtest job HTTP
+
+keywords: API-H4, ops_http_tests, stranded, pending-open, websocket, event_bus, backtest, JOBS, hermetic, CLMM_PENDING_OPEN_RECOVERY_PATH
+
+- **What:** Hermetic HTTP contracts for bot stranded/pending-open (tempdir ledger + dismiss), WS upgrade + injected `position.updated` payload shape (same JSON as WS text), backtest job GET from in-memory seed + 4xx on bad start body (no CLI spawn).
+- **paths:** `crates/api/src/handlers/ops_http_tests.rs`, `backtests.rs` (`seed_*_for_tests`)
+
+## 2026-11-11 — API-H3: chain-portfolio + wallet balances HTTP
+
+keywords: API-H3, chain-portfolio, wallets, balances, effective-balances, api-signer, httpmock, B6, footer, CLMM_WALLET_BALANCES
+
+- **What:** `wallets_http_tests` — chain-portfolio no-DB envelope + B6 footer helpers (8.50 USD); history/backfill stable errors without DB; balances via httpmock JSON-RPC; effective warmup + api-signer unconfigured contracts.
+- **paths:** `crates/api/src/handlers/wallets_http_tests.rs`, `http_test_support.rs`
+
+## 2026-11-11 — API-H2: dip + agent HTTP contract tests
+
+keywords: API-H2, dip, agent, httpmock, Jupiter Trigger, CLMM_JUPITER_TRIGGER_BASE_URL, confirm_execute, CLMM_AGENT_DATA_DIR, dip_http_tests, agent_http_tests
+
+- **What:** Hermetic HTTP suites for `/dip/*` (snapshot/runtime/session/propose + live-create gates) and position agent start/chat/worker; Trigger vault/craft/history via httpmock. `JupiterTriggerClient::new` respects `CLMM_JUPITER_TRIGGER_BASE_URL`.
+- **paths:** `crates/api/src/handlers/dip_http_tests.rs`, `agent_http_tests.rs`, `crates/data/src/providers/jupiter_trigger.rs`
+
+## 2026-11-11 — API-H1 / F2.8: close-all job persistence
+
+keywords: API-H1, F2.8, close-all, persistence, CLMM_CLOSE_ALL_JOBS_PATH, close_all_jobs.json, reload, BUG-20261111-02
+
+- **What:** Close-all batches survive API restart via JSON store (`data/close_all_jobs.json` / `CLMM_CLOSE_ALL_JOBS_PATH`). Reload in `ApiServer::new`. Unit + HTTP contract: clear memory → reload → same `batch_id`/status.
+- **paths:** `crates/api/src/services/position_close_all.rs`, `crates/api/src/server.rs`, `api_http_contract_tests.rs`, `doc/DATA_CATALOG.md`, `doc/BUGS.md`
+
+## 2026-11-11 — API-H0: hermetic HTTP helpers + close-all contract
+
+keywords: API-H0, api_http_contract_tests, http_test_support, endpoint_coverage, close-all, hermetic, RpcConfig, fallback_urls, IMPLEMENTATION_PLAN_API_HTTP_TESTS
+
+- **What:** Shared `handlers/http_test_support` (`hermetic_rpc` z pustymi fallbackami). Typed contract: close-all preview (empty / validation / unmanaged skip) + start→GET gdy `closable==0` (worker nie startuje). `endpoint_coverage` przełączony na te same helpery (bez `RpcConfig { ..Default }` z publicznymi fallbackami).
+- **paths:** `crates/api/src/handlers/http_test_support.rs`, `api_http_contract_tests.rs`, `endpoint_coverage_tests.rs`, `doc/TESTS.md`
+
+## 2026-11-11 — Plan: API HTTP / contract test hardening
+
+keywords: API, HTTP, contract-tests, api_http_contract_tests, endpoint_coverage, OpenAPI, C1, C2, F2.8, dip, agent, chain-portfolio, IMPLEMENTATION_PLAN_API_HTTP_TESTS
+
+- **What:** Analiza pokrycia HTTP (~127 paths / ~136 ops; typed contract ~7 routes; smoke ~40–45%) + plan faz **API-H0…H5** (close-all/F2.8 → dip/agent → chain-portfolio/balances → bot/WS/backtest → detail + habit). Technika: rozszerzać typed `oneshot`+serde, nie Vitest→żywe API / Playwright. Wpis §7 w planie regresji.
+- **paths:** `doc/IMPLEMENTATION_PLAN_API_HTTP_TESTS.md`, `doc/IMPLEMENTATION_PLAN_REGRESSION_RESILIENCE.md`
+
 ## 2026-11-11 — Dip: Swap V2 order + execute (S1–S2)
 
 keywords: dip-agent, Jupiter Swap, S1, S2, swap/v2, order, execute, urgent exit, clmm-lp-data, clmm-lp-api

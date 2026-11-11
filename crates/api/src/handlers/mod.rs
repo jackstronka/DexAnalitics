@@ -21,13 +21,25 @@ pub mod tx;
 pub mod wallets;
 
 #[cfg(test)]
+mod agent_http_tests;
+#[cfg(test)]
 mod api_http_contract_tests;
+#[cfg(test)]
+mod dip_http_tests;
+#[cfg(test)]
+mod wallets_http_tests;
+#[cfg(test)]
+mod ops_http_tests;
+#[cfg(test)]
+mod positions_detail_http_tests;
 #[cfg(test)]
 mod devnet_e2e_tests;
 #[cfg(test)]
 mod devnet_test_harness;
 #[cfg(test)]
 mod endpoint_coverage_tests;
+#[cfg(test)]
+mod http_test_support;
 #[cfg(test)]
 mod orca_tests;
 #[cfg(test)]

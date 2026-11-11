@@ -80,6 +80,13 @@ tags: domain=wallet; source=json-local; freshness=near-realtime; quality=best-ef
 - Contains balances, token rows, confidence/staleness metadata, and cache write timestamps only; it must not contain seed phrases, private keys, or keypair bytes.
 - Produced by API wallet refresh paths (`GET /wallets/effective-balances?force=true`, periodic resync, WS-triggered refresh). Path override: `CLMM_WALLET_EFFECTIVE_CACHE_PATH`.
 
+### `data/close_all_jobs.json`
+
+tags: domain=execution,api; source=json-local; freshness=near-realtime; quality=best-effort(job-status); cost=free
+
+- Persisted close-all batch jobs (`POST /positions/close-all`) so `GET /positions/close-all/{batch_id}` survives API restart (F2.8 / API-H1).
+- JSON map of batch_id → status/items/summary timestamps; no key material. Path override: `CLMM_CLOSE_ALL_JOBS_PATH`.
+
 ### `data/orca_position_lifecycle.jsonl`
 
 tags: domain=lifecycle,lineage; source=jsonl-local; freshness=historical; quality=authoritative(best available for tx lifecycle); cost=free
@@ -165,3 +172,5 @@ Before adding new data collection paths:
 1. Check this catalog for an existing source with the same `domain`.
 2. Prefer reusing/transforming existing data over creating a new snapshot feed.
 3. If a new source is necessary, add it here with tags and intended consumers.
+
+Hyperliquid liquidation map (recon 2026-11-11, **no source yet**): existing CLMM snapshots, swaps, wallet GL, and dip zones do not contain `liquidationPx` or perp open interest. MyLiquidBot publishes a derived BTC/ETH aggregate at `/market-data/liquidation-map/{btc,eth}.json` (no wallet addresses, no SOL, no contract). Do not add a catalog row until a collector exists, and do not treat that URL as the source of truth. If the consumer is the Jupiter dip bot, write the §1.C decision rule before any collector. See [`RECON_HYPERLIQUID_LIQUIDATION_MAP.md`](RECON_HYPERLIQUID_LIQUIDATION_MAP.md).

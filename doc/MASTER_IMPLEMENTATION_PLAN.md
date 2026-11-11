@@ -59,7 +59,7 @@
 | Dashboard (web) | **7/10** | **unit** | 22 trasy; experiment/close-all/session GL świeże; WebSocket bez subskrypcji |
 | Stream lineage / PnL | **6/10** | **golden+niezmiennik** | Bogaty kod + testy; **aktywne bugi regresji** (BUG-20260413-05, BUG-20260512-03) |
 | Wallet GL + SESSION | **7/10** | **golden+niezmiennik** | Journal + PG; session capital **flag-gated** (`CLMM_REOPEN_USE_SESSION_CAPITAL`) |
-| Close-all | **6/10** | **unit** | API działa; joby **in-memory** (restart = utrata batch) |
+| Close-all | **7/10** | **unit** | API + JSON job store (`close_all_jobs.json` / F2.8); UI/ops nadal bez E2E |
 | Decision layer / orkiestrator | **4/10** | **unit** | Gate + FULL MVP; brak rankingu/raportu/UI alert |
 | Position Agent + LLM | **4/10** | **unit** | Czat/supervisor live; LLM stateless; brak rolling memory |
 | Multi-venue live LP | **3/10** | **unit** | Raydium/Meteora: snapshot/decode, bez executora |

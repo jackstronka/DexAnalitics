@@ -1,33 +1,15 @@
+use super::http_test_support::{
+    request, request_body, request_with_headers, test_router, test_state, test_state_with_config,
+};
 use crate::models::{CreateStrategyRequest, SimulationRequest, StrategyParameters, StrategyType};
-use crate::routes::create_versioned_router;
 use crate::state::{ApiConfig, AppState, StrategyState};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
-use clmm_lp_protocols::prelude::RpcConfig;
 use httpmock::Method::GET;
 use httpmock::MockServer;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use tower::util::ServiceExt;
-
-const TEST_REQUEST_TIMEOUT_SECS: u64 = 30;
-const TEST_ONCHAIN_REQUEST_TIMEOUT_SECS: u64 = 120;
-
-fn test_state() -> AppState {
-    let rpc_config = RpcConfig {
-        primary_url: "http://127.0.0.1:1".to_string(),
-        ..Default::default()
-    };
-    AppState::new(rpc_config, ApiConfig::default(), None)
-}
-
-fn test_router(state: AppState) -> axum::Router {
-    create_versioned_router(
-        state,
-        TEST_REQUEST_TIMEOUT_SECS,
-        TEST_ONCHAIN_REQUEST_TIMEOUT_SECS,
-    )
-}
 
 async fn seed_strategy(state: &AppState, id: &str) {
     let now = chrono::Utc::now();
@@ -46,59 +28,6 @@ async fn seed_strategy(state: &AppState, id: &str) {
         updated_at: now,
     };
     state.strategies.write().await.insert(id.to_string(), s);
-}
-
-async fn request(
-    router: axum::Router,
-    method: Method,
-    path: &str,
-    body: Option<serde_json::Value>,
-) -> StatusCode {
-    let mut req = Request::builder().method(method).uri(path);
-    if body.is_some() {
-        req = req.header("content-type", "application/json");
-    }
-    let body = body
-        .map(|v| Body::from(v.to_string()))
-        .unwrap_or_else(Body::empty);
-    let resp = router.oneshot(req.body(body).unwrap()).await.unwrap();
-    resp.status()
-}
-
-async fn request_with_headers(
-    router: axum::Router,
-    method: Method,
-    path: &str,
-    headers: &[(&'static str, &'static str)],
-) -> StatusCode {
-    let mut req = Request::builder().method(method).uri(path);
-    for (k, v) in headers {
-        req = req.header(*k, *v);
-    }
-    let resp = router
-        .oneshot(req.body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    resp.status()
-}
-
-async fn request_body(
-    router: axum::Router,
-    method: Method,
-    path: &str,
-    body: Option<serde_json::Value>,
-) -> (StatusCode, String) {
-    let mut req = Request::builder().method(method).uri(path);
-    if body.is_some() {
-        req = req.header("content-type", "application/json");
-    }
-    let body = body
-        .map(|v| Body::from(v.to_string()))
-        .unwrap_or_else(Body::empty);
-    let resp = router.oneshot(req.body(body).unwrap()).await.unwrap();
-    let status = resp.status();
-    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-    (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tokio::test]
@@ -647,7 +576,7 @@ async fn all_orca_proxy_endpoints_are_reachable() {
         orca_public_api_base_url: Some(server.base_url()),
         ..ApiConfig::default()
     };
-    let state = AppState::new(RpcConfig::default(), cfg, None);
+    let state = test_state_with_config(cfg);
     let router = test_router(state);
     assert_eq!(
         request(router.clone(), Method::GET, "/api/v1/orca/pools", None).await,
@@ -1011,15 +940,11 @@ async fn open_position_endpoint_is_reachable() {
 
 #[tokio::test]
 async fn chain_history_refresh_requires_secret_when_configured() {
-    let rpc_config = RpcConfig {
-        primary_url: "http://127.0.0.1:1".to_string(),
-        ..Default::default()
-    };
     let cfg = ApiConfig {
         chain_history_refresh_secret: Some("unit-test-secret-alpha".to_string()),
         ..Default::default()
     };
-    let state = AppState::new(rpc_config, cfg, None);
+    let state = test_state_with_config(cfg);
     let router = test_router(state);
     let pk = Pubkey::new_unique();
     let path = format!("/api/v1/positions/{}/chain-history/refresh", pk);

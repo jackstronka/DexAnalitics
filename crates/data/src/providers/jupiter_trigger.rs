@@ -294,10 +294,16 @@ pub struct JupiterTriggerClient {
 impl JupiterTriggerClient {
     #[must_use]
     pub fn new(api_key: Option<String>) -> Self {
+        // Tests / local mocks: `CLMM_JUPITER_TRIGGER_BASE_URL=http://127.0.0.1:…`
+        let base_url = std::env::var("CLMM_JUPITER_TRIGGER_BASE_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_BASE.to_string());
         Self {
             client: Client::new(),
             api_key,
-            base_url: DEFAULT_BASE.to_string(),
+            base_url,
         }
     }
 

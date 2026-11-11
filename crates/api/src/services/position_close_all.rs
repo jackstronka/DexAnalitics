@@ -25,14 +25,26 @@ use crate::services::position_wallet_store::load_api_wallet_by_id;
 use crate::services::strategy_service::disable_automation_for_positions;
 use crate::state::AppState;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+/// On-disk close-all job store (F2.8 / API-H1). Override with `CLMM_CLOSE_ALL_JOBS_PATH`.
+pub fn close_all_jobs_path() -> PathBuf {
+    std::env::var("CLMM_CLOSE_ALL_JOBS_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data").join("close_all_jobs.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CloseAllJob {
     batch_id: String,
     status: String,
@@ -41,8 +53,107 @@ struct CloseAllJob {
     items: Vec<CloseAllBatchItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct CloseAllJobsFile {
+    version: u32,
+    #[serde(default)]
+    jobs: HashMap<String, CloseAllJob>,
+}
+
 static CLOSE_ALL_JOBS: LazyLock<RwLock<HashMap<String, CloseAllJob>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn load_close_all_jobs_from_path(path: &Path) -> HashMap<String, CloseAllJob> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "close-all: failed to read jobs file; starting empty"
+            );
+            return HashMap::new();
+        }
+    };
+    match serde_json::from_str::<CloseAllJobsFile>(&text) {
+        Ok(file) => file.jobs,
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "close-all: corrupt jobs file; starting empty"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn persist_close_all_jobs_map(jobs: &HashMap<String, CloseAllJob>) {
+    let path = close_all_jobs_path();
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        warn!(
+            path = %path.display(),
+            error = %e,
+            "close-all: failed to create jobs dir"
+        );
+        return;
+    }
+    let file = CloseAllJobsFile {
+        version: 1,
+        jobs: jobs.clone(),
+    };
+    let bytes = match serde_json::to_vec_pretty(&file) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "close-all: failed to serialize jobs");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        warn!(
+            path = %tmp.display(),
+            error = %e,
+            "close-all: failed to write jobs tmp"
+        );
+        return;
+    }
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        warn!(
+            path = %path.display(),
+            error = %e,
+            "close-all: failed to rename jobs file"
+        );
+    }
+}
+
+/// Load jobs from disk into the in-memory store (API startup / simulated restart).
+pub async fn reload_close_all_jobs_from_disk() {
+    let path = close_all_jobs_path();
+    let loaded = load_close_all_jobs_from_path(&path);
+    let n = loaded.len();
+    *CLOSE_ALL_JOBS.write().await = loaded;
+    if n > 0 {
+        info!(
+            path = %path.display(),
+            jobs = n,
+            "close-all: loaded persisted jobs"
+        );
+    }
+}
+
+/// Drop in-memory jobs without touching disk (test “crash” before reload).
+#[cfg(test)]
+pub async fn clear_close_all_jobs_memory_for_tests() {
+    CLOSE_ALL_JOBS.write().await.clear();
+}
 
 fn summarize(items: &[CloseAllBatchItem]) -> CloseAllBatchSummary {
     let mut summary = CloseAllBatchSummary {
@@ -286,6 +397,7 @@ async fn update_job_item(batch_id: &str, address: &str, item: CloseAllBatchItem)
         && let Some(row) = job.items.iter_mut().find(|i| i.address == address)
     {
         *row = item;
+        persist_close_all_jobs_map(&jobs);
     }
 }
 
@@ -294,6 +406,7 @@ async fn finish_job(batch_id: &str, status: &str) {
     if let Some(job) = jobs.get_mut(batch_id) {
         job.status = status.to_string();
         job.finished_ts_utc = Some(Utc::now());
+        persist_close_all_jobs_map(&jobs);
     }
 }
 
@@ -686,7 +799,11 @@ pub async fn start_close_all_batch(
         },
         items,
     };
-    CLOSE_ALL_JOBS.write().await.insert(batch_id.clone(), job);
+    {
+        let mut jobs = CLOSE_ALL_JOBS.write().await;
+        jobs.insert(batch_id.clone(), job);
+        persist_close_all_jobs_map(&jobs);
+    }
 
     if closable > 0 {
         let worker_state = state.clone();
@@ -717,6 +834,24 @@ pub async fn get_close_all_batch(batch_id: &str) -> Result<CloseAllBatchStatusRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ApiConfig;
+    use crate::test_env::EnvGuard;
+    use clmm_lp_protocols::prelude::RpcConfig;
+    use std::time::Duration;
+
+    fn hermetic_state() -> AppState {
+        let rpc = RpcConfig {
+            primary_url: "http://127.0.0.1:1".to_string(),
+            fallback_urls: Vec::new(),
+            timeout: Duration::from_millis(200),
+            max_retries: 0,
+            retry_base_delay_ms: 1,
+            retry_max_delay_ms: 1,
+            health_check_interval_secs: 60,
+            commitment: Default::default(),
+        };
+        AppState::new(rpc, ApiConfig::default(), None)
+    }
 
     #[test]
     fn apply_excludes_filters_addresses() {
@@ -749,5 +884,49 @@ mod tests {
         assert!(!parse_close_all_send_mode("confirm_sync").unwrap());
         assert!(parse_close_all_send_mode("send_first").unwrap());
         assert!(parse_close_all_send_mode("fast").is_err());
+    }
+
+    /// F2.8 / API-H1: job file → clear memory → reload → same batch status.
+    #[tokio::test]
+    async fn close_all_job_survives_store_reload_from_tempdir() {
+        let mut env = EnvGuard::lock().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("close_all_jobs.json");
+        env.set("CLMM_CLOSE_ALL_JOBS_PATH", &path);
+
+        clear_close_all_jobs_memory_for_tests().await;
+
+        let pda = Pubkey::new_unique().to_string();
+        let req = CloseAllPositionsRequest {
+            scope: "explicit".to_string(),
+            addresses: vec![pda.clone()],
+            exclude_addresses: vec![],
+            pause_linked_strategies: true,
+            options: Default::default(),
+        };
+        let started = start_close_all_batch(hermetic_state(), req)
+            .await
+            .expect("start");
+        assert!(path.is_file(), "persist should create {}", path.display());
+
+        clear_close_all_jobs_memory_for_tests().await;
+        assert!(
+            get_close_all_batch(&started.batch_id).await.is_err(),
+            "memory cleared → batch missing"
+        );
+
+        reload_close_all_jobs_from_disk().await;
+        let batch = get_close_all_batch(&started.batch_id)
+            .await
+            .expect("reloaded");
+        assert_eq!(batch.batch_id, started.batch_id);
+        assert_eq!(batch.status, "done");
+        assert_eq!(batch.summary.total, 1);
+        assert_eq!(batch.summary.skipped, 1);
+        assert_eq!(batch.items[0].address, pda);
+        assert_eq!(
+            batch.items[0].status,
+            CloseAllItemStatus::SkippedUnmanagedSigner
+        );
     }
 }
