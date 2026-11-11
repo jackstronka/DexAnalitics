@@ -3553,6 +3553,80 @@ pub struct DipTriggerPriceOrderPatchResponse {
     pub notes: Vec<String>,
 }
 
+/// Open DCA order row for `GET /dip/trigger/orders/dca`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDcaOrder {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_mint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds_remaining: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDcaHistoryResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub orders: Vec<DipTriggerDcaOrder>,
+    pub notes: Vec<String>,
+}
+
+/// `POST /dip/trigger/orders/dca` — craft+sign+create time_based DCA (E5 / T17).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDcaOrderCreateRequest {
+    pub wallet_id: String,
+    pub confirm_execute: bool,
+    pub input_mint: String,
+    pub output_mint: String,
+    pub amount: String,
+    pub order_count: u32,
+    pub interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDcaOrderCreateResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub order_id: String,
+    pub tx_signature: String,
+    pub deposit_request_id: String,
+    pub order_count: u32,
+    pub interval_seconds: u64,
+    pub notes: Vec<String>,
+}
+
+/// `POST /dip/trigger/orders/dca/cancel` — cancel + sign withdraw + confirm (E5 / T19).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDcaOrderCancelRequest {
+    pub wallet_id: String,
+    pub order_id: String,
+    pub confirm_execute: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerDcaOrderCancelResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub order_id: String,
+    pub cancel_request_id: String,
+    pub tx_signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_amount: Option<String>,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

@@ -67,7 +67,7 @@ Każdy create limitu wymaga vault + signed deposit (`depositRequestId` + `deposi
 | `GET /api/v1/dip/snapshot` | P1 (via Price) + strefy + T13 |
 | CLI `dip-snapshot` | j.w. |
 
-**Create/cancel/patch/deposit: NO-GO do Fazy E.**
+**Create/cancel/patch/deposit/DCA time_based: shipped E0–E5 (live gates). Remaining: Stop Loss flag, swap, DCA price_conditional.**
 
 ---
 
@@ -77,9 +77,9 @@ Włączane tylko gdy `runtime.jupiter.dca_allowed: true`.
 
 | ID | Funkcja | Endpoint | Tryb | Faza | Status |
 |----|---------|----------|------|------|--------|
-| T17 | DCA create | `POST /orders/dca` | propose → live | E | ⬜ |
-| T18 | DCA history | `GET /orders/history/dca` | read | E prep | ⬜ |
-| T19 | DCA cancel + confirm | cancel + confirm-cancel | live | E | ⬜ |
+| T17 | DCA create (`time_based`) | `POST /orders/dca` → Dex `POST /dip/trigger/orders/dca` | live | E5 | ✅ (`dca_allowed` + `confirm_execute` + `mode: live`) |
+| T18 | DCA history | `GET /orders/history/dca` → Dex `GET /dip/trigger/orders/dca` | read | E5 | ✅ (`dca_allowed`) |
+| T19 | DCA cancel + confirm | cancel + confirm-cancel → Dex `POST /dip/trigger/orders/dca/cancel` | live | E5 | ✅ (one-shot; same gates as T17) |
 
 ---
 
@@ -152,13 +152,14 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 - [x] T7 (+ T8 via `above`) create single — httpmock `create_price_order_parse_with_mock`
 - [x] T15–T16 cancel + confirm — httpmock `cancel_and_confirm_parse_with_mock`
 - [x] T14 patch single — httpmock `patch_price_order_parse_with_mock`
-- [ ] T9 Stop Loss + DCA/swap (E5+)  
+- [x] T17–T19 DCA time_based — httpmock `dca_create_history_cancel_parse_with_mock` (`dca_allowed`)
+- [ ] T9 Stop Loss + swap / DCA `price_conditional` (later)  
 
 - [ ] Propose path zwraca body bez broadcast (`mode: propose-only`)  
 - [ ] Live path za flagą + osobny signer  
 - [ ] Pending Withdraw po cancel dopięty zanim nowe `buy_dip`  
 - [ ] S1–S2 tylko dla policy `sell` market / pilny exit  
-- [ ] T10/T11/T17 nadal 🚫 lub za jawną flagą runtime  
+- [ ] T10/T11 nadal 🚫; DCA create za `dca_allowed`  
 - [ ] Brak rozszerzania `AgentDecision` (`deny_unknown_fields`) — dip = D1  
 
 ---
@@ -167,4 +168,5 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 
 | Data | Zmiana |
 |------|--------|
+| 2026-11-11 | E5: T17–T19 DCA time_based Dex surfaces (`dca_allowed` + live gate) |
 | 2026-11-09 | v1 matryca: P/T/S/D IDs, status A+B vs C–E, deny list |

@@ -1188,6 +1188,118 @@
         }
       }
     },
+    "/dip/trigger/orders/dca": {
+      "get": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`GET /dip/trigger/orders/dca` — E5 T18 DCA history for attached wallet.",
+        "operationId": "get_dip_trigger_orders_dca",
+        "parameters": [
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Host wallet id with attached Trigger session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Optional Jupiter state filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DCA order history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerDcaHistoryResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/orders/dca` — E5 T17: craft+sign+create time_based DCA.",
+        "operationId": "post_dip_trigger_orders_dca",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerDcaOrderCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created DCA order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerDcaOrderCreateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dip/trigger/orders/dca/cancel": {
+      "post": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`POST /dip/trigger/orders/dca/cancel` — E5 T19: cancel + sign withdraw + confirm.",
+        "operationId": "post_dip_trigger_orders_dca_cancel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DipTriggerDcaOrderCancelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cancelled DCA + withdraw",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerDcaOrderCancelResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/dip/trigger/orders/price": {
       "post": {
         "tags": [
@@ -8004,6 +8116,247 @@
           },
           "session": {
             "$ref": "#/components/schemas/DipTriggerSessionStatusDto"
+          }
+        }
+      },
+      "DipTriggerDcaHistoryResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "orders",
+          "notes"
+        ],
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DipTriggerDcaOrder"
+            }
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerDcaOrder": {
+        "type": "object",
+        "description": "Open DCA order row for `GET /dip/trigger/orders/dca`.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "input_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interval_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "order_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "order_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rounds_remaining": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "DipTriggerDcaOrderCancelRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/orders/dca/cancel` — cancel + sign withdraw + confirm (E5 / T19).",
+        "required": [
+          "wallet_id",
+          "order_id",
+          "confirm_execute"
+        ],
+        "properties": {
+          "confirm_execute": {
+            "type": "boolean"
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerDcaOrderCancelResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "order_id",
+          "cancel_request_id",
+          "tx_signature",
+          "notes"
+        ],
+        "properties": {
+          "cancel_request_id": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "refund_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tx_signature": {
+            "type": "string"
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerDcaOrderCreateRequest": {
+        "type": "object",
+        "description": "`POST /dip/trigger/orders/dca` — craft+sign+create time_based DCA (E5 / T17).",
+        "required": [
+          "wallet_id",
+          "confirm_execute",
+          "input_mint",
+          "output_mint",
+          "amount",
+          "order_count",
+          "interval_seconds"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string"
+          },
+          "confirm_execute": {
+            "type": "boolean"
+          },
+          "input_mint": {
+            "type": "string"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "output_mint": {
+            "type": "string"
+          },
+          "wallet_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerDcaOrderCreateResponse": {
+        "type": "object",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "order_id",
+          "tx_signature",
+          "deposit_request_id",
+          "order_count",
+          "interval_seconds",
+          "notes"
+        ],
+        "properties": {
+          "deposit_request_id": {
+            "type": "string"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "tx_signature": {
+            "type": "string"
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
           }
         }
       },

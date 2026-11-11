@@ -2714,3 +2714,45 @@ export const postDipTriggerOrdersPricePatch = (body: {
     method: 'POST',
     body: JSON.stringify(body),
   })
+
+export type DipTriggerDcaHistoryResponse = OkJson<'/dip/trigger/orders/dca', 'get'>
+export type DipTriggerDcaOrderCreateResponse = OkJson<'/dip/trigger/orders/dca', 'post'>
+export type DipTriggerDcaOrderCancelResponse = OkJson<'/dip/trigger/orders/dca/cancel', 'post'>
+
+/** DCA history (T18). Requires `runtime.jupiter.dca_allowed`. */
+export const getDipTriggerOrdersDca = (params: {
+  wallet_id: string
+  state?: string
+  limit?: number
+}) => {
+  const q = new URLSearchParams({ wallet_id: params.wallet_id })
+  if (params.state) q.set('state', params.state)
+  if (params.limit != null) q.set('limit', String(params.limit))
+  return fetchJson<DipTriggerDcaHistoryResponse>(`/dip/trigger/orders/dca?${q}`)
+}
+
+/** Live DCA create time_based (T17). Requires `dca_allowed` + `mode: live` + `confirm_execute`. */
+export const postDipTriggerOrdersDca = (body: {
+  wallet_id: string
+  confirm_execute: boolean
+  input_mint: string
+  output_mint: string
+  amount: string
+  order_count: number
+  interval_seconds: number
+}) =>
+  fetchJson<DipTriggerDcaOrderCreateResponse>('/dip/trigger/orders/dca', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+/** Live DCA cancel+withdraw (T19). Requires `dca_allowed` + `mode: live` + `confirm_execute`. */
+export const postDipTriggerOrdersDcaCancel = (body: {
+  wallet_id: string
+  order_id: string
+  confirm_execute: boolean
+}) =>
+  fetchJson<DipTriggerDcaOrderCancelResponse>('/dip/trigger/orders/dca/cancel', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })

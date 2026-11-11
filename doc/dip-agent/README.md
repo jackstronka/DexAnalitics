@@ -47,10 +47,8 @@ Live Trigger create/cancel = Faza E (osobny GO + osobna policy signera). Nie ł�
 - **E1:** vault + deposit/craft (unsigned propose) — DONE  
 - **E2:** sign deposit + create single price order (`POST /dip/trigger/orders/price`) — DONE (gate: `mode: live` + `confirm_execute`)  
 - **E3:** cancel + sign withdraw + confirm (`POST /dip/trigger/orders/price/cancel`) — DONE (same live gate)  
-- **E4:** patch trigger/slippage (`POST /dip/trigger/orders/price/patch`) — DONE (same live gate); DCA/swap = E5+  
- 
- 
- 
+- **E4:** patch trigger/slippage (`POST /dip/trigger/orders/price/patch`) — DONE (same live gate)  
+- **E5:** DCA time_based create/history/cancel (`GET|POST /dip/trigger/orders/dca`, `POST …/dca/cancel`) — DONE (`dca_allowed` + live gate on writes); swap / price_conditional DCA = later  
 - **E:** live create/cancel za flagą  
 
 Szczegóły: [`BRIDGE.md`](BRIDGE.md). Powierzchnia AI: [`AI_AGENT_LAYER.md`](../AI_AGENT_LAYER.md) § D.

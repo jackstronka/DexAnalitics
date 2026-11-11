@@ -1,15 +1,18 @@
-//! Dip Agent endpoints: snapshot (B) + propose (C) + runtime (U2) + Trigger attach/vault/create (E0–E2).
+//! Dip Agent endpoints: snapshot (B) + propose (C) + runtime (U2) + Trigger attach/vault/orders (E0–E5).
 
 use crate::error::{ApiError, ApiResult};
 use crate::handlers::wallets::load_wallet_keypair_for_id;
 use crate::models::{
     AgentDecisionRow, DipBuyDipOrder, DipLadderDefaultsDto, DipProposeRequest, DipProposeResponse,
     DipRuntimeResponse, DipSnapshotResponse, DipTriggerAttachRequest, DipTriggerAttachResponse,
-    DipTriggerDepositCraftRequest, DipTriggerDepositCraftResponse,
-    DipTriggerPriceOrderCancelRequest, DipTriggerPriceOrderCancelResponse,
-    DipTriggerPriceOrderCreateRequest, DipTriggerPriceOrderCreateResponse,
-    DipTriggerPriceOrderPatchRequest, DipTriggerPriceOrderPatchResponse,
-    DipTriggerSessionStatusDto, DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
+    DipTriggerDcaHistoryResponse, DipTriggerDcaOrder, DipTriggerDcaOrderCancelRequest,
+    DipTriggerDcaOrderCancelResponse, DipTriggerDcaOrderCreateRequest,
+    DipTriggerDcaOrderCreateResponse, DipTriggerDepositCraftRequest,
+    DipTriggerDepositCraftResponse, DipTriggerPriceOrderCancelRequest,
+    DipTriggerPriceOrderCancelResponse, DipTriggerPriceOrderCreateRequest,
+    DipTriggerPriceOrderCreateResponse, DipTriggerPriceOrderPatchRequest,
+    DipTriggerPriceOrderPatchResponse, DipTriggerSessionStatusDto, DipTriggerVaultResponse,
+    DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
@@ -27,9 +30,9 @@ use clmm_lp_data::dip::{
     resolve_runtime_path, resolve_trigger_session_dir, save_trigger_session,
 };
 use clmm_lp_data::providers::{
-    JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDepositCraftRequest,
-    TriggerPriceOrderConfirmCancelRequest, TriggerPriceOrderCreateRequest,
-    TriggerPriceOrderPatchRequest, filter_open_buy_dips,
+    JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDcaOrderCreateRequest,
+    TriggerDepositCraftRequest, TriggerPriceOrderConfirmCancelRequest,
+    TriggerPriceOrderCreateRequest, TriggerPriceOrderPatchRequest, filter_open_buy_dips,
 };
 use serde::Deserialize;
 use solana_sdk::signature::{Keypair, Signer};
@@ -663,20 +666,34 @@ fn sign_trigger_versioned_tx_base64(tx_b64: &str, keypair: &Keypair) -> ApiResul
     Ok(BASE64.encode(bytes))
 }
 
+fn load_runtime_or_bad_request() -> ApiResult<DipRuntimeFile> {
+    let path = resolve_runtime_path(None);
+    load_dip_runtime_file(&path)
+        .map_err(|e| ApiError::bad_request(format!("load dip runtime {}: {e}", path.display())))
+}
+
 fn require_live_execute_gate(confirm_execute: bool, action: &str) -> ApiResult<()> {
     if !confirm_execute {
         return Err(ApiError::bad_request(format!(
             "confirm_execute=true required for Trigger order {action}"
         )));
     }
-    let path = resolve_runtime_path(None);
-    let rt = load_dip_runtime_file(&path)
-        .map_err(|e| ApiError::bad_request(format!("load dip runtime {}: {e}", path.display())))?;
+    let rt = load_runtime_or_bad_request()?;
     let mode = normalize_dip_mode(&rt.mode);
     if mode != "live" {
         return Err(ApiError::bad_request(format!(
             "dip runtime mode is '{mode}' — set config/dip/runtime.yaml mode: live for {action}"
         )));
+    }
+    Ok(())
+}
+
+fn require_dca_allowed() -> ApiResult<()> {
+    let rt = load_runtime_or_bad_request()?;
+    if !rt.jupiter.dca_allowed {
+        return Err(ApiError::bad_request(
+            "jupiter.dca_allowed is false in config/dip/runtime.yaml",
+        ));
     }
     Ok(())
 }
@@ -918,6 +935,231 @@ pub async fn post_dip_trigger_orders_price_patch(
             "E4 live patch: single order only (no OCO/trailing)".into(),
             "JWT from attached wallet_id session".into(),
         ],
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DipTriggerDcaHistoryQuery {
+    pub wallet_id: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `GET /dip/trigger/orders/dca` — E5 T18 DCA history for attached wallet.
+#[utoipa::path(
+    get,
+    path = "/dip/trigger/orders/dca",
+    tag = "Dip",
+    params(
+        ("wallet_id" = String, Query, description = "Host wallet id with attached Trigger session"),
+        ("state" = Option<String>, Query, description = "Optional Jupiter state filter"),
+        ("limit" = Option<u32>, Query, description = "Page size")
+    ),
+    responses(
+        (status = 200, description = "DCA order history", body = DipTriggerDcaHistoryResponse)
+    )
+)]
+pub async fn get_dip_trigger_orders_dca(
+    Query(q): Query<DipTriggerDcaHistoryQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<DipTriggerDcaHistoryResponse>> {
+    require_dca_allowed()?;
+    let session = require_attached_session(&q.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let hist = client
+        .get_dca_order_history(
+            &session.tokens.access_token,
+            &OrderHistoryQuery {
+                state: q.state,
+                limit: q.limit,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/history/dca failed: {e}")))?;
+
+    Ok(Json(DipTriggerDcaHistoryResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        orders: hist
+            .orders
+            .into_iter()
+            .map(|o| DipTriggerDcaOrder {
+                id: o.id,
+                order_state: o.order_state,
+                order_type: o.order_type,
+                input_mint: o.input_mint,
+                output_mint: o.output_mint,
+                input_amount: o.input_amount,
+                order_count: o.order_count,
+                interval_seconds: o.interval_seconds,
+                rounds_remaining: o.rounds_remaining,
+            })
+            .collect(),
+        notes: vec!["E5 read: DCA history (T18)".into()],
+    }))
+}
+
+/// `POST /dip/trigger/orders/dca` — E5 T17: craft+sign+create time_based DCA.
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/orders/dca",
+    tag = "Dip",
+    request_body = DipTriggerDcaOrderCreateRequest,
+    responses(
+        (status = 200, description = "Created DCA order", body = DipTriggerDcaOrderCreateResponse)
+    )
+)]
+pub async fn post_dip_trigger_orders_dca(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerDcaOrderCreateRequest>,
+) -> ApiResult<Json<DipTriggerDcaOrderCreateResponse>> {
+    require_dca_allowed()?;
+    require_live_execute_gate(req.confirm_execute, "dca create")?;
+    let session = require_attached_session(&req.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    if req.input_mint.trim().is_empty() || req.output_mint.trim().is_empty() {
+        return Err(ApiError::bad_request("input_mint and output_mint required"));
+    }
+    if req.amount.trim().is_empty() {
+        return Err(ApiError::bad_request("amount required (smallest units)"));
+    }
+    if req.order_count < 2 {
+        return Err(ApiError::bad_request("order_count must be >= 2"));
+    }
+    if !(60..=31_536_000).contains(&req.interval_seconds) {
+        return Err(ApiError::bad_request(
+            "interval_seconds must be 60..=31536000",
+        ));
+    }
+
+    let kp = load_wallet_keypair_for_id(&state, req.wallet_id.trim())?;
+    if kp.pubkey().to_string() != session.wallet_pubkey {
+        return Err(ApiError::bad_request(
+            "host keypair pubkey mismatch vs Trigger session wallet_pubkey",
+        ));
+    }
+
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let craft = client
+        .craft_deposit(
+            &session.tokens.access_token,
+            &TriggerDepositCraftRequest {
+                input_mint: req.input_mint.trim().to_string(),
+                output_mint: req.output_mint.trim().to_string(),
+                user_address: session.wallet_pubkey.clone(),
+                amount: req.amount.trim().to_string(),
+                order_type: "dca".into(),
+                order_sub_type: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("deposit/craft (dca) failed: {e}")))?;
+
+    let signed_tx = sign_trigger_versioned_tx_base64(&craft.transaction, &kp)?;
+    let created = client
+        .create_dca_order(
+            &session.tokens.access_token,
+            &TriggerDcaOrderCreateRequest {
+                deposit_request_id: craft.request_id.clone(),
+                deposit_signed_tx: signed_tx,
+                user_pubkey: session.wallet_pubkey.clone(),
+                input_mint: req.input_mint.trim().to_string(),
+                output_mint: req.output_mint.trim().to_string(),
+                input_amount: req.amount.trim().to_string(),
+                order_count: req.order_count,
+                interval_seconds: req.interval_seconds,
+                order_type: "time_based".into(),
+                min_price_usd: None,
+                max_price_usd: None,
+                trigger_mint: None,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/dca create failed: {e}")))?;
+
+    Ok(Json(DipTriggerDcaOrderCreateResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        order_id: created.id,
+        tx_signature: created.tx_signature,
+        deposit_request_id: craft.request_id,
+        order_count: req.order_count,
+        interval_seconds: req.interval_seconds,
+        notes: vec![
+            "E5 live DCA create: time_based only (price_conditional later)".into(),
+            "requires jupiter.dca_allowed + mode:live + confirm_execute".into(),
+        ],
+    }))
+}
+
+/// `POST /dip/trigger/orders/dca/cancel` — E5 T19: cancel + sign withdraw + confirm.
+#[utoipa::path(
+    post,
+    path = "/dip/trigger/orders/dca/cancel",
+    tag = "Dip",
+    request_body = DipTriggerDcaOrderCancelRequest,
+    responses(
+        (status = 200, description = "Cancelled DCA + withdraw", body = DipTriggerDcaOrderCancelResponse)
+    )
+)]
+pub async fn post_dip_trigger_orders_dca_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DipTriggerDcaOrderCancelRequest>,
+) -> ApiResult<Json<DipTriggerDcaOrderCancelResponse>> {
+    require_dca_allowed()?;
+    require_live_execute_gate(req.confirm_execute, "dca cancel")?;
+    let session = require_attached_session(&req.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    let order_id = req.order_id.trim();
+    if order_id.is_empty() {
+        return Err(ApiError::bad_request("order_id required"));
+    }
+
+    let kp = load_wallet_keypair_for_id(&state, req.wallet_id.trim())?;
+    if kp.pubkey().to_string() != session.wallet_pubkey {
+        return Err(ApiError::bad_request(
+            "host keypair pubkey mismatch vs Trigger session wallet_pubkey",
+        ));
+    }
+
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let cancel = client
+        .cancel_dca_order(&session.tokens.access_token, order_id)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/dca/cancel failed: {e}")))?;
+    let signed_tx = sign_trigger_versioned_tx_base64(&cancel.transaction, &kp)?;
+    let confirmed = client
+        .confirm_cancel_dca_order(
+            &session.tokens.access_token,
+            order_id,
+            &TriggerPriceOrderConfirmCancelRequest {
+                signed_transaction: signed_tx,
+                cancel_request_id: cancel.request_id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/dca/confirm-cancel failed: {e}")))?;
+
+    Ok(Json(DipTriggerDcaOrderCancelResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        order_id: confirmed.id,
+        cancel_request_id: cancel.request_id,
+        tx_signature: confirmed.tx_signature,
+        refund_amount: cancel.refund_amount,
+        notes: vec!["E5 live DCA cancel: withdraw signed with host wallet".into()],
     }))
 }
 
