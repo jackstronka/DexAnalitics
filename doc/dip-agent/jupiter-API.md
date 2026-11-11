@@ -147,6 +147,17 @@ Base auth (aktualne docs):
 - `triggerCondition` = `above`  
 - `triggerPriceUsd` = TP1/TP2  
 
+### Stop Loss (static — sprzedaż SOL → USDC)
+
+Ten sam `POST /orders/price` (brak osobnego endpointu). Dex klasyfikuje `role=stop_loss` gdy:
+
+- `inputMint` = SOL, `outputMint` = USDC  
+- `triggerMint` = SOL (= `inputMint`)  
+- `triggerCondition` = `below`  
+- `triggerPriceUsd` = poziom SL  
+
+Dex surfaces: `POST /dip/trigger/orders/price` (create + `role` w odpowiedzi), monitor `GET /dip/trigger/orders/price` + snapshot `open_orders`.
+
 ### Explicit Trigger deny (v1)
 
 | Feature | Status |

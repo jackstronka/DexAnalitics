@@ -96,9 +96,16 @@ export default function Dip() {
 
   const data = q.data
   const zone = data ? normalizeDipZone(data.zone) : '—'
-  const emptyKind = data
-    ? dipOrdersEmptyKind(data.orders_source, data.buy_dip_orders.length)
-    : null
+  const openOrders =
+    data?.open_orders ??
+    data?.buy_dip_orders?.map((o) => ({
+      ...o,
+      role: 'buy_dip',
+      trigger_condition: 'below' as string | undefined,
+      trigger_mint: undefined as string | undefined,
+    })) ??
+    []
+  const emptyKind = data ? dipOrdersEmptyKind(data.orders_source, openOrders.length) : null
   const fmtTs = (ts?: string) =>
     ts ? new Date(ts).toLocaleString(locale === 'pl' ? 'pl-PL' : 'en-US') : '—'
 
@@ -239,13 +246,17 @@ export default function Dip() {
             <p className="text-sm text-muted-foreground">{t('dip.emptySkipped')}</p>
           ) : emptyKind === 'empty' ? (
             <p className="text-sm text-muted-foreground">{t('dip.emptyOrders')}</p>
-          ) : data && data.buy_dip_orders.length > 0 ? (
+          ) : openOrders.length > 0 ? (
             <div className="overflow-x-auto rounded-md border">
               <table className="w-full text-left text-sm">
                 <thead className="bg-muted/50">
                   <tr>
+                    <th className="px-3 py-2 font-medium whitespace-nowrap">{t('dip.colRole')}</th>
                     <th className="px-3 py-2 font-medium whitespace-nowrap">{t('dip.colId')}</th>
                     <th className="px-3 py-2 font-medium whitespace-nowrap">{t('dip.colState')}</th>
+                    <th className="px-3 py-2 font-medium whitespace-nowrap">
+                      {t('dip.colCondition')}
+                    </th>
                     <th className="px-3 py-2 font-medium whitespace-nowrap">
                       {t('dip.colTrigger')}
                     </th>
@@ -258,10 +269,14 @@ export default function Dip() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.buy_dip_orders.map((o) => (
+                  {openOrders.map((o) => (
                     <tr key={o.id} className="border-t">
+                      <td className="px-3 py-2 font-mono text-xs">{o.role}</td>
                       <td className="px-3 py-2 font-mono text-xs break-all">{o.id}</td>
                       <td className="px-3 py-2">{o.order_state ?? '—'}</td>
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {o.trigger_condition ?? '—'}
+                      </td>
                       <td className="px-3 py-2">{formatDipUsd(o.trigger_price_usd ?? null)}</td>
                       <td className="px-3 py-2 font-mono text-xs">
                         {o.remaining_input_amount ?? '—'}

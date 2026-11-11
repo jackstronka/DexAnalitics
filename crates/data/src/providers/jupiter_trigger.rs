@@ -798,15 +798,85 @@ impl JupiterTriggerClient {
 
 /// Pure filter used by API/CLI and unit tests.
 #[must_use]
-pub fn filter_open_buy_dips(orders: &[TriggerOrderHistoryItem]) -> Vec<TriggerOrderHistoryItem> {
+/// Product role for a single Trigger price order (allowlista spot).
+///
+/// Jupiter has no separate SL endpoint — role follows mint orientation:
+/// - **buy_dip**: `below` + `trigger_mint == output_mint` (buy asset on dip)
+/// - **stop_loss**: `below` + `trigger_mint == input_mint` (sell asset if price falls)
+/// - **take_profit**: `above` + `trigger_mint == input_mint` (sell asset if price rises)
+/// - **buy_above**: `above` + `trigger_mint == output_mint` (breakout buy)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerPriceOrderRole {
+    BuyDip,
+    TakeProfit,
+    StopLoss,
+    BuyAbove,
+    Other,
+}
+
+impl TriggerPriceOrderRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BuyDip => "buy_dip",
+            Self::TakeProfit => "take_profit",
+            Self::StopLoss => "stop_loss",
+            Self::BuyAbove => "buy_above",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Classify a price order from Jupiter mint + condition rules (static SL, not trailing).
+pub fn classify_price_order_role(
+    trigger_condition: &str,
+    input_mint: &str,
+    output_mint: &str,
+    trigger_mint: &str,
+) -> TriggerPriceOrderRole {
+    let cond = trigger_condition.trim().to_ascii_lowercase();
+    let input = input_mint.trim();
+    let output = output_mint.trim();
+    let trigger = trigger_mint.trim();
+    if input.is_empty() || output.is_empty() || trigger.is_empty() {
+        return TriggerPriceOrderRole::Other;
+    }
+    match cond.as_str() {
+        "below" if trigger == output => TriggerPriceOrderRole::BuyDip,
+        "below" if trigger == input => TriggerPriceOrderRole::StopLoss,
+        "above" if trigger == input => TriggerPriceOrderRole::TakeProfit,
+        "above" if trigger == output => TriggerPriceOrderRole::BuyAbove,
+        _ => TriggerPriceOrderRole::Other,
+    }
+}
+
+pub fn classify_history_item_role(o: &TriggerOrderHistoryItem) -> TriggerPriceOrderRole {
+    classify_price_order_role(
+        o.trigger_condition.as_deref().unwrap_or(""),
+        o.input_mint.as_deref().unwrap_or(""),
+        o.output_mint.as_deref().unwrap_or(""),
+        o.trigger_mint.as_deref().unwrap_or(""),
+    )
+}
+
+fn is_open_or_pending(state: &str) -> bool {
+    state == "open" || state == "pending"
+}
+
+/// All open/pending price orders (Buy-the-Dip, TP, SL, …).
+pub fn filter_open_price_orders(
+    orders: &[TriggerOrderHistoryItem],
+) -> Vec<TriggerOrderHistoryItem> {
     orders
         .iter()
-        .filter(|o| {
-            let state = o.order_state.as_deref().unwrap_or("");
-            let cond = o.trigger_condition.as_deref().unwrap_or("");
-            (state == "open" || state == "pending") && cond == "below"
-        })
+        .filter(|o| is_open_or_pending(o.order_state.as_deref().unwrap_or("")))
         .cloned()
+        .collect()
+}
+
+pub fn filter_open_buy_dips(orders: &[TriggerOrderHistoryItem]) -> Vec<TriggerOrderHistoryItem> {
+    filter_open_price_orders(orders)
+        .into_iter()
+        .filter(|o| classify_history_item_role(o) == TriggerPriceOrderRole::BuyDip)
         .collect()
 }
 
@@ -818,14 +888,16 @@ mod tests {
 
     #[test]
     fn filter_keeps_below_open_only() {
+        let usdc = "USDC";
+        let sol = "SOL";
         let orders = vec![
             TriggerOrderHistoryItem {
                 id: "1".into(),
                 order_type: Some("single".into()),
                 order_state: Some("open".into()),
-                input_mint: None,
-                output_mint: None,
-                trigger_mint: None,
+                input_mint: Some(usdc.into()),
+                output_mint: Some(sol.into()),
+                trigger_mint: Some(sol.into()),
                 trigger_condition: Some("below".into()),
                 trigger_price_usd: Some(90.5),
                 initial_input_amount: None,
@@ -838,9 +910,9 @@ mod tests {
                 id: "2".into(),
                 order_type: Some("single".into()),
                 order_state: Some("open".into()),
-                input_mint: None,
-                output_mint: None,
-                trigger_mint: None,
+                input_mint: Some(sol.into()),
+                output_mint: Some(usdc.into()),
+                trigger_mint: Some(sol.into()),
                 trigger_condition: Some("above".into()),
                 trigger_price_usd: Some(110.0),
                 initial_input_amount: None,
@@ -853,9 +925,9 @@ mod tests {
                 id: "3".into(),
                 order_type: Some("single".into()),
                 order_state: Some("filled".into()),
-                input_mint: None,
-                output_mint: None,
-                trigger_mint: None,
+                input_mint: Some(usdc.into()),
+                output_mint: Some(sol.into()),
+                trigger_mint: Some(sol.into()),
                 trigger_condition: Some("below".into()),
                 trigger_price_usd: Some(88.0),
                 initial_input_amount: None,
@@ -864,10 +936,54 @@ mod tests {
                 created_at: None,
                 updated_at: None,
             },
+            TriggerOrderHistoryItem {
+                id: "4".into(),
+                order_type: Some("single".into()),
+                order_state: Some("pending".into()),
+                input_mint: Some(sol.into()),
+                output_mint: Some(usdc.into()),
+                trigger_mint: Some(sol.into()),
+                trigger_condition: Some("below".into()),
+                trigger_price_usd: Some(70.0),
+                initial_input_amount: None,
+                remaining_input_amount: None,
+                expires_at: None,
+                created_at: None,
+                updated_at: None,
+            },
         ];
+        assert_eq!(filter_open_price_orders(&orders).len(), 3);
         let dips = filter_open_buy_dips(&orders);
         assert_eq!(dips.len(), 1);
         assert_eq!(dips[0].id, "1");
+        assert_eq!(
+            classify_history_item_role(&orders[1]),
+            TriggerPriceOrderRole::TakeProfit
+        );
+        assert_eq!(
+            classify_history_item_role(&orders[3]),
+            TriggerPriceOrderRole::StopLoss
+        );
+    }
+
+    #[test]
+    fn classify_roles_from_mint_orientation() {
+        assert_eq!(
+            classify_price_order_role("below", "USDC", "SOL", "SOL"),
+            TriggerPriceOrderRole::BuyDip
+        );
+        assert_eq!(
+            classify_price_order_role("below", "SOL", "USDC", "SOL"),
+            TriggerPriceOrderRole::StopLoss
+        );
+        assert_eq!(
+            classify_price_order_role("above", "SOL", "USDC", "SOL"),
+            TriggerPriceOrderRole::TakeProfit
+        );
+        assert_eq!(
+            classify_price_order_role("above", "USDC", "SOL", "SOL"),
+            TriggerPriceOrderRole::BuyAbove
+        );
     }
 
     #[tokio::test]

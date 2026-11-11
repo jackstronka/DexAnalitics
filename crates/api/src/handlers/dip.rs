@@ -8,11 +8,11 @@ use crate::models::{
     DipTriggerDcaHistoryResponse, DipTriggerDcaOrder, DipTriggerDcaOrderCancelRequest,
     DipTriggerDcaOrderCancelResponse, DipTriggerDcaOrderCreateRequest,
     DipTriggerDcaOrderCreateResponse, DipTriggerDepositCraftRequest,
-    DipTriggerDepositCraftResponse, DipTriggerPriceOrderCancelRequest,
+    DipTriggerDepositCraftResponse, DipTriggerOpenOrder, DipTriggerPriceOrderCancelRequest,
     DipTriggerPriceOrderCancelResponse, DipTriggerPriceOrderCreateRequest,
-    DipTriggerPriceOrderCreateResponse, DipTriggerPriceOrderPatchRequest,
-    DipTriggerPriceOrderPatchResponse, DipTriggerSessionStatusDto, DipTriggerVaultResponse,
-    DipZoneBandDto, DipZonesDto,
+    DipTriggerPriceOrderCreateResponse, DipTriggerPriceOrderHistoryResponse,
+    DipTriggerPriceOrderPatchRequest, DipTriggerPriceOrderPatchResponse,
+    DipTriggerSessionStatusDto, DipTriggerVaultResponse, DipZoneBandDto, DipZonesDto,
 };
 use crate::services::price_fetch::fetch_mint_prices_usd;
 use crate::state::AppState;
@@ -31,8 +31,10 @@ use clmm_lp_data::dip::{
 };
 use clmm_lp_data::providers::{
     JupiterTriggerClient, OrderHistoryQuery, TriggerChallenge, TriggerDcaOrderCreateRequest,
-    TriggerDepositCraftRequest, TriggerPriceOrderConfirmCancelRequest,
-    TriggerPriceOrderCreateRequest, TriggerPriceOrderPatchRequest, filter_open_buy_dips,
+    TriggerDepositCraftRequest, TriggerOrderHistoryItem, TriggerPriceOrderConfirmCancelRequest,
+    TriggerPriceOrderCreateRequest, TriggerPriceOrderPatchRequest, TriggerPriceOrderRole,
+    classify_history_item_role, classify_price_order_role, filter_open_buy_dips,
+    filter_open_price_orders,
 };
 use serde::Deserialize;
 use solana_sdk::signature::{Keypair, Signer};
@@ -145,7 +147,35 @@ fn resolve_zones_path(override_path: Option<&str>) -> PathBuf {
     PathBuf::from("config/dip/zones.json")
 }
 
-/// `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only).
+fn map_trigger_open_order(o: TriggerOrderHistoryItem) -> DipTriggerOpenOrder {
+    let role = classify_history_item_role(&o).as_str().to_string();
+    DipTriggerOpenOrder {
+        id: o.id,
+        role,
+        order_state: o.order_state,
+        trigger_condition: o.trigger_condition,
+        trigger_price_usd: o.trigger_price_usd,
+        input_mint: o.input_mint,
+        output_mint: o.output_mint,
+        trigger_mint: o.trigger_mint,
+        remaining_input_amount: o.remaining_input_amount,
+        expires_at: o.expires_at,
+    }
+}
+
+fn map_buy_dip_order(o: &DipTriggerOpenOrder) -> DipBuyDipOrder {
+    DipBuyDipOrder {
+        id: o.id.clone(),
+        order_state: o.order_state.clone(),
+        trigger_price_usd: o.trigger_price_usd,
+        input_mint: o.input_mint.clone(),
+        output_mint: o.output_mint.clone(),
+        remaining_input_amount: o.remaining_input_amount.clone(),
+        expires_at: o.expires_at,
+    }
+}
+
+/// `GET /dip/snapshot` — SOL zone + optional open Trigger price orders (read-only).
 #[utoipa::path(
     get,
     path = "/dip/snapshot",
@@ -186,6 +216,7 @@ pub async fn get_dip_snapshot(
         format!("zones_path={}", zones_path.display()),
     ];
 
+    let mut open_orders: Vec<DipTriggerOpenOrder> = Vec::new();
     let mut buy_dip_orders: Vec<DipBuyDipOrder> = Vec::new();
     let mut orders_source = "skipped".to_string();
 
@@ -208,19 +239,17 @@ pub async fn get_dip_snapshot(
                     .await
                 {
                     Ok(hist) => {
-                        let dips = filter_open_buy_dips(&hist.orders);
-                        buy_dip_orders = dips
+                        open_orders = filter_open_price_orders(&hist.orders)
                             .into_iter()
-                            .map(|o| DipBuyDipOrder {
-                                id: o.id,
-                                order_state: o.order_state,
-                                trigger_price_usd: o.trigger_price_usd,
-                                input_mint: o.input_mint,
-                                output_mint: o.output_mint,
-                                remaining_input_amount: o.remaining_input_amount,
-                                expires_at: o.expires_at,
-                            })
+                            .map(map_trigger_open_order)
                             .collect();
+                        buy_dip_orders = open_orders
+                            .iter()
+                            .filter(|o| o.role == TriggerPriceOrderRole::BuyDip.as_str())
+                            .map(map_buy_dip_order)
+                            .collect();
+                        // Keep T13 helper path exercised for regressions.
+                        let _ = filter_open_buy_dips(&hist.orders);
                         orders_source = "trigger_v2_orders_history".to_string();
                     }
                     Err(e) => {
@@ -273,6 +302,7 @@ pub async fn get_dip_snapshot(
                 max: sol_zones.c.max,
             },
         },
+        open_orders,
         buy_dip_orders,
         orders_source,
         notes,
@@ -698,7 +728,72 @@ fn require_dca_allowed() -> ApiResult<()> {
     Ok(())
 }
 
-/// `POST /dip/trigger/orders/price` — E2 T7: craft + sign deposit + create single price order.
+#[derive(Debug, Deserialize)]
+pub struct DipTriggerPriceOrderHistoryQuery {
+    pub wallet_id: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// When true (default), keep only open/pending rows.
+    #[serde(default = "default_true")]
+    pub open_only: bool,
+}
+
+/// `GET /dip/trigger/orders/price` — T12 price order history with roles (read).
+#[utoipa::path(
+    get,
+    path = "/dip/trigger/orders/price",
+    tag = "Dip",
+    params(
+        ("wallet_id" = String, Query, description = "Host wallet id with attached Trigger session"),
+        ("state" = Option<String>, Query, description = "Jupiter history state filter (default active)"),
+        ("limit" = Option<u32>, Query, description = "Page size"),
+        ("open_only" = Option<bool>, Query, description = "If true (default), return open/pending only")
+    ),
+    responses(
+        (status = 200, description = "Trigger price order history", body = DipTriggerPriceOrderHistoryResponse)
+    )
+)]
+pub async fn get_dip_trigger_orders_price(
+    Query(q): Query<DipTriggerPriceOrderHistoryQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<DipTriggerPriceOrderHistoryResponse>> {
+    let session = require_attached_session(&q.wallet_id)?;
+    let api_key = jupiter_api_key(&headers).ok_or_else(|| {
+        ApiError::bad_request("JUPITER_API_KEY missing — set env or x-api-key header")
+    })?;
+    let client = JupiterTriggerClient::new(Some(api_key));
+    let hist = client
+        .get_order_history(
+            &session.tokens.access_token,
+            &OrderHistoryQuery {
+                state: q.state.or_else(|| Some("active".into())),
+                limit: q.limit.or(Some(50)),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| ApiError::bad_request(format!("orders/history failed: {e}")))?;
+
+    let rows = if q.open_only {
+        filter_open_price_orders(&hist.orders)
+    } else {
+        hist.orders
+    };
+
+    Ok(Json(DipTriggerPriceOrderHistoryResponse {
+        wallet_id: session.wallet_id,
+        wallet_pubkey: session.wallet_pubkey,
+        orders: rows.into_iter().map(map_trigger_open_order).collect(),
+        notes: vec![
+            "T12 read: roles from mint orientation (buy_dip/take_profit/stop_loss/buy_above)"
+                .into(),
+        ],
+    }))
+}
+
+/// `POST /dip/trigger/orders/price` — E2 T7/T8/T9: craft + sign deposit + create single price order.
 #[utoipa::path(
     post,
     path = "/dip/trigger/orders/price",
@@ -722,7 +817,7 @@ pub async fn post_dip_trigger_orders_price(
     let cond = req.trigger_condition.trim().to_ascii_lowercase();
     if cond != "below" && cond != "above" {
         return Err(ApiError::bad_request(
-            "trigger_condition must be 'below' (Buy-the-Dip) or 'above' (TP)",
+            "trigger_condition must be 'below' (buy_dip/stop_loss) or 'above' (take_profit/buy_above)",
         ));
     }
     if req.input_mint.trim().is_empty()
@@ -733,6 +828,15 @@ pub async fn post_dip_trigger_orders_price(
             "input_mint, output_mint, trigger_mint required",
         ));
     }
+    let input_mint = req.input_mint.trim().to_string();
+    let output_mint = req.output_mint.trim().to_string();
+    let trigger_mint = req.trigger_mint.trim().to_string();
+    if trigger_mint != input_mint && trigger_mint != output_mint {
+        return Err(ApiError::bad_request(
+            "trigger_mint must equal input_mint (sell-side TP/SL) or output_mint (buy_dip/buy_above)",
+        ));
+    }
+    let role = classify_price_order_role(&cond, &input_mint, &output_mint, &trigger_mint);
     if req.amount.trim().is_empty() {
         return Err(ApiError::bad_request("amount required (smallest units)"));
     }
@@ -759,8 +863,8 @@ pub async fn post_dip_trigger_orders_price(
         .craft_deposit(
             &session.tokens.access_token,
             &TriggerDepositCraftRequest {
-                input_mint: req.input_mint.trim().to_string(),
-                output_mint: req.output_mint.trim().to_string(),
+                input_mint: input_mint.clone(),
+                output_mint: output_mint.clone(),
                 user_address: session.wallet_pubkey.clone(),
                 amount: req.amount.trim().to_string(),
                 order_type: "price".into(),
@@ -779,10 +883,10 @@ pub async fn post_dip_trigger_orders_price(
                 deposit_request_id: craft.request_id.clone(),
                 deposit_signed_tx: signed_tx,
                 user_pubkey: session.wallet_pubkey.clone(),
-                input_mint: req.input_mint.trim().to_string(),
-                output_mint: req.output_mint.trim().to_string(),
+                input_mint: input_mint.clone(),
+                output_mint: output_mint.clone(),
                 input_amount: req.amount.trim().to_string(),
-                trigger_mint: req.trigger_mint.trim().to_string(),
+                trigger_mint: trigger_mint.clone(),
                 trigger_condition: cond.clone(),
                 trigger_price_usd: req.trigger_price_usd,
                 expires_at,
@@ -801,8 +905,13 @@ pub async fn post_dip_trigger_orders_price(
         deposit_request_id: craft.request_id,
         trigger_condition: cond,
         trigger_price_usd: req.trigger_price_usd,
+        role: role.as_str().to_string(),
         notes: vec![
-            "E2 live create: deposit signed with host wallet_id keypair".into(),
+            format!(
+                "live create role={}: deposit signed with host wallet_id keypair",
+                role.as_str()
+            ),
+            "static stop_loss = below + trigger_mint==input_mint (trailingBps deny)".into(),
             "cancel via POST /dip/trigger/orders/price/cancel".into(),
         ],
     }))

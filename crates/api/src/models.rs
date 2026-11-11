@@ -3281,7 +3281,7 @@ pub struct DipZonesDto {
     pub c: DipZoneBandDto,
 }
 
-/// One open Buy-the-Dip style Trigger order (read summary).
+/// One open Buy-the-Dip style Trigger order (read summary; kept for back-compat).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DipBuyDipOrder {
     pub id: String,
@@ -3299,7 +3299,40 @@ pub struct DipBuyDipOrder {
     pub expires_at: Option<i64>,
 }
 
-/// `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders.
+/// Open Trigger price order with product role (`buy_dip` | `take_profit` | `stop_loss` | …).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerOpenOrder {
+    pub id: String,
+    /// `buy_dip` | `take_profit` | `stop_loss` | `buy_above` | `other`
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_price_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_input_amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+/// `GET /dip/trigger/orders/price` — Trigger price order history (T12) with roles.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipTriggerPriceOrderHistoryResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub orders: Vec<DipTriggerOpenOrder>,
+    pub notes: Vec<String>,
+}
+
+/// `GET /dip/snapshot` — zone classification + optional Trigger open orders.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DipSnapshotResponse {
     pub fetched_at: String,
@@ -3311,6 +3344,10 @@ pub struct DipSnapshotResponse {
     /// `A` | `B` | `C` | `none`
     pub zone: String,
     pub zones: DipZonesDto,
+    /// All open/pending price orders (Buy-the-Dip, TP, SL, …).
+    #[serde(default)]
+    pub open_orders: Vec<DipTriggerOpenOrder>,
+    /// Subset of `open_orders` with `role=buy_dip` (back-compat).
     pub buy_dip_orders: Vec<DipBuyDipOrder>,
     /// How orders were resolved (`trigger_v2_orders_history`, `no_jwt`, …).
     pub orders_source: String,
@@ -3483,7 +3520,7 @@ pub struct DipTriggerPriceOrderCreateRequest {
     /// Amount in input mint smallest units.
     pub amount: String,
     pub trigger_mint: String,
-    /// `below` (Buy-the-Dip) or `above` (TP).
+    /// `below` (Buy-the-Dip / Stop Loss) or `above` (TP / buy-above).
     pub trigger_condition: String,
     pub trigger_price_usd: f64,
     /// Unix ms expiry; if omitted, now + 7d.
@@ -3505,6 +3542,8 @@ pub struct DipTriggerPriceOrderCreateResponse {
     pub deposit_request_id: String,
     pub trigger_condition: String,
     pub trigger_price_usd: f64,
+    /// Classified role: `buy_dip` | `take_profit` | `stop_loss` | `buy_above` | `other`.
+    pub role: String,
     pub notes: Vec<String>,
 }
 
