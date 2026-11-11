@@ -48,13 +48,13 @@ Każdy create limitu wymaga vault + signed deposit (`depositRequestId` + `deposi
 
 | ID | Funkcja | Endpoint | Tryb | Faza | Status |
 |----|---------|----------|------|------|--------|
-| T7 | Create **Buy the Dip** (`below`) | `POST /orders/price` → Dex `POST /dip/trigger/orders/price` | live | E2 | ✅ (`confirm_execute` + `mode: live`) |
-| T8 | Create **Take Profit** (`above`) | same Dex path (`trigger_condition=above`) | live | E2 | ✅ same endpoint |
-| T9 | Create **Stop Loss** | `POST /orders/price` | propose → live | E (flag) | ⬜ |
+| T7 | Create **Buy the Dip** (`below` + trigger=`output`) | `POST /orders/price` → Dex `POST /dip/trigger/orders/price` | live | E2 | ✅ (`confirm_execute` + `mode: live`; `role=buy_dip`) |
+| T8 | Create **Take Profit** (`above` + trigger=`input`) | same Dex path | live | E2 | ✅ (`role=take_profit`) |
+| T9 | Create **Stop Loss** (static: `below` + trigger=`input`) | same Dex path | live | E2/E | ✅ static; trailing = T11 🚫 |
 | T10 | Create **OCO / OTOCO** | `POST /orders/price` | — | — | 🚫 |
 | T11 | **Trailing** (`trailingBps`) | `POST /orders/price` | — | — | 🚫 |
-| T12 | Historia / open orders | `GET /orders/history` | read | B | ✅ |
-| T13 | Filtr open Buy-the-Dip | lokalnie na T12 | read | B | ✅ |
+| T12 | Historia / open orders | `GET /orders/history` → Dex `GET /dip/trigger/orders/price` + snapshot `open_orders` | read | B+ | ✅ roles |
+| T13 | Filtr open Buy-the-Dip | lokalnie na T12 (`role=buy_dip`) | read | B | ✅ |
 | T14 | Patch trigger / slippage | `PATCH /orders/price/{id}` → Dex `POST /dip/trigger/orders/price/patch` | live | E4 | ✅ (`confirm_execute` + `mode: live`) |
 | T15 | Cancel start | `POST /orders/price/cancel/{id}` via Dex cancel | live | E3 | ✅ (one-shot with T16) |
 | T16 | Confirm cancel + withdraw | `POST /orders/price/confirm-cancel/{id}` → Dex `POST /dip/trigger/orders/price/cancel` | live + sign | E3 | ✅ |
@@ -153,7 +153,8 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 - [x] T15–T16 cancel + confirm — httpmock `cancel_and_confirm_parse_with_mock`
 - [x] T14 patch single — httpmock `patch_price_order_parse_with_mock`
 - [x] T17–T19 DCA time_based — httpmock `dca_create_history_cancel_parse_with_mock` (`dca_allowed`)
-- [ ] T9 Stop Loss + swap / DCA `price_conditional` (later)  
+- [x] T9 static Stop Loss + T12 open_orders roles (`classify_price_order_role`)
+- [ ] Swap / DCA `price_conditional` / trailing SL (later)  
 
 - [ ] Propose path zwraca body bez broadcast (`mode: propose-only`)  
 - [ ] Live path za flagą + osobny signer  
@@ -168,5 +169,6 @@ Szczegóły pól create: [`jupiter-API.md`](jupiter-API.md) §3.2.
 
 | Data | Zmiana |
 |------|--------|
+| 2026-11-11 | Monitor: snapshot `open_orders` + `GET /dip/trigger/orders/price`; T9 static SL role |
 | 2026-11-11 | E5: T17–T19 DCA time_based Dex surfaces (`dca_allowed` + live gate) |
 | 2026-11-09 | v1 matryca: P/T/S/D IDs, status A+B vs C–E, deny list |

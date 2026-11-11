@@ -2669,7 +2669,23 @@ export const postDipTriggerDepositCraft = (body: {
     body: JSON.stringify(body),
   })
 
-/** Live create (T7). Requires runtime `mode: live` + `confirm_execute: true`. */
+export type DipTriggerPriceOrderHistoryResponse = OkJson<'/dip/trigger/orders/price', 'get'>
+
+/** Price order history with roles (T12). Requires attached Trigger session. */
+export const getDipTriggerOrdersPrice = (params: {
+  wallet_id: string
+  state?: string
+  limit?: number
+  open_only?: boolean
+}) => {
+  const q = new URLSearchParams({ wallet_id: params.wallet_id })
+  if (params.state) q.set('state', params.state)
+  if (params.limit != null) q.set('limit', String(params.limit))
+  if (params.open_only != null) q.set('open_only', String(params.open_only))
+  return fetchJson<DipTriggerPriceOrderHistoryResponse>(`/dip/trigger/orders/price?${q}`)
+}
+
+/** Live create (T7/T8/T9). Requires runtime `mode: live` + `confirm_execute: true`. */
 export const postDipTriggerOrdersPrice = (body: {
   wallet_id: string
   confirm_execute: boolean

@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip: full open price-order monitor + static Stop Loss role (T9/T12)
+
+keywords: dip-agent, Jupiter Trigger, T9, T12, T13, open_orders, stop_loss, take_profit, buy_dip, role, classify_price_order_role, clmm-lp-data, clmm-lp-api
+
+- **What:** Classify Trigger price orders by mint orientation (`buy_dip` / `stop_loss` / `take_profit` / `buy_above`). Snapshot returns `open_orders` (all open/pending) + back-compat `buy_dip_orders`. New `GET /dip/trigger/orders/price` (T12). Create response includes `role`; static SL = `below` + `trigger_mint==input_mint` (trailing still deny).
+- **paths:** `crates/data/src/providers/jupiter_trigger.rs`, `crates/api/src/handlers/dip.rs`, `web/src/pages/Dip.tsx`
+
 ## 2026-11-11 — Dip E5: DCA create / history / cancel (T17–T19)
 
 keywords: dip-agent, Jupiter Trigger, E5, T17, T18, T19, DCA, time_based, dca_allowed, orders/dca, live, confirm_execute, clmm-lp-data, clmm-lp-api

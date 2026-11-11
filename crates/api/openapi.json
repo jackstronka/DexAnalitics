@@ -1081,7 +1081,7 @@
         "tags": [
           "Dip"
         ],
-        "summary": "`GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only).",
+        "summary": "`GET /dip/snapshot` — SOL zone + optional open Trigger price orders (read-only).",
         "operationId": "get_dip_snapshot",
         "parameters": [
           {
@@ -1301,11 +1301,70 @@
       }
     },
     "/dip/trigger/orders/price": {
+      "get": {
+        "tags": [
+          "Dip"
+        ],
+        "summary": "`GET /dip/trigger/orders/price` — T12 price order history with roles (read).",
+        "operationId": "get_dip_trigger_orders_price",
+        "parameters": [
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Host wallet id with attached Trigger session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Jupiter history state filter (default active)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "open_only",
+            "in": "query",
+            "description": "If true (default), return open/pending only",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger price order history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DipTriggerPriceOrderHistoryResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "Dip"
         ],
-        "summary": "`POST /dip/trigger/orders/price` — E2 T7: craft + sign deposit + create single price order.",
+        "summary": "`POST /dip/trigger/orders/price` — E2 T7/T8/T9: craft + sign deposit + create single price order.",
         "operationId": "post_dip_trigger_orders_price",
         "requestBody": {
           "content": {
@@ -7781,7 +7840,7 @@
       },
       "DipBuyDipOrder": {
         "type": "object",
-        "description": "One open Buy-the-Dip style Trigger order (read summary).",
+        "description": "One open Buy-the-Dip style Trigger order (read summary; kept for back-compat).",
         "required": [
           "id"
         ],
@@ -8030,7 +8089,7 @@
       },
       "DipSnapshotResponse": {
         "type": "object",
-        "description": "`GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders.",
+        "description": "`GET /dip/snapshot` — zone classification + optional Trigger open orders.",
         "required": [
           "fetched_at",
           "symbol",
@@ -8047,7 +8106,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/DipBuyDipOrder"
-            }
+            },
+            "description": "Subset of `open_orders` with `role=buy_dip` (back-compat)."
           },
           "fetched_at": {
             "type": "string"
@@ -8060,6 +8120,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "open_orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DipTriggerOpenOrder"
+            },
+            "description": "All open/pending price orders (Buy-the-Dip, TP, SL, …)."
           },
           "orders_source": {
             "type": "string",
@@ -8454,6 +8521,73 @@
           }
         }
       },
+      "DipTriggerOpenOrder": {
+        "type": "object",
+        "description": "Open Trigger price order with product role (`buy_dip` | `take_profit` | `stop_loss` | …).",
+        "required": [
+          "id",
+          "role"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remaining_input_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "description": "`buy_dip` | `take_profit` | `stop_loss` | `buy_above` | `other`"
+          },
+          "trigger_condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger_mint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger_price_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
       "DipTriggerPriceOrderCancelRequest": {
         "type": "object",
         "description": "`POST /dip/trigger/orders/price/cancel` — cancel start + sign withdraw + confirm (E3 / T15–T16).",
@@ -8557,7 +8691,7 @@
           },
           "trigger_condition": {
             "type": "string",
-            "description": "`below` (Buy-the-Dip) or `above` (TP)."
+            "description": "`below` (Buy-the-Dip / Stop Loss) or `above` (TP / buy-above)."
           },
           "trigger_mint": {
             "type": "string"
@@ -8580,6 +8714,7 @@
           "deposit_request_id",
           "trigger_condition",
           "trigger_price_usd",
+          "role",
           "notes"
         ],
         "properties": {
@@ -8601,6 +8736,10 @@
           "order_id": {
             "type": "string"
           },
+          "role": {
+            "type": "string",
+            "description": "Classified role: `buy_dip` | `take_profit` | `stop_loss` | `buy_above` | `other`."
+          },
           "trigger_condition": {
             "type": "string"
           },
@@ -8613,6 +8752,36 @@
               "string",
               "null"
             ]
+          },
+          "wallet_id": {
+            "type": "string"
+          },
+          "wallet_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "DipTriggerPriceOrderHistoryResponse": {
+        "type": "object",
+        "description": "`GET /dip/trigger/orders/price` — Trigger price order history (T12) with roles.",
+        "required": [
+          "wallet_id",
+          "wallet_pubkey",
+          "orders",
+          "notes"
+        ],
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DipTriggerOpenOrder"
+            }
           },
           "wallet_id": {
             "type": "string"

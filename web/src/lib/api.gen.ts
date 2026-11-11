@@ -504,7 +504,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only). */
+        /** `GET /dip/snapshot` — SOL zone + optional open Trigger price orders (read-only). */
         get: operations["get_dip_snapshot"];
         put?: never;
         post?: never;
@@ -590,9 +590,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** `GET /dip/trigger/orders/price` — T12 price order history with roles (read). */
+        get: operations["get_dip_trigger_orders_price"];
         put?: never;
-        /** `POST /dip/trigger/orders/price` — E2 T7: craft + sign deposit + create single price order. */
+        /** `POST /dip/trigger/orders/price` — E2 T7/T8/T9: craft + sign deposit + create single price order. */
         post: operations["post_dip_trigger_orders_price"];
         delete?: never;
         options?: never;
@@ -3171,7 +3172,7 @@ export interface components {
             /** @description Liquidity amount to remove (base units as decimal string; supports full u128 range in JSON). */
             liquidity_amount: string;
         };
-        /** @description One open Buy-the-Dip style Trigger order (read summary). */
+        /** @description One open Buy-the-Dip style Trigger order (read summary; kept for back-compat). */
         DipBuyDipOrder: {
             /** Format: int64 */
             expires_at?: number | null;
@@ -3243,12 +3244,15 @@ export interface components {
             trigger_jwt_set: boolean;
             trigger_session?: null | components["schemas"]["DipTriggerSessionStatusDto"];
         };
-        /** @description `GET /dip/snapshot` — zone classification + optional Trigger Buy-the-Dip orders. */
+        /** @description `GET /dip/snapshot` — zone classification + optional Trigger open orders. */
         DipSnapshotResponse: {
+            /** @description Subset of `open_orders` with `role=buy_dip` (back-compat). */
             buy_dip_orders: components["schemas"]["DipBuyDipOrder"][];
             fetched_at: string;
             mint: string;
             notes: string[];
+            /** @description All open/pending price orders (Buy-the-Dip, TP, SL, …). */
+            open_orders?: components["schemas"]["DipTriggerOpenOrder"][];
             /** @description How orders were resolved (`trigger_v2_orders_history`, `no_jwt`, …). */
             orders_source: string;
             price_source: string;
@@ -3355,6 +3359,22 @@ export interface components {
             wallet_id: string;
             wallet_pubkey: string;
         };
+        /** @description Open Trigger price order with product role (`buy_dip` | `take_profit` | `stop_loss` | …). */
+        DipTriggerOpenOrder: {
+            /** Format: int64 */
+            expires_at?: number | null;
+            id: string;
+            input_mint?: string | null;
+            order_state?: string | null;
+            output_mint?: string | null;
+            remaining_input_amount?: string | null;
+            /** @description `buy_dip` | `take_profit` | `stop_loss` | `buy_above` | `other` */
+            role: string;
+            trigger_condition?: string | null;
+            trigger_mint?: string | null;
+            /** Format: double */
+            trigger_price_usd?: number | null;
+        };
         /** @description `POST /dip/trigger/orders/price/cancel` — cancel start + sign withdraw + confirm (E3 / T15–T16). */
         DipTriggerPriceOrderCancelRequest: {
             /** @description Must be `true`; double-confirm live cancel + withdraw. */
@@ -3385,7 +3405,7 @@ export interface components {
             output_mint: string;
             /** Format: int32 */
             slippage_bps?: number | null;
-            /** @description `below` (Buy-the-Dip) or `above` (TP). */
+            /** @description `below` (Buy-the-Dip / Stop Loss) or `above` (TP / buy-above). */
             trigger_condition: string;
             trigger_mint: string;
             /** Format: double */
@@ -3397,10 +3417,19 @@ export interface components {
             deposit_request_id: string;
             notes: string[];
             order_id: string;
+            /** @description Classified role: `buy_dip` | `take_profit` | `stop_loss` | `buy_above` | `other`. */
+            role: string;
             trigger_condition: string;
             /** Format: double */
             trigger_price_usd: number;
             tx_signature?: string | null;
+            wallet_id: string;
+            wallet_pubkey: string;
+        };
+        /** @description `GET /dip/trigger/orders/price` — Trigger price order history (T12) with roles. */
+        DipTriggerPriceOrderHistoryResponse: {
+            notes: string[];
+            orders: components["schemas"]["DipTriggerOpenOrder"][];
             wallet_id: string;
             wallet_pubkey: string;
         };
@@ -6461,6 +6490,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DipTriggerDcaOrderCancelResponse"];
+                };
+            };
+        };
+    };
+    get_dip_trigger_orders_price: {
+        parameters: {
+            query: {
+                /** @description Host wallet id with attached Trigger session */
+                wallet_id: string;
+                /** @description Jupiter history state filter (default active) */
+                state?: string;
+                /** @description Page size */
+                limit?: number;
+                /** @description If true (default), return open/pending only */
+                open_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trigger price order history */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DipTriggerPriceOrderHistoryResponse"];
                 };
             };
         };

@@ -328,7 +328,8 @@ fn create_base_http_router(state: AppState) -> Router {
         )
         .route(
             "/dip/trigger/orders/price",
-            post(handlers::post_dip_trigger_orders_price),
+            get(handlers::get_dip_trigger_orders_price)
+                .post(handlers::post_dip_trigger_orders_price),
         )
         .route(
             "/dip/trigger/orders/price/cancel",
