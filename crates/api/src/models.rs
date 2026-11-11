@@ -3666,6 +3666,76 @@ pub struct DipTriggerDcaOrderCancelResponse {
     pub notes: Vec<String>,
 }
 
+/// `POST /dip/swap/order` — Swap V2 quote (+ unsigned tx) for urgent exit / rebalance (S1).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipSwapOrderRequest {
+    pub wallet_id: String,
+    pub input_mint: String,
+    pub output_mint: String,
+    /// Amount in input mint smallest units.
+    pub amount: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipSwapOrderResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_usd_value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_usd_value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_impact: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_amount_threshold: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<String>,
+    /// Base64 unsigned VersionedTransaction (null/empty if Jupiter could not build).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// `POST /dip/swap/execute` — S2: `/order` → sign host keypair → `/execute` (live).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipSwapExecuteRequest {
+    pub wallet_id: String,
+    pub confirm_execute: bool,
+    pub input_mint: String,
+    pub output_mint: String,
+    pub amount: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slippage_bps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DipSwapExecuteResponse {
+    pub wallet_id: String,
+    pub wallet_pubkey: String,
+    pub request_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_input_amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_output_amount: Option<String>,
+    pub notes: Vec<String>,
+}
+
 // ============================================================================
 // Data feed endpoints (normalized JSONL reads)
 // ============================================================================

@@ -12,6 +12,8 @@ mod dexscreener;
 pub mod dune;
 /// Jupiter Price API provider.
 pub mod jupiter;
+/// Jupiter Swap API V2 (`/order` + `/execute`).
+pub mod jupiter_swap;
 /// Jupiter Trigger Order API V2 (auth + vault/deposit + price + DCA).
 pub mod jupiter_trigger;
 mod mock;
@@ -24,6 +26,9 @@ pub use defillama::{DailyTvlPoint, DefiLlamaChartPoint, DefiLlamaClient, DefiLla
 pub use dexscreener::{DexChain, DexPair, DexscreenerClient};
 pub use dune::{DuneClient, TvlPoint, VolumePoint};
 pub use jupiter::JupiterProvider;
+pub use jupiter_swap::{
+    JupiterSwapClient, SwapExecuteRequest, SwapExecuteResponse, SwapOrderQuery, SwapOrderResponse,
+};
 pub use jupiter_trigger::{
     JupiterTriggerClient, OrderHistoryQuery, TriggerAuthTokens, TriggerChallenge,
     TriggerDcaHistoryItem, TriggerDcaHistoryResponse, TriggerDcaOrderCancelResponse,

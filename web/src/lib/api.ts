@@ -2772,3 +2772,33 @@ export const postDipTriggerOrdersDcaCancel = (body: {
     method: 'POST',
     body: JSON.stringify(body),
   })
+
+export type DipSwapOrderResponse = OkJson<'/dip/swap/order', 'post'>
+export type DipSwapExecuteResponse = OkJson<'/dip/swap/execute', 'post'>
+
+/** Swap V2 quote + unsigned tx (S1). Propose-safe — no broadcast. */
+export const postDipSwapOrder = (body: {
+  wallet_id: string
+  input_mint: string
+  output_mint: string
+  amount: string
+  slippage_bps?: number
+}) =>
+  fetchJson<DipSwapOrderResponse>('/dip/swap/order', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+/** Live Swap V2 execute (S2). Requires `mode: live` + `confirm_execute`. */
+export const postDipSwapExecute = (body: {
+  wallet_id: string
+  confirm_execute: boolean
+  input_mint: string
+  output_mint: string
+  amount: string
+  slippage_bps?: number
+}) =>
+  fetchJson<DipSwapExecuteResponse>('/dip/swap/execute', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
