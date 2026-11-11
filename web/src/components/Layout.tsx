@@ -16,6 +16,7 @@ import {
   Database,
   ClipboardList,
   TrendingDown,
+  Brain,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -55,6 +56,7 @@ export default function Layout() {
     { key: 'nav.logs', href: '/logs', icon: ScrollText },
     { key: 'nav.botActivity', href: '/bot-activity', icon: History },
     { key: 'nav.dip', href: '/dip', icon: TrendingDown },
+    { key: 'nav.agentDecisions', href: '/agent/decisions', icon: Brain },
     { key: 'nav.settings', href: '/settings', icon: Settings },
   ] as const
 

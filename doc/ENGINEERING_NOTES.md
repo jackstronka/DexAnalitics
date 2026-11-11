@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip U3: Agent decisions browser + OOR alert (AH5/AH7)
+
+keywords: dip-agent, U3, AH5, AH7, agent_decisions, decisions browser, OOR, adjust_lp, web, PositionDetail
+
+- **What:** UI `/agent/decisions` reads `GET /data/agent/decisions` (source API filter + client kind filter); PositionDetail shows OOR banner with links to Dip + decisions when `!in_range`. Pure helpers + vitest in `agentDecisionsDisplay`.
+- **paths:** `web/src/pages/AgentDecisions.tsx`, `web/src/lib/agentDecisionsDisplay.ts`, `web/src/lib/api.ts`, `web/src/pages/PositionDetail.tsx`, `Layout`/`App`/`i18n`
+
 ## 2026-11-11 — Dip: partial sign VersionedTransaction (live smoke)
 
 keywords: dip-agent, Jupiter Trigger, VersionedTransaction, partial sign, not enough signers, BUG-20261111-01, deposit/craft, live smoke

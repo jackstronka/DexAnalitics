@@ -24,6 +24,7 @@ import Swap from '@/pages/Swap'
 import Backtests from '@/pages/Backtests'
 import DataQuality from '@/pages/DataQuality'
 import Dip from '@/pages/Dip'
+import AgentDecisions from '@/pages/AgentDecisions'
 import ExperimentLaunch from '@/pages/ExperimentLaunch'
 
 function App() {
@@ -67,6 +68,7 @@ function App() {
             <Route path="logs" element={<Logs />} />
             <Route path="bot-activity" element={<BotActivity />} />
             <Route path="dip" element={<Dip />} />
+            <Route path="agent/decisions" element={<AgentDecisions />} />
             <Route path="backtests" element={<Backtests />} />
             <Route path="experiments/new" element={<ExperimentLaunch />} />
             <Route path="data-quality" element={<DataQuality />} />
