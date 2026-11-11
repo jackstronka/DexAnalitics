@@ -883,15 +883,15 @@ pub async fn post_dip_trigger_orders_price_patch(
             "at least one of trigger_price_usd or slippage_bps required",
         ));
     }
-    if let Some(px) = req.trigger_price_usd {
-        if !px.is_finite() || px <= 0.0 {
-            return Err(ApiError::bad_request("trigger_price_usd must be > 0"));
-        }
+    if let Some(px) = req.trigger_price_usd
+        && (!px.is_finite() || px <= 0.0)
+    {
+        return Err(ApiError::bad_request("trigger_price_usd must be > 0"));
     }
-    if let Some(bps) = req.slippage_bps {
-        if bps > 10_000 {
-            return Err(ApiError::bad_request("slippage_bps must be 0..=10000"));
-        }
+    if let Some(bps) = req.slippage_bps
+        && bps > 10_000
+    {
+        return Err(ApiError::bad_request("slippage_bps must be 0..=10000"));
     }
 
     let client = JupiterTriggerClient::new(Some(api_key));
