@@ -1227,6 +1227,30 @@ export default function PositionDetail() {
         </Tabs.List>
 
         <Tabs.Content value="overview" className="mt-4 space-y-6">
+          {!position.in_range ? (
+            <div
+              className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm"
+              role="status"
+            >
+              <p className="font-medium text-amber-900 dark:text-amber-100">
+                {locale === 'pl'
+                  ? 'LP poza zakresem (OOR) — rozważ adjust_lp / rebalance'
+                  : 'LP out of range (OOR) — consider adjust_lp / rebalance'}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {locale === 'pl'
+                  ? 'Cena wyszła poza ticki pozycji. Dip Agent może zaproponować adjust_lp; rebalance LP zostaje w botcie Orca.'
+                  : 'Price left the position tick range. Dip Agent may propose adjust_lp; LP rebalance stays with the Orca bot.'}{' '}
+                <Link to="/dip" className="text-primary hover:underline">
+                  Dip / Jupiter
+                </Link>
+                {' · '}
+                <Link to="/agent/decisions" className="text-primary hover:underline">
+                  {locale === 'pl' ? 'Decyzje agenta' : 'Agent decisions'}
+                </Link>
+              </p>
+            </div>
+          ) : null}
           {(lastRebalanceIncomplete || address) && (
             <Card>
               <CardHeader>

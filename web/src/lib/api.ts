@@ -2606,6 +2606,30 @@ export const runScript = (id: string, triggeredBy?: string) =>
     }),
   })
 
+/** `GET /data/agent/decisions` — local agent_decisions.jsonl browser (U3 / AH5). */
+export type AgentDecisionsResponse = OkJson<'/data/agent/decisions', 'get'>
+
+export type GetAgentDecisionsParams = {
+  strategy_id?: string
+  source?: string
+  from?: string
+  to?: string
+  limit?: number
+}
+
+export const getAgentDecisions = (params?: GetAgentDecisionsParams) => {
+  const p = new URLSearchParams()
+  if (params?.strategy_id?.trim()) p.set('strategy_id', params.strategy_id.trim())
+  if (params?.source?.trim()) p.set('source', params.source.trim())
+  if (params?.from?.trim()) p.set('from', params.from.trim())
+  if (params?.to?.trim()) p.set('to', params.to.trim())
+  if (typeof params?.limit === 'number' && Number.isFinite(params.limit) && params.limit > 0) {
+    p.set('limit', String(Math.floor(params.limit)))
+  }
+  const q = p.toString()
+  return fetchJson<AgentDecisionsResponse>(`/data/agent/decisions${q ? `?${q}` : ''}`)
+}
+
 /** `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only). */
 export type DipSnapshotResponse = OkJson<'/dip/snapshot', 'get'>
 
