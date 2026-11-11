@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { RefreshCw, TrendingDown } from 'lucide-react'
 import { DipLadderPreviewTable } from '@/components/dip/DipLadderPreviewTable'
@@ -7,8 +7,14 @@ import { DipLadderSummary } from '@/components/dip/DipLadderSummary'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorBanner } from '@/components/ui/error-banner'
-import { getDipRuntime, getDipSnapshot } from '@/lib/api'
+import { getAgentDecisions, getDipRuntime, getDipSnapshot, postDipPropose } from '@/lib/api'
+import { agentDecisionAction, agentDecisionKind } from '@/lib/agentDecisionsDisplay'
 import { buildDipLadderPreview } from '@/lib/dipLadder'
+import {
+  buildLadderBuyDipPropose,
+  buildQueueResolvePropose,
+  isLadderBuyDipPropose,
+} from '@/lib/dipProposePayload'
 import {
   dipOrdersEmptyKind,
   formatDipUsd,
@@ -59,8 +65,10 @@ function num(s: string, fallback = 0): number {
 
 export default function Dip() {
   const { locale, t } = useI18n()
+  const queryClient = useQueryClient()
   const [ladderForm, setLadderForm] = useState<LadderForm>(DEFAULT_LADDER)
   const [ladderSeeded, setLadderSeeded] = useState(false)
+  const [proposeMsg, setProposeMsg] = useState<string | null>(null)
   const selectedWalletId =
     typeof localStorage !== 'undefined'
       ? localStorage.getItem('clmm.selected_wallet_id')?.trim() || undefined
@@ -75,6 +83,12 @@ export default function Dip() {
     queryKey: ['dip-runtime', selectedWalletId ?? null],
     queryFn: () => getDipRuntime(selectedWalletId),
     staleTime: 60_000,
+    retry: 1,
+  })
+  const decisionsQ = useQuery({
+    queryKey: ['dip-propose-queue'],
+    queryFn: () => getAgentDecisions({ source: 'dip_agent', limit: 50 }),
+    refetchInterval: 30_000,
     retry: 1,
   })
 
@@ -127,6 +141,53 @@ export default function Dip() {
 
   const setField = (key: keyof LadderForm) => (e: ChangeEvent<HTMLInputElement>) => {
     setLadderForm((prev) => ({ ...prev, [key]: e.target.value }))
+  }
+
+  const queueRows = useMemo(() => {
+    const rows = decisionsQ.data?.rows ?? []
+    return [...rows]
+      .filter((r) => agentDecisionKind(r.decision) === 'dip_propose')
+      .reverse()
+      .slice(0, 20)
+  }, [decisionsQ.data?.rows])
+
+  const proposeMut = useMutation({
+    mutationFn: postDipPropose,
+    onSuccess: async () => {
+      setProposeMsg(t('dip.proposeOk'))
+      await queryClient.invalidateQueries({ queryKey: ['dip-propose-queue'] })
+      await queryClient.invalidateQueries({ queryKey: ['agent-decisions'] })
+    },
+    onError: (err) => {
+      setProposeMsg(
+        `${t('dip.proposeErr')}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    },
+  })
+
+  const submitLadderPropose = () => {
+    setProposeMsg(null)
+    if (entryPrice == null || !Number.isFinite(entryPrice)) return
+    const body = buildLadderBuyDipPropose({
+      entryPriceUsd: entryPrice,
+      preview: ladderPreview,
+      takeProfitPct: num(ladderForm.takeProfitPct),
+      zone: data ? normalizeDipZone(data.zone) : undefined,
+      solUsd: data?.price_usd ?? entryPrice,
+    })
+    if (!body) return
+    proposeMut.mutate(body)
+  }
+
+  const resolveQueue = (resolve: 'confirm' | 'reject', refTsUtc: string) => {
+    setProposeMsg(null)
+    const body = buildQueueResolvePropose({
+      resolve,
+      refTsUtc,
+      zone: data ? normalizeDipZone(data.zone) : undefined,
+      solUsd: data?.price_usd ?? undefined,
+    })
+    proposeMut.mutate(body)
   }
 
   return (
@@ -331,8 +392,119 @@ export default function Dip() {
               </label>
             ))}
           </div>
-          <DipLadderSummary summary={ladderPreview.summary} />
+          <DipLadderSummary
+            summary={ladderPreview.summary}
+            onPropose={submitLadderPropose}
+            proposePending={proposeMut.isPending}
+          />
+          {proposeMsg ? (
+            <p
+              className={`text-sm ${proposeMut.isError ? 'text-destructive' : 'text-muted-foreground'}`}
+            >
+              {proposeMsg}
+            </p>
+          ) : null}
           <DipLadderPreviewTable rows={ladderPreview.rows} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('dip.queueTitle')}</CardTitle>
+          <CardDescription>{t('dip.queueHint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void decisionsQ.refetch()}
+              disabled={decisionsQ.isFetching}
+            >
+              <RefreshCw
+                className={`h-4 w-4 mr-1 ${decisionsQ.isFetching ? 'animate-spin' : ''}`}
+              />
+              {t('dip.refresh')}
+            </Button>
+            <Button asChild variant="secondary" size="sm">
+              <Link to="/agent/decisions">{t('dip.queueOpenDecisions')}</Link>
+            </Button>
+          </div>
+          {decisionsQ.isError ? (
+            <ErrorBanner>
+              {decisionsQ.error instanceof Error
+                ? decisionsQ.error.message
+                : String(decisionsQ.error)}
+            </ErrorBanner>
+          ) : null}
+          {decisionsQ.isLoading && !decisionsQ.data ? (
+            <p className="text-sm text-muted-foreground">{t('dip.loading')}</p>
+          ) : decisionsQ.data?.file_missing || queueRows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{t('dip.queueEmpty')}</p>
+          ) : (
+            <div className="overflow-x-auto rounded-md border">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-3 py-2 font-medium whitespace-nowrap">ts_utc</th>
+                    <th className="px-3 py-2 font-medium">action</th>
+                    <th className="px-3 py-2 font-medium">rationale</th>
+                    <th className="px-3 py-2 font-medium whitespace-nowrap"> </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {queueRows.map((row) => {
+                    const action = agentDecisionAction(row.decision) ?? '—'
+                    const decisionObj =
+                      row.decision && typeof row.decision === 'object'
+                        ? (row.decision as unknown as Record<string, unknown>)
+                        : null
+                    const rationale =
+                      decisionObj && typeof decisionObj.rationale === 'string'
+                        ? decisionObj.rationale
+                        : '—'
+                    const canResolve = isLadderBuyDipPropose(row.decision)
+                    return (
+                      <tr key={row.ts_utc} className="border-t align-top">
+                        <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
+                          {row.ts_utc}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs">{action}</td>
+                        <td
+                          className="px-3 py-2 text-xs max-w-[28rem] truncate"
+                          title={rationale}
+                        >
+                          {rationale}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {canResolve ? (
+                            <div className="flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={proposeMut.isPending}
+                                onClick={() => resolveQueue('confirm', row.ts_utc)}
+                              >
+                                {t('dip.queueConfirm')}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={proposeMut.isPending}
+                                onClick={() => resolveQueue('reject', row.ts_utc)}
+                              >
+                                {t('dip.queueReject')}
+                              </Button>
+                            </div>
+                          ) : null}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

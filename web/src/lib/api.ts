@@ -2630,6 +2630,28 @@ export const getAgentDecisions = (params?: GetAgentDecisionsParams) => {
   return fetchJson<AgentDecisionsResponse>(`/data/agent/decisions${q ? `?${q}` : ''}`)
 }
 
+/** `POST /dip/propose` — append kind=dip_propose to agent_decisions.jsonl (no Trigger write). */
+export type DipProposeResponse = OkJson<'/dip/propose', 'post'>
+
+export type PostDipProposeBody = {
+  action: string
+  rationale: string
+  mode?: string
+  refs?: string[]
+  zone?: string | null
+  sol_usd?: number | null
+  proposed_orders?: unknown
+  strategy_id?: string | null
+  position_id?: string | null
+  session_id?: string | null
+}
+
+export const postDipPropose = (body: PostDipProposeBody) =>
+  fetchJson<DipProposeResponse>('/dip/propose', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
 /** `GET /dip/snapshot` — SOL zone + optional open Buy-the-Dip Trigger orders (read-only). */
 export type DipSnapshotResponse = OkJson<'/dip/snapshot', 'get'>
 
