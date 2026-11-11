@@ -121,10 +121,10 @@ impl JupiterSwapClient {
             format!("outputMint={}", urlencoding_mint(&q.output_mint)),
             format!("amount={}", urlencoding_mint(&q.amount)),
         ];
-        if let Some(t) = &q.taker {
-            if !t.trim().is_empty() {
-                params.push(format!("taker={}", urlencoding_mint(t.trim())));
-            }
+        if let Some(t) = &q.taker
+            && !t.trim().is_empty()
+        {
+            params.push(format!("taker={}", urlencoding_mint(t.trim())));
         }
         if let Some(bps) = q.slippage_bps {
             params.push(format!("slippageBps={bps}"));
