@@ -155,7 +155,7 @@ async fn stranded_dismiss_empty_session_id_is_bad_request() {
     let mut env = EnvGuard::lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let _ = hermetic_bot_paths(&mut env, dir.path());
-    std::fs::write(&dir.path().join("lifecycle.jsonl"), "").ok();
+    std::fs::write(dir.path().join("lifecycle.jsonl"), "").ok();
     std::fs::write(
         dir.path().join("pending-open-recovery.json"),
         r#"{"items":[],"dismissed_session_ids":[]}"#,
