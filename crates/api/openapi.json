@@ -9337,12 +9337,17 @@
           "status",
           "version",
           "uptime_secs",
-          "components"
+          "components",
+          "dry_run"
         ],
         "properties": {
           "components": {
             "$ref": "#/components/schemas/ComponentHealth",
             "description": "Component health."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Host `DRY_RUN` / AppState execution gate (U5 / BC3 source of truth)."
           },
           "status": {
             "$ref": "#/components/schemas/ServiceStatus",

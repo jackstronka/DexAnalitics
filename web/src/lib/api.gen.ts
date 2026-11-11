@@ -3602,6 +3602,8 @@ export interface components {
         HealthResponse: {
             /** @description Component health. */
             components: components["schemas"]["ComponentHealth"];
+            /** @description Host `DRY_RUN` / AppState execution gate (U5 / BC3 source of truth). */
+            dry_run: boolean;
             /** @description Service status. */
             status: components["schemas"]["ServiceStatus"];
             /**

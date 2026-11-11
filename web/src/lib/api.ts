@@ -767,12 +767,8 @@ export interface SimulationResponse {
   methodology_note: string
 }
 
-export interface HealthResponse {
-  status: string
-  version: string
-  uptime_secs: number
-  components: Record<string, ComponentHealth>
-}
+/** Prefer OpenAPI schema; keep a loose fallback for older handwritten callers. */
+export type HealthResponse = OkJson<'/health', 'get'>
 
 export interface ComponentHealth {
   status: string
