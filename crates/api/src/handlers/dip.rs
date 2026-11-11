@@ -38,6 +38,7 @@ use clmm_lp_data::providers::{
     classify_price_order_role, filter_open_buy_dips, filter_open_price_orders,
 };
 use serde::Deserialize;
+use solana_sdk::message::VersionedMessage;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::VersionedTransaction;
 use std::collections::BTreeSet;
@@ -680,19 +681,41 @@ pub async fn post_dip_trigger_deposit_craft(
     }))
 }
 
-/// Sign a Jupiter Trigger `VersionedTransaction` (deposit or cancel withdraw; base64 ↔ base64).
+/// Sign a Jupiter Trigger/Swap `VersionedTransaction` (deposit, withdraw, or swap; base64 ↔ base64).
+///
+/// Jupiter often returns multi-signer messages (e.g. vault/fee payer). We only place the host
+/// wallet signature — same as `VersionedTransaction.sign([keypair])` in web3.js — not `try_new`
+/// which requires every required signer.
 fn sign_trigger_versioned_tx_base64(tx_b64: &str, keypair: &Keypair) -> ApiResult<String> {
     let raw = BASE64
         .decode(tx_b64.trim().as_bytes())
         .map_err(|e| ApiError::bad_request(format!("trigger tx base64 decode: {e}")))?;
-    let tx: VersionedTransaction = bincode::deserialize(&raw).map_err(|e| {
+    let mut tx: VersionedTransaction = bincode::deserialize(&raw).map_err(|e| {
         ApiError::bad_request(format!(
             "trigger tx deserialize (expected VersionedTransaction): {e}"
         ))
     })?;
-    let signed = VersionedTransaction::try_new(tx.message, &[keypair])
-        .map_err(|e| ApiError::bad_request(format!("trigger tx sign failed: {e}")))?;
-    let bytes = bincode::serialize(&signed)
+    let account_keys = match &tx.message {
+        VersionedMessage::Legacy(m) => m.account_keys.as_slice(),
+        VersionedMessage::V0(m) => m.account_keys.as_slice(),
+    };
+    let idx = account_keys
+        .iter()
+        .position(|k| *k == keypair.pubkey())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "host wallet pubkey is not among transaction account keys — cannot sign",
+            )
+        })?;
+    if idx >= tx.signatures.len() {
+        return Err(ApiError::bad_request(format!(
+            "signer index {idx} outside signatures len {}",
+            tx.signatures.len()
+        )));
+    }
+    let msg_bytes = tx.message.serialize();
+    tx.signatures[idx] = keypair.sign_message(&msg_bytes);
+    let bytes = bincode::serialize(&tx)
         .map_err(|e| ApiError::internal(format!("trigger tx serialize: {e}")))?;
     Ok(BASE64.encode(bytes))
 }
@@ -1505,4 +1528,45 @@ pub async fn post_dip_propose(
         written: true,
         row: api_row,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_sdk::hash::Hash;
+    use solana_sdk::message::{Message, MessageHeader};
+    use solana_sdk::pubkey::Pubkey;
+    use solana_sdk::signature::Signature;
+
+    /// BUG-20261111-01: Jupiter deposit txs can require >1 signature; host must partial-sign.
+    #[test]
+    fn partial_sign_succeeds_when_try_new_needs_all_signers() {
+        let host = Keypair::new();
+        let other = Keypair::new();
+        let msg = Message {
+            header: MessageHeader {
+                num_required_signatures: 2,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![host.pubkey(), other.pubkey(), Pubkey::new_unique()],
+            recent_blockhash: Hash::new_unique(),
+            instructions: vec![],
+        };
+        let unsigned = VersionedTransaction {
+            signatures: vec![Signature::default(), Signature::default()],
+            message: VersionedMessage::Legacy(msg),
+        };
+        assert!(
+            VersionedTransaction::try_new(unsigned.message.clone(), &[&host]).is_err(),
+            "try_new must reject incomplete signer set"
+        );
+        let b64 = BASE64.encode(bincode::serialize(&unsigned).expect("serialize"));
+        let signed_b64 =
+            sign_trigger_versioned_tx_base64(&b64, &host).expect("partial sign host only");
+        let signed: VersionedTransaction =
+            bincode::deserialize(&BASE64.decode(signed_b64.as_bytes()).unwrap()).unwrap();
+        assert_ne!(signed.signatures[0], Signature::default());
+        assert_eq!(signed.signatures[1], Signature::default());
+    }
 }

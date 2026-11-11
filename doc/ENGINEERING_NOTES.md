@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip: partial sign VersionedTransaction (live smoke)
+
+keywords: dip-agent, Jupiter Trigger, VersionedTransaction, partial sign, not enough signers, BUG-20261111-01, deposit/craft, live smoke
+
+- **What:** Host wallet signs Jupiter multi-signer deposit/cancel txs by account-key index (web3.js-style), not `try_new` (all signers). Unblocked smoke past craft→sign; create still needs ≥10 USD deposit.
+- **paths:** `crates/api/src/handlers/dip.rs`, `doc/dip-agent/SMOKE_LIVE.md`
+
 ## 2026-11-11 — Dip: Swap V2 order + execute (S1–S2)
 
 keywords: dip-agent, Jupiter Swap, S1, S2, swap/v2, order, execute, urgent exit, clmm-lp-data, clmm-lp-api

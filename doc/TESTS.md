@@ -223,6 +223,7 @@ Liczby `#[test]` rosną; dokładny stan: `cargo test --workspace -- --list`. Pon
 | cache / timeseries / providers | cache, CSV, Orca REST (hermetyczne) |
 | `providers::jupiter_trigger` | Trigger V2: role classify (buy_dip/TP/SL); open filters; mock history/verify; E1–E5 vault/craft/create/cancel/patch/DCA |
 | `providers::jupiter_swap` | Swap V2: order+execute parse (`order_and_execute_parse_with_mock`) |
+| `api handlers::dip` partial sign | BUG-20261111-01: host partial-signs multi-signer Trigger tx (`partial_sign_succeeds_when_try_new_needs_all_signers`) |
 | `dip::zones` | klasyfikacja stref A/B/C + default `config/dip/zones.json` |
 | `dip::propose` | envelope `kind=dip_propose`, walidacja, hermetic append JSONL |
 | `dip::runtime` | parse `runtime.yaml` mode + ladder defaults (U2) |
