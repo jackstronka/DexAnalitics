@@ -255,7 +255,7 @@ Mapowanie z [`AI_AGENT_LAYER.md`](AI_AGENT_LAYER.md):
 | AH1 | Podgląd / submit `AgentDecision` + busy state | StrategyDetail / Backtests | osobny PR |
 | AH2 | Position Agent: start, scan, chat, supervisor (utrzymać) | PositionDetail | ✅ + polish |
 | AH3 | Ostatnia decyzja DecisionEngine (hold/rebalance + reason) | PositionDetail | P1 |
-| AH4 | Dip proposes: lista `buy_dip\|hold\|…`, confirm/reject | `/dip` | C→D |
+| AH4 | Dip proposes: lista `buy_dip\|hold\|…`, confirm/reject | `/dip` | DONE 2026-11-11 |
 | AH5 | Browser `agent_decisions.jsonl` | `/agent/decisions` | DONE 2026-11-11 |
 | AH6 | Badge `mode` (propose-only / live) globalnie gdy Dip włączony | Layout / Dip | D |
 | AH7 | Alert LP OOR → sugestia `adjust_lp` | PositionDetail | DONE 2026-11-11 |
@@ -316,7 +316,7 @@ Zasada: **doklejamy** Trigger / Dip / drabinkę do istniejących powierzchni, za
 | **U1b** | **`DipLadderPreviewTable` + `DipLadderSummary`** (lokalna matematyka drabinki, bez create) | tylko web lib + cena P1 · **DONE 2026-11-09** |
 | **U2** | Settings: S-API, S-JUP, S-JWT, S-DIP-MODE, **S-LADDER** defaults (read) | B + runtime/yaml · **DONE 2026-11-09** (`GET /dip/runtime`) |
 | **U3** | AH5 decisions browser + AH7 OOR alert | API decisions ✅ · **DONE 2026-11-11** (`/agent/decisions` + PositionDetail OOR) |
-| **U4** | AH4 propose queue — body N× Buy-the-Dip z drabinki + TP | Faza C |
+| **U4** | AH4 propose queue — body N× Buy-the-Dip z drabinki + TP | Faza C · **DONE 2026-11-11** (`/dip` Propose + queue confirm/reject audit) |
 | **U5** | Bot Control BC1–BC3 hardening (dry-run bound to server) | LP API |
 | **U6** | Live: materializacja drabinki (T6–T9, T14–T16) + opcjonalnie native DCA T17 | Faza E GO |
 | **U7** | AH1 optimize envelope UX | niezależnie |

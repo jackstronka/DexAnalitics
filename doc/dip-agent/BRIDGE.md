@@ -84,7 +84,8 @@ Markdown (`candidates.md`, journals) wystarczy do czasu stabilnego Trigger histo
 | **U1b** drabinka preview + Summary | DONE 2026-11-09 |
 | **U2** Settings S-API/S-JUP/S-JWT/S-DIP-MODE/S-LADDER (`GET /dip/runtime`) | DONE 2026-11-09 |
 | **U3** AH5 `/agent/decisions` + AH7 OOR na PositionDetail | DONE 2026-11-11 |
-| U4+ propose queue / Bot Control / live UI | ⬜ |
+| **U4** AH4 propose queue z drabinki (`POST /dip/propose`) | DONE 2026-11-11 |
+| U5+ Bot Control / live UI | ⬜ |
 
 **Plan szczegółowy (funkcje Jupiter UI + bot settings + agent + UX 3Commas DCA / drabinka + reuse Dex):**  
 [`IMPLEMENTATION_PLAN_DIP_AGENT_UI.md`](../IMPLEMENTATION_PLAN_DIP_AGENT_UI.md) §1b · §3b.

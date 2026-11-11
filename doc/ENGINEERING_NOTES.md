@@ -1,3 +1,10 @@
+## 2026-11-11 — Dip U4: ladder propose queue (AH4)
+
+keywords: dip-agent, U4, AH4, dip_propose, ladder, propose queue, POST /dip/propose, web, Dip
+
+- **What:** `/dip` Propose button builds `proposed_orders` (`ladder_v1` BO/SO/TP) and `POST /dip/propose` (`buy_dip`, propose-only). Queue lists recent `dip_agent` decisions; Confirm/Reject write audit `hold`/`skip` (no Jupiter create).
+- **paths:** `web/src/lib/dipProposePayload.ts`, `web/src/pages/Dip.tsx`, `web/src/components/dip/DipLadderSummary.tsx`, `web/src/lib/api.ts`
+
 ## 2026-11-11 — Dip U3: Agent decisions browser + OOR alert (AH5/AH7)
 
 keywords: dip-agent, U3, AH5, AH7, agent_decisions, decisions browser, OOR, adjust_lp, web, PositionDetail

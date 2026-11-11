@@ -287,6 +287,7 @@ Tylko `web/src/lib/*.test.ts` (logika liczbowa). **Brak** testów stron/komponen
 | Plik | Co robi |
 | ---- | ------- |
 | `api.gen.test.ts` | C2: `HealthResponse` + `DipSnapshotResponse` + `DipRuntimeResponse` + `/dip/runtime` |
+| `dipProposePayload.test.ts` | U4 AH4: ladder→proposed_orders, propose-only body, confirm/reject resolve |
 | `agentDecisionsDisplay.test.ts` | U3 AH5: kind/action extract + kind filter + preview truncate |
 | `dipSnapshotDisplay.test.ts` | U1 Dip UI: empty CTA (`no_jwt`/…), format USD/strefy |
 | `dipLadder.test.ts` | U1b: drabinka 3C (scale=1/≠1), Required&gt;Available, min size |
